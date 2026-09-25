@@ -4,3 +4,4 @@
 *.swp
 /volatility3/
 /bench/venv/
+/testdata/
