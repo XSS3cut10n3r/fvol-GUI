@@ -1,0 +1,32 @@
+[package]
+name = "rsvol"
+version = "0.1.0"
+edition = "2024"
+description = "A zero-dependency Rust rewrite of the Volatility 3 memory forensics framework"
+license-file = "LICENSE.txt"
+
+[[bin]]
+name = "vol"
+path = "src/main.rs"
+
+# NO DEPENDENCIES. std only. Do not add any crates here, ever.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = true
+incremental = false
+
+# Fast-to-build optimized profile for day-to-day development and output diffing:
+#   cargo build --profile fast   ->  target/fast/vol
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
+[profile.dev]
+opt-level = 1
