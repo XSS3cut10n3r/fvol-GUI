@@ -2,3 +2,5 @@
 /bench/ref/
 /bench/out/
 *.swp
+/volatility3/
+/bench/venv/
