@@ -189,6 +189,12 @@ impl IntelLayer {
     /// Create a translation layer named `name` over `phys` with page table root `dtb`
     /// (python `page_map_offset`).
     pub fn new(name: &str, phys: Arc<dyn Layer>, dtb: u64, mode: PagingMode, flavor: PteFlavor) -> IntelLayer {
+        IntelLayer::with_table_cache(name, phys, dtb, mode, flavor, Arc::new(TableCache::new()))
+    }
+
+    /// `new` sharing an existing page-table validity cache (process layers share their
+    /// parent's: allocating and zeroing a fresh 128 KiB one per process is wasted work).
+    fn with_table_cache(name: &str, phys: Arc<dyn Layer>, dtb: u64, mode: PagingMode, flavor: PteFlavor, table_cache: Arc<TableCache>) -> IntelLayer {
         let p = params(mode, flavor);
         let initial_position = p.maxvirtaddr.min(p.bits_per_register) - 1;
         let initial_entry = mask_bits(dtb, initial_position, 0) | 1;
@@ -207,7 +213,7 @@ impl IntelLayer {
             initial_entry,
             vmask: if p.maxvirtaddr >= 64 { u64::MAX } else { (1u64 << p.maxvirtaddr) - 1 },
             register_mask: if p.bits_per_register >= 64 { u64::MAX } else { (1u64 << p.bits_per_register) - 1 },
-            table_cache: Arc::new(TableCache::new()),
+            table_cache,
             id,
             os: None,
             kernel_virtual_offset: None,
@@ -245,9 +251,8 @@ impl IntelLayer {
     /// A process address space: same class/config/physical layer, different DTB
     /// (python `_add_process_layer`). Shares the page-table cache.
     pub fn process_layer(&self, dtb: u64, name: &str) -> IntelLayer {
-        let mut l = IntelLayer::new(name, self.phys.clone(), dtb, self.mode, self.flavor);
+        let mut l = IntelLayer::with_table_cache(name, self.phys.clone(), dtb, self.mode, self.flavor, self.table_cache.clone());
         l.swap = self.swap.clone();
-        l.table_cache = self.table_cache.clone();
         l.os = self.os.clone();
         l.kernel_virtual_offset = self.kernel_virtual_offset;
         l.kernel_banner = self.kernel_banner.clone();
@@ -449,7 +454,7 @@ impl IntelLayer {
     /// their PTE. Semantics are identical to `translate_raw` (invalid PTEs take the full path
     /// for python's fault / swap handling).
     #[inline]
-    fn translate_cursor(&self, addr: u64, cur: &mut (u64, u64)) -> std::result::Result<(u64, u32, Target), Fault> {
+    pub fn translate_cursor(&self, addr: u64, cur: &mut (u64, u64)) -> std::result::Result<(u64, u32, Target), Fault> {
         let last_bits = self.p.levels[self.p.levels.len() - 1].0;
         let key = ((addr & self.vmask) >> (12 + last_bits)) + 1;
         if cur.0 == key {
@@ -497,6 +502,66 @@ impl IntelLayer {
             Ok(v) => Ok(v),
             Err(f) if self.flavor == PteFlavor::Windows => self.translate_swap(f),
             Err(f) => Err(f),
+        }
+    }
+
+    /// python `Intel.is_dirty(offset)`: the dirty bit (bit 6) of the final paging entry of the
+    /// page containing `addr` (the entry itself need not be present, like python).
+    /// `Err(InvalidAddress)` where python's `_translate_entry` raises.
+    pub fn is_dirty(&self, addr: u64) -> Result<bool> {
+        let page = addr & !0xfff;
+        match self.translate_entry(page) {
+            Ok((entry, _)) => Ok(entry & (1 << 6) != 0),
+            Err(f) => Err(fault_error(page, f)),
+        }
+    }
+
+    /// python `_translate(addr)[1]` and `is_dirty(addr)` with one page-table walk, for
+    /// sequential page loops (linux malfind's `_get_dirty_pages`): `(page size, dirty bit of
+    /// the final entry)`, or the fault where python's `_translate` raises (every address of the
+    /// aligned `1 << fault.invalid_bits` block containing `addr` faults the same way, so a loop
+    /// may skip it). `cur` caches the last page table reached (start with `(0, 0)`), so
+    /// consecutive 4 KiB pages under one table only read their PTE.
+    pub fn page_dirty_cursor(&self, addr: u64, cur: &mut (u64, u64)) -> std::result::Result<(u64, bool), Fault> {
+        let last_bits = self.p.levels[self.p.levels.len() - 1].0;
+        let key = ((addr & self.vmask) >> (12 + last_bits)) + 1;
+        if cur.0 == key {
+            let idx = (addr >> 12) & ((1u64 << last_bits) - 1);
+            if let Some(e) = self.read_entry(cur.1 + (idx << self.p.index_shift)) {
+                if self.entry_valid(e) {
+                    return Ok((0x1000, e & (1 << 6) != 0));
+                }
+                // exactly what the full walk returns for an invalid PTE (position 11)
+                let f = Fault { invalid_bits: 12, entry: e, swap_offset: None };
+                if self.flavor == PteFlavor::Windows {
+                    let (_, bits, _) = self.translate_swap(f)?;
+                    return Ok((1u64.checked_shl(bits).unwrap_or(0), e & (1 << 6) != 0));
+                }
+                return Err(f);
+            }
+        }
+        let (entry, position, base) = self.translate_entry_ex(addr & !0xfff)?;
+        if position == 11 {
+            *cur = (key, base);
+        }
+        let dirty = entry & (1 << 6) != 0;
+        if !self.entry_valid(entry) {
+            let f = Fault { invalid_bits: position + 1, entry, swap_offset: None };
+            if self.flavor == PteFlavor::Windows {
+                let (_, bits, _) = self.translate_swap(f)?;
+                return Ok((1u64.checked_shl(bits).unwrap_or(0), dirty));
+            }
+            return Err(f);
+        }
+        Ok((1u64.checked_shl(position + 1).unwrap_or(0), dirty))
+    }
+
+    /// python `_translate(offset)[1]`: the size of the (possibly large) page mapping `addr`.
+    /// `Err(InvalidAddress)` where python raises (PagedInvalidAddressException).
+    pub fn page_size_at(&self, addr: u64) -> Result<u64> {
+        match self.translate_raw(addr) {
+            Ok((_, bits, _)) => Ok(1u64.checked_shl(bits).unwrap_or(0)),
+            Err(f) => Err(fault_error(addr, f)),
         }
     }
 
@@ -959,6 +1024,67 @@ mod tests {
         // a 4 MiB page coalesces into one run
         let ms = l.mappings(0x400000, 0x400000);
         assert_eq!(ms, vec![Mapping { offset: 0x400000, len: 0x400000, mapped: 0x400000 }]);
+    }
+
+    /// `page_dirty_cursor` + fault-block skipping == python's `_translate` / `is_dirty` loop
+    /// stepping 4 KiB on every fault (linux malfind `_get_dirty_pages`).
+    #[test]
+    fn page_dirty_cursor_matches_python_loop() {
+        let mut m = vec![0u8; 0x20000];
+        put(&mut m, 0x1000, 0x2000 | 1); // PML4[0]
+        put(&mut m, 0x1008, 0x9000 | 1);
+        put(&mut m, 0x2000, 0x3000 | 1); // PDPT[0]
+        put(&mut m, 0x2008, 0x9000 | 1);
+        put(&mut m, 0x3000, 0x4000 | 1); // PD[0] -> PT
+        put(&mut m, 0x3008, 0x200000 | 0x81 | 0x40); // PD[1]: dirty 2 MiB page
+        put(&mut m, 0x3018, 0xa000 | 1); // PD[3] -> PT at 0xa000 (all zero: invalid table)
+        put(&mut m, 0x4000, 0x5000 | 1); // VA 0
+        put(&mut m, 0x4008, 0x6000 | 1 | 0x40); // VA 0x1000 dirty
+        put(&mut m, 0x4010, 0x8000 | 0x40); // VA 0x2000 not present (dirty bit set)
+        put(&mut m, 0x4028, 0x7000 | 1 | 0x40); // VA 0x5000 dirty
+        let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1000, PagingMode::Intel32e, PteFlavor::Linux);
+        let python = |start: u64, end: u64| {
+            let mut out = Vec::new();
+            let mut a = start;
+            while a < end {
+                let step = match l.page_size_at(a) {
+                    Ok(s) => {
+                        if l.is_dirty(a).unwrap() {
+                            out.push((a, s));
+                        }
+                        s
+                    }
+                    Err(_) => 0x1000,
+                };
+                a += step;
+            }
+            out
+        };
+        let fast = |start: u64, end: u64| {
+            let mut out = Vec::new();
+            let mut cur = (0u64, 0u64);
+            let mut a = start;
+            while a < end {
+                let step = match l.page_dirty_cursor(a, &mut cur) {
+                    Ok((s, d)) => {
+                        if d {
+                            out.push((a, s));
+                        }
+                        s
+                    }
+                    Err(f) => {
+                        let block_end = (a | ((1u64 << f.invalid_bits) - 1)) + 1;
+                        (block_end.min(end) - a).div_ceil(0x1000).max(1) * 0x1000
+                    }
+                };
+                a += step;
+            }
+            out
+        };
+        for (s, e) in [(0, 0x1000000), (0x1000, 0x800000), (0x3000, 0x8000_0000), (0x201000, 0x402000)] {
+            assert_eq!(fast(s, e), python(s, e), "{s:#x}-{e:#x}");
+        }
+        assert_eq!(fast(0, 0x400000), vec![(0x1000, 0x1000), (0x5000, 0x1000), (0x200000, 0x200000)]);
     }
 
     #[test]

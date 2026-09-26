@@ -22,6 +22,10 @@ use crate::error::{Error, Result};
 use crate::objects::{LayerRef, Obj};
 use crate::util::FxHashSet;
 
+pub mod files; // MacUtilities.files_descriptors_for_process
+pub mod net; // socket / inpcb / ifnet / sockaddr / sockaddr_dl extensions
+pub mod vm; // vm_map_entry get_vnode / get_path / is_suspicious, proc.get_process_memory_sections
+
 /// python `MacIntelStacker.virtual_to_physical_address` (ignores KASLR), on u64 with
 /// two's-complement wrap-around (python ints would go negative; the low 64 bits agree).
 pub fn virtual_to_physical_address(addr: u64) -> u64 {
@@ -153,6 +157,11 @@ pub trait MacExt {
     // ---- vnode
     /// python `vnode.full_path()`.
     fn full_path(&self) -> Result<String>;
+
+    // ---- kauth_scope
+    /// python `kauth_scope.get_listeners()`: the `ks_listeners` elements whose `kll_callback`
+    /// is non-zero. A trailing `Err` means python raised there (after yielding the `Ok`s).
+    fn get_listeners(&self) -> Vec<Result<Obj>>;
 }
 
 fn attr_error(what: &str) -> Error {
@@ -402,6 +411,29 @@ impl MacExt for Obj {
         let joined = elements.join("/");
         Ok(if joined.is_empty() { joined } else { format!("/{joined}") })
     }
+
+    fn get_listeners(&self) -> Vec<Result<Obj>> {
+        let mut out = Vec::new();
+        let arr = match self.m("ks_listeners") {
+            Ok(a) => a,
+            Err(e) => return vec![Err(e)],
+        };
+        for i in 0..arr.count() {
+            // `listener != 0` is always true for a struct; `kll_callback` is read
+            match arr.at(i).and_then(|l| l.m("kll_callback")?.u64().map(|v| (l, v))) {
+                Ok((l, v)) => {
+                    if v != 0 {
+                        out.push(Ok(l));
+                    }
+                }
+                Err(e) => {
+                    out.push(Err(e));
+                    break;
+                }
+            }
+        }
+        out
+    }
 }
 
 /// python `vnode._do_calc_path(ret, vnodeobj, vname)` (recursive in python; iterative here
@@ -448,13 +480,84 @@ fn do_calc_path(ret: &mut Vec<String>, vnodeobj: Option<Obj>, vname: Option<Obj>
     Err(Error::msg("RecursionError: maximum recursion depth exceeded"))
 }
 
+/// One entry of python `MacUtilities.generate_kernel_handler_info`: `(name, start, end)`
+/// (python ints; `end` is inclusive in [`lookup_module_address`]).
+#[derive(Clone, Debug)]
+pub struct Handler {
+    pub name: String,
+    pub start: i128,
+    pub end: i128,
+}
+
+/// python `MacUtilities.mask_mods_list(context, layer_name, mods)`: `(name, address & mask,
+/// (address & mask) + size)` for each module (a `kmod_info` or a pointer to one, as yielded by
+/// `plugins::mac::lsmod::list_modules`). `mods` is consumed in order; a trailing `Err` (python
+/// raised inside the generator) or an error while reading a module propagates.
+pub fn mask_mods_list(mask: u64, mods: impl IntoIterator<Item = Result<Obj>>) -> Result<Vec<Handler>> {
+    let mut out = Vec::new();
+    for m in mods {
+        let m = m?;
+        let name = crate::objects::util::array_to_string(&m.m("name")?, None)?;
+        let start = m.m("address")?.int()? & mask as i128;
+        let end = start + m.m("size")?.int()?;
+        out.push(Handler { name, start, end });
+    }
+    Ok(out)
+}
+
+/// python `MacUtilities.generate_kernel_handler_info(context, layer_name, kernel, mods_list)`:
+/// `[("__kernel__", stext & mask, etext & mask)] + mask_mods_list(mods)`, where stext/etext are
+/// the values of `vm_kernel_stext`/`vm_kernel_etext` (falling back to `stext`/`etext` when the
+/// symbol does not exist). `mods` = `plugins::mac::lsmod::list_modules(k)`.
+pub fn generate_kernel_handler_info(k: &crate::automagic::mac::MacKernel, mods: impl IntoIterator<Item = Result<Obj>>) -> Result<Vec<Handler>> {
+    let sym = |a: &str, b: &str| -> Result<i128> {
+        let o = match k.object_from_symbol(a) {
+            Ok(o) => o,
+            Err(Error::Symbol(_)) => k.object_from_symbol(b)?,
+            Err(e) => return Err(e),
+        };
+        o.int()
+    };
+    let start = sym("vm_kernel_stext", "stext")?;
+    let end = sym("vm_kernel_etext", "etext")?;
+    let mask = k.vlayer.address_mask();
+    let mut out = vec![Handler { name: "__kernel__".to_string(), start: start & mask as i128, end: end & mask as i128 }];
+    out.extend(mask_mods_list(mask, mods)?);
+    Ok(out)
+}
+
+/// python `MacUtilities.lookup_module_address(context, handlers, target_address,
+/// kernel_module_name)`: `(module name, symbol name)`, `("UNKNOWN", "N/A")` when no handler
+/// covers the address. `module_shift` is python's `context.modules[kernel_module_name].offset`
+/// (`Some(k.offset)`), or `None` when the caller passes no module name (the symbol lookup then
+/// uses the raw address). Only the kernel's symbol table is in the symbol space for the mac
+/// plugins, so the first symbol at the location in that table is python's `symbols[0]`.
+pub fn lookup_module_address(table: crate::symbols::TableRef, handlers: &[Handler], target: i128, module_shift: Option<u64>) -> (String, &'static str) {
+    for h in handlers {
+        if h.start <= target && target <= h.end {
+            let mut symbol_name = "N/A";
+            if h.name == "__kernel__" {
+                let loc = target - module_shift.unwrap_or(0) as i128;
+                if (0..=u64::MAX as i128).contains(&loc) {
+                    if let Some(first) = table.symbols_at(loc as u64, 0).first() {
+                        // str(symbols[0].split("!")[1]) of "table!name"
+                        symbol_name = first.split('!').next().unwrap_or("");
+                    }
+                }
+            }
+            return (h.name.clone(), symbol_name);
+        }
+    }
+    ("UNKNOWN".to_string(), "N/A")
+}
+
 pub use crate::util::time::{float_to_timeval, fromtimestamp_local};
 
 /// python `int(b)` for a bytes object (ASCII whitespace around, optional sign, digits with
 /// single underscores between them). `None` = python raises `ValueError`. Values that do not
 /// fit an i128 saturate (they can never compare equal to anything we read).
 pub fn py_int_bytes(b: &[u8]) -> Option<i128> {
-    let is_ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | 0x1c..=0x1f);
+    let is_ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
     let start = b.iter().position(|c| !is_ws(c))?;
     let end = b.iter().rposition(|c| !is_ws(c))? + 1;
     let mut s = &b[start..end];
@@ -515,6 +618,9 @@ mod tests {
         assert_eq!(py_int_bytes(b"_13"), None);
         assert_eq!(py_int_bytes(b""), None);
         assert_eq!(py_int_bytes(b"2: Thu"), None);
+        // bytes int() strips ASCII whitespace only (not \x1c-\x1f like str)
+        assert_eq!(py_int_bytes(b" 13\x0b"), Some(13));
+        assert_eq!(py_int_bytes(b"13\x1c"), None);
     }
 
     #[test]
