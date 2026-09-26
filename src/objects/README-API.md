@@ -156,6 +156,24 @@ mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
 
+### PE files: pefile, pe_symbols, verinfo
+
+| python | rust |
+|---|---|
+| `pe_data = BytesIO(); for off, d in dos.reconstruct(): seek/write` (to parse it) | `let (view, err) = pe::reconstruct_view(&dos);` — lazy page view, reads only what is parsed; `err: Option<ReconError>` (`is_invalid_or_value()` = what `except (InvalidAddressException, ValueError)` catches; the view keeps the pieces written before it) |
+| `pefile.PE(data=pe_data.getvalue(), fast_load=True)` | `crate::symbols::windows::pefile::PeFile::parse(&view)?` (`PeError::Format` = PEFormatError, `PeError::Attribute` = AttributeError); works on `&[u8]`/`Vec<u8>` too |
+| `pe.parse_data_directories([EXPORT])` + `pe.DIRECTORY_ENTRY_EXPORT.symbols` | `pe.parse_exports()` → `Option<ExportDir>` (`.symbols: Vec<Export{ordinal, address, name, forwarder}>`) |
+| `pe.parse_data_directories([IMPORT])` + `pe.DIRECTORY_ENTRY_IMPORT` | `pe.parse_imports()` → `Option<Vec<ImportDesc{dll, time_date_stamp, imports: Vec<Import{name, ordinal, address}>}>>` |
+| `pe.parse_data_directories([RESOURCE])` + `pe.VS_FIXEDFILEINFO` | `pe.parse_version_info()` → `Vec<FixedFileInfo>` (empty = AttributeError) |
+| `pe.OPTIONAL_HEADER.ImageBase` / `pe.sections` / `get_data(rva, n)` / `get_string_at_rva` | `pe.optional_header.image_base` / `pe.sections` / same names |
+| `VerInfo.get_version_information(ctx, pe_table, layer, base)` | `crate::plugins::windows::verinfo::get_version_information(pe_table, Some(layer), base)` |
+| `PESymbols.addresses_for_process_symbols(ctx, path, kernel, {"ntdll.dll": {"names": [...]}})` | `pe_symbols::addresses_for_process_symbols(ctx, k, &vec![("ntdll.dll".into(), WantedSymbols::names(&[..]))])?` → `Vec<(module, Vec<(name, addr)>)>` |
+| `PESymbols.get_kernel_modules / get_process_modules(ctx, kernel, filter)` | `pe_symbols::get_kernel_modules(k, Some(&filter))?` / `get_process_modules(k, Some(&filter))?` → `CollectedModules` |
+| `PESymbols.find_symbols(ctx, path, wanted, collected)` | `pe_symbols::find_symbols(ctx, &wanted, &collected)?` → `(found, missing)` |
+| `PESymbols.path_and_symbol_for_address(ctx, path, collected, ranges, addr)` | `pe_symbols::path_and_symbol_for_address(ctx, &collected, &ranges, addr)?` |
+| `PESymbols.get_vads_for_process_cache / get_proc_vads_with_file_paths / filepath_for_address / range_info_for_address / filename_for_path` | same names in `crate::plugins::windows::pe_symbols` |
+| `PEDump.dump_pe_at_base / dump_kernel_pe_at_base` | `crate::plugins::windows::pedump::{dump_pe_at_base, dump_kernel_pe_at_base}` |
+
 ## Linux (`use crate::symbols::linux::LinuxExt`)
 
 `let k = ctx.linux_kernel()?;` → `&LinuxKernel`, derefs to the kernel `Module` (offset =
