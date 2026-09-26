@@ -38,3 +38,5 @@ Round A = foundations (start right after core merges). Round B = dependents.
 Running: W1 scanners+kernel objects, W2a process, W2b PE/files, W3 registry, W4 net+gui, G generic,
 L1 linux ext+process, M1 mac. Pending: W5 malware+services (after disasm + yara land), L2 linux kernel,
 L3 linux fs/net (after L1's extensions land).
+- regex: URL pattern 0.91-0.94x PCRE2-JIT (everything else >= 1x or at the ~20 GB/s page-cache floor).
+- codecs: xz single-block 0.97-0.99x liblzma (cold ISF path only; binary ISF cache hides it).
