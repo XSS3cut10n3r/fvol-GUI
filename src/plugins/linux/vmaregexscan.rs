@@ -8,14 +8,15 @@
 
 use crate::context::Context;
 use crate::error::{Error, Result};
-use crate::layers::scan::{DEFAULT_CHUNK_SIZE, FnScanner, scan};
-use crate::objects::Obj;
+use crate::layers::scan::{DEFAULT_CHUNK_SIZE, FnScanner, scan_each};
+use crate::objects::{LayerRef, Obj};
 use crate::objects::util::array_to_string;
 use crate::plugins::linux::pslist::{collect_tasks, pid_filter};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::prelude::*;
 use crate::yara::regex::{Flags, Regex};
+use crate::yara::rules::volatility::{HitRun, push_run};
 
 pub struct VmaRegExScan;
 
@@ -24,14 +25,15 @@ pub struct VmaRegExScan;
 pub const MAXSIZE_DEFAULT: i128 = 128;
 
 /// python `scanners.RegExScanner(pattern)` (flags `re.DOTALL`) as a chunk scanner: the start
-/// of every `finditer` match that begins before `chunk_size`.
-pub fn regex_scanner(re: &Regex) -> FnScanner<u64, impl Fn(&[u8], u64, &mut Vec<u64>) + Sync + '_> {
-    FnScanner::new(move |data: &[u8], off: u64, hits: &mut Vec<u64>| {
+/// of every `finditer` match that begins before `chunk_size`, as runs of offsets.
+pub fn regex_scanner(re: &Regex) -> FnScanner<HitRun, impl Fn(&[u8], u64, &mut Vec<HitRun>) + Sync + '_> {
+    FnScanner::new(move |data: &[u8], off: u64, hits: &mut Vec<HitRun>| {
+        let base = hits.len();
         for (s, _) in re.find_iter(data) {
             if s as u64 >= DEFAULT_CHUNK_SIZE {
                 break;
             }
-            hits.push(off + s as u64);
+            push_run(hits, base, off + s as u64, 0);
         }
     })
 }
@@ -42,41 +44,73 @@ struct Patterns {
     rematch: Regex,
 }
 
-/// python `_generator` body for one task; the `Err` is where python raised.
-fn task_rows(task: &Obj, pats: &std::result::Result<Patterns, String>) -> (Vec<Vec<Value>>, Option<Error>) {
-    let mut rows = Vec::new();
-    let r = (|| -> Result<()> {
+/// Hit runs one task may collect before its rows are streamed straight from the scan instead.
+const TASK_RUNS_CAP: usize = 1 << 20;
+
+/// A scanned task: its layer, sections, pid and name, and its hits (`None`: more than
+/// [`TASK_RUNS_CAP`] runs, scan again while rendering).
+struct TaskHits {
+    layer: LayerRef,
+    sections: Vec<(u64, u64)>,
+    pid: i128,
+    name: String,
+    runs: Option<Vec<HitRun>>,
+}
+
+/// python `_generator` body for one task up to its rows; the `Err` is where python raised.
+fn task_hits(task: &Obj, pats: &std::result::Result<Patterns, String>) -> (Option<TaskHits>, Option<Error>) {
+    let r = (|| -> Result<Option<TaskHits>> {
         if task.m("mm")?.u64()? == 0 {
-            return Ok(());
+            return Ok(None);
         }
         let name = array_to_string(&task.m("comm")?, None)?;
-        let Some(layer) = task.add_process_layer()? else { return Ok(()) };
+        let Some(layer) = task.add_process_layer()? else { return Ok(None) };
         let sections = task.get_process_memory_sections(false)?;
         // python compiles the pattern here (RegExScanner.__init__), per task
         let p = pats.as_ref().map_err(|m| Error::msg(m.clone()))?;
-        let hits = scan(layer, &regex_scanner(&p.scan), Some(&sections));
-        if hits.is_empty() {
-            return Ok(());
+        let mut runs = Vec::new();
+        let mut over = false;
+        scan_each(layer, &regex_scanner(&p.scan), Some(&sections), |run| {
+            runs.push(run);
+            over = runs.len() > TASK_RUNS_CAP;
+            !over
+        });
+        if runs.is_empty() {
+            return Ok(None);
         }
-        let user_pid = task.m("tgid")?.int()?;
-        let mut buf = vec![0u8; MAXSIZE_DEFAULT as usize];
-        for offset in hits {
-            layer.read_padded(offset, &mut buf);
-            let m = match p.rematch.match_at(&buf, 0) {
+        let pid = task.m("tgid")?.int()?;
+        Ok(Some(TaskHits { layer, sections, pid, name, runs: (!over).then_some(runs) }))
+    })();
+    match r {
+        Ok(t) => (t, None),
+        Err(e) => (None, Some(e)),
+    }
+}
+
+/// The rows of one task's hits (python: `layer.read(offset, 128, pad=True)` re-matched with
+/// `re.match`).
+fn emit_runs(t: &TaskHits, rematch: &Regex, runs: &[HitRun], out: &mut dyn RowSink) -> Result<()> {
+    let mut buf = [0u8; MAXSIZE_DEFAULT as usize];
+    for run in runs {
+        for offset in run.offsets() {
+            t.layer.read_padded(offset, &mut buf);
+            let m = match rematch.match_at(&buf, 0) {
                 Some((s, e)) => &buf[s..e],
                 None => &buf[..],
             };
-            rows.push(vec![
-                Value::Int(user_pid),
-                Value::Str(name.clone()),
-                Value::Int(offset as i128),
-                Value::Str(String::from_utf8_lossy(m).into_owned()),
-                Value::Bytes(m.to_vec()),
-            ]);
+            out.row(
+                0,
+                vec![
+                    Value::Int(t.pid),
+                    Value::Str(t.name.clone()),
+                    Value::Int(offset as i128),
+                    Value::Str(String::from_utf8_lossy(m).into_owned()),
+                    Value::Bytes(m.to_vec()),
+                ],
+            )?;
         }
-        Ok(())
-    })();
-    (rows, r.err())
+    }
+    Ok(())
 }
 
 impl Plugin for VmaRegExScan {
@@ -111,15 +145,36 @@ impl Plugin for VmaRegExScan {
             .and_then(|scan| Ok(Patterns { scan, rematch: Regex::new(pattern, 0)? }))
             .map_err(|e| format!("re.PatternError: {}", e.py_str(pattern)));
         let (tasks, tail) = collect_tasks(k, &filter, false);
-        let per_task = crate::util::par::par_map(tasks.len(), |i| task_rows(&tasks[i], &pats));
-        for (rows, err) in per_task {
-            for row in rows {
-                out.row(0, row)?;
+        // tasks scanned in parallel, rows emitted in python order; workers run ahead only while
+        // the waiting hits stay small
+        let weight = |r: &(Option<TaskHits>, Option<Error>)| 64 + r.0.as_ref().and_then(|t| t.runs.as_ref()).map_or(0, |v| v.capacity() * std::mem::size_of::<HitRun>());
+        let mut result: Result<()> = Ok(());
+        crate::yara::rules::regions::stream_ordered(tasks.len(), 64 << 20, |i| task_hits(&tasks[i], &pats), weight, |_, (t, err)| {
+            if let (Some(t), Ok(p)) = (t, &pats) {
+                let r = match &t.runs {
+                    Some(runs) => emit_runs(&t, &p.rematch, runs, out),
+                    None => {
+                        // too many hits to hold: stream them from a second scan
+                        let mut r = Ok(());
+                        scan_each(t.layer, &regex_scanner(&p.scan), Some(&t.sections), |run| {
+                            r = emit_runs(&t, &p.rematch, &[run], out);
+                            r.is_ok()
+                        });
+                        r
+                    }
+                };
+                if let Err(e) = r {
+                    result = Err(e);
+                    return false;
+                }
             }
             if let Some(e) = err {
-                return Err(e);
+                result = Err(e);
+                return false;
             }
-        }
+            true
+        });
+        result?;
         match tail {
             Some(e) => Err(e),
             None => Ok(()),

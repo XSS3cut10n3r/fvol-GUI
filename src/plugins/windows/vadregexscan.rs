@@ -5,11 +5,12 @@
 
 use crate::context::Context;
 use crate::error::{Error, Result};
-use crate::layers::scan::{DEFAULT_CHUNK_SIZE, FnScanner, scan};
+use crate::layers::scan::{DEFAULT_CHUNK_SIZE, FnScanner, scan_each};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::prelude::*;
 use crate::yara::regex::{Flags, Regex};
+use crate::yara::rules::volatility::{HitRun, push_run};
 
 pub struct VadRegExScan;
 
@@ -18,14 +19,15 @@ pub struct VadRegExScan;
 const MAXSIZE_DEFAULT: usize = 128;
 
 /// python `scanners.RegExScanner(pattern)` (`re.DOTALL`): hits of `finditer` starting before
-/// `chunk_size` in each chunk.
-pub fn regex_scanner(re: &Regex) -> FnScanner<u64, impl Fn(&[u8], u64, &mut Vec<u64>) + Sync + '_> {
-    FnScanner::new(move |data: &[u8], off: u64, out: &mut Vec<u64>| {
+/// `chunk_size` in each chunk, as runs of offsets.
+pub fn regex_scanner(re: &Regex) -> FnScanner<HitRun, impl Fn(&[u8], u64, &mut Vec<HitRun>) + Sync + '_> {
+    FnScanner::new(move |data: &[u8], off: u64, out: &mut Vec<HitRun>| {
+        let base = out.len();
         for (s, _) in re.find_iter(data) {
             if s as u64 >= DEFAULT_CHUNK_SIZE {
                 break;
             }
-            out.push(off + s as u64);
+            push_run(out, base, off + s as u64, 0);
         }
     })
 }
@@ -78,25 +80,35 @@ impl Plugin for VadRegExScan {
                 compiled = Some((scan_re, match_re));
             }
             let (scan_re, match_re) = compiled.as_ref().unwrap();
-            let hits = scan(layer, &regex_scanner(scan_re), Some(&sections));
+            // rows stream out as the chunks are scanned (python yields hit by hit)
+            // the process columns are read at the first hit, like python's generator
+            let mut ident: Option<(i128, String)> = None;
             let mut data = [0u8; MAXSIZE_DEFAULT];
-            for offset in hits {
-                layer.read_padded(offset, &mut data);
-                let bytes = match match_re.match_at(&data, 0) {
-                    Some((s, e)) => data[s..e].to_vec(),
-                    None => data.to_vec(),
-                };
-                let text = crate::objects::strings::decode_utf8(&bytes, crate::symbols::StrErrors::Replace)?;
-                out.row(
-                    0,
-                    vec![
-                        Value::Int(proc.m("UniqueProcessId")?.int()?),
-                        Value::Str(proc.image_file_name_str()?),
-                        Value::Int(offset as i128),
-                        Value::Str(text),
-                        Value::Bytes(bytes),
-                    ],
-                )?;
+            let mut err = None;
+            scan_each(layer, &regex_scanner(scan_re), Some(&sections), |run| {
+                for offset in run.offsets() {
+                    layer.read_padded(offset, &mut data);
+                    let bytes = match match_re.match_at(&data, 0) {
+                        Some((s, e)) => data[s..e].to_vec(),
+                        None => data.to_vec(),
+                    };
+                    let row = (|| -> Result<()> {
+                        if ident.is_none() {
+                            ident = Some((proc.m("UniqueProcessId")?.int()?, proc.image_file_name_str()?));
+                        }
+                        let (pid, name) = ident.clone().unwrap_or_default();
+                        let text = crate::objects::strings::decode_utf8(&bytes, crate::symbols::StrErrors::Replace)?;
+                        out.row(0, vec![Value::Int(pid), Value::Str(name), Value::Int(offset as i128), Value::Str(text), Value::Bytes(bytes)])
+                    })();
+                    if let Err(e) = row {
+                        err = Some(e);
+                        return false;
+                    }
+                }
+                true
+            });
+            if let Some(e) = err {
+                return Err(e);
             }
         }
         Ok(())
