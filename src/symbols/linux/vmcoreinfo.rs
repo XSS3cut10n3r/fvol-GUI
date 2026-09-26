@@ -5,7 +5,8 @@
 
 use crate::error::{Error, Result};
 use crate::layers::Layer;
-use crate::layers::scan::{BytesScanner, scan_each};
+use super::search::FastBytesScanner;
+use crate::layers::scan::scan_each;
 
 /// python `linux_constants.VMCOREINFO_MAGIC`.
 pub const VMCOREINFO_MAGIC: &[u8] = b"VMCOREINFO\x00";
@@ -216,7 +217,7 @@ pub fn search_vmcoreinfo_elf_note(layer: &dyn Layer, mut f: impl FnMut(u64, &VmC
         Ok(u32::from_le_bytes(b))
     };
     let mut err = None;
-    scan_each(layer, &BytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), None, |magic_off| {
+    scan_each(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), None, |magic_off| {
         let r = (|| -> Result<Option<(u64, VmCoreInfo)>> {
             let note = magic_off.wrapping_sub(ELF_NOTE_SIZE);
             if rd32(note)? as usize != VMCOREINFO_MAGIC.len() || rd32(note.wrapping_add(8))? != 0 {

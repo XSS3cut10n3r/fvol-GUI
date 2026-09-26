@@ -13,7 +13,8 @@
 
 use crate::context::Context;
 use crate::error::{Error, Result};
-use crate::layers::scan::{BytesScanner, FnScanner, MultiStringScanner, find, scan_each};
+use crate::layers::scan::{FnScanner, MultiStringScanner, scan_each};
+use crate::symbols::linux::search::{FastBytesScanner, Needle};
 use crate::layers::{IntelLayer, Layer, PagingMode, PteFlavor};
 use crate::objects::{LayerRef, Module};
 use crate::symbols::linux::vmcoreinfo::{VmValue, search_vmcoreinfo_elf_note};
@@ -104,10 +105,11 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
         let valid: Vec<&(Vec<u8>, IsfLocation)> = banners.iter().filter(|(b, _)| !b.is_empty() && b.starts_with(&prefix)).collect();
         let hit: Option<usize> = match valid.len() {
             0 => None,
+            1 if banner_in_place(phys, &valid[0].0, &valid[0].1, aslr_shift, kaslr_shift) => Some(0),
             1 => {
                 let _t = span("linux vmcoreinfo: banner scan (bytes)");
                 let mut h = None;
-                scan_each(phys, &BytesScanner::new(&valid[0].0), None, |_| {
+                scan_each(phys, &FastBytesScanner::new(&valid[0].0), None, |_| {
                     h = Some(0);
                     false
                 });
@@ -146,6 +148,38 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
     Ok(found)
 }
 
+/// Shortcut for python's single-banner `BytesScanner` scan, whose only effect is "does the
+/// banner occur anywhere in the layer": check the kernel's own `linux_banner` at its physical
+/// address (from the ISF and the VMCOREINFO shifts: `__pa(x) = v2p(x + aslr) - aslr + kaslr`).
+/// True means the scan would have a hit, so the result is identical; false falls back to the
+/// full scan.
+fn banner_in_place(phys: &dyn Layer, banner: &[u8], isf: &IsfLocation, aslr_shift: i128, kaslr_shift: i128) -> bool {
+    let _t = span("linux vmcoreinfo: banner in place");
+    let Ok(table) = crate::symbols::load_location(isf, "LintelStacker", None, 0) else { return false };
+    let Ok(sym) = table.get_symbol("linux_banner") else { return false };
+    let paddr = virtual_to_physical_address_i(sym.address as i128 + aslr_shift) - aslr_shift + kaslr_shift;
+    if paddr < 0 || paddr > u64::MAX as i128 {
+        return false;
+    }
+    let (start, len) = (paddr as u64, banner.len() as u64);
+    // python's scan covers [min, max) (never the last byte) and its chunks never cross a
+    // mapping run: the hit counts only if the banner lies inside one run of that range
+    if start < phys.min_address() || start.checked_add(len).is_none_or(|end| end > phys.max_address()) {
+        return false;
+    }
+    let (mut runs, mut covers) = (0, false);
+    phys.mapping(start, len, &mut |m| {
+        runs += 1;
+        covers = m.offset == start && m.len == len;
+        runs < 2
+    });
+    if runs != 1 || !covers {
+        return false;
+    }
+    let mut buf = vec![0u8; banner.len()];
+    phys.read(start, &mut buf).is_ok() && buf == banner
+}
+
 // ------------------------------------------------------------------------------------------
 // LinuxIntelStacker
 // ------------------------------------------------------------------------------------------
@@ -154,20 +188,12 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
 /// two alternatives have equal length and matches cannot overlap, so `re.finditer` reports
 /// every occurrence).
 pub fn swapper_matches(data: &[u8], mut f: impl FnMut(usize) -> bool) {
-    let mut pos = 0usize;
-    while let Some(i) = find(&data[pos..], b"swapper") {
-        let at = pos + i;
+    Needle::new(b"swapper").for_each(data, |at| {
         let tail = &data[at + 7..];
         let ok = tail.len() >= 8 && ((tail[0] == b'/' && tail[1] == b'0') || (tail[0] == 0 && tail[1] == 0)) && tail[2..8] == [0u8; 6];
-        if ok {
-            if !f(at) {
-                return;
-            }
-            pos = at + 15;
-        } else {
-            pos = at + 1;
-        }
-    }
+        // matches are 15 bytes and cannot overlap another match (they start with "swapper")
+        !ok || f(at)
+    });
 }
 
 /// python `LinuxIntelStacker.find_aslr(context, table, layer)`: (kaslr_shift, aslr_shift) as
@@ -439,8 +465,7 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                 let _t = span("linux banners (identifier index)");
                 crate::symbols::store::identifier_index(ctx.symbol_path()).dictionary("linux")
             };
-            let stackers = ctx.opts.stackers.clone().filter(|s| !s.is_empty());
-            let allow = |name: &str| stackers.as_ref().is_none_or(|s| s.iter().any(|x| x == name));
+            let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
             let a = run(*phys, &banners, &allow)
                 .ok_or_else(|| Error::Unsatisfied("Unable to validate the plugin requirements: no Linux kernel found".into()))?;
             store_cached(&image, &kind, &a);
@@ -500,6 +525,95 @@ mod tests {
             true
         });
         assert_eq!(v, vec![0, 15]);
+    }
+
+
+    /// `RSVOL_BENCH_IMAGE=<image> cargo test --profile fast bench_scans -- --ignored --nocapture`
+    /// (run through bench/scripts/limit.sh): core `BytesScanner` (glibc memmem) vs
+    /// [`FastBytesScanner`] full-image scans, hot single-thread search speed, and the time to the
+    /// first valid VMCOREINFO note.
+    #[test]
+    #[ignore]
+    fn bench_scans() {
+        use crate::layers::scan::{BytesScanner, find};
+        use crate::symbols::linux::vmcoreinfo::VMCOREINFO_MAGIC_ALIGNED;
+        let path = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let (phys, _) = crate::automagic::stack_physical(std::path::Path::new(&path), None).unwrap();
+        let total = phys.max_address() as f64;
+        for round in 0..2 {
+            let t = std::time::Instant::now();
+            let n = crate::layers::scan::scan(phys.as_ref(), &BytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), None).len();
+            let s = t.elapsed().as_secs_f64();
+            eprintln!("[{round}] BytesScanner full scan: {n} hits {:.1}ms {:.2} GB/s", s * 1e3, total / s / 1e9);
+            let t = std::time::Instant::now();
+            let n = crate::layers::scan::scan(phys.as_ref(), &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), None).len();
+            let s = t.elapsed().as_secs_f64();
+            eprintln!("[{round}] FastBytesScanner full scan: {n} hits {:.1}ms {:.2} GB/s", s * 1e3, total / s / 1e9);
+        }
+        if let Some(f) = crate::layers::base_file(phys.as_ref()) {
+            // parallel scan of the whole file through (a) the global mapping (b) per-chunk windows
+            let chunk = 16usize << 20;
+            let n = f.data().len().div_ceil(chunk);
+            for mode in 0..2 {
+                let t = std::time::Instant::now();
+                let hits: usize = crate::util::par::par_map(n, |i| {
+                    let off = i * chunk;
+                    let l = chunk.min(f.data().len() - off);
+                    let mut c = 0;
+                    if mode == 0 {
+                        Needle::new(VMCOREINFO_MAGIC_ALIGNED).for_each(&f.data()[off..off + l], |_| {
+                            c += 1;
+                            true
+                        });
+                    } else {
+                        let w = f.window(off as u64, l).unwrap();
+                        Needle::new(VMCOREINFO_MAGIC_ALIGNED).for_each(w.as_slice(), |_| {
+                            c += 1;
+                            true
+                        });
+                    }
+                    c
+                })
+                .into_iter()
+                .sum();
+                let s = t.elapsed().as_secs_f64();
+                eprintln!("raw {} : {hits} hits {:.1}ms {:.2} GB/s", ["global map", "windows"][mode], s * 1e3, f.data().len() as f64 / s / 1e9);
+            }
+            // single-thread search on a hot 64 MiB buffer from the middle of the image
+            let mut b = vec![0u8; 64 << 20];
+            use std::os::unix::fs::FileExt;
+            f.file().read_exact_at(&mut b, 1 << 30).unwrap();
+            for needle in [VMCOREINFO_MAGIC_ALIGNED, b"swapper".as_slice()] {
+                let t = std::time::Instant::now();
+                let mut c = 0;
+                for _ in 0..4 {
+                    let mut p = 0;
+                    while let Some(k) = find(&b[p..], needle) {
+                        c += 1;
+                        p += k + 1;
+                    }
+                }
+                let s1 = t.elapsed().as_secs_f64();
+                let t = std::time::Instant::now();
+                let mut c2 = 0;
+                for _ in 0..4 {
+                    Needle::new(needle).for_each(&b, |_| {
+                        c2 += 1;
+                        true
+                    });
+                }
+                let s2 = t.elapsed().as_secs_f64();
+                let gb = 4.0 * b.len() as f64 / 1e9;
+                eprintln!("hot {:?}: memmem {c} hits {:.2} GB/s, Needle {c2} hits {:.2} GB/s", String::from_utf8_lossy(needle), gb / s1, gb / s2);
+            }
+        }
+        let t = std::time::Instant::now();
+        let mut first = None;
+        let r = crate::symbols::linux::vmcoreinfo::search_vmcoreinfo_elf_note(phys.as_ref(), |off, _| {
+            first = Some(off);
+            false
+        });
+        eprintln!("first valid note {first:x?} {r:?} in {:.1}ms", t.elapsed().as_secs_f64() * 1e3);
     }
 
     #[test]

@@ -12,6 +12,7 @@
 //!   * [`container_of`] is python's `LinuxUtilities.container_of`.
 
 pub mod ext;
+pub mod search;
 pub mod timespec;
 pub mod vmcoreinfo;
 
