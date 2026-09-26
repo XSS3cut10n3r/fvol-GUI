@@ -21,12 +21,8 @@ pub(crate) enum Res {
     Invalid,
 }
 
-/// Substring of the spec text.
-#[derive(Clone, Copy, Default, Debug)]
-struct SRef {
-    off: u32,
-    len: u32,
-}
+/// Substring of the ('static) spec text.
+type SRef = &'static str;
 
 /// Table entry / exception codes.
 const E_OTHER: u32 = u32::MAX;
@@ -193,13 +189,27 @@ pub(crate) fn push_hex(out: &mut String, mut v: u64) {
             break;
         }
     }
-    for &c in &buf[i..] {
-        out.push(c as char);
-    }
+    // ASCII only
+    out.push_str(std::str::from_utf8(&buf[i..]).unwrap_or(""));
 }
+
+const DIGITS2: &[u8; 200] = b"0001020304050607080910111213141516171819\
+2021222324252627282930313233343536373839\
+4041424344454647484950515253545556575859\
+6061626364656667686970717273747576777879\
+8081828384858687888990919293949596979899";
 
 #[inline]
 pub(crate) fn push_dec(out: &mut String, mut v: u64) {
+    if v < 10 {
+        out.push((b'0' + v as u8) as char);
+        return;
+    }
+    if v < 100 {
+        let k = v as usize * 2;
+        out.push_str(std::str::from_utf8(&DIGITS2[k..k + 2]).unwrap_or(""));
+        return;
+    }
     let mut buf = [0u8; 20];
     let mut i = 20;
     loop {
@@ -210,9 +220,7 @@ pub(crate) fn push_dec(out: &mut String, mut v: u64) {
             break;
         }
     }
-    for &c in &buf[i..] {
-        out.push(c as char);
-    }
+    out.push_str(std::str::from_utf8(&buf[i..]).unwrap_or(""));
 }
 
 #[inline]
@@ -296,17 +304,14 @@ fn parse_hex(s: &str) -> Option<u32> {
 }
 
 impl Engine {
-    fn sref(&self, s: &str) -> SRef {
-        let base = self.text.as_ptr() as usize;
-        let p = s.as_ptr() as usize;
-        debug_assert!(p >= base && p + s.len() <= base + self.text.len());
-        SRef { off: (p - base) as u32, len: s.len() as u32 }
+    #[inline(always)]
+    fn sref(&self, s: &'static str) -> SRef {
+        s
     }
 
     #[inline(always)]
     fn s(&self, r: SRef) -> &'static str {
-        let t: &'static str = self.text;
-        t.get(r.off as usize..(r.off + r.len) as usize).unwrap_or("")
+        r
     }
 
     fn entry(&mut self, s: &'static str) -> u32 {
@@ -396,12 +401,12 @@ impl Engine {
                 let cls = f[1].as_bytes().first().copied()?;
                 let sp31 = f[2].as_bytes().first().copied()?;
                 let field = self.parse_field(f[3])?;
-                let suffix = if f[4] == "-" { SRef::default() } else { self.sref(f[4]) };
+                let suffix = if f[4] == "-" { "" } else { self.sref(f[4]) };
                 let (exc_off, exc_len) = self.parse_exc(f[5])?;
                 Some(Op::Reg { cls, sp31, field, suffix, exc_off, exc_len })
             }
             "n" if f.len() == 6 => {
-                let prefix = if f[1] == "-" { SRef::default() } else { self.sref(f[1]) };
+                let prefix = if f[1] == "-" { "" } else { self.sref(f[1]) };
                 let style = style_of(f[2])?;
                 let pc: u8 = f[3].parse().ok()?;
                 let field = self.parse_field(f[4])?;
@@ -523,7 +528,7 @@ impl Engine {
                     mask,
                     value,
                     handler: (e.handlers.len() - 1) as u32,
-                    mnem: SRef::default(),
+                    mnem: "",
                     prog_off: 0,
                     prog_len: 0,
                     cons_off: 0,
@@ -766,6 +771,30 @@ impl Engine {
         None
     }
 
+    /// (tree depth, leaf size, candidates whose mask matched) for word `w` (benchmarking aid).
+    pub(crate) fn walk_stats(&self, w: u32) -> (u32, u32, u32) {
+        let mut n = 0usize;
+        let mut depth = 0;
+        while let Some(&x) = self.tree.get(n) {
+            if x & 0x8000_0000 == 0 {
+                break;
+            }
+            depth += 1;
+            let v = (w >> ((x >> 8) & 31)) & ((1u32 << (x & 0xFF)) - 1);
+            n = self.tree.get(n + 1 + v as usize).copied().unwrap_or(0) as usize;
+        }
+        let cnt = self.tree.get(n).copied().unwrap_or(0) as usize;
+        let off = self.tree.get(n + 1).copied().unwrap_or(0) as usize;
+        let matched = self.leaf.get(off..off + cnt).unwrap_or(&[]).iter()
+            .filter(|&&ci| { let c = &self.classes[ci as usize]; w & c.mask == c.value }).count();
+        (depth, cnt as u32, matched as u32)
+    }
+
+    /// (classes, ops, tree words, leaf entries) sizes.
+    pub(crate) fn sizes(&self) -> (usize, usize, usize, usize) {
+        (self.classes.len(), self.ops.len(), self.tree.len(), self.leaf.len())
+    }
+
     /// Index of the class that renders `w` (for debugging), if any.
     pub(crate) fn class_of(&self, w: u32, addr: u64) -> Option<usize> {
         let mut s = String::new();
@@ -909,7 +938,7 @@ impl Engine {
                     match e {
                         E_OTHER => return Res::Other,
                         E_INVALID => return Res::Invalid,
-                        i => out.push_str(self.ents.get(i as usize).map_or("", |r| self.s(*r))),
+                        i => out.push_str(self.ents.get(i as usize).copied().unwrap_or("")),
                     }
                 }
             }

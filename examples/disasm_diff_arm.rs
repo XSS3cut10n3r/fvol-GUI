@@ -237,15 +237,56 @@ fn bench_cmd(args: &[String]) {
     let arch = args[0].clone();
     let n: usize = args.get(1).and_then(|x| x.parse().ok()).unwrap_or(10_000_000);
     let mut words = Vec::with_capacity(n);
-    let mut x: u64 = 1;
-    for _ in 0..n {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        words.push((x >> 16) as u32);
+    if let Some(path) = args.get(2) {
+        // real code: the file's words, repeated cyclically up to n words (like arm_bench.c)
+        let data = std::fs::read(path).expect("read code file");
+        let fw: Vec<u32> = data.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        for i in 0..n {
+            words.push(fw[i % fw.len()]);
+        }
+    } else {
+        let mut x: u64 = 1;
+        for _ in 0..n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            words.push((x >> 16) as u32);
+        }
     }
-    disasm::arm64::warm_up();
+    let t = Instant::now();
+    let eng = if arch == "arm64" { disasm::arm64::engine_ref() } else { disasm::arm::engine_ref() };
+    let (nc, no, nt, nl) = eng.sizes();
+    println!(
+        "spec compile {:.1} ms: {nc} classes, {no} ops, {nt} tree words, {nl} leaf entries",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    let (mut sd, mut sl, mut sm) = (0u64, 0u64, 0u64);
+    for &w in words.iter().take(1_000_000) {
+        let (d, l, m) = eng.walk_stats(w);
+        sd += d as u64;
+        sl += l as u64;
+        sm += m as u64;
+    }
+    let k = words.len().min(1_000_000) as f64;
+    println!("avg tree depth {:.2}, leaf size {:.2}, mask matches {:.2}", sd as f64 / k, sl as f64 / k, sm as f64 / k);
     let mut buf = String::with_capacity(256);
+    {
+        // split timing: valid-only vs invalid-only words
+        let (mut vw, mut iw) = (Vec::new(), Vec::new());
+        for &w in words.iter().take(2_000_000) {
+            buf.clear();
+            if render(&arch, w, 0x10000, &mut buf) { vw.push(w) } else { iw.push(w) }
+        }
+        for (name, set) in [("valid", &vw), ("invalid", &iw)] {
+            let t = Instant::now();
+            for &w in set.iter() {
+                buf.clear();
+                render(&arch, w, 0x10000, &mut buf);
+            }
+            let dt = t.elapsed().as_secs_f64();
+            println!("  {name}: {} words, {:.1} ns/word", set.len(), dt * 1e9 / set.len().max(1) as f64);
+        }
+    }
     for round in 0..3 {
         let t = Instant::now();
         let mut valid = 0u64;

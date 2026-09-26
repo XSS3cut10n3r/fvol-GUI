@@ -25,6 +25,7 @@ mismatch rates per corpus (unique and occurrence weighted) and writes DIR/NAME.m
 """
 import os
 import random
+import re
 import struct
 import subprocess
 import sys
@@ -37,6 +38,12 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ELF_ROOTS = ["/usr/lib/go/src", "/opt/metasploit", "/home/user/.rustup/toolchains", "/usr/share/proxmark3",
              "/usr/lib", "/usr/share"]
 MACH = {"arm64": 183, "arm": 40}
+# extra open-source C inputs for the cross-compiled corpus: (dir, filename regex, flags)
+EXTRA_SOURCES = [
+    ("/home/user/vh2/g6", r"wuffs-v0\.3\.c", ["-DWUFFS_IMPLEMENTATION"]),
+    ("/home/user/lp16fuzz/src", r"png[a-z]*\.c", []),
+    ("/usr/share/libtool", r"ltdl\.c", []),
+]
 BASE_ADDR = 0xFFFFFF8008080000
 
 
@@ -237,13 +244,23 @@ def objs(argv):
     out = DEFAULT_OUT
     if "--out" in argv:
         out = argv[argv.index("--out") + 1]
+    # sources: capstone tree (documentation copy in the scratch dir) plus any open-source C found
+    # locally (wuffs single-file library, libpng); host glibc headers are used with a stub
+    # bits/floatn.h (DIR/xinc) so they parse for 32/64-bit ARM targets
     srcs = []
     src_root = os.path.join(out, "cssrc")
     for dp, dn, fn in os.walk(src_root):
         for f in fn:
             if f.endswith(".c"):
-                srcs.append(os.path.join(dp, f))
+                srcs.append((os.path.join(dp, f), []))
+    for extra in EXTRA_SOURCES:
+        for dp, pat, flags in [extra]:
+            if os.path.isdir(dp):
+                for f in sorted(os.listdir(dp)):
+                    if re.fullmatch(pat, f):
+                        srcs.append((os.path.join(dp, f), flags))
     srcs.sort()
+    xinc = os.path.join(out, "xinc")
     configs = {
         "arm64": [["--target=aarch64-linux-gnu", "-O2"], ["--target=aarch64-linux-gnu", "-O0"],
                   ["--target=aarch64-linux-gnu", "-O3", "-march=armv9-a+sve2+sme"],
@@ -257,12 +274,13 @@ def objs(argv):
         os.makedirs(d, exist_ok=True)
         n = 0
         for ci, cfg in enumerate(cfgs):
-            for s in srcs:
+            for s, flags in srcs:
                 o = os.path.join(d, "%d_%s.o" % (ci, os.path.basename(s)[:-2]))
-                inc = ["-I" + os.path.dirname(s), "-I" + os.path.join(src_root, "capstone-5.0.9", "include"),
+                inc = ["-isystem", xinc, "-I" + os.path.dirname(s),
+                       "-I" + os.path.join(src_root, "capstone-5.0.9", "include"),
                        "-I" + os.path.join(src_root, "capstone-5.0.9")]
                 r = subprocess.run(["clang", "-c", "-w", "-DCAPSTONE_HAS_ARM", "-DCAPSTONE_HAS_ARM64",
-                                    "-DCAPSTONE_HAS_X86"] + cfg + inc + [s, "-o", o],
+                                    "-DCAPSTONE_HAS_X86"] + flags + cfg + inc + [s, "-o", o],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 n += r.returncode == 0
         print("%s: %d objects" % (arch, n), file=sys.stderr)

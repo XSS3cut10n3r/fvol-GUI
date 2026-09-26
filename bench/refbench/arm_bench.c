@@ -29,11 +29,15 @@ int main(int argc, char **argv) {
     size_t n = strtoull(argv[2], 0, 0);
     uint32_t *words = malloc(n * 4);
     if (argc > 3) {
+        // real code: the file's words, repeated cyclically up to N words
         FILE *f = fopen(argv[3], "rb");
         size_t got = f ? fread(words, 4, n, f) : 0;
-        n = got;
         if (f)
             fclose(f);
+        if (got == 0)
+            return 1;
+        for (size_t i = got; i < n; i++)
+            words[i] = words[i % got];
     } else {
         uint64_t x = 1;
         for (size_t i = 0; i < n; i++) {

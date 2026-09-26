@@ -238,5 +238,10 @@ pub fn warm_up() {
     let _ = engine();
 }
 
+/// The compiled engine (benchmarks / diagnostics).
+pub(crate) fn engine_ref() -> &'static Engine {
+    engine()
+}
+
 #[cfg(test)]
 mod tests;

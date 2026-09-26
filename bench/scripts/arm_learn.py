@@ -1007,10 +1007,12 @@ class Learner:
             return -1
         if p0 == p1 and p0 == p2:
             return 0
-        if (p1 - p0) % (1 << 64) == (A1 - A0) % (1 << 64) and (p2 - p0) % (1 << 64) == 4:
-            return 1
-        if (p1 - p0) % (1 << 64) == ((A1 & ~0xFFF) - (A0 & ~0xFFF)) % (1 << 64) and p2 == p0:
-            return 2
+        # 64-bit addresses, or 32-bit wrap-around (ARM)
+        for mod in (1 << 64, 1 << 32):
+            if (p1 - p0) % mod == (A1 - A0) % mod and (p2 - p0) % mod == 4:
+                return 1
+            if (p1 - p0) % mod == ((A1 & ~0xFFF) - (A0 & ~0xFFF)) % mod and p2 == p0:
+                return 2
         return -1
 
     def _enum_exceptions(self, dbits, sh, members, key_fn, check_fn):
