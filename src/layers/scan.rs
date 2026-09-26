@@ -171,26 +171,98 @@ fn build_chunks(layer: &dyn Layer, chunk: u64, overlap: u64, sections: &[(u64, u
     } else {
         // TranslationLayerInterface._scan_iterator (linear): per mapping run
         for &(start, length) in sections {
-            for m in collect_runs(layer, start, length) {
-                let run_end = m.offset + m.len;
-                let mut piece = m.offset;
-                while piece < run_end {
-                    let len = (run_end - piece).min(chunk + overlap);
-                    out.push(Chunk { start: piece, len, src: Src::Lower(m.mapped + (piece - m.offset)) });
-                    piece = match piece.checked_add(chunk) {
-                        Some(p) => p,
-                        None => break,
-                    };
-                }
-            }
+            run_chunks(layer, start, length, chunk, overlap, &mut out);
         }
     }
     out
 }
 
+/// python's chunks of one mapping run: `chunk + overlap` pieces stepping by `chunk`.
+#[inline]
+fn cut_run(m: Mapping, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
+    let run_end = m.offset + m.len;
+    let mut piece = m.offset;
+    while piece < run_end {
+        let len = (run_end - piece).min(chunk + overlap);
+        out.push(Chunk { start: piece, len, src: Src::Lower(m.mapped + (piece - m.offset)) });
+        piece = match piece.checked_add(chunk) {
+            Some(p) => p,
+            None => break,
+        };
+    }
+}
+
+/// Whether two runs are one python run (contiguous in both spaces).
+#[inline]
+fn runs_join(a: &Mapping, b: &Mapping) -> bool {
+    a.offset.wrapping_add(a.len) == b.offset && a.mapped.wrapping_add(a.len) == b.mapped
+}
+
+/// The chunks of `[start, start+length)` of a translation layer. Intel layers are walked in
+/// parallel pieces (see [`collect_runs`]); each piece cuts its interior runs into chunks, and
+/// only the runs at piece boundaries (which may continue in the neighbour) are joined and cut
+/// sequentially.
+fn run_chunks(layer: &dyn Layer, start: u64, length: u64, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
+    let Some(pieces) = run_pieces(layer, start, length) else {
+        layer.mapping(start, length, &mut |m| {
+            cut_run(m, chunk, overlap, out);
+            true
+        });
+        return;
+    };
+    struct PieceOut {
+        first: Option<Mapping>,
+        mid: Vec<Chunk>,
+        last: Option<Mapping>,
+    }
+    let parts: Vec<PieceOut> = par::par_map(pieces.len(), |i| {
+        let (s, l) = pieces[i];
+        let mut p = PieceOut { first: None, mid: Vec::new(), last: None };
+        layer.mapping(s, l, &mut |m| {
+            if p.first.is_none() {
+                p.first = Some(m);
+            } else {
+                if let Some(prev) = p.last.replace(m) {
+                    cut_run(prev, chunk, overlap, &mut p.mid);
+                }
+            }
+            true
+        });
+        p
+    });
+    out.reserve(parts.iter().map(|p| p.mid.len() + 2).sum());
+    let mut pending: Option<Mapping> = None;
+    for p in parts {
+        if let Some(f) = p.first {
+            match pending.as_mut() {
+                Some(pm) if runs_join(pm, &f) => pm.len += f.len,
+                _ => {
+                    if let Some(pm) = pending.take() {
+                        cut_run(pm, chunk, overlap, out);
+                    }
+                    pending = Some(f);
+                }
+            }
+        }
+        if p.last.is_some() {
+            // the first run is complete: it is followed by more runs of this piece
+            if let Some(pm) = pending.take() {
+                cut_run(pm, chunk, overlap, out);
+            }
+            out.extend_from_slice(&p.mid);
+            pending = p.last;
+        }
+    }
+    if let Some(pm) = pending {
+        cut_run(pm, chunk, overlap, out);
+    }
+}
+
 /// Granularity (log2) of the parallel mapping enumeration of Intel layers: no page (4 KiB up to
 /// 1 GiB) crosses such a boundary.
 const RUN_PIECE_BITS: u32 = 30;
+/// Finer split (log2) of 1 GiB pieces that are not a single 1 GiB page (pages <= 4 MiB).
+const RUN_SUBPIECE_BITS: u32 = 24;
 
 /// python `layer.mapping(start, length, ignore_errors=True)` as a Vec (runs coalesced exactly
 /// like python). Large ranges of Intel layers are enumerated in parallel: the range is cut at
@@ -198,32 +270,16 @@ const RUN_PIECE_BITS: u32 = 30;
 /// which python's walk skips as a whole too), pieces are walked concurrently and runs that
 /// meet at a boundary contiguously in both spaces are merged again. The page-by-page walk
 /// visits every piece boundary it does not skip over, so the result is identical.
+#[cfg(test)]
 fn collect_runs(layer: &dyn Layer, start: u64, length: u64) -> Vec<Mapping> {
     let mut out: Vec<Mapping> = Vec::new();
-    let g = 1u128 << RUN_PIECE_BITS;
-    let intel = layer.as_intel().filter(|_| length as u128 >= 8 * g && par::threads() > 1);
-    let Some(intel) = intel else {
+    let Some(pieces) = run_pieces(layer, start, length) else {
         layer.mapping(start, length, &mut |m| {
             out.push(m);
             true
         });
         return out;
     };
-    let end = start as u128 + length as u128;
-    let mut pieces: Vec<(u64, u64)> = Vec::new();
-    let mut x = start as u128;
-    while x < end {
-        let pend = (((x >> RUN_PIECE_BITS) + 1) << RUN_PIECE_BITS).min(end);
-        if let Err(f) = intel.translate_raw(x as u64) {
-            if f.invalid_bits > RUN_PIECE_BITS && f.invalid_bits < 64 {
-                let span = 1u128 << f.invalid_bits;
-                x = (x / span + 1) * span;
-                continue;
-            }
-        }
-        pieces.push((x as u64, (pend - x) as u64));
-        x = pend;
-    }
     let parts: Vec<Vec<Mapping>> = par::par_map(pieces.len(), |i| {
         let (s, l) = pieces[i];
         let mut v = Vec::new();
@@ -233,20 +289,58 @@ fn collect_runs(layer: &dyn Layer, start: u64, length: u64) -> Vec<Mapping> {
         });
         v
     });
-    out.reserve(parts.iter().map(|p| p.len()).sum());
     for part in parts {
         let mut it = part.into_iter();
         if let Some(first) = it.next() {
             match out.last_mut() {
-                Some(last) if last.offset.wrapping_add(last.len) == first.offset && last.mapped.wrapping_add(last.len) == first.mapped => {
-                    last.len += first.len;
-                }
+                Some(last) if runs_join(last, &first) => last.len += first.len,
                 _ => out.push(first),
             }
         }
         out.extend(it);
     }
     out
+}
+
+/// The pieces a large range of an Intel layer is walked in, in parallel (None = walk it
+/// sequentially): cut at 1 GiB boundaries, dropping ranges under invalid upper-level entries
+/// (python's walk skips them as a whole too), and at 16 MiB boundaries where a page directory
+/// (not a 1 GiB page) lies below. No page crosses a piece boundary, and the page-by-page walk
+/// visits every boundary it does not skip over, so walking the pieces and re-joining runs that
+/// meet at a boundary contiguously in both spaces gives exactly python's runs.
+fn run_pieces(layer: &dyn Layer, start: u64, length: u64) -> Option<Vec<(u64, u64)>> {
+    let g = 1u128 << RUN_PIECE_BITS;
+    let intel = layer.as_intel().filter(|_| length as u128 >= 8 * g && par::threads() > 1)?;
+    let end = start as u128 + length as u128;
+    let mut pieces: Vec<(u64, u64)> = Vec::new();
+    let mut x = start as u128;
+    while x < end {
+        let pend = (((x >> RUN_PIECE_BITS) + 1) << RUN_PIECE_BITS).min(end);
+        let whole_page = match intel.translate_raw(x as u64) {
+            // the entry covering 2^invalid_bits bytes is invalid: python's walk skips it all
+            Err(f) if f.invalid_bits >= RUN_PIECE_BITS && f.invalid_bits < 64 => {
+                let span = 1u128 << f.invalid_bits;
+                x = (x / span + 1) * span;
+                continue;
+            }
+            Ok((_, bits, _)) => bits >= RUN_PIECE_BITS,
+            Err(_) => false,
+        };
+        if whole_page {
+            // one 1 GiB page
+            pieces.push((x as u64, (pend - x) as u64));
+        } else {
+            // a page directory below: no page crosses a 16 MiB boundary
+            let mut y = x;
+            while y < pend {
+                let yend = (((y >> RUN_SUBPIECE_BITS) + 1) << RUN_SUBPIECE_BITS).min(pend);
+                pieces.push((y as u64, (yend - y) as u64));
+                y = yend;
+            }
+        }
+        x = pend;
+    }
+    Some(pieces)
 }
 
 /// Locate `[addr, addr+len)` of `layer` as linear bytes of the backing file: the layer IS the
@@ -337,107 +431,122 @@ fn chunk_source<'a>(layer: &'a dyn Layer, c: &Chunk) -> Option<(&'a FileLayer, u
 }
 
 fn make_plan(layer: &dyn Layer, chunks: Vec<Chunk>) -> Plan<'_> {
-    let mut file: Option<&FileLayer> = None;
-    let mut offs = Vec::with_capacity(chunks.len());
-    for c in &chunks {
-        let off = match chunk_source(layer, c) {
-            Some((f, off)) => match file {
-                None => {
-                    file = Some(f);
-                    off
-                }
-                Some(g) if std::ptr::eq(f, g) => off,
-                Some(_) => NO_FILE,
-            },
-            None => NO_FILE,
-        };
-        offs.push(off);
+    // file offsets (in parallel; every file-backed chunk lives in the layer stack's base file)
+    let file = super::base_file(layer);
+    const BLOCK: usize = 1 << 15;
+    let blocks = par::par_map(chunks.len().div_ceil(BLOCK), |bi| {
+        let cs = &chunks[bi * BLOCK..((bi + 1) * BLOCK).min(chunks.len())];
+        cs.iter()
+            .map(|c| match chunk_source(layer, c) {
+                Some((f, off)) if file.is_some_and(|g| std::ptr::eq(f, g)) => off,
+                _ => NO_FILE,
+            })
+            .collect::<Vec<u64>>()
+    });
+    let offs: Vec<u64> = blocks.concat();
+    let file = if offs.iter().any(|&o| o != NO_FILE) { file } else { None };
+    // segments: big chunks alone, runs of small chunks cut into rounds
+    enum Seg {
+        Big(usize),
+        Round(usize, usize),
     }
-    let mut plan = Plan { chunks, offs, file, idx: Vec::new(), items: Vec::new(), round_end: Vec::new() };
-    let n = plan.chunks.len();
+    let mut segs = Vec::new();
     let mut round_start = 0usize;
     let mut round_bytes = 0u64;
-    let mut i = 0usize;
-    while i < n {
-        let c = plan.chunks[i];
+    for (i, c) in chunks.iter().enumerate() {
         if c.len >= BIG_CHUNK {
-            close_round(&mut plan, round_start, i);
-            if plan.offs[i] != NO_FILE {
-                plan.items.push(Item::Big { chunk: i as u32, off: plan.offs[i] });
-            } else {
-                let a = plan.idx.len() as u32;
-                plan.idx.push(i as u32);
-                plan.items.push(Item::Generic { a, b: a + 1 });
+            if round_start < i {
+                segs.push(Seg::Round(round_start, i));
             }
-            plan.round_end.push(true);
-            i += 1;
-            round_start = i;
+            segs.push(Seg::Big(i));
+            round_start = i + 1;
             round_bytes = 0;
             continue;
         }
         round_bytes += c.len;
-        i += 1;
         if round_bytes >= ROUND_BYTES {
-            close_round(&mut plan, round_start, i);
-            round_start = i;
+            segs.push(Seg::Round(round_start, i + 1));
+            round_start = i + 1;
             round_bytes = 0;
         }
     }
-    close_round(&mut plan, round_start, n);
+    if round_start < chunks.len() {
+        segs.push(Seg::Round(round_start, chunks.len()));
+    }
+    // rounds are planned in parallel (sorting by file range), then concatenated
+    let rounds: Vec<(Vec<u32>, Vec<Item>)> = par::par_map(segs.len(), |k| match segs[k] {
+        Seg::Round(a, b) => plan_round(&chunks, &offs, a, b),
+        Seg::Big(i) => {
+            if offs[i] != NO_FILE {
+                (Vec::new(), vec![Item::Big { chunk: i as u32, off: offs[i] }])
+            } else {
+                (vec![i as u32], vec![Item::Generic { a: 0, b: 1 }])
+            }
+        }
+    });
+    let mut plan = Plan { chunks, offs, file, idx: Vec::new(), items: Vec::new(), round_end: Vec::new() };
+    for (idx, items) in rounds {
+        let base = plan.idx.len() as u32;
+        plan.idx.extend_from_slice(&idx);
+        let n = items.len();
+        for (j, it) in items.into_iter().enumerate() {
+            plan.items.push(match it {
+                Item::Group { a, b } => Item::Group { a: a + base, b: b + base },
+                Item::Generic { a, b } => Item::Generic { a: a + base, b: b + base },
+                big => big,
+            });
+            plan.round_end.push(j + 1 == n);
+        }
+    }
     plan
 }
 
-/// Turn the small chunks `[start, end)` into window groups (+ generic items) forming one round.
-fn close_round(plan: &mut Plan, start: usize, end: usize) {
-    if start >= end {
-        return;
-    }
-    let first_item = plan.items.len();
+/// Work items of one round: the small chunks `[start, end)` (item ranges index the returned
+/// chunk list).
+fn plan_round(chunks: &[Chunk], offs: &[u64], start: usize, end: usize) -> (Vec<u32>, Vec<Item>) {
+    let mut idx: Vec<u32> = Vec::new();
+    let mut items = Vec::new();
     // file-backed: sorted by (file offset, length, chunk) so identical ranges (the same
     // physical pages mapped at several virtual addresses) are adjacent and read once; items
     // take up to GROUP_BYTES of distinct data (and GROUP_CHUNKS chunks)
-    let mut keyed: Vec<(u64, u64, u32)> = (start..end).filter(|&i| plan.offs[i] != NO_FILE).map(|i| (plan.offs[i], plan.chunks[i].len, i as u32)).collect();
+    let mut keyed: Vec<(u64, u64, u32)> = (start..end).filter(|&i| offs[i] != NO_FILE).map(|i| (offs[i], chunks[i].len, i as u32)).collect();
     keyed.sort_unstable();
     let mut k = 0;
     while k < keyed.len() {
-        let a = plan.idx.len() as u32;
+        let a = idx.len() as u32;
         let mut bytes = 0u64;
         let mut n = 0usize;
         while k < keyed.len() && bytes < GROUP_BYTES && n < GROUP_CHUNKS {
             let (off, len, _) = keyed[k];
             bytes += len;
             while k < keyed.len() && keyed[k].0 == off && keyed[k].1 == len {
-                plan.idx.push(keyed[k].2);
+                idx.push(keyed[k].2);
                 k += 1;
                 n += 1;
             }
         }
-        let b = plan.idx.len() as u32;
-        plan.items.push(Item::Group { a, b });
+        items.push(Item::Group { a, b: idx.len() as u32 });
     }
     // not file-backed: consecutive items of ~GENERIC_ITEM_BYTES
-    let mut a = plan.idx.len() as u32;
+    let mut a = idx.len() as u32;
     let mut bytes = 0u64;
     for i in start..end {
-        if plan.offs[i] != NO_FILE {
+        if offs[i] != NO_FILE {
             continue;
         }
-        plan.idx.push(i as u32);
-        bytes += plan.chunks[i].len;
+        idx.push(i as u32);
+        bytes += chunks[i].len;
         if bytes >= GENERIC_ITEM_BYTES {
-            let b = plan.idx.len() as u32;
-            plan.items.push(Item::Generic { a, b });
+            let b = idx.len() as u32;
+            items.push(Item::Generic { a, b });
             a = b;
             bytes = 0;
         }
     }
-    if (plan.idx.len() as u32) > a {
-        plan.items.push(Item::Generic { a, b: plan.idx.len() as u32 });
+    if (idx.len() as u32) > a {
+        items.push(Item::Generic { a, b: idx.len() as u32 });
     }
-    let n_new = plan.items.len() - first_item;
-    for j in 0..n_new {
-        plan.round_end.push(j + 1 == n_new);
-    }
+    (idx, items)
 }
 
 thread_local! {
@@ -1687,6 +1796,20 @@ mod tests {
         let par_runs = collect_runs(l, secs[0].0, secs[0].1);
         let t_par = t.elapsed().as_secs_f64();
         assert!(seq == par_runs, "parallel runs differ: {} vs {}", seq.len(), par_runs.len());
+        {
+            let mut seq_chunks = Vec::new();
+            for m in &seq {
+                cut_run(*m, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &mut seq_chunks);
+            }
+            let par_chunks = build_chunks(l, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &secs);
+            let key = |c: &Chunk| {
+                (c.start, c.len, match c.src {
+                    Src::Lower(m) => m,
+                    Src::Layer => u64::MAX,
+                })
+            };
+            assert!(seq_chunks.len() == par_chunks.len() && seq_chunks.iter().zip(&par_chunks).all(|(a, b)| key(a) == key(b)), "parallel chunks differ");
+        }
         eprintln!("runs: {} sequential {:.1} ms, parallel {:.1} ms (identical)", seq.len(), t_seq * 1e3, t_par * 1e3);
         let mut best = f64::MAX;
         let mut chunks = Vec::new();
