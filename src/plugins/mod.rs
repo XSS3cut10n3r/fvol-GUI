@@ -163,7 +163,13 @@ pub trait Plugin: Sync {
     /// Full dotted name as volatility3 prints it, e.g. "windows.pslist.PsList".
     fn name(&self) -> &'static str;
     /// Text shown in the `vol -h` plugin list (python class docstring, first paragraph).
+    /// Empty when the python class has no docstring.
     fn description(&self) -> &'static str;
+    /// The rest of the python docstring after the first blank line (argparse epilog of
+    /// `vol <plugin> -h`), if any.
+    fn epilog(&self) -> Option<&'static str> {
+        None
+    }
     /// CLI-visible requirements in python order.
     fn requirements(&self) -> Vec<Requirement> {
         Vec::new()
@@ -174,6 +180,16 @@ pub trait Plugin: Sync {
     fn timeline(&self, _ctx: &Context, _cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
         None
     }
+}
+
+/// The error python reports as an `UnsatisfiedException` (printed by the CLI as
+/// "Unsatisfied requirement plugins.<Class>.<path>: ..." + hints, exit status 1).
+/// `paths` are config paths relative to the plugin, e.g. `["kernel.layer_name",
+/// "kernel.symbol_table_name"]` (what the CLI assumes when an `Error::Unsatisfied` message is
+/// free text); a path ending in `layer_name` counts as a TranslationLayerRequirement, one ending
+/// in `symbol_table_name` as a SymbolTableRequirement.
+pub fn unsatisfied(paths: &[&str]) -> crate::error::Error {
+    crate::error::Error::Unsatisfied(paths.join("\n"))
 }
 
 /// Every registered plugin, sorted by name.
