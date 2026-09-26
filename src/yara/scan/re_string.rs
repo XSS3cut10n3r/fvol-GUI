@@ -308,6 +308,34 @@ impl ReString {
         true
     }
 
+    /// For an ASCII-only string (no `wide` pass): the byte sets a hit of `atom` needs
+    /// around it to pass [`ReString::hit_rejected`]'s filter checks, as one sequence
+    /// (backward filter reversed, then the forward filter, which starts with the atom
+    /// itself), and the offset of the atom start in it. A hit at `pos` survives only if
+    /// `seq[k]` contains `data[pos - anchor + k]` for every k (bounds included). None for
+    /// literal parts, wide strings and atoms without a usable context.
+    pub fn atom_context(&self, atom: usize) -> Option<(Vec<[u64; 4]>, usize)> {
+        if !self.ascii || self.wide {
+            return None;
+        }
+        let &(pi, ai) = self.atom_map.get(atom)?;
+        let part = self.parts.get(pi as usize)?;
+        let ca = part.atoms.get(ai as usize)?;
+        let PartKind::Re { code, .. } = &part.kind else { return None };
+        if let Some(id) = ca.node {
+            code.fwd_ref.get(id as usize).copied().flatten()?;
+        }
+        let bwd = ca.node.and_then(|id| code.bwd_ref.get(id as usize).copied().flatten()).is_some();
+        let filter = part.filters.get(ai as usize).map_or(&[][..], |f| &f[..]);
+        let bfilter = if bwd { part.bfilters.get(ai as usize).map_or(&[][..], |f| &f[..]) } else { &[][..] };
+        let mut seq: Vec<[u64; 4]> = bfilter.iter().rev().copied().collect();
+        seq.extend_from_slice(filter);
+        if seq.iter().filter(|s| **s != [u64::MAX; 4]).count() < 2 {
+            return None;
+        }
+        Some((seq, ca.backtrack + bfilter.len()))
+    }
+
     pub fn new_state(&self) -> ReState {
         ReState { machine: Machine::new(), unconfirmed: vec![Vec::new(); self.parts.len()], tmp: Vec::new() }
     }
@@ -746,7 +774,18 @@ mod tests {
             let data: Vec<u8> = (0..len).map(|_| alpha[(rnd() % alpha.len() as u64) as usize]).collect();
             for rs in &strings {
                 for atom in 0..rs.atoms().len() {
+                    let ctx = rs.atom_context(atom);
                     for pos in 0..=data.len() {
+                        // A hit without the atom's context must be rejected.
+                        if let Some((seq, anchor)) = &ctx {
+                            let ok = pos >= *anchor
+                                && pos - anchor + seq.len() <= data.len()
+                                && seq.iter().enumerate().all(|(k, s)| {
+                                    let b = data[pos - anchor + k];
+                                    s[(b >> 6) as usize] >> (b & 63) & 1 != 0
+                                });
+                            assert!(ok || rs.hit_rejected(&data, atom, pos), "context-less hit kept (atom {atom} pos {pos})");
+                        }
                         if !rs.hit_rejected(&data, atom, pos) {
                             continue;
                         }

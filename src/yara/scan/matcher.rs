@@ -136,6 +136,8 @@ static MATCHER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 #[cfg(test)]
 pub(crate) static VERIFY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
+pub(crate) static VERIFY_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
 pub(crate) static SKIP_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static TIME_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -224,7 +226,7 @@ fn build_re(def: &StringDef) -> Result<ReString, String> {
     }
 }
 
-/// See [`Engine::Pair`].
+/// See [`Engine::Pairs`].
 struct PairEngine {
     id: u32,
     /// The string the pattern belongs to (the engine switches off when it is disabled).
@@ -234,6 +236,14 @@ struct PairEngine {
     folds: Vec<u8>,
     /// Window offset of the pattern (candidates are reported at window starts).
     w: usize,
+    /// Byte sets every reported hit has around it, starting `anchor` bytes before the
+    /// pattern: the pattern itself, or for a hex/regex atom the context its string's
+    /// filters require (`ReString::atom_context`; hits without it would be rejected).
+    seq: Vec<ByteSet>,
+    anchor: usize,
+    /// `seq` is just the pattern (`eq_at` alone decides).
+    plain: bool,
+    /// The two rarest positions of `seq`.
     i1: usize,
     i2: usize,
     s1: SetDesc,
@@ -241,48 +251,71 @@ struct PairEngine {
 }
 
 impl PairEngine {
-    fn new(id: u32, p: &Pat, bytes: &[u8], folds: &[u8]) -> PairEngine {
+    fn new(id: u32, p: &Pat, bytes: &[u8], folds: &[u8], ctx: Option<(Vec<[u64; 4]>, usize)>) -> PairEngine {
         let (a, e) = (p.off as usize, (p.off + p.len) as usize);
         let (bytes, folds) = (bytes[a..e].to_vec(), folds[a..e].to_vec());
-        let sets: Vec<ByteSet> = bytes
-            .iter()
-            .zip(&folds)
-            .map(|(&b, &f)| {
-                let mut s = ByteSet::single(b);
-                if f != 0 {
-                    s.insert(b ^ 0x20);
-                }
-                s
-            })
-            .collect();
+        let (seq, anchor, plain) = match ctx {
+            Some((c, anchor)) => (c.into_iter().map(ByteSet).collect(), anchor, false),
+            None => {
+                let sets: Vec<ByteSet> = bytes
+                    .iter()
+                    .zip(&folds)
+                    .map(|(&b, &f)| {
+                        let mut s = ByteSet::single(b);
+                        if f != 0 {
+                            s.insert(b ^ 0x20);
+                        }
+                        s
+                    })
+                    .collect();
+                (sets, 0, true)
+            }
+        };
         // Two rarest positions (one position for 1-byte patterns).
-        let mut idx: Vec<usize> = (0..sets.len()).collect();
-        idx.sort_by_key(|&i| (set_freq(&sets[i]), i));
-        let (i1, i2) = (idx[0], idx.get(1).copied().unwrap_or(idx[0]));
-        PairEngine { id, string: p.string, w: p.w as usize, i1, i2, s1: SetDesc::new(&sets[i1]), s2: SetDesc::new(&sets[i2]), bytes, folds }
+        let mut idx: Vec<(u64, usize)> = seq.iter().enumerate().map(|(i, s)| (if s.is_full() { u64::MAX } else { set_freq(s) }, i)).collect();
+        idx.sort_unstable();
+        let (i1, i2) = (idx[0].1, idx.get(1).map_or(idx[0].1, |x| x.1));
+        let (s1, s2) = (SetDesc::new(&seq[i1]), SetDesc::new(&seq[i2]));
+        PairEngine { id, string: p.string, w: p.w as usize, seq, anchor, plain, i1, i2, s1, s2, bytes, folds }
     }
 
     /// Reports `f(q, id)` for every window start `q` in `[from, to)` whose pattern start
-    /// `q - w` has a whole-pattern match (Teddy reports the superset of window matches;
-    /// `on_raw` rejects the others anyway).
+    /// `q - w` has a whole-pattern match (and the required context) (Teddy reports the
+    /// superset of window matches; `on_raw` rejects the others anyway).
     #[inline]
     fn run<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, f: &mut F) {
-        let m = self.bytes.len();
-        if to <= self.w || hay.len() < m {
+        let (n, m, k) = (hay.len(), self.bytes.len(), self.seq.len());
+        if to <= self.w || n < m || n < k {
             return;
         }
+        // pattern starts s in [lo, last]; sequence starts c = s - anchor in [c_lo, c_hi]
         let lo = from.saturating_sub(self.w);
-        let last = (to - self.w - 1).min(hay.len() - m);
-        if lo > last {
+        let last = (to - self.w - 1).min(n - m);
+        if lo > last || last < self.anchor {
             return;
         }
-        let (bytes, folds, w, id) = (&self.bytes[..], &self.folds[..], self.w, self.id);
-        pair_set_find(hay, lo, last, self.i1, &self.s1, self.i2, &self.s2, &mut |s| {
-            if eq_at(hay, s, bytes, folds, 0) {
-                f(s + w, id);
-            }
-            false
-        });
+        let c_lo = lo.max(self.anchor) - self.anchor;
+        let c_hi = (last - self.anchor).min(n - k);
+        if c_lo > c_hi {
+            return;
+        }
+        let (bytes, folds, seq, anchor, w, id) = (&self.bytes[..], &self.folds[..], &self.seq[..], self.anchor, self.w, self.id);
+        if self.plain {
+            pair_set_find(hay, c_lo, c_hi, self.i1, &self.s1, self.i2, &self.s2, &mut |s| {
+                if eq_at(hay, s, bytes, folds, 0) {
+                    f(s + w, id);
+                }
+                false
+            });
+        } else {
+            pair_set_find(hay, c_lo, c_hi, self.i1, &self.s1, self.i2, &self.s2, &mut |c| {
+                let s = c + anchor;
+                if seq.iter().zip(&hay[c..c + k]).all(|(set, &b)| set.contains(b)) && eq_at(hay, s, bytes, folds, 0) {
+                    f(s + w, id);
+                }
+                false
+            });
+        }
     }
 }
 
@@ -547,8 +580,12 @@ impl Matcher {
             }
         }
         let ids: Vec<u32> = (0..m.pats.len() as u32).collect();
+        let ctx_of = |p: &Pat| match &m.kinds[p.string as usize] {
+            Kind::Re(rs) => rs.atom_context(p.sub as usize),
+            Kind::Text(_) => None,
+        };
         m.raw = if !ids.is_empty() && ids.len() <= PAIRS_MAX {
-            Engine::Pairs(ids.iter().map(|&id| PairEngine::new(id, &m.pats[id as usize], &m.bytes, &m.folds)).collect())
+            Engine::Pairs(ids.iter().map(|&id| PairEngine::new(id, &m.pats[id as usize], &m.bytes, &m.folds, ctx_of(&m.pats[id as usize]))).collect())
         } else {
             Engine::build(&m.pats, &ids, &m.bytes, &m.folds)
         };
@@ -936,6 +973,7 @@ impl Matcher {
                 let t0 = std::time::Instant::now();
                 rs.verify(st, data, atom, pos, tmp);
                 VERIFY_NS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+                VERIFY_CALLS.fetch_add(1, Relaxed);
             } else {
                 rs.verify(st, data, atom, pos, tmp);
             }

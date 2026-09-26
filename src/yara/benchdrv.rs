@@ -331,7 +331,7 @@ fn yara_scaling_probe() {
 #[ignore]
 fn yara_verify_probe() {
     use super::scan::Matcher;
-    use super::scan::matcher::{SKIP_VERIFY, TIME_VERIFY, VERIFY_NS};
+    use super::scan::matcher::{SKIP_VERIFY, TIME_VERIFY, VERIFY_CALLS, VERIFY_NS};
     let Ok(files) = std::env::var("RSVOL_BENCH_YARA_CASES") else { return };
     let w = bench_window();
     let hay = w.bytes();
@@ -349,9 +349,10 @@ fn yara_verify_probe() {
         VERIFY_NS.store(0, Ordering::Relaxed);
         m.scan(hay, &mut out);
         let vns = VERIFY_NS.swap(0, Ordering::Relaxed);
+        let calls = VERIFY_CALLS.swap(0, Ordering::Relaxed);
         TIME_VERIFY.store(false, Ordering::Relaxed);
         println!(
-            "{path}: full {:.1} ms ({:.0} MB/s), verify skipped {:.1} ms, in verify {:.1} ms; matches per string {n:?}",
+            "{path}: full {:.1} ms ({:.0} MB/s), verify skipped {:.1} ms, in verify {:.1} ms ({calls} calls); matches per string {n:?}",
             full * 1e3,
             hay.len() as f64 / 1e6 / full,
             skip * 1e3,
