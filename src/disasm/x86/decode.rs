@@ -1270,6 +1270,16 @@ fn operands<const FULL: bool>(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64
     true
 }
 
+/// Store operand `k` (FULL only); the common sources return through here directly from their
+/// match arm, so each gets its own small store instead of one merged 16-byte write.
+#[inline(always)]
+fn put_op<const FULL: bool>(out: &mut Insn, k: usize, o: Operand) -> bool {
+    if FULL {
+        out.operands[k] = o;
+    }
+    true
+}
+
 /// Decode explicit operand `k` (spec `e.ops[k]`).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -1292,7 +1302,7 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
                 if r == 0 {
                     return false;
                 }
-                Operand::Reg(Reg(r))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(r)));
             }
             S_RM | S_MEM | S_RMREG | S_VSIB => {
                 if is_reg {
@@ -1307,14 +1317,14 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
                     if r == 0 {
                         return false;
                     }
-                    Operand::Reg(Reg(r))
+                    return put_op::<FULL>(out, k, Operand::Reg(Reg(r)));
                 } else {
                     if s.src == S_RMREG {
                         return false;
                     }
                     let mut mm = *mem;
                     mm.size = memsize_for(st, s.cls, s.mk);
-                    Operand::Mem(mm)
+                    return put_op::<FULL>(out, k, Operand::Mem(mm));
                 }
             }
             S_VVVV => {
@@ -1322,11 +1332,11 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
                 if r == 0 {
                     return false;
                 }
-                Operand::Reg(Reg(r))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(r)));
             }
             S_OPREG => {
                 let num = (op & 7) | rexb;
-                Operand::Reg(Reg(reg_for(st, s.cls, num)))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(reg_for(st, s.cls, num))));
             }
             S_IS4 => {
                 let b = match st.byte() {
@@ -1336,9 +1346,9 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
                 st.is4 = b;
                 // capstone does not mask the is4 register to 3 bits in 32-bit mode
                 let num = b >> 4;
-                Operand::Reg(Reg(reg_for(st, s.cls, num)))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(reg_for(st, s.cls, num))));
             }
-            S_FIXED => Operand::Reg(Reg(s.cls)),
+            S_FIXED => return put_op::<FULL>(out, k, Operand::Reg(Reg(s.cls))),
             S_ACC => {
                 let size = if s.cls == C_A {
                     if m64 { st.asz } else { 4 }
@@ -1349,9 +1359,9 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
                 } else {
                     st.osz
                 };
-                Operand::Reg(Reg(gpr(0, size, false)))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(gpr(0, size, false))));
             }
-            S_CONST1 => Operand::Imm(1),
+            S_CONST1 => return put_op::<FULL>(out, k, Operand::Imm(1)),
             S_RC => {
                 out.ofmt[k] |= OF_RC;
                 Operand::None
@@ -1438,7 +1448,7 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
                 if signed {
                     out.ofmt[k] |= OF_SIGNED;
                 }
-                Operand::Imm(v)
+                return put_op::<FULL>(out, k, Operand::Imm(v));
             }
             S_REL => {
                 let rel = if s.cls == 1 {
@@ -1475,7 +1485,7 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
                 };
                 out.ofmt[k] |= OF_REL;
                 st.rel = k as u8 + 1;
-                Operand::Imm(rel)
+                return put_op::<FULL>(out, k, Operand::Imm(rel));
             }
             S_MOFFS => {
                 let v = match st.le(st.asz as usize) {
@@ -1529,14 +1539,7 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
             _ => Operand::None,
         };
         if FULL {
-            // per-variant stores: lets LLVM thread each source arm to its own (small) store
-            // instead of merging every variant's fields into one generic 16-byte write
-            out.operands[k] = match o {
-                Operand::Reg(r) => Operand::Reg(r),
-                Operand::Imm(v) => Operand::Imm(v),
-                Operand::Mem(m) => Operand::Mem(m),
-                Operand::None => Operand::None,
-            };
+            out.operands[k] = o;
         }
     }
     true
