@@ -392,7 +392,9 @@ impl MacVmExt for Obj {
         }
         let mut vol_offset = ptr.addr;
         let mut obj = deref_value(&ptr, v)?;
-        let mut guard = 0usize;
+        let mut depth = 0usize;
+        // shadow chains are short; a cycle (python loops forever) is detected once long
+        let mut visited: FxHashSet<u64> = FxHashSet::default();
         loop {
             let tmp = match acc.shadow(&obj).and_then(|s| s.deref()) {
                 Ok(t) => t,
@@ -404,8 +406,8 @@ impl MacVmExt for Obj {
             }
             vol_offset = tmp.addr;
             obj = tmp;
-            guard += 1;
-            if guard == HANG_GUARD {
+            depth += 1;
+            if depth >= 64 && (!visited.insert(tmp.addr) || depth == HANG_GUARD) {
                 break;
             }
         }

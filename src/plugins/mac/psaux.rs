@@ -7,7 +7,7 @@
 
 use crate::context::Context;
 use crate::error::Result;
-use crate::objects::Obj;
+use crate::objects::{LayerRef, Obj};
 use crate::objects::util::array_to_string;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -43,6 +43,34 @@ pub fn py_bytes_repr_len(b: &[u8]) -> usize {
     n
 }
 
+/// python's alignment loop: `while pos < limit: read 1 byte (stop if unreadable or not NUL);
+/// pos += 1`, returning the final `pos`. Reads a page at a time (validity is per page; a
+/// failing piece is re-done byte by byte), so a huge garbage `p_argslen` over zeroed memory
+/// costs page reads instead of one read per byte.
+fn skip_nuls(layer: LayerRef, mut pos: i128, limit: i128) -> i128 {
+    let mut buf = [0u8; 0x1000];
+    while pos < limit {
+        let page_left = 0x1000 - (pos as u64 & 0xfff) as i128;
+        let n = page_left.min(limit - pos) as usize;
+        match layer.read(pos as u64, &mut buf[..n]) {
+            Ok(()) => match buf[..n].iter().position(|&c| c != 0) {
+                Some(i) => return pos + i as i128,
+                None => pos += n as i128,
+            },
+            Err(_) => {
+                let mut check = [0u8; 1];
+                while pos < limit {
+                    if layer.read(pos as u64, &mut check).is_err() || check[0] != 0 {
+                        return pos;
+                    }
+                    pos += 1;
+                }
+            }
+        }
+    }
+    pos
+}
+
 /// One task's row, `None` where python `continue`s.
 fn task_row(task: &Obj) -> Result<Option<Vec<Value>>> {
     let Some(layer) = task.add_process_layer()? else { return Ok(None) };
@@ -76,13 +104,7 @@ fn task_row(task: &Obj) -> Result<Option<Vec<Value>>> {
         argsstart += py_bytes_repr_len(arg) as i128 + 1;
         if args.is_empty() {
             // skip the alignment NULs
-            let mut check = [0u8; 1];
-            while argsstart < user_stack {
-                if layer.read(argsstart as u64, &mut check).is_err() || check[0] != 0 {
-                    break;
-                }
-                argsstart += 1;
-            }
+            argsstart = skip_nuls(layer, argsstart, user_stack);
             args.push(arg.to_vec());
         } else if arg != args[0].as_slice() {
             args.push(arg.to_vec());
@@ -137,7 +159,60 @@ impl Plugin for Psaux {
 
 #[cfg(test)]
 mod tests {
-    use super::py_bytes_repr_len;
+    use super::{py_bytes_repr_len, skip_nuls};
+    use crate::error::{Error, Result};
+    use crate::layers::{Layer, Mapping};
+    use crate::objects::leak_layer;
+    use std::sync::Arc;
+
+    /// 3 pages; the middle one is unreadable.
+    struct Mem(Vec<u8>);
+    impl Layer for Mem {
+        fn name(&self) -> &str {
+            "m1a_psaux_mem"
+        }
+        fn max_address(&self) -> u64 {
+            (1 << 48) - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            let a = addr as usize;
+            let end = a + buf.len();
+            if end > self.0.len() || (a < 0x2000 && end > 0x1000) {
+                return Err(Error::invalid(addr));
+            }
+            buf.copy_from_slice(&self.0[a..end]);
+            Ok(())
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            let mut b = vec![0u8; len as usize];
+            self.read(addr, &mut b).is_ok()
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
+            f(Mapping { offset: addr, len, mapped: addr });
+        }
+    }
+
+    #[test]
+    fn nul_skipping_matches_byte_loop() {
+        let mut m = vec![0u8; 0x3000];
+        m[0x800] = 7;
+        m[0x2100] = 9;
+        let l = leak_layer(Arc::new(Mem(m)));
+        // the python loop, byte by byte
+        let slow = |mut pos: i128, limit: i128| {
+            let mut c = [0u8; 1];
+            while pos < limit {
+                if l.read(pos as u64, &mut c).is_err() || c[0] != 0 {
+                    break;
+                }
+                pos += 1;
+            }
+            pos
+        };
+        for (start, limit) in [(0x10, 0x3000), (0x801, 0x3000), (0x801, 0x900), (0x2000, 0x3000), (0x2101, 0x3000), (0x2101, 0x2101), (0x2200, 0x2100), (0xfff, 0x1800)] {
+            assert_eq!(skip_nuls(l, start, limit), slow(start, limit), "{start:#x}..{limit:#x}");
+        }
+    }
 
     #[test]
     fn bytes_repr_len_matches_python() {
