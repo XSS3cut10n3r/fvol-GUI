@@ -1,0 +1,3853 @@
+{
+ "base": "/tmp/rsvol-cli-fixture",
+ "plugins": [
+  {
+   "name": "banners.Banners",
+   "doc": "Attempts to identify potential linux banners in an image",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py banners.Banners [-h]\n\nAttempts to identify potential linux banners in an image\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "configwriter.ConfigWriter",
+   "doc": "Runs the automagics and both prints and outputs configuration in the output directory.",
+   "requirements": [
+    {
+     "name": "extra",
+     "description": "Outputs whole configuration tree",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py configwriter.ConfigWriter [-h] [--extra]\n\nRuns the automagics and both prints and outputs configuration in the output\ndirectory.\n\noptions:\n  -h, --help  show this help message and exit\n  --extra     Outputs whole configuration tree\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "frameworkinfo.FrameworkInfo",
+   "doc": "Plugin to list the various modular components of Volatility",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py frameworkinfo.FrameworkInfo [-h]\n\nPlugin to list the various modular components of Volatility\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "isfinfo.IsfInfo",
+   "doc": "Determines information about the currently available ISF files, or a specific one",
+   "requirements": [
+    {
+     "name": "filter",
+     "description": "String that must be present in the file URI to display the ISF",
+     "kind": "list_str",
+     "default": [],
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "isf",
+     "description": "Specific ISF file to process",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "validate",
+     "description": "Validate against schema if possible",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "live",
+     "description": "Traverse all files, rather than use the cache",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py isfinfo.IsfInfo [-h] [--filter [FILTER ...]] [--isf ISF]\n                              [--validate] [--live]\n\nDetermines information about the currently available ISF files, or a specific\none\n\noptions:\n  -h, --help            show this help message and exit\n  --filter [FILTER ...]\n                        String that must be present in the file URI to display\n                        the ISF\n  --isf ISF             Specific ISF file to process\n  --validate            Validate against schema if possible\n  --live                Traverse all files, rather than use the cache\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "layerwriter.LayerWriter",
+   "doc": "Runs the automagics and writes out the primary layer produced by the stacker.",
+   "requirements": [
+    {
+     "name": "block_size",
+     "description": "Size of blocks to copy over",
+     "kind": "int",
+     "default": 5242880,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "list",
+     "description": "List available layers",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "layers",
+     "description": "Names of layers to write (defaults to the highest non-mapped layer)",
+     "kind": "list_str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py layerwriter.LayerWriter [-h] [--block-size BLOCK_SIZE] [--list]\n                                      [--layers [LAYERS ...]]\n\nRuns the automagics and writes out the primary layer produced by the stacker.\n\noptions:\n  -h, --help            show this help message and exit\n  --block-size BLOCK_SIZE\n                        Size of blocks to copy over\n  --list                List available layers\n  --layers [LAYERS ...]\n                        Names of layers to write (defaults to the highest non-\n                        mapped layer)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.bash.Bash",
+   "doc": "Recovers bash command history from memory.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.bash.Bash [-h] [--pid [PID ...]]\n\nRecovers bash command history from memory.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.boottime.Boottime",
+   "doc": "Shows the time the system was started",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.boottime.Boottime [-h]\n\nShows the time the system was started\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.capabilities.Capabilities",
+   "doc": "Lists process capabilities",
+   "requirements": [
+    {
+     "name": "pids",
+     "description": "Filter on specific process IDs.",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.capabilities.Capabilities [-h] [--pids [PIDS ...]]\n\nLists process capabilities\n\noptions:\n  -h, --help         show this help message and exit\n  --pids [PIDS ...]  Filter on specific process IDs.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.check_afinfo.Check_afinfo",
+   "doc": "Verifies the operation function pointers of network protocols (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.check_afinfo.Check_afinfo [-h]\n\nVerifies the operation function pointers of network protocols (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.check_creds.Check_creds",
+   "doc": "Checks if any processes are sharing credential structures (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.check_creds.Check_creds [-h]\n\nChecks if any processes are sharing credential structures (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.check_idt.Check_idt",
+   "doc": "Checks if the IDT has been altered (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.check_idt.Check_idt [-h]\n\nChecks if the IDT has been altered (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.check_modules.Check_modules",
+   "doc": "Compares module list to sysfs info, if available (deprecated).",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed modules",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.check_modules.Check_modules [-h] [--dump]\n\nCompares module list to sysfs info, if available (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n  --dump      Extract listed modules\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.check_syscall.Check_syscall",
+   "doc": "Check system call table for hooks (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.check_syscall.Check_syscall [-h]\n\nCheck system call table for hooks (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.ebpf.EBPF",
+   "doc": "Enumerate eBPF programs",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.ebpf.EBPF [-h]\n\nEnumerate eBPF programs\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.elfs.Elfs",
+   "doc": "Lists all memory mapped ELF files for all processes.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed processes",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.elfs.Elfs [-h] [--pid [PID ...]] [--dump]\n\nLists all memory mapped ELF files for all processes.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n  --dump           Extract listed processes\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.envars.Envars",
+   "doc": "Lists processes with their environment variables",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.envars.Envars [-h] [--pid [PID ...]]\n\nLists processes with their environment variables\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.graphics.fbdev.Fbdev",
+   "doc": "Extract framebuffers from the fbdev graphics subsystem",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Dump framebuffers",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.graphics.fbdev.Fbdev [-h] [--dump]\n\nExtract framebuffers from the fbdev graphics subsystem\n\noptions:\n  -h, --help  show this help message and exit\n  --dump      Dump framebuffers\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.hidden_modules.Hidden_modules",
+   "doc": "Carves memory to find hidden kernel modules (deprecated).",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed modules",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.hidden_modules.Hidden_modules [-h] [--dump]\n\nCarves memory to find hidden kernel modules (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n  --dump      Extract listed modules\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.iomem.IOMem",
+   "doc": "Generates an output similar to /proc/iomem on a running system.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.iomem.IOMem [-h]\n\nGenerates an output similar to /proc/iomem on a running system.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.ip.Addr",
+   "doc": "Lists network interface information for all devices",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.ip.Addr [-h]\n\nLists network interface information for all devices\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.ip.Link",
+   "doc": "Lists information about network interfaces similar to `ip link show`",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.ip.Link [-h]\n\nLists information about network interfaces similar to `ip link show`\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.kallsyms.Kallsyms",
+   "doc": "Kallsyms symbols enumeration plugin.\n\nIf no arguments are provided, all symbols are included: core, modules, ftrace, and BPF.\nAlternatively, you can use any combination of --core, --modules, --ftrace, and --bpf\nto customize the output.\n",
+   "requirements": [
+    {
+     "name": "core",
+     "description": "Include core symbols",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "modules",
+     "description": "Include module symbols",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "ftrace",
+     "description": "Include ftrace symbols",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "bpf",
+     "description": "Include BPF symbols",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.kallsyms.Kallsyms [-h] [--core] [--modules] [--ftrace]\n                                      [--bpf]\n\nKallsyms symbols enumeration plugin.\n\noptions:\n  -h, --help  show this help message and exit\n  --core      Include core symbols\n  --modules   Include module symbols\n  --ftrace    Include ftrace symbols\n  --bpf       Include BPF symbols\n\nIf no arguments are provided, all symbols are included: core, modules, ftrace,\nand BPF. Alternatively, you can use any combination of --core, --modules,\n--ftrace, and --bpf to customize the output.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.keyboard_notifiers.Keyboard_notifiers",
+   "doc": "Parses the keyboard notifier call chain (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.keyboard_notifiers.Keyboard_notifiers [-h]\n\nParses the keyboard notifier call chain (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.kmsg.Kmsg",
+   "doc": "Kernel log buffer reader",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.kmsg.Kmsg [-h]\n\nKernel log buffer reader\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.kthreads.Kthreads",
+   "doc": "Enumerates kthread functions",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.kthreads.Kthreads [-h]\n\nEnumerates kthread functions\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.library_list.LibraryList",
+   "doc": "Enumerate libraries loaded into processes",
+   "requirements": [
+    {
+     "name": "pids",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.library_list.LibraryList [-h] [--pids [PIDS ...]]\n\nEnumerate libraries loaded into processes\n\noptions:\n  -h, --help         show this help message and exit\n  --pids [PIDS ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.lsmod.Lsmod",
+   "doc": "Lists loaded kernel modules.",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed modules",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.lsmod.Lsmod [-h] [--dump]\n\nLists loaded kernel modules.\n\noptions:\n  -h, --help  show this help message and exit\n  --dump      Extract listed modules\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.lsof.Lsof",
+   "doc": "Lists open files for each processes.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "files_only",
+     "description": "Include only file descriptors of type file",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.lsof.Lsof [-h] [--pid [PID ...]] [--files-only]\n\nLists open files for each processes.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n  --files-only     Include only file descriptors of type file\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malfind.Malfind",
+   "doc": "Lists process memory ranges that potentially contain injected code (deprecated).",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "hexdump-size",
+     "description": "Amount of bytes to show for each region/page found - Default 64 bytes",
+     "kind": "int",
+     "default": 64,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "show-all-dirty-pages",
+     "description": "Show all dirty pages in a VMA if at least one dirty page is found - Default off",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump-regions",
+     "description": "Dump each suspicious memory region in output. All dirty pages will be dumped if --show-all-dirty-pages is enabled.",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump-maxsize",
+     "description": "Maximum size for dumped memory regions (all the bigger regions will be ignored) - Default 1 GB",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.malfind.Malfind [-h] [--pid [PID ...]]\n                                    [--hexdump-size HEXDUMP-SIZE]\n                                    [--show-all-dirty-pages] [--dump-regions]\n                                    [--dump-maxsize DUMP-MAXSIZE]\n\nLists process memory ranges that potentially contain injected code\n(deprecated).\n\noptions:\n  -h, --help            show this help message and exit\n  --pid [PID ...]       Filter on specific process IDs\n  --hexdump-size HEXDUMP-SIZE\n                        Amount of bytes to show for each region/page found -\n                        Default 64 bytes\n  --show-all-dirty-pages\n                        Show all dirty pages in a VMA if at least one dirty\n                        page is found - Default off\n  --dump-regions        Dump each suspicious memory region in output. All\n                        dirty pages will be dumped if --show-all-dirty-pages\n                        is enabled.\n  --dump-maxsize DUMP-MAXSIZE\n                        Maximum size for dumped memory regions (all the bigger\n                        regions will be ignored) - Default 1 GB\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.check_afinfo.Check_afinfo",
+   "doc": "Verifies the operation function pointers of network protocols.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.malware.check_afinfo.Check_afinfo [-h]\n\nVerifies the operation function pointers of network protocols.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.check_creds.Check_creds",
+   "doc": "Checks if any processes are sharing credential structures",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.malware.check_creds.Check_creds [-h]\n\nChecks if any processes are sharing credential structures\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.check_idt.Check_idt",
+   "doc": "Checks if the IDT has been altered",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.malware.check_idt.Check_idt [-h]\n\nChecks if the IDT has been altered\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.check_modules.Check_modules",
+   "doc": "Compares module list to sysfs info, if available",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed modules",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.malware.check_modules.Check_modules [-h] [--dump]\n\nCompares module list to sysfs info, if available\n\noptions:\n  -h, --help  show this help message and exit\n  --dump      Extract listed modules\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.check_syscall.Check_syscall",
+   "doc": "Check system call table for hooks.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.malware.check_syscall.Check_syscall [-h]\n\nCheck system call table for hooks.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.hidden_modules.Hidden_modules",
+   "doc": "Carves memory to find hidden kernel modules",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed modules",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.malware.hidden_modules.Hidden_modules [-h] [--dump]\n\nCarves memory to find hidden kernel modules\n\noptions:\n  -h, --help  show this help message and exit\n  --dump      Extract listed modules\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.keyboard_notifiers.Keyboard_notifiers",
+   "doc": "Parses the keyboard notifier call chain",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.malware.keyboard_notifiers.Keyboard_notifiers [-h]\n\nParses the keyboard notifier call chain\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.malfind.Malfind",
+   "doc": "Lists process memory ranges that potentially contain injected code.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "hexdump-size",
+     "description": "Amount of bytes to show for each region/page found - Default 64 bytes",
+     "kind": "int",
+     "default": 64,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "show-all-dirty-pages",
+     "description": "Show all dirty pages in a VMA if at least one dirty page is found - Default off",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump-regions",
+     "description": "Dump each suspicious memory region in output. All dirty pages will be dumped if --show-all-dirty-pages is enabled.",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump-maxsize",
+     "description": "Maximum size for dumped memory regions (all the bigger regions will be ignored) - Default 1 GB",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.malware.malfind.Malfind [-h] [--pid [PID ...]]\n                                            [--hexdump-size HEXDUMP-SIZE]\n                                            [--show-all-dirty-pages]\n                                            [--dump-regions]\n                                            [--dump-maxsize DUMP-MAXSIZE]\n\nLists process memory ranges that potentially contain injected code.\n\noptions:\n  -h, --help            show this help message and exit\n  --pid [PID ...]       Filter on specific process IDs\n  --hexdump-size HEXDUMP-SIZE\n                        Amount of bytes to show for each region/page found -\n                        Default 64 bytes\n  --show-all-dirty-pages\n                        Show all dirty pages in a VMA if at least one dirty\n                        page is found - Default off\n  --dump-regions        Dump each suspicious memory region in output. All\n                        dirty pages will be dumped if --show-all-dirty-pages\n                        is enabled.\n  --dump-maxsize DUMP-MAXSIZE\n                        Maximum size for dumped memory regions (all the bigger\n                        regions will be ignored) - Default 1 GB\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.modxview.Modxview",
+   "doc": "Centralize lsmod, check_modules and hidden_modules results to efficiently spot modules presence and taints.",
+   "requirements": [
+    {
+     "name": "plain_taints",
+     "description": "Display the plain taints string for each module.",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.malware.modxview.Modxview [-h] [--plain-taints]\n\nCentralize lsmod, check_modules and hidden_modules results to efficiently spot\nmodules presence and taints.\n\noptions:\n  -h, --help      show this help message and exit\n  --plain-taints  Display the plain taints string for each module.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.netfilter.Netfilter",
+   "doc": "Lists Netfilter hooks.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.malware.netfilter.Netfilter [-h]\n\nLists Netfilter hooks.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.process_spoofing.ProcessSpoofing",
+   "doc": "Detects process spoofing by comparing executable path to cmdline & comm fields.\n\nExamples of such behavior can be found here: https://github.com/SolitudePy/linux-mal\n",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.malware.process_spoofing.ProcessSpoofing\n       [-h] [--pid [PID ...]]\n\nDetects process spoofing by comparing executable path to cmdline & comm\nfields.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n\nExamples of such behavior can be found here:\nhttps://github.com/SolitudePy/linux-mal\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.malware.tty_check.Tty_Check",
+   "doc": "Checks tty devices for hooks",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.malware.tty_check.Tty_Check [-h]\n\nChecks tty devices for hooks\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.module_extract.ModuleExtract",
+   "doc": "Recreates an ELF file from a specific address in the kernel",
+   "requirements": [
+    {
+     "name": "base",
+     "description": "Base virtual address to reconstruct an ELF file",
+     "kind": "int",
+     "default": null,
+     "optional": false,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.module_extract.ModuleExtract [-h] --base BASE\n\nRecreates an ELF file from a specific address in the kernel\n\noptions:\n  -h, --help   show this help message and exit\n  --base BASE  Base virtual address to reconstruct an ELF file\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.modxview.Modxview",
+   "doc": "Centralize lsmod, check_modules and hidden_modules results to efficiently spot modules presence and taints (deprecated).",
+   "requirements": [
+    {
+     "name": "plain_taints",
+     "description": "Display the plain taints string for each module.",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.modxview.Modxview [-h] [--plain-taints]\n\nCentralize lsmod, check_modules and hidden_modules results to efficiently spot\nmodules presence and taints (deprecated).\n\noptions:\n  -h, --help      show this help message and exit\n  --plain-taints  Display the plain taints string for each module.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.mountinfo.MountInfo",
+   "doc": "Lists mount points on processes mount namespaces",
+   "requirements": [
+    {
+     "name": "pids",
+     "description": "Filter on specific process IDs.",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "mntns",
+     "description": "Filter results by mount namespace. Otherwise, all of them are shown.",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "mount-format",
+     "description": "Shows a brief summary of the mount points information with similar output format to the older /proc/[pid]/mounts or the user-land command 'mount -l'.",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.mountinfo.MountInfo [-h] [--pids [PIDS ...]]\n                                        [--mntns [MNTNS ...]] [--mount-format]\n\nLists mount points on processes mount namespaces\n\noptions:\n  -h, --help           show this help message and exit\n  --pids [PIDS ...]    Filter on specific process IDs.\n  --mntns [MNTNS ...]  Filter results by mount namespace. Otherwise, all of\n                       them are shown.\n  --mount-format       Shows a brief summary of the mount points information\n                       with similar output format to the older\n                       /proc/[pid]/mounts or the user-land command 'mount -l'.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.netfilter.Netfilter",
+   "doc": "Lists Netfilter hooks (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.netfilter.Netfilter [-h]\n\nLists Netfilter hooks (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.pagecache.Files",
+   "doc": "Lists files from memory",
+   "requirements": [
+    {
+     "name": "type",
+     "description": "List of space-separated file type filters i.e. --type REG DIR",
+     "kind": "list_str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "find",
+     "description": "Filename (full path) to find",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.pagecache.Files [-h] [--type [TYPE ...]] [--find FIND]\n\nLists files from memory\n\noptions:\n  -h, --help         show this help message and exit\n  --type [TYPE ...]  List of space-separated file type filters i.e. --type REG\n                     DIR\n  --find FIND        Filename (full path) to find\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.pagecache.InodePages",
+   "doc": "Lists and recovers cached inode pages",
+   "requirements": [
+    {
+     "name": "find",
+     "description": "Filename (full path) to find ",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "inode",
+     "description": "Inode address",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract inode content",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.pagecache.InodePages [-h] [--find FIND] [--inode INODE]\n                                         [--dump]\n\nLists and recovers cached inode pages\n\noptions:\n  -h, --help     show this help message and exit\n  --find FIND    Filename (full path) to find\n  --inode INODE  Inode address\n  --dump         Extract inode content\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.pagecache.RecoverFs",
+   "doc": "Recovers the cached filesystem (directories, files, symlinks) into a compressed tarball.\n\nDetails: level 0 directories are named after the UUID of the parent superblock; metadata aren't replicated to extracted objects; objects modification time is set to the plugin run time; absolute symlinks\nare converted to relative symlinks to prevent referencing the analyst's filesystem.\nTroubleshooting: to fix extraction errors related to long paths, please consider using https://github.com/mxmlnkn/ratarmount.\n",
+   "requirements": [
+    {
+     "name": "tmpfs_only",
+     "description": "Extracts only files from tmpfs file systems",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "compression_format",
+     "description": "Compression format (default: gz)",
+     "kind": "choice",
+     "default": "gz",
+     "optional": true,
+     "choices": [
+      "gz",
+      "bz2",
+      "xz"
+     ]
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.pagecache.RecoverFs [-h] [--tmpfs-only]\n                                        [--compression-format {gz,bz2,xz}]\n\nRecovers the cached filesystem (directories, files, symlinks) into a\ncompressed tarball.\n\noptions:\n  -h, --help            show this help message and exit\n  --tmpfs-only          Extracts only files from tmpfs file systems\n  --compression-format {gz,bz2,xz}\n                        Compression format (default: gz)\n\nDetails: level 0 directories are named after the UUID of the parent\nsuperblock; metadata aren't replicated to extracted objects; objects\nmodification time is set to the plugin run time; absolute symlinks are\nconverted to relative symlinks to prevent referencing the analyst's\nfilesystem. Troubleshooting: to fix extraction errors related to long paths,\nplease consider using https://github.com/mxmlnkn/ratarmount.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.pidhashtable.PIDHashTable",
+   "doc": "Enumerates processes through the PID hash table",
+   "requirements": [
+    {
+     "name": "decorate_comm",
+     "description": "Show `user threads` comm in curly brackets, and `kernel threads` comm in square brackets",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.pidhashtable.PIDHashTable [-h] [--decorate-comm]\n\nEnumerates processes through the PID hash table\n\noptions:\n  -h, --help       show this help message and exit\n  --decorate-comm  Show `user threads` comm in curly brackets, and `kernel\n                   threads` comm in square brackets\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.proc.Maps",
+   "doc": "Lists all memory maps for all processes.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed memory segments",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "address",
+     "description": "Process virtual memory addresses to include (all other VMA sections are excluded). This can be any virtual address within the VMA section.",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "maxsize",
+     "description": "Maximum size for dumped VMA sections (all the bigger sections will be ignored)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.proc.Maps [-h] [--pid [PID ...]] [--dump]\n                              [--address [ADDRESS ...]] [--maxsize MAXSIZE]\n\nLists all memory maps for all processes.\n\noptions:\n  -h, --help            show this help message and exit\n  --pid [PID ...]       Filter on specific process IDs\n  --dump                Extract listed memory segments\n  --address [ADDRESS ...]\n                        Process virtual memory addresses to include (all other\n                        VMA sections are excluded). This can be any virtual\n                        address within the VMA section.\n  --maxsize MAXSIZE     Maximum size for dumped VMA sections (all the bigger\n                        sections will be ignored)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.psaux.PsAux",
+   "doc": "Lists processes with their command line arguments",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.psaux.PsAux [-h] [--pid [PID ...]]\n\nLists processes with their command line arguments\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.pscallstack.PsCallStack",
+   "doc": "Enumerates the call stack of each task",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "unresolved",
+     "description": "Include unresolved stack values",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.pscallstack.PsCallStack [-h] [--pid [PID ...]]\n                                            [--unresolved]\n\nEnumerates the call stack of each task\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n  --unresolved     Include unresolved stack values\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.pslist.PsList",
+   "doc": "Lists the processes present in a particular linux memory image.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "threads",
+     "description": "Include user threads",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "decorate_comm",
+     "description": "Show `user threads` comm in curly brackets, and `kernel threads` comm in square brackets",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed processes",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.pslist.PsList [-h] [--pid [PID ...]] [--threads]\n                                  [--decorate-comm] [--dump]\n\nLists the processes present in a particular linux memory image.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n  --threads        Include user threads\n  --decorate-comm  Show `user threads` comm in curly brackets, and `kernel\n                   threads` comm in square brackets\n  --dump           Extract listed processes\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.psscan.PsScan",
+   "doc": "Scans for processes present in a particular linux image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.psscan.PsScan [-h]\n\nScans for processes present in a particular linux image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.pstree.PsTree",
+   "doc": "Plugin for listing processes in a tree based on their parent process ID.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "threads",
+     "description": "Include user threads",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "decorate_comm",
+     "description": "Show `user threads` comm in curly brackets, and `kernel threads` comm in square brackets",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.pstree.PsTree [-h] [--pid [PID ...]] [--threads]\n                                  [--decorate-comm]\n\nPlugin for listing processes in a tree based on their parent process ID.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n  --threads        Include user threads\n  --decorate-comm  Show `user threads` comm in curly brackets, and `kernel\n                   threads` comm in square brackets\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.ptrace.Ptrace",
+   "doc": "Enumerates ptrace's tracer and tracee tasks",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.ptrace.Ptrace [-h]\n\nEnumerates ptrace's tracer and tracee tasks\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.sockscan.Sockscan",
+   "doc": "Scans for network connections found in memory layer.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.sockscan.Sockscan [-h]\n\nScans for network connections found in memory layer.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.sockstat.Sockstat",
+   "doc": "Lists all network connections for all processes.",
+   "requirements": [
+    {
+     "name": "pids",
+     "description": "Filter results by process IDs. It takes the root PID namespace identifiers.",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "netns",
+     "description": "Filter results by network namespace. Otherwise, all of them are shown.",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.sockstat.Sockstat [-h] [--pids [PIDS ...]] [--netns NETNS]\n\nLists all network connections for all processes.\n\noptions:\n  -h, --help         show this help message and exit\n  --pids [PIDS ...]  Filter results by process IDs. It takes the root PID\n                     namespace identifiers.\n  --netns NETNS      Filter results by network namespace. Otherwise, all of\n                     them are shown.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.tracing.ftrace.CheckFtrace",
+   "doc": "Detect ftrace hooking\n\nInvestigate the ftrace infrastructure to uncover kernel attached callbacks, which can be leveraged\nto hook kernel functions and modify their behaviour.",
+   "requirements": [
+    {
+     "name": "show_ftrace_flags",
+     "description": "Show ftrace flags associated with an ftrace_ops struct",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.tracing.ftrace.CheckFtrace [-h] [--show-ftrace-flags]\n\nDetect ftrace hooking\n\noptions:\n  -h, --help           show this help message and exit\n  --show-ftrace-flags  Show ftrace flags associated with an ftrace_ops struct\n\nInvestigate the ftrace infrastructure to uncover kernel attached callbacks,\nwhich can be leveraged to hook kernel functions and modify their behaviour.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.tracing.perf_events.PerfEvents",
+   "doc": "Lists performance events for each process.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.tracing.perf_events.PerfEvents [-h]\n\nLists performance events for each process.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.tracing.tracepoints.CheckTracepoints",
+   "doc": "Detect tracepoints hooking\n\nInvestigate the tracepoints subsystem to uncover kernel attached probes, which can be leveraged\nto hook kernel functions and modify their behaviour.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.tracing.tracepoints.CheckTracepoints [-h]\n\nDetect tracepoints hooking\n\noptions:\n  -h, --help  show this help message and exit\n\nInvestigate the tracepoints subsystem to uncover kernel attached probes, which\ncan be leveraged to hook kernel functions and modify their behaviour.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.tty_check.tty_check",
+   "doc": "Checks tty devices for hooks (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.tty_check.tty_check [-h]\n\nChecks tty devices for hooks (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.vmaregexscan.VmaRegExScan",
+   "doc": "Scans all virtual memory areas for tasks using RegEx.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "pattern",
+     "description": "RegEx pattern",
+     "kind": "str",
+     "default": null,
+     "optional": false,
+     "choices": null
+    },
+    {
+     "name": "maxsize",
+     "description": "Maximum size in bytes for displayed context",
+     "kind": "int",
+     "default": 128,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.vmaregexscan.VmaRegExScan [-h] [--pid [PID ...]]\n                                              --pattern PATTERN\n                                              [--maxsize MAXSIZE]\n\nScans all virtual memory areas for tasks using RegEx.\n\noptions:\n  -h, --help         show this help message and exit\n  --pid [PID ...]    Filter on specific process IDs\n  --pattern PATTERN  RegEx pattern\n  --maxsize MAXSIZE  Maximum size in bytes for displayed context\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.vmayarascan.VmaYaraScan",
+   "doc": "Scans all virtual memory areas for tasks using yara.",
+   "requirements": [
+    {
+     "name": "insensitive",
+     "description": "Makes the search case insensitive",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "wide",
+     "description": "Match wide (unicode) strings",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_string",
+     "description": "Yara rules (as a string)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_file",
+     "description": "Yara rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_compiled_file",
+     "description": "Yara compiled rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_size",
+     "description": "Set the maximum size (default is 1GB)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py linux.vmayarascan.VmaYaraScan [-h] [--insensitive] [--wide]\n                                            [--yara-string YARA_STRING]\n                                            [--yara-file YARA_FILE]\n                                            [--yara-compiled-file YARA_COMPILED_FILE]\n                                            [--max-size MAX_SIZE]\n                                            [--pid [PID ...]]\n\nScans all virtual memory areas for tasks using yara.\n\noptions:\n  -h, --help            show this help message and exit\n  --insensitive         Makes the search case insensitive\n  --wide                Match wide (unicode) strings\n  --yara-string YARA_STRING\n                        Yara rules (as a string)\n  --yara-file YARA_FILE\n                        Yara rules (as a file)\n  --yara-compiled-file YARA_COMPILED_FILE\n                        Yara compiled rules (as a file)\n  --max-size MAX_SIZE   Set the maximum size (default is 1GB)\n  --pid [PID ...]       Process IDs to include (all other processes are\n                        excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "linux.vmcoreinfo.VMCoreInfo",
+   "doc": "Enumerate VMCoreInfo tables",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py linux.vmcoreinfo.VMCoreInfo [-h]\n\nEnumerate VMCoreInfo tables\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.bash.Bash",
+   "doc": "Recovers bash command history from memory.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.bash.Bash [-h] [--pid [PID ...]]\n\nRecovers bash command history from memory.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.check_syscall.Check_syscall",
+   "doc": "Check system call table for hooks.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.check_syscall.Check_syscall [-h]\n\nCheck system call table for hooks.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.check_sysctl.Check_sysctl",
+   "doc": "Check sysctl handlers for hooks.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.check_sysctl.Check_sysctl [-h]\n\nCheck sysctl handlers for hooks.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.check_trap_table.Check_trap_table",
+   "doc": "Check mach trap table for hooks.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.check_trap_table.Check_trap_table [-h]\n\nCheck mach trap table for hooks.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.dmesg.Dmesg",
+   "doc": "Prints the kernel log buffer.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.dmesg.Dmesg [-h]\n\nPrints the kernel log buffer.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.ifconfig.Ifconfig",
+   "doc": "Lists network interface information for all devices",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.ifconfig.Ifconfig [-h]\n\nLists network interface information for all devices\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.kauth_listeners.Kauth_listeners",
+   "doc": "Lists kauth listeners and their status",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.kauth_listeners.Kauth_listeners [-h]\n\nLists kauth listeners and their status\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.kauth_scopes.Kauth_scopes",
+   "doc": "Lists kauth scopes and their status",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.kauth_scopes.Kauth_scopes [-h]\n\nLists kauth scopes and their status\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.kevents.Kevents",
+   "doc": "Lists event handlers registered by processes",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.kevents.Kevents [-h] [--pid [PID ...]]\n\nLists event handlers registered by processes\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.list_files.List_Files",
+   "doc": "Lists all open file descriptors for all processes.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.list_files.List_Files [-h]\n\nLists all open file descriptors for all processes.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.lsmod.Lsmod",
+   "doc": "Lists loaded kernel modules.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.lsmod.Lsmod [-h]\n\nLists loaded kernel modules.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.lsof.Lsof",
+   "doc": "Lists all open file descriptors for all processes.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.lsof.Lsof [-h] [--pid [PID ...]]\n\nLists all open file descriptors for all processes.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.malfind.Malfind",
+   "doc": "Lists process memory ranges that potentially contain injected code.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.malfind.Malfind [-h] [--pid [PID ...]]\n\nLists process memory ranges that potentially contain injected code.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.mount.Mount",
+   "doc": "A module containing a collection of plugins that produce data typically found in Mac's mount command",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.mount.Mount [-h]\n\nA module containing a collection of plugins that produce data typically found\nin Mac's mount command\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.netstat.Netstat",
+   "doc": "Lists all network connections for all processes.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.netstat.Netstat [-h] [--pid [PID ...]]\n\nLists all network connections for all processes.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.proc_maps.Maps",
+   "doc": "Lists process memory ranges that potentially contain injected code.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed memory segments",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "address",
+     "description": "Process virtual memory addresses to include (all other VMA sections are excluded). This can be any virtual address within the VMA section. Virtual addresses must be separated by a space.",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "maxsize",
+     "description": "Maximum size for dumped VMA sections (all the bigger sections will be ignored)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.proc_maps.Maps [-h] [--pid [PID ...]] [--dump]\n                                 [--address [ADDRESS ...]] [--maxsize MAXSIZE]\n\nLists process memory ranges that potentially contain injected code.\n\noptions:\n  -h, --help            show this help message and exit\n  --pid [PID ...]       Filter on specific process IDs\n  --dump                Extract listed memory segments\n  --address [ADDRESS ...]\n                        Process virtual memory addresses to include (all other\n                        VMA sections are excluded). This can be any virtual\n                        address within the VMA section. Virtual addresses must\n                        be separated by a space.\n  --maxsize MAXSIZE     Maximum size for dumped VMA sections (all the bigger\n                        sections will be ignored)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.psaux.Psaux",
+   "doc": "Recovers program command line arguments.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.psaux.Psaux [-h] [--pid [PID ...]]\n\nRecovers program command line arguments.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.pslist.PsList",
+   "doc": "Lists the processes present in a particular mac memory image.",
+   "requirements": [
+    {
+     "name": "pslist_method",
+     "description": "Method to determine for processes",
+     "kind": "choice",
+     "default": "tasks",
+     "optional": true,
+     "choices": [
+      "tasks",
+      "allproc",
+      "process_group",
+      "sessions",
+      "pid_hash_table"
+     ]
+    },
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py mac.pslist.PsList [-h]\n                                [--pslist-method {tasks,allproc,process_group,sessions,pid_hash_table}]\n                                [--pid [PID ...]]\n\nLists the processes present in a particular mac memory image.\n\noptions:\n  -h, --help            show this help message and exit\n  --pslist-method {tasks,allproc,process_group,sessions,pid_hash_table}\n                        Method to determine for processes\n  --pid [PID ...]       Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.pstree.PsTree",
+   "doc": "Plugin for listing processes in a tree based on their parent process ID.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.pstree.PsTree [-h]\n\nPlugin for listing processes in a tree based on their parent process ID.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.socket_filters.Socket_filters",
+   "doc": "Enumerates kernel socket filters.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.socket_filters.Socket_filters [-h]\n\nEnumerates kernel socket filters.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.timers.Timers",
+   "doc": "Check for malicious kernel timers.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.timers.Timers [-h]\n\nCheck for malicious kernel timers.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.trustedbsd.Trustedbsd",
+   "doc": "Checks for malicious trustedbsd modules",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.trustedbsd.Trustedbsd [-h]\n\nChecks for malicious trustedbsd modules\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "mac.vfsevents.VFSevents",
+   "doc": "Lists processes that are filtering file system events",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py mac.vfsevents.VFSevents [-h]\n\nLists processes that are filtering file system events\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "regexscan.RegExScan",
+   "doc": "Scans kernel memory using RegEx patterns.",
+   "requirements": [
+    {
+     "name": "pattern",
+     "description": "RegEx pattern",
+     "kind": "str",
+     "default": null,
+     "optional": false,
+     "choices": null
+    },
+    {
+     "name": "maxsize",
+     "description": "Maximum size in bytes for displayed context",
+     "kind": "int",
+     "default": 128,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py regexscan.RegExScan [-h] --pattern PATTERN [--maxsize MAXSIZE]\n\nScans kernel memory using RegEx patterns.\n\noptions:\n  -h, --help         show this help message and exit\n  --pattern PATTERN  RegEx pattern\n  --maxsize MAXSIZE  Maximum size in bytes for displayed context\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "timeliner.Timeliner",
+   "doc": "Runs all relevant plugins that provide time related information and orders the results by time.",
+   "requirements": [
+    {
+     "name": "record-config",
+     "description": "Whether to record the state of all the plugins once complete",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "plugin-filter",
+     "description": "Only run plugins featuring this substring",
+     "kind": "list_str",
+     "default": [],
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "create-bodyfile",
+     "description": "Whether to create a body file whilst producing results",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py timeliner.Timeliner [-h] [--record-config]\n                                  [--plugin-filter [PLUGIN-FILTER ...]]\n                                  [--create-bodyfile]\n\nRuns all relevant plugins that provide time related information and orders the\nresults by time.\n\noptions:\n  -h, --help            show this help message and exit\n  --record-config       Whether to record the state of all the plugins once\n                        complete\n  --plugin-filter [PLUGIN-FILTER ...]\n                        Only run plugins featuring this substring\n  --create-bodyfile     Whether to create a body file whilst producing results\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "vmscan.Vmscan",
+   "doc": "Scans for Intel VT-d structures and generates VM volatility configs for them",
+   "requirements": [
+    {
+     "name": "log-threshold",
+     "description": "Number of criteria failed to log to debug output",
+     "kind": "int",
+     "default": 2,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py vmscan.Vmscan [-h] [--log-threshold LOG-THRESHOLD]\n\nScans for Intel VT-d structures and generates VM volatility configs for them\n\noptions:\n  -h, --help            show this help message and exit\n  --log-threshold LOG-THRESHOLD\n                        Number of criteria failed to log to debug output\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.amcache.Amcache",
+   "doc": "Extract information on executed applications from the AmCache (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.amcache.Amcache [-h]\n\nExtract information on executed applications from the AmCache (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.bigpools.BigPools",
+   "doc": "List big page pools.",
+   "requirements": [
+    {
+     "name": "tags",
+     "description": "Comma separated list of pool tags to filter pools returned",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "show-free",
+     "description": "Show freed regions (otherwise only show allocations in use)",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.bigpools.BigPools [-h] [--tags TAGS] [--show-free]\n\nList big page pools.\n\noptions:\n  -h, --help   show this help message and exit\n  --tags TAGS  Comma separated list of pool tags to filter pools returned\n  --show-free  Show freed regions (otherwise only show allocations in use)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.cachedump.Cachedump",
+   "doc": "Dumps lsa secrets from memory (deprecated)",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.cachedump.Cachedump [-h]\n\nDumps lsa secrets from memory (deprecated)\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.callbacks.Callbacks",
+   "doc": "Lists kernel callbacks and notification routines.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.callbacks.Callbacks [-h]\n\nLists kernel callbacks and notification routines.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.cmdline.CmdLine",
+   "doc": "Lists process command line arguments.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.cmdline.CmdLine [-h] [--pid [PID ...]]\n\nLists process command line arguments.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.cmdscan.CmdScan",
+   "doc": "Looks for Windows Command History lists",
+   "requirements": [
+    {
+     "name": "no_registry",
+     "description": "Don't search the registry for possible values of CommandHistorySize",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_history",
+     "description": "CommandHistorySize values to search for.",
+     "kind": "list_int",
+     "default": [
+      50
+     ],
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.cmdscan.CmdScan [-h] [--no-registry]\n                                      [--max-history [MAX_HISTORY ...]]\n\nLooks for Windows Command History lists\n\noptions:\n  -h, --help            show this help message and exit\n  --no-registry         Don't search the registry for possible values of\n                        CommandHistorySize\n  --max-history [MAX_HISTORY ...]\n                        CommandHistorySize values to search for.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.consoles.Consoles",
+   "doc": "Looks for Windows console buffers",
+   "requirements": [
+    {
+     "name": "no_registry",
+     "description": "Don't search the registry for possible values of CommandHistorySize and HistoryBufferMax",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_history",
+     "description": "CommandHistorySize values to search for.",
+     "kind": "list_int",
+     "default": [
+      50
+     ],
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_buffers",
+     "description": "HistoryBufferMax values to search for.",
+     "kind": "list_int",
+     "default": [
+      4
+     ],
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.consoles.Consoles [-h] [--no-registry]\n                                        [--max-history [MAX_HISTORY ...]]\n                                        [--max-buffers [MAX_BUFFERS ...]]\n\nLooks for Windows console buffers\n\noptions:\n  -h, --help            show this help message and exit\n  --no-registry         Don't search the registry for possible values of\n                        CommandHistorySize and HistoryBufferMax\n  --max-history [MAX_HISTORY ...]\n                        CommandHistorySize values to search for.\n  --max-buffers [MAX_BUFFERS ...]\n                        HistoryBufferMax values to search for.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.crashinfo.Crashinfo",
+   "doc": "Lists the information from a Windows crash dump.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.crashinfo.Crashinfo [-h]\n\nLists the information from a Windows crash dump.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.debugregisters.DebugRegisters",
+   "doc": null,
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.debugregisters.DebugRegisters [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.deskscan.DeskScan",
+   "doc": "Scans for the Desktop instances of each Window Station",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.deskscan.DeskScan [-h]\n\nScans for the Desktop instances of each Window Station\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.desktops.Desktops",
+   "doc": "Enumerates the Desktop instances of each Window Station",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.desktops.Desktops [-h]\n\nEnumerates the Desktop instances of each Window Station\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.devicetree.DeviceTree",
+   "doc": "Listing tree based on drivers and attached devices in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.devicetree.DeviceTree [-h]\n\nListing tree based on drivers and attached devices in a particular windows\nmemory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.direct_system_calls.DirectSystemCalls",
+   "doc": "Detects the Direct System Call technique used to bypass EDRs (deprecated).",
+   "requirements": [
+    {
+     "name": "insensitive",
+     "description": "Makes the search case insensitive",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "wide",
+     "description": "Match wide (unicode) strings",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_string",
+     "description": "Yara rules (as a string)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_file",
+     "description": "Yara rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_compiled_file",
+     "description": "Yara compiled rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_size",
+     "description": "Set the maximum size (default is 1GB)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.direct_system_calls.DirectSystemCalls\n       [-h] [--insensitive] [--wide] [--yara-string YARA_STRING]\n       [--yara-file YARA_FILE] [--yara-compiled-file YARA_COMPILED_FILE]\n       [--max-size MAX_SIZE]\n\nDetects the Direct System Call technique used to bypass EDRs (deprecated).\n\noptions:\n  -h, --help            show this help message and exit\n  --insensitive         Makes the search case insensitive\n  --wide                Match wide (unicode) strings\n  --yara-string YARA_STRING\n                        Yara rules (as a string)\n  --yara-file YARA_FILE\n                        Yara rules (as a file)\n  --yara-compiled-file YARA_COMPILED_FILE\n                        Yara compiled rules (as a file)\n  --max-size MAX_SIZE   Set the maximum size (default is 1GB)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.dlllist.DllList",
+   "doc": "Lists the loaded DLLs in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "offset",
+     "description": "Process offset in the physical address space",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "base",
+     "description": "Specify a base virtual address in process memory",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "name",
+     "description": "Specify a regular expression to match dll name(s)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "ignore-case",
+     "description": "Specify case insensitivity for the regular expression name matching",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed DLLs",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.dlllist.DllList [-h] [--pid [PID ...]] [--offset OFFSET]\n                                      [--base BASE] [--name NAME]\n                                      [--ignore-case] [--dump]\n\nLists the loaded DLLs in a particular windows memory image.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n  --offset OFFSET  Process offset in the physical address space\n  --base BASE      Specify a base virtual address in process memory\n  --name NAME      Specify a regular expression to match dll name(s)\n  --ignore-case    Specify case insensitivity for the regular expression name\n                   matching\n  --dump           Extract listed DLLs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.driverirp.DriverIrp",
+   "doc": "List IRPs for drivers in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.driverirp.DriverIrp [-h]\n\nList IRPs for drivers in a particular windows memory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.drivermodule.DriverModule",
+   "doc": "Determines if any loaded drivers were hidden by a rootkit (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.drivermodule.DriverModule [-h]\n\nDetermines if any loaded drivers were hidden by a rootkit (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.driverscan.DriverScan",
+   "doc": "Scans for drivers present in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.driverscan.DriverScan [-h]\n\nScans for drivers present in a particular windows memory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.dumpfiles.DumpFiles",
+   "doc": "Dumps cached file contents from Windows memory samples.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process ID to include (all other processes are excluded)",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "virtaddr",
+     "description": "Dump the _FILE_OBJECTs at the given virtual address(es)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "physaddr",
+     "description": "Dump a single _FILE_OBJECTs at the given physical address(es)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "filter",
+     "description": "Dump files matching regular expression FILTER",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "ignore-case",
+     "description": "Ignore case in filter match",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.dumpfiles.DumpFiles [-h] [--pid PID]\n                                          [--virtaddr [VIRTADDR ...]]\n                                          [--physaddr [PHYSADDR ...]]\n                                          [--filter FILTER] [--ignore-case]\n\nDumps cached file contents from Windows memory samples.\n\noptions:\n  -h, --help            show this help message and exit\n  --pid PID             Process ID to include (all other processes are\n                        excluded)\n  --virtaddr [VIRTADDR ...]\n                        Dump the _FILE_OBJECTs at the given virtual\n                        address(es)\n  --physaddr [PHYSADDR ...]\n                        Dump a single _FILE_OBJECTs at the given physical\n                        address(es)\n  --filter FILTER       Dump files matching regular expression FILTER\n  --ignore-case         Ignore case in filter match\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.envars.Envars",
+   "doc": "Display process environment variables",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "silent",
+     "description": "Suppress common and non-persistent variables",
+     "kind": "bool",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.envars.Envars [-h] [--pid [PID ...]] [--silent]\n\nDisplay process environment variables\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n  --silent         Suppress common and non-persistent variables\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.etwpatch.EtwPatch",
+   "doc": "Identifies ETW (Event Tracing for Windows) patching techniques used by malware to evade detection.\n\nThis plugin examines the first opcode of key ETW functions in ntdll.dll and advapi32.dll\nto detect common ETW bypass techniques such as return pointer manipulation (RET) or function\nredirection (JMP). Attackers often patch these functions to prevent security tools from\nreceiving telemetry about process execution, API calls, and other system events.\n",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.etwpatch.EtwPatch [-h] [--pid [PID ...]]\n\nIdentifies ETW (Event Tracing for Windows) patching techniques used by malware\nto evade detection.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n\nThis plugin examines the first opcode of key ETW functions in ntdll.dll and\nadvapi32.dll to detect common ETW bypass techniques such as return pointer\nmanipulation (RET) or function redirection (JMP). Attackers often patch these\nfunctions to prevent security tools from receiving telemetry about process\nexecution, API calls, and other system events.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.filescan.FileScan",
+   "doc": "Scans for file objects present in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.filescan.FileScan [-h]\n\nScans for file objects present in a particular windows memory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.getservicesids.GetServiceSIDs",
+   "doc": "Lists process token sids.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.getservicesids.GetServiceSIDs [-h]\n\nLists process token sids.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.getsids.GetSIDs",
+   "doc": "Print the SIDs owning each process",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.getsids.GetSIDs [-h] [--pid [PID ...]]\n\nPrint the SIDs owning each process\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.handles.Handles",
+   "doc": "Lists process open handles.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "offset",
+     "description": "Process offset in the physical address space",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.handles.Handles [-h] [--pid [PID ...]] [--offset OFFSET]\n\nLists process open handles.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n  --offset OFFSET  Process offset in the physical address space\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.hashdump.Hashdump",
+   "doc": "Dumps user hashes from memory (deprecated)",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.hashdump.Hashdump [-h]\n\nDumps user hashes from memory (deprecated)\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.hollowprocesses.HollowProcesses",
+   "doc": "Lists hollowed processes (deprecated)",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.hollowprocesses.HollowProcesses [-h] [--pid [PID ...]]\n\nLists hollowed processes (deprecated)\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.iat.IAT",
+   "doc": "Extract Import Address Table to list API (functions) used by a program contained in external libraries",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process ID to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.iat.IAT [-h] [--pid [PID ...]]\n\nExtract Import Address Table to list API (functions) used by a program\ncontained in external libraries\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process ID to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.indirect_system_calls.IndirectSystemCalls",
+   "doc": "Detects the Indirect System Call technique used to bypass EDRs (deprecated).",
+   "requirements": [
+    {
+     "name": "insensitive",
+     "description": "Makes the search case insensitive",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "wide",
+     "description": "Match wide (unicode) strings",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_string",
+     "description": "Yara rules (as a string)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_file",
+     "description": "Yara rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_compiled_file",
+     "description": "Yara compiled rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_size",
+     "description": "Set the maximum size (default is 1GB)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.indirect_system_calls.IndirectSystemCalls\n       [-h] [--insensitive] [--wide] [--yara-string YARA_STRING]\n       [--yara-file YARA_FILE] [--yara-compiled-file YARA_COMPILED_FILE]\n       [--max-size MAX_SIZE]\n\nDetects the Indirect System Call technique used to bypass EDRs (deprecated).\n\noptions:\n  -h, --help            show this help message and exit\n  --insensitive         Makes the search case insensitive\n  --wide                Match wide (unicode) strings\n  --yara-string YARA_STRING\n                        Yara rules (as a string)\n  --yara-file YARA_FILE\n                        Yara rules (as a file)\n  --yara-compiled-file YARA_COMPILED_FILE\n                        Yara compiled rules (as a file)\n  --max-size MAX_SIZE   Set the maximum size (default is 1GB)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.info.Info",
+   "doc": "Show OS & kernel details of the memory sample being analyzed.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.info.Info [-h]\n\nShow OS & kernel details of the memory sample being analyzed.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.joblinks.JobLinks",
+   "doc": "Print process job link information",
+   "requirements": [
+    {
+     "name": "physical",
+     "description": "Display physical offset instead of virtual",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.joblinks.JobLinks [-h] [--physical]\n\nPrint process job link information\n\noptions:\n  -h, --help  show this help message and exit\n  --physical  Display physical offset instead of virtual\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.kpcrs.KPCRs",
+   "doc": "Print KPCR structure for each processor",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.kpcrs.KPCRs [-h]\n\nPrint KPCR structure for each processor\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.ldrmodules.LdrModules",
+   "doc": "Lists the loaded modules in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.ldrmodules.LdrModules [-h] [--pid [PID ...]]\n\nLists the loaded modules in a particular windows memory image.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.lsadump.Lsadump",
+   "doc": "Dumps lsa secrets from memory (deprecated)",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.lsadump.Lsadump [-h]\n\nDumps lsa secrets from memory (deprecated)\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malfind.Malfind",
+   "doc": "Lists process memory ranges that potentially contain injected code (deprecated).",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract injected VADs",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malfind.Malfind [-h] [--pid [PID ...]] [--dump]\n\nLists process memory ranges that potentially contain injected code\n(deprecated).\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n  --dump           Extract injected VADs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.direct_system_calls.DirectSystemCalls",
+   "doc": "Detects the Direct System Call technique used to bypass EDRs",
+   "requirements": [
+    {
+     "name": "insensitive",
+     "description": "Makes the search case insensitive",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "wide",
+     "description": "Match wide (unicode) strings",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_string",
+     "description": "Yara rules (as a string)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_file",
+     "description": "Yara rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_compiled_file",
+     "description": "Yara compiled rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_size",
+     "description": "Set the maximum size (default is 1GB)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.direct_system_calls.DirectSystemCalls\n       [-h] [--insensitive] [--wide] [--yara-string YARA_STRING]\n       [--yara-file YARA_FILE] [--yara-compiled-file YARA_COMPILED_FILE]\n       [--max-size MAX_SIZE]\n\nDetects the Direct System Call technique used to bypass EDRs\n\noptions:\n  -h, --help            show this help message and exit\n  --insensitive         Makes the search case insensitive\n  --wide                Match wide (unicode) strings\n  --yara-string YARA_STRING\n                        Yara rules (as a string)\n  --yara-file YARA_FILE\n                        Yara rules (as a file)\n  --yara-compiled-file YARA_COMPILED_FILE\n                        Yara compiled rules (as a file)\n  --max-size MAX_SIZE   Set the maximum size (default is 1GB)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.drivermodule.DriverModule",
+   "doc": "Determines if any loaded drivers were hidden by a rootkit",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.malware.drivermodule.DriverModule [-h]\n\nDetermines if any loaded drivers were hidden by a rootkit\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.hollowprocesses.HollowProcesses",
+   "doc": "Lists hollowed processes",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.hollowprocesses.HollowProcesses\n       [-h] [--pid [PID ...]]\n\nLists hollowed processes\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.indirect_system_calls.IndirectSystemCalls",
+   "doc": "Detects the Indirect System Call technique used to bypass EDRs.",
+   "requirements": [
+    {
+     "name": "insensitive",
+     "description": "Makes the search case insensitive",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "wide",
+     "description": "Match wide (unicode) strings",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_string",
+     "description": "Yara rules (as a string)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_file",
+     "description": "Yara rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_compiled_file",
+     "description": "Yara compiled rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_size",
+     "description": "Set the maximum size (default is 1GB)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.indirect_system_calls.IndirectSystemCalls\n       [-h] [--insensitive] [--wide] [--yara-string YARA_STRING]\n       [--yara-file YARA_FILE] [--yara-compiled-file YARA_COMPILED_FILE]\n       [--max-size MAX_SIZE]\n\nDetects the Indirect System Call technique used to bypass EDRs.\n\noptions:\n  -h, --help            show this help message and exit\n  --insensitive         Makes the search case insensitive\n  --wide                Match wide (unicode) strings\n  --yara-string YARA_STRING\n                        Yara rules (as a string)\n  --yara-file YARA_FILE\n                        Yara rules (as a file)\n  --yara-compiled-file YARA_COMPILED_FILE\n                        Yara compiled rules (as a file)\n  --max-size MAX_SIZE   Set the maximum size (default is 1GB)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.ldrmodules.LdrModules",
+   "doc": "Lists the loaded modules in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.ldrmodules.LdrModules [-h] [--pid [PID ...]]\n\nLists the loaded modules in a particular windows memory image.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.malfind.Malfind",
+   "doc": "Lists process memory ranges that potentially contain injected code.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract injected VADs",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.malfind.Malfind [-h] [--pid [PID ...]] [--dump]\n\nLists process memory ranges that potentially contain injected code.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n  --dump           Extract injected VADs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.pebmasquerade.PebMasquerade",
+   "doc": "Detects potential process name spoofing by comparing EPROCESS and PEB data.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process ID to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.pebmasquerade.PebMasquerade [-h]\n                                                          [--pid [PID ...]]\n\nDetects potential process name spoofing by comparing EPROCESS and PEB data.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process ID to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.processghosting.ProcessGhosting",
+   "doc": "Lists processes whose DeletePending bit is set or whose FILE_OBJECT is set to 0 or Vads that are DeleteOnClose",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.malware.processghosting.ProcessGhosting [-h]\n\nLists processes whose DeletePending bit is set or whose FILE_OBJECT is set to\n0 or Vads that are DeleteOnClose\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.psxview.PsXView",
+   "doc": "Lists all processes found via four of the methods described in \"The Art of Memory Forensics\" which may help identify processes that are trying to hide themselves.\n\nWe recommend using -r pretty if you are looking at this plugin's output in a terminal.",
+   "requirements": [
+    {
+     "name": "physical-offsets",
+     "description": "List processes with physical offsets instead of virtual offsets.",
+     "kind": "bool",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.psxview.PsXView [-h] [--physical-offsets]\n\nLists all processes found via four of the methods described in \"The Art of\nMemory Forensics\" which may help identify processes that are trying to hide\nthemselves.\n\noptions:\n  -h, --help          show this help message and exit\n  --physical-offsets  List processes with physical offsets instead of virtual\n                      offsets.\n\nWe recommend using -r pretty if you are looking at this plugin's output in a\nterminal.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.skeleton_key_check.Skeleton_Key_Check",
+   "doc": "Looks for signs of Skeleton Key malware",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.malware.skeleton_key_check.Skeleton_Key_Check [-h]\n\nLooks for signs of Skeleton Key malware\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.suspicious_threads.SuspiciousThreads",
+   "doc": "Lists suspicious userland process threads",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.malware.suspicious_threads.SuspiciousThreads\n       [-h] [--pid [PID ...]]\n\nLists suspicious userland process threads\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.svcdiff.SvcDiff",
+   "doc": "Compares services found through list walking versus scanning to find rootkits",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.malware.svcdiff.SvcDiff [-h]\n\nCompares services found through list walking versus scanning to find rootkits\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.malware.unhooked_system_calls.UnhookedSystemCalls",
+   "doc": "Detects hooked ntdll.dll stub functions in Windows processes.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.malware.unhooked_system_calls.UnhookedSystemCalls [-h]\n\nDetects hooked ntdll.dll stub functions in Windows processes.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.mbrscan.MBRScan",
+   "doc": "Scans for and parses potential Master Boot Records (MBRs)",
+   "requirements": [
+    {
+     "name": "full",
+     "description": "It analyzes and provides all the information in the partition entry and bootcode hexdump. (It returns a lot of information, so we recommend you render it in CSV.)",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.mbrscan.MBRScan [-h] [--full]\n\nScans for and parses potential Master Boot Records (MBRs)\n\noptions:\n  -h, --help  show this help message and exit\n  --full      It analyzes and provides all the information in the partition\n              entry and bootcode hexdump. (It returns a lot of information, so\n              we recommend you render it in CSV.)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.memmap.Memmap",
+   "doc": "Prints the memory map",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process ID to include (all other processes are excluded)",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed memory segments",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.memmap.Memmap [-h] [--pid PID] [--dump]\n\nPrints the memory map\n\noptions:\n  -h, --help  show this help message and exit\n  --pid PID   Process ID to include (all other processes are excluded)\n  --dump      Extract listed memory segments\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.mftscan.ADS",
+   "doc": "Scans for Alternate Data Stream",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.mftscan.ADS [-h]\n\nScans for Alternate Data Stream\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.mftscan.MFTScan",
+   "doc": "Scans for MFT FILE objects present in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.mftscan.MFTScan [-h]\n\nScans for MFT FILE objects present in a particular windows memory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.mftscan.ResidentData",
+   "doc": "Scans for MFT Records with Resident Data",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.mftscan.ResidentData [-h]\n\nScans for MFT Records with Resident Data\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.modscan.ModScan",
+   "doc": "Scans for modules present in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed modules",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "base",
+     "description": "Extract a single module with BASE address",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "name",
+     "description": "module name/sub string",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.modscan.ModScan [-h] [--dump] [--base BASE]\n                                      [--name NAME]\n\nScans for modules present in a particular windows memory image.\n\noptions:\n  -h, --help   show this help message and exit\n  --dump       Extract listed modules\n  --base BASE  Extract a single module with BASE address\n  --name NAME  module name/sub string\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.modules.Modules",
+   "doc": "Lists the loaded kernel modules.",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed modules",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "base",
+     "description": "Extract a single module with BASE address",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "name",
+     "description": "module name/sub string",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.modules.Modules [-h] [--dump] [--base BASE]\n                                      [--name NAME]\n\nLists the loaded kernel modules.\n\noptions:\n  -h, --help   show this help message and exit\n  --dump       Extract listed modules\n  --base BASE  Extract a single module with BASE address\n  --name NAME  module name/sub string\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.mutantscan.MutantScan",
+   "doc": "Scans for mutexes present in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.mutantscan.MutantScan [-h]\n\nScans for mutexes present in a particular windows memory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.netscan.NetScan",
+   "doc": "Scans for network objects present in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "include-corrupt",
+     "description": "Radically eases result validation. This will show partially overwritten data. WARNING: the results are likely to include garbage and/or corrupt data. Be cautious!",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.netscan.NetScan [-h] [--include-corrupt]\n\nScans for network objects present in a particular windows memory image.\n\noptions:\n  -h, --help         show this help message and exit\n  --include-corrupt  Radically eases result validation. This will show\n                     partially overwritten data. WARNING: the results are\n                     likely to include garbage and/or corrupt data. Be\n                     cautious!\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.netstat.NetStat",
+   "doc": "Traverses network tracking structures present in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "include-corrupt",
+     "description": "Radically eases result validation. This will show partially overwritten data. WARNING: the results are likely to include garbage and/or corrupt data. Be cautious!",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.netstat.NetStat [-h] [--include-corrupt]\n\nTraverses network tracking structures present in a particular windows memory\nimage.\n\noptions:\n  -h, --help         show this help message and exit\n  --include-corrupt  Radically eases result validation. This will show\n                     partially overwritten data. WARNING: the results are\n                     likely to include garbage and/or corrupt data. Be\n                     cautious!\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.orphan_kernel_threads.Threads",
+   "doc": "Lists process threads",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.orphan_kernel_threads.Threads [-h]\n\nLists process threads\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.pe_symbols.PESymbols",
+   "doc": "Prints symbols in PE files in process and kernel memory",
+   "requirements": [
+    {
+     "name": "source",
+     "description": "Where to resolve symbols.",
+     "kind": "choice",
+     "default": null,
+     "optional": false,
+     "choices": [
+      "kernel",
+      "processes"
+     ]
+    },
+    {
+     "name": "module",
+     "description": "Module in which to resolve symbols. Use \"ntoskrnl.exe\" to resolve in the base kernel executable.",
+     "kind": "str",
+     "default": null,
+     "optional": false,
+     "choices": null
+    },
+    {
+     "name": "symbols",
+     "description": "Symbol name to resolve",
+     "kind": "list_str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "addresses",
+     "description": "Address of symbol to resolve",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.pe_symbols.PESymbols [-h] --source {kernel,processes}\n                                           --module MODULE\n                                           [--symbols [SYMBOLS ...]]\n                                           [--addresses [ADDRESSES ...]]\n\nPrints symbols in PE files in process and kernel memory\n\noptions:\n  -h, --help            show this help message and exit\n  --source {kernel,processes}\n                        Where to resolve symbols.\n  --module MODULE       Module in which to resolve symbols. Use \"ntoskrnl.exe\"\n                        to resolve in the base kernel executable.\n  --symbols [SYMBOLS ...]\n                        Symbol name to resolve\n  --addresses [ADDRESSES ...]\n                        Address of symbol to resolve\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.pedump.PEDump",
+   "doc": "Allows extracting PE Files from a specific address in a specific address space",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "base",
+     "description": "Base address to reconstruct a PE file",
+     "kind": "int",
+     "default": null,
+     "optional": false,
+     "choices": null
+    },
+    {
+     "name": "kernel_module",
+     "description": "Extract from kernel address space.",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.pedump.PEDump [-h] [--pid [PID ...]] --base BASE\n                                    [--kernel-module]\n\nAllows extracting PE Files from a specific address in a specific address space\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n  --base BASE      Base address to reconstruct a PE file\n  --kernel-module  Extract from kernel address space.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.poolscanner.PoolScanner",
+   "doc": "A generic pool scanner plugin.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.poolscanner.PoolScanner [-h]\n\nA generic pool scanner plugin.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.privileges.Privs",
+   "doc": "Lists process token privileges",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.privileges.Privs [-h] [--pid [PID ...]]\n\nLists process token privileges\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.processghosting.ProcessGhosting",
+   "doc": "Lists processes whose DeletePending bit is set or whose FILE_OBJECT is set to 0 or Vads that are DeleteOnClose (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.processghosting.ProcessGhosting [-h]\n\nLists processes whose DeletePending bit is set or whose FILE_OBJECT is set to\n0 or Vads that are DeleteOnClose (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.pslist.PsList",
+   "doc": "Lists the processes present in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "physical",
+     "description": "Display physical offsets instead of virtual",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "pid",
+     "description": "Process ID to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed processes",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.pslist.PsList [-h] [--physical] [--pid [PID ...]]\n                                    [--dump]\n\nLists the processes present in a particular windows memory image.\n\noptions:\n  -h, --help       show this help message and exit\n  --physical       Display physical offsets instead of virtual\n  --pid [PID ...]  Process ID to include (all other processes are excluded)\n  --dump           Extract listed processes\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.psscan.PsScan",
+   "doc": "Scans for processes present in a particular windows memory image.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process ID to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed processes",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "physical",
+     "description": "Display physical offset instead of virtual",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.psscan.PsScan [-h] [--pid [PID ...]] [--dump]\n                                    [--physical]\n\nScans for processes present in a particular windows memory image.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process ID to include (all other processes are excluded)\n  --dump           Extract listed processes\n  --physical       Display physical offset instead of virtual\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.pstree.PsTree",
+   "doc": "Plugin for listing processes in a tree based on their parent process ID.",
+   "requirements": [
+    {
+     "name": "physical",
+     "description": "Display physical offsets instead of virtual",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "pid",
+     "description": "Process ID to include (with ancestors and descendants, all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.pstree.PsTree [-h] [--physical] [--pid [PID ...]]\n\nPlugin for listing processes in a tree based on their parent process ID.\n\noptions:\n  -h, --help       show this help message and exit\n  --physical       Display physical offsets instead of virtual\n  --pid [PID ...]  Process ID to include (with ancestors and descendants, all\n                   other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.psxview.PsXView",
+   "doc": "Lists all processes found via four of the methods described in \"The Art of Memory Forensics\" which may help     identify processes that are trying to hide themselves.\n\nWe recommend using -r pretty if you are looking at this plugin's output in a terminal.\ndeprecated.",
+   "requirements": [
+    {
+     "name": "physical-offsets",
+     "description": "List processes with physical offsets instead of virtual offsets.",
+     "kind": "bool",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.psxview.PsXView [-h] [--physical-offsets]\n\nLists all processes found via four of the methods described in \"The Art of\nMemory Forensics\" which may help identify processes that are trying to hide\nthemselves.\n\noptions:\n  -h, --help          show this help message and exit\n  --physical-offsets  List processes with physical offsets instead of virtual\n                      offsets.\n\nWe recommend using -r pretty if you are looking at this plugin's output in a\nterminal. deprecated.\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.amcache.Amcache",
+   "doc": "Extract information on executed applications from the AmCache.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.registry.amcache.Amcache [-h]\n\nExtract information on executed applications from the AmCache.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.cachedump.Cachedump",
+   "doc": "Dumps lsa secrets from memory",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.registry.cachedump.Cachedump [-h]\n\nDumps lsa secrets from memory\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.certificates.Certificates",
+   "doc": "Lists the certificates in the registry's Certificate Store.",
+   "requirements": [
+    {
+     "name": "dump",
+     "description": "Extract listed certificates",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.registry.certificates.Certificates [-h] [--dump]\n\nLists the certificates in the registry's Certificate Store.\n\noptions:\n  -h, --help  show this help message and exit\n  --dump      Extract listed certificates\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.getcellroutine.GetCellRoutine",
+   "doc": "Reports registry hives with a hooked GetCellRoutine handler",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.registry.getcellroutine.GetCellRoutine [-h]\n\nReports registry hives with a hooked GetCellRoutine handler\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.hashdump.Hashdump",
+   "doc": "Dumps user hashes from memory",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.registry.hashdump.Hashdump [-h]\n\nDumps user hashes from memory\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.hivelist.HiveList",
+   "doc": "Lists the registry hives present in a particular memory image.",
+   "requirements": [
+    {
+     "name": "filter",
+     "description": "String to filter hive names returned",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed registry hives",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.registry.hivelist.HiveList [-h] [--filter FILTER]\n                                                 [--dump]\n\nLists the registry hives present in a particular memory image.\n\noptions:\n  -h, --help       show this help message and exit\n  --filter FILTER  String to filter hive names returned\n  --dump           Extract listed registry hives\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.hivescan.HiveScan",
+   "doc": "Scans for registry hives present in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.registry.hivescan.HiveScan [-h]\n\nScans for registry hives present in a particular windows memory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.lsadump.Lsadump",
+   "doc": "Dumps lsa secrets from memory",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.registry.lsadump.Lsadump [-h]\n\nDumps lsa secrets from memory\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.printkey.PrintKey",
+   "doc": "Lists the registry keys under a hive or specific key value.",
+   "requirements": [
+    {
+     "name": "offset",
+     "description": "Hive Offset",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "key",
+     "description": "Key to start from",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "recurse",
+     "description": "Recurses through keys",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.registry.printkey.PrintKey [-h] [--offset OFFSET]\n                                                 [--key KEY] [--recurse]\n\nLists the registry keys under a hive or specific key value.\n\noptions:\n  -h, --help       show this help message and exit\n  --offset OFFSET  Hive Offset\n  --key KEY        Key to start from\n  --recurse        Recurses through keys\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.scheduled_tasks.ScheduledTasks",
+   "doc": "Decodes scheduled task information from the Windows registry, including\ninformation about triggers, actions, run times, and creation times.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.registry.scheduled_tasks.ScheduledTasks [-h]\n\nDecodes scheduled task information from the Windows registry, including\ninformation about triggers, actions, run times, and creation times.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.registry.userassist.UserAssist",
+   "doc": "Print userassist registry keys and information.",
+   "requirements": [
+    {
+     "name": "offset",
+     "description": "Hive Offset",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.registry.userassist.UserAssist [-h] [--offset OFFSET]\n\nPrint userassist registry keys and information.\n\noptions:\n  -h, --help       show this help message and exit\n  --offset OFFSET  Hive Offset\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.scheduled_tasks.ScheduledTasks",
+   "doc": "Decodes scheduled task information from the Windows registry, including\ninformation about triggers, actions, run times, and creation times (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.scheduled_tasks.ScheduledTasks [-h]\n\nDecodes scheduled task information from the Windows registry, including\ninformation about triggers, actions, run times, and creation times\n(deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.sessions.Sessions",
+   "doc": "lists Processes with Session information extracted from Environmental Variables",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.sessions.Sessions [-h] [--pid [PID ...]]\n\nlists Processes with Session information extracted from Environmental\nVariables\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.shimcachemem.ShimcacheMem",
+   "doc": "Reads Shimcache entries from the ahcache.sys AVL tree",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.shimcachemem.ShimcacheMem [-h]\n\nReads Shimcache entries from the ahcache.sys AVL tree\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.skeleton_key_check.Skeleton_Key_Check",
+   "doc": "Looks for signs of Skeleton Key malware",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.skeleton_key_check.Skeleton_Key_Check [-h]\n\nLooks for signs of Skeleton Key malware\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.ssdt.SSDT",
+   "doc": "Lists the system call table.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.ssdt.SSDT [-h]\n\nLists the system call table.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.statistics.Statistics",
+   "doc": "Lists statistics about the memory space.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.statistics.Statistics [-h]\n\nLists statistics about the memory space.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.strings.Strings",
+   "doc": "Reads output from the strings command and indicates which process(es) each string belongs to.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process ID to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "strings_file",
+     "description": "Strings file",
+     "kind": "uri",
+     "default": null,
+     "optional": false,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.strings.Strings [-h] [--pid [PID ...]]\n                                      --strings-file STRINGS_FILE\n\nReads output from the strings command and indicates which process(es) each\nstring belongs to.\n\noptions:\n  -h, --help            show this help message and exit\n  --pid [PID ...]       Process ID to include (all other processes are\n                        excluded)\n  --strings-file STRINGS_FILE\n                        Strings file\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.suspended_threads.SuspendedThreads",
+   "doc": "Enumerates suspended threads.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.suspended_threads.SuspendedThreads [-h]\n\nEnumerates suspended threads.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.suspicious_threads.SuspiciousThreads",
+   "doc": "Lists suspicious userland process threads (deprecated).",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.suspicious_threads.SuspiciousThreads [-h]\n                                                           [--pid [PID ...]]\n\nLists suspicious userland process threads (deprecated).\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Filter on specific process IDs\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.svcdiff.SvcDiff",
+   "doc": "Compares services found through list walking versus scanning to find rootkits (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.svcdiff.SvcDiff [-h]\n\nCompares services found through list walking versus scanning to find rootkits\n(deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.svclist.SvcList",
+   "doc": "Lists services contained with the services.exe doubly linked list of services",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.svclist.SvcList [-h]\n\nLists services contained with the services.exe doubly linked list of services\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.svcscan.SvcScan",
+   "doc": "Scans for windows services.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.svcscan.SvcScan [-h]\n\nScans for windows services.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.symlinkscan.SymlinkScan",
+   "doc": "Scans for links present in a particular windows memory image.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.symlinkscan.SymlinkScan [-h]\n\nScans for links present in a particular windows memory image.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.thrdscan.ThrdScan",
+   "doc": "Scans for windows threads.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.thrdscan.ThrdScan [-h]\n\nScans for windows threads.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.threads.Threads",
+   "doc": "Lists process threads",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.threads.Threads [-h]\n\nLists process threads\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.timers.Timers",
+   "doc": "Print kernel timers and associated module DPCs",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.timers.Timers [-h]\n\nPrint kernel timers and associated module DPCs\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.truecrypt.Passphrase",
+   "doc": "TrueCrypt Cached Passphrase Finder",
+   "requirements": [
+    {
+     "name": "min-length",
+     "description": "Minimum length of passphrases to identify",
+     "kind": "int",
+     "default": 5,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.truecrypt.Passphrase [-h] [--min-length MIN-LENGTH]\n\nTrueCrypt Cached Passphrase Finder\n\noptions:\n  -h, --help            show this help message and exit\n  --min-length MIN-LENGTH\n                        Minimum length of passphrases to identify\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.unhooked_system_calls.unhooked_system_calls",
+   "doc": "Detects hooked ntdll.dll stub functions in Windows processes (deprecated).",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.unhooked_system_calls.unhooked_system_calls [-h]\n\nDetects hooked ntdll.dll stub functions in Windows processes (deprecated).\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.unloadedmodules.UnloadedModules",
+   "doc": "Lists the unloaded kernel modules.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.unloadedmodules.UnloadedModules [-h]\n\nLists the unloaded kernel modules.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.vadinfo.VadInfo",
+   "doc": "Lists process memory ranges.",
+   "requirements": [
+    {
+     "name": "address",
+     "description": "Process virtual memory address to include (all other address ranges are excluded).",
+     "kind": "int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "dump",
+     "description": "Extract listed memory ranges",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "maxsize",
+     "description": "Maximum size for dumped VAD sections (all the bigger sections will be ignored)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.vadinfo.VadInfo [-h] [--address ADDRESS]\n                                      [--pid [PID ...]] [--dump]\n                                      [--maxsize MAXSIZE]\n\nLists process memory ranges.\n\noptions:\n  -h, --help         show this help message and exit\n  --address ADDRESS  Process virtual memory address to include (all other\n                     address ranges are excluded).\n  --pid [PID ...]    Filter on specific process IDs\n  --dump             Extract listed memory ranges\n  --maxsize MAXSIZE  Maximum size for dumped VAD sections (all the bigger\n                     sections will be ignored)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.vadregexscan.VadRegExScan",
+   "doc": "Scans all virtual memory areas for tasks using RegEx.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Filter on specific process IDs",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "pattern",
+     "description": "RegEx pattern",
+     "kind": "str",
+     "default": null,
+     "optional": false,
+     "choices": null
+    },
+    {
+     "name": "maxsize",
+     "description": "Maximum size in bytes for displayed context",
+     "kind": "int",
+     "default": 128,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.vadregexscan.VadRegExScan [-h] [--pid [PID ...]]\n                                                --pattern PATTERN\n                                                [--maxsize MAXSIZE]\n\nScans all virtual memory areas for tasks using RegEx.\n\noptions:\n  -h, --help         show this help message and exit\n  --pid [PID ...]    Filter on specific process IDs\n  --pattern PATTERN  RegEx pattern\n  --maxsize MAXSIZE  Maximum size in bytes for displayed context\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.vadwalk.VadWalk",
+   "doc": "Walk the VAD tree.",
+   "requirements": [
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.vadwalk.VadWalk [-h] [--pid [PID ...]]\n\nWalk the VAD tree.\n\noptions:\n  -h, --help       show this help message and exit\n  --pid [PID ...]  Process IDs to include (all other processes are excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.vadyarascan.VadYaraScan",
+   "doc": "Scans all the Virtual Address Descriptor memory maps using yara.",
+   "requirements": [
+    {
+     "name": "insensitive",
+     "description": "Makes the search case insensitive",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "wide",
+     "description": "Match wide (unicode) strings",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_string",
+     "description": "Yara rules (as a string)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_file",
+     "description": "Yara rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_compiled_file",
+     "description": "Yara compiled rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_size",
+     "description": "Set the maximum size (default is 1GB)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "pid",
+     "description": "Process IDs to include (all other processes are excluded)",
+     "kind": "list_int",
+     "default": null,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.vadyarascan.VadYaraScan [-h] [--insensitive] [--wide]\n                                              [--yara-string YARA_STRING]\n                                              [--yara-file YARA_FILE]\n                                              [--yara-compiled-file YARA_COMPILED_FILE]\n                                              [--max-size MAX_SIZE]\n                                              [--pid [PID ...]]\n\nScans all the Virtual Address Descriptor memory maps using yara.\n\noptions:\n  -h, --help            show this help message and exit\n  --insensitive         Makes the search case insensitive\n  --wide                Match wide (unicode) strings\n  --yara-string YARA_STRING\n                        Yara rules (as a string)\n  --yara-file YARA_FILE\n                        Yara rules (as a file)\n  --yara-compiled-file YARA_COMPILED_FILE\n                        Yara compiled rules (as a file)\n  --max-size MAX_SIZE   Set the maximum size (default is 1GB)\n  --pid [PID ...]       Process IDs to include (all other processes are\n                        excluded)\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.verinfo.VerInfo",
+   "doc": "Lists version information from PE files.",
+   "requirements": [
+    {
+     "name": "extensive",
+     "description": "Search physical layer for version information",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py windows.verinfo.VerInfo [-h] [--extensive]\n\nLists version information from PE files.\n\noptions:\n  -h, --help   show this help message and exit\n  --extensive  Search physical layer for version information\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.virtmap.VirtMap",
+   "doc": "Lists virtual mapped sections.",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.virtmap.VirtMap [-h]\n\nLists virtual mapped sections.\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.windows.Windows",
+   "doc": "Enumerates the Windows of Desktop instances",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.windows.Windows [-h]\n\nEnumerates the Windows of Desktop instances\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "windows.windowstations.WindowStations",
+   "doc": "Scans for top level Windows Stations",
+   "requirements": [],
+   "help": {
+    "out": "usage: vol.py windows.windowstations.WindowStations [-h]\n\nScans for top level Windows Stations\n\noptions:\n  -h, --help  show this help message and exit\n",
+    "err": "",
+    "code": 0
+   }
+  },
+  {
+   "name": "yarascan.YaraScan",
+   "doc": "Scans kernel memory using yara rules (string or file).",
+   "requirements": [
+    {
+     "name": "insensitive",
+     "description": "Makes the search case insensitive",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "wide",
+     "description": "Match wide (unicode) strings",
+     "kind": "bool",
+     "default": false,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_string",
+     "description": "Yara rules (as a string)",
+     "kind": "str",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_file",
+     "description": "Yara rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "yara_compiled_file",
+     "description": "Yara compiled rules (as a file)",
+     "kind": "uri",
+     "default": null,
+     "optional": true,
+     "choices": null
+    },
+    {
+     "name": "max_size",
+     "description": "Set the maximum size (default is 1GB)",
+     "kind": "int",
+     "default": 1073741824,
+     "optional": true,
+     "choices": null
+    }
+   ],
+   "help": {
+    "out": "usage: vol.py yarascan.YaraScan [-h] [--insensitive] [--wide]\n                                [--yara-string YARA_STRING]\n                                [--yara-file YARA_FILE]\n                                [--yara-compiled-file YARA_COMPILED_FILE]\n                                [--max-size MAX_SIZE]\n\nScans kernel memory using yara rules (string or file).\n\noptions:\n  -h, --help            show this help message and exit\n  --insensitive         Makes the search case insensitive\n  --wide                Match wide (unicode) strings\n  --yara-string YARA_STRING\n                        Yara rules (as a string)\n  --yara-file YARA_FILE\n                        Yara rules (as a file)\n  --yara-compiled-file YARA_COMPILED_FILE\n                        Yara compiled rules (as a file)\n  --max-size MAX_SIZE   Set the maximum size (default is 1GB)\n",
+    "err": "",
+    "code": 0
+   }
+  }
+ ]
+}

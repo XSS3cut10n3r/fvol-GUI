@@ -10,7 +10,6 @@
 
 use crate::error::Result;
 use std::fs::File;
-use std::path::PathBuf;
 
 /// Global (non plugin-specific) CLI options.
 #[derive(Clone, Debug, Default)]
@@ -54,9 +53,6 @@ impl Context {
     /// preferred name already exists a counter is appended). Returns the open file and the
     /// final file name (as plugins print it).
     pub fn create_output_file(&self, preferred_name: &str) -> Result<(File, String)> {
-        let dir = if self.opts.output_dir.is_empty() { "." } else { self.opts.output_dir.as_str() };
-        let path: PathBuf = [dir, preferred_name].iter().collect();
-        let f = File::create(&path)?;
-        Ok((f, preferred_name.to_string()))
+        crate::cli::files::create(&self.opts.output_dir, preferred_name)
     }
 }

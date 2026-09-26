@@ -1,2 +1,4 @@
 [build]
 rustflags = ["-C", "target-cpu=native"]
+# Several agents build concurrently on this 20-core / 62 GB box; keep each build's footprint bounded.
+jobs = 6
