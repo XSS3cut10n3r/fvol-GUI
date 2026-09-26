@@ -5,7 +5,7 @@
 //! keywords, mnemonics) and branch-free hex conversion, so there is no memcpy call or UTF-8
 //! re-validation per piece. Only ASCII is ever written.
 
-use super::decode::{OF_FARSEP, OF_KMASK, OF_MOFFS, OF_RC, OF_SIGNED};
+use super::decode::{EVEX_FMT_DECO, OF_FARSEP, OF_KMASK, OF_MOFFS, OF_RC, OF_SIGNED};
 use super::regs::NAMES;
 use super::{Insn, Mem, Mode, Operand};
 
@@ -345,8 +345,7 @@ pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
 
 #[inline(always)]
 fn op_str(w: &mut W, insn: &Insn) {
-    let f = &insn.ofmt;
-    if (f[0] | f[1] | f[2] | f[3] | f[4]) & (OF_RC | OF_KMASK) != 0 || insn.evex & 0x80 != 0 {
+    if insn.evex & (0x80 | EVEX_FMT_DECO) != 0 {
         // (out of line with its own writer, so this one never escapes to memory)
         // SAFETY: bytes [len, n) were initialized by previous stores.
         unsafe { w.v.set_len(w.n) };

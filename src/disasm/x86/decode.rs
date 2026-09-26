@@ -609,6 +609,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
             dn: 0,
             vsib: 0,
             kmask: false,
+            fdeco: false,
         };
         st.osz = osz_def;
         if !operands::<FULL>(&mut st, &e, out, addr, mode, 0) {
@@ -769,7 +770,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
     if !operands::<FULL>(&mut st, e, out, addr, mode, op) {
         return false;
     }
-    out.evex = deco;
+    out.evex = deco | if e.fdeco { EVEX_FMT_DECO } else { 0 };
     out.sae = sae;
     if FULL && bcst_elem != 0 {
         let vl: u8 = if st.l >= 2 { 64 } else { 16 << st.l };
@@ -941,6 +942,9 @@ pub(crate) const OF_BCST: u8 = 32;
 pub(crate) const OF_FARSEP: u8 = 64; // printed after ':' instead of ", "
 pub(crate) const OF_RC: u8 = 128; // EVEX rounding slot (printed only when active)
 pub(crate) const OF_KMASK: u8 = 4; // standalone {kN}
+/// `Insn::evex` bit: the instruction has an OF_RC / OF_KMASK operand (formatting fast-path test;
+/// bits 0x80 / 0x40 / 0x07 are the opmask decoration).
+pub(crate) const EVEX_FMT_DECO: u8 = 0x20;
 
 #[inline]
 fn gpr_by_size(n: u8, size: u8, rex: bool) -> u8 {

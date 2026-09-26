@@ -196,6 +196,8 @@ pub(crate) struct Entry {
     pub vsib: u8,
     /// (derived) has an S_KMASK operand.
     pub kmask: bool,
+    /// (derived) has an S_KMASK or S_RC operand (formatted by the general op_str loop).
+    pub fdeco: bool,
 }
 
 const CMP_PREDS: [&str; 32] = [
@@ -656,6 +658,9 @@ impl Builder {
                 e.vsib = o.cls;
             } else if o.src == S_KMASK {
                 e.kmask = true;
+            }
+            if o.src == S_KMASK || o.src == S_RC {
+                e.fdeco = true;
             }
         }
         for t in flags_s.split_whitespace() {
