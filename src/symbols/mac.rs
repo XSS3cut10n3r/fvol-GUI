@@ -101,9 +101,6 @@ pub fn walk_iterable(queue: &Obj, list_head_member: &str, list_next_member: &str
     out
 }
 
-/// python `mac.MacUtilities.mask_mods_list` element: `(name, start, end)`.
-pub type HandlerInfo = (String, u64, u64);
-
 /// Mac class extensions on [`Obj`].
 pub trait MacExt {
     // ---- queue_entry
