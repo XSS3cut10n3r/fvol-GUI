@@ -27,6 +27,16 @@ fn spans(it: impl Iterator<Item = (usize, usize)>) -> String {
 }
 
 pub fn run_case(pat: &[u8], flags: u32, hay: &[u8], mode: &str) -> (String, Option<String>) {
+    if mode == "str" {
+        // python str pattern; spans reported in bytes of the UTF-8 haystack
+        let (Ok(p), Ok(_)) = (std::str::from_utf8(pat), std::str::from_utf8(hay)) else {
+            return ("BADUTF8".into(), None);
+        };
+        return match Regex::new_str(p, flags) {
+            Err(_) => ("ERR".into(), None),
+            Ok(re) => (spans(re.find_iter(hay)), None),
+        };
+    }
     let re = match Regex::new(pat, flags) {
         Ok(r) => r,
         Err(_) => return ("ERR".into(), None),

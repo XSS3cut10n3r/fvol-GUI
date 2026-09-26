@@ -169,6 +169,34 @@ def py_iter(p, flags, hay):
     return ",".join("%d-%d" % m.span() for m in rx.finditer(hay))
 
 
+UNI = ["é", "É", "ß", "ſ", "\u212a", "σ", "ς", "Σ", "\u0663", "\u2003", "İ", "ı", "ǅ", "\U0001d400", "ﬀ"]
+
+
+def gen_str_case(rng):
+    """(pattern str, flags, haystack str) for python str-pattern tests."""
+    p = gen_pattern(rng).decode("ascii")
+    p = "".join(rng.choice(UNI) if ch == "c" and rng.random() < 0.6 else ch for ch in p)
+    alpha = "abcAB\n _1-sSkKiI" + "".join(UNI)
+    n = rng.choice([0, 1, 3, 8, 20, 40])
+    h = "".join(rng.choice(alpha) for _ in range(n))
+    f = rng.choice([0, 0, re.I, re.I, re.S, re.M, re.A, re.A | re.I])
+    return p, f, h
+
+
+def py_str_iter(p, flags, hay):
+    try:
+        rx = re.compile(p, flags)
+    except Exception:
+        return "ERR"
+    out = []
+    for m in rx.finditer(hay):
+        s, e = m.span()
+        bs = len(hay[:s].encode())
+        be = len(hay[:e].encode())
+        out.append("%d-%d" % (bs, be))
+    return ",".join(out)
+
+
 def py_groups(p, flags, hay):
     try:
         rx = re.compile(p, flags)
@@ -193,6 +221,7 @@ def main():
     ap.add_argument("--show", type=int, default=25)
     ap.add_argument("--regular", action="store_true", help="only DFA-eligible constructs")
     ap.add_argument("--long", action="store_true", help="add long haystacks (up to 3000 bytes)")
+    ap.add_argument("--str", action="store_true", help="python str patterns (Unicode semantics)")
     args = ap.parse_args()
     rng = random.Random(args.seed)
     Gen.REGULAR = args.regular
@@ -208,6 +237,9 @@ def main():
     ]
     for p, f, h in fixed:
         cases.append((p, f, h, "iter"))
+    while args.str and len(cases) < args.n:
+        p, f, h = gen_str_case(rng)
+        cases.append((p.encode(), f, h.encode(), "str"))
     while len(cases) < args.n:
         p = gen_pattern(rng)
         f = rng.choice(flag_choices)
@@ -221,7 +253,10 @@ def main():
     kept = []
     timeouts = 0
     for (p, f, h, mode) in cases:
-        e = guarded(py_iter, p, f, h) if mode == "iter" else guarded(py_groups, p, f, h)
+        if mode == "str":
+            e = guarded(py_str_iter, p.decode(), f, h.decode())
+        else:
+            e = guarded(py_iter, p, f, h) if mode == "iter" else guarded(py_groups, p, f, h)
         if e is None:
             timeouts += 1
             continue

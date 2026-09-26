@@ -27,6 +27,8 @@ pub enum SubKind {
 pub enum Inst {
     Byte(u8),
     Set(u32),
+    /// One UTF-8 character in a codepoint class (str patterns).
+    UClass(u32),
     Look(Look),
     Split(u32, u32),
     Jmp(u32),
@@ -37,7 +39,7 @@ pub enum Inst {
     RegSet(u16),
     RegJmpIfEq(u16, u32),
     RegFailIfEq(u16),
-    Backref { group: u32, icase: bool },
+    Backref { group: u32, icase: bool, unicode: bool },
     /// Sub-match; body starts at pc+1 and ends with SubEnd; continuation at `next`.
     SubStart { id: u32, kind: SubKind, width: u32, next: u32 },
     SubEnd,
@@ -50,6 +52,9 @@ pub enum Inst {
 pub struct Prog {
     pub insts: Vec<Inst>,
     pub sets: Vec<ByteSet>,
+    pub uclasses: Vec<Vec<(u32, u32)>>,
+    /// Haystack positions advance by UTF-8 characters (str patterns).
+    pub utf8: bool,
     pub nslots: usize,
     pub nregs: usize,
     /// Per pc: memo key index (u32::MAX = not memoized).
@@ -76,6 +81,7 @@ const NONE: usize = usize::MAX;
 struct Compiler {
     insts: Vec<Inst>,
     sets: Vec<ByteSet>,
+    uclasses: Vec<Vec<(u32, u32)>>,
     nregs: usize,
     nsubs: u32,
     gw: Vec<(u128, u128)>,
@@ -151,6 +157,16 @@ impl Compiler {
             Hir::Look(l) => {
                 self.push(Inst::Look(*l))?;
             }
+            Hir::UClass(r) => {
+                let idx = match self.uclasses.iter().position(|x| **x == ***r) {
+                    Some(i) => i,
+                    None => {
+                        self.uclasses.push((**r).clone());
+                        self.uclasses.len() - 1
+                    }
+                };
+                self.push(Inst::UClass(idx as u32))?;
+            }
             Hir::Concat(v) => {
                 for x in v {
                     self.compile(x, depth + 1)?;
@@ -184,11 +200,11 @@ impl Compiler {
                 self.push(Inst::Save(index * 2 + 1))?;
             }
             Hir::Repeat { min, max, greedy, sub } => self.repeat(*min, *max, *greedy, sub, depth)?,
-            Hir::Backref { group, icase } => {
+            Hir::Backref { group, icase, unicode } => {
                 if !self.ref_groups.contains(group) {
                     self.ref_groups.push(*group);
                 }
-                self.push(Inst::Backref { group: *group, icase: *icase })?;
+                self.push(Inst::Backref { group: *group, icase: *icase, unicode: *unicode })?;
             }
             Hir::LookAround { behind, negate, width, sub } => {
                 let kind = match (behind, negate) {
@@ -350,6 +366,7 @@ impl Prog {
         let mut c = Compiler {
             insts: Vec::new(),
             sets: Vec::new(),
+            uclasses: Vec::new(),
             nregs: 0,
             nsubs: 0,
             gw: gw.to_vec(),
@@ -408,6 +425,8 @@ impl Prog {
         Ok(Prog {
             insts: c.insts,
             sets: c.sets,
+            uclasses: c.uclasses,
+            utf8: false,
             nslots: (ngroups as usize) * 2,
             nregs: c.nregs,
             memo_key,
@@ -545,15 +564,16 @@ pub fn look_at(look: Look, hay: &[u8], pos: usize) -> bool {
         Look::EndOrFinalNl => pos == n || (pos + 1 == n && hay[pos] == b'\n'),
         Look::EndLine => pos >= n || hay[pos] == b'\n',
         Look::End => pos >= n,
-        Look::WordB | Look::NotWordB | Look::WordBYara | Look::NotWordBYara => {
+        Look::WordBUni | Look::NotWordBUni => {
+            use super::unicode_class::{decode, decode_prev, is_word};
+            let before = decode_prev(hay, pos).is_some_and(|(c, _)| is_word(c));
+            let after = pos < n && decode(hay, pos).is_some_and(|(c, _)| is_word(c));
+            if look == Look::WordBUni { before != after } else { before == after }
+        }
+        Look::WordB | Look::NotWordB => {
             let before = pos > 0 && pos <= n && super::hir::is_word_byte(hay[pos - 1]);
             let after = pos < n && super::hir::is_word_byte(hay[pos]);
-            match look {
-                Look::WordB => before != after,
-                Look::NotWordB => before == after,
-                Look::WordBYara => before != after,
-                _ => before == after,
-            }
+            if look == Look::WordB { before != after } else { before == after }
         }
     }
 }
@@ -599,7 +619,7 @@ impl<'a> Search<'a> {
             if anchored || s >= hay.len() {
                 return None;
             }
-            s += 1;
+            s += if prog.utf8 { super::unicode_class::decode(hay, s).map_or(1, |(_, l)| l) } else { 1 };
             if let Some(pf) = pre {
                 s = pf.find(hay, s)?;
             }
@@ -714,6 +734,17 @@ impl<'a> Search<'a> {
                             break 'exec true;
                         }
                     }
+                    Inst::UClass(i) => {
+                        match super::unicode_class::decode(hay, pos) {
+                            Some((cp, len))
+                                if prog.uclasses.get(i as usize).is_some_and(|r| super::unicode_class::in_table(r, cp)) =>
+                            {
+                                pos += len;
+                                pc += 1;
+                            }
+                            _ => break 'exec true,
+                        }
+                    }
                     Inst::Look(l) => {
                         if look_at(l, hay, pos) {
                             pc += 1;
@@ -799,7 +830,7 @@ impl<'a> Search<'a> {
                         }
                         pc += 1;
                     }
-                    Inst::Backref { group, icase } => {
+                    Inst::Backref { group, icase, unicode } => {
                         let a = cache.slots.get(group as usize * 2).copied().unwrap_or(NONE);
                         let b = cache.slots.get(group as usize * 2 + 1).copied().unwrap_or(NONE);
                         if a == NONE || b == NONE || a > b || b > hay.len() {
@@ -808,6 +839,30 @@ impl<'a> Search<'a> {
                         let len = b - a;
                         if pos + len > hay.len() {
                             break 'exec true;
+                        }
+                        if icase && unicode {
+                            // compare character by character with sre's lower()
+                            use super::unicode_class::{decode, lower};
+                            let (mut i, mut j) = (a, pos);
+                            let mut ok = true;
+                            while i < b {
+                                match (decode(hay, i), decode(hay, j)) {
+                                    (Some((x, lx)), Some((y, ly))) if lower(x) == lower(y) => {
+                                        i += lx;
+                                        j += ly;
+                                    }
+                                    _ => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !ok || i != b {
+                                break 'exec true;
+                            }
+                            pos = j;
+                            pc += 1;
+                            continue;
                         }
                         let ok = if icase {
                             hay[a..b].iter().zip(&hay[pos..pos + len]).all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
@@ -833,6 +888,28 @@ impl<'a> Search<'a> {
                             _ => {}
                         }
                         let body_pos = match kind {
+                            SubKind::Behind | SubKind::NotBehind if prog.utf8 => {
+                                // step back `width` characters
+                                let mut q = pos;
+                                let mut ok = true;
+                                for _ in 0..width {
+                                    match super::unicode_class::decode_prev(hay, q) {
+                                        Some((_, l)) => q -= l,
+                                        None => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if !ok {
+                                    if kind == SubKind::NotBehind {
+                                        pc = next as usize;
+                                        continue;
+                                    }
+                                    break 'exec true;
+                                }
+                                q
+                            }
                             SubKind::Behind | SubKind::NotBehind => {
                                 if pos < width as usize {
                                     // Cannot look behind: positive fails, negative succeeds.

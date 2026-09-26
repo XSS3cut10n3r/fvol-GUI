@@ -126,7 +126,7 @@ fn bytes_into(h: &Hir, s: &mut ByteSet, depth: usize) {
             bytes_into(yes, s, depth + 1);
             bytes_into(no, s, depth + 1);
         }
-        Hir::Backref { .. } => *s = ByteSet::FULL,
+        Hir::Backref { .. } | Hir::UClass(_) => *s = ByteSet::FULL,
         _ => {}
     }
 }

@@ -20,6 +20,8 @@ pub mod hir;
 pub mod literal;
 pub mod nfa;
 pub mod parse;
+pub mod unicode;
+pub mod unicode_class;
 
 #[cfg(test)]
 mod difftest;
@@ -164,6 +166,37 @@ impl Regex {
             engine,
             pool: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Compile a python **str** pattern (`re.compile("...", flags)`): Unicode `\w \d \s \b`
+    /// and case folding unless `Flags::A`, `.` / classes match whole characters, `\u`
+    /// / `\U` escapes. Haystacks are the UTF-8 bytes of a `str` (`s.as_bytes()`);
+    /// reported positions are byte offsets (use [`char_offset`] for python indices).
+    /// `\N{name}` escapes are not supported. Runs on the backtracking engine.
+    pub fn new_str(pattern: &str, flags: u32) -> Result<Regex, Error> {
+        let parsed = parse::parse_str(pattern, flags)?;
+        let lowered = hir::lower_str(parsed)?;
+        let mut bt = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+        bt.utf8 = true;
+        Ok(Regex {
+            pattern: pattern.as_bytes().into(),
+            flags,
+            groups: lowered.groups,
+            names: lowered.names,
+            bt,
+            engine: Engine::Backtrack,
+            pool: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// python `pattern.search(s)` for str patterns (byte offsets).
+    pub fn search_str(&self, s: &str) -> Option<(usize, usize)> {
+        self.search(s.as_bytes(), 0)
+    }
+
+    /// python `pattern.match(s)` for str patterns (byte offsets).
+    pub fn match_str(&self, s: &str) -> Option<(usize, usize)> {
+        self.match_at(s.as_bytes(), 0)
     }
 
     /// Compile with python-backtracker semantics only (testing / reference).
@@ -357,4 +390,9 @@ pub fn escape(pattern: &[u8]) -> Vec<u8> {
         out.push(b);
     }
     out
+}
+
+/// Convert a byte offset into a UTF-8 string to a python str index.
+pub fn char_offset(s: &[u8], byte_off: usize) -> usize {
+    s[..byte_off.min(s.len())].iter().filter(|&&b| b & 0xc0 != 0x80).count()
 }

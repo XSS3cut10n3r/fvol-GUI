@@ -112,7 +112,7 @@ impl Builder {
                 }
                 Some(n)
             }
-            Hir::Backref { .. } | Hir::LookAround { .. } | Hir::Atomic(_) | Hir::Cond { .. } => None,
+            Hir::Backref { .. } | Hir::LookAround { .. } | Hir::Atomic(_) | Hir::Cond { .. } | Hir::UClass(_) => None,
         }
     }
 }

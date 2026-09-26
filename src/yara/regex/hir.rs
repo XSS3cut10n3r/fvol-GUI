@@ -3,6 +3,7 @@
 //! regex / hex-string front ends.
 
 use super::parse::{self, At, Cat, Node, Parsed, RepKind, SetItem, MAXREPEAT, MAXWIDTH};
+use super::unicode_class::CpSet;
 use super::{Error, FLAG_ASCII, FLAG_DOTALL, FLAG_IGNORECASE, FLAG_LOCALE, FLAG_MULTILINE, FLAG_UNICODE};
 
 /// 256-bit byte set.
@@ -138,25 +139,28 @@ pub enum Look {
     EndLine,
     /// Absolute end (`\Z`).
     End,
-    /// `\b` (python: never true on an empty haystack).
+    /// `\b` over ASCII word bytes.
     WordB,
-    /// `\B` (python: never true on an empty haystack).
+    /// `\B` over ASCII word bytes.
     NotWordB,
-    /// YARA-style word boundary (true on empty haystack edges like PCRE).
-    WordBYara,
-    NotWordBYara,
+    /// `\b` / `\B` of str patterns (Unicode word characters, UTF-8 decoded).
+    WordBUni,
+    NotWordBUni,
 }
 
 #[derive(Clone, Debug)]
 pub enum Hir {
     Empty,
     Class(ByteSet),
+    /// One UTF-8 encoded character whose codepoint is in the (sorted) ranges
+    /// (python str patterns).
+    UClass(Box<Vec<(u32, u32)>>),
     Look(Look),
     Concat(Vec<Hir>),
     Alt(Vec<Hir>),
     Repeat { min: u32, max: Option<u32>, greedy: bool, sub: Box<Hir> },
     Capture { index: u32, sub: Box<Hir> },
-    Backref { group: u32, icase: bool },
+    Backref { group: u32, icase: bool, unicode: bool },
     LookAround { behind: bool, negate: bool, width: u32, sub: Box<Hir> },
     Atomic(Box<Hir>),
     Cond { group: u32, yes: Box<Hir>, no: Box<Hir> },
@@ -168,7 +172,7 @@ impl Hir {
     pub fn min_width(&self, gw: &[(u128, u128)]) -> u128 {
         match self {
             Hir::Empty | Hir::Look(_) | Hir::LookAround { .. } | Hir::Fail => 0,
-            Hir::Class(_) => 1,
+            Hir::Class(_) | Hir::UClass(_) => 1,
             Hir::Concat(v) => v.iter().fold(0u128, |a, h| a.saturating_add(h.min_width(gw))).min(MAXWIDTH),
             Hir::Alt(v) => v.iter().map(|h| h.min_width(gw)).min().unwrap_or(0),
             Hir::Repeat { min, sub, .. } => sub.min_width(gw).saturating_mul(*min as u128).min(MAXWIDTH),
@@ -183,6 +187,7 @@ impl Hir {
         match self {
             Hir::Empty | Hir::Look(_) | Hir::LookAround { .. } | Hir::Fail => Some(0),
             Hir::Class(_) => Some(1),
+            Hir::UClass(_) => Some(4),
             Hir::Concat(v) => {
                 let mut t: u64 = 0;
                 for h in v {
@@ -241,7 +246,7 @@ pub fn props(h: &Hir, gw: &[(u128, u128)]) -> Props {
 fn walk_props(h: &Hir, gw: &[(u128, u128)], p: &mut Props) -> u64 {
     match h {
         Hir::Empty | Hir::Fail => 1,
-        Hir::Class(_) => 1,
+        Hir::Class(_) | Hir::UClass(_) => 1,
         Hir::Look(_) => {
             p.has_look = true;
             1
@@ -291,8 +296,19 @@ pub struct Lowered {
 }
 
 pub fn lower(parsed: Parsed) -> Result<Lowered, Error> {
+    lower_mode(parsed, false)
+}
+
+/// Lower a parsed python str pattern (codepoint classes, Unicode categories / case
+/// folding unless `re.ASCII`).
+pub fn lower_str(parsed: Parsed) -> Result<Lowered, Error> {
+    lower_mode(parsed, true)
+}
+
+fn lower_mode(parsed: Parsed, text: bool) -> Result<Lowered, Error> {
     let gw = parsed.group_widths.clone();
-    let hir = lower_seq(&parsed.nodes, parsed.flags, &gw, 0)?;
+    let flags = if text { parsed.flags | FLAG_TEXT } else { parsed.flags };
+    let hir = lower_seq(&parsed.nodes, flags, &gw, 0)?;
     Ok(Lowered { hir, groups: parsed.groups, names: parsed.names, group_widths: gw })
 }
 
@@ -305,7 +321,88 @@ fn combine_flags(flags: u32, add: u32, del: u32) -> u32 {
     (f | add) & !del
 }
 
-fn lit_set(c: u8, flags: u32) -> ByteSet {
+/// Internal flag: lowering a str pattern.
+const FLAG_TEXT: u32 = 1 << 30;
+
+fn cat_cpset(c: Cat, unicode: bool) -> CpSet {
+    use super::unicode as u;
+    let (base, neg) = match c {
+        Cat::Digit => (u::DIGIT, false),
+        Cat::NotDigit => (u::DIGIT, true),
+        Cat::Space => (u::SPACE, false),
+        Cat::NotSpace => (u::SPACE, true),
+        Cat::Word => (u::WORD, false),
+        Cat::NotWord => (u::WORD, true),
+    };
+    let set = if unicode {
+        CpSet::from_table(base)
+    } else {
+        let bs = cat_set(match c {
+            Cat::Digit | Cat::NotDigit => Cat::Digit,
+            Cat::Space | Cat::NotSpace => Cat::Space,
+            Cat::Word | Cat::NotWord => Cat::Word,
+        });
+        let mut s = CpSet::default();
+        for b in 0..128u8 {
+            if bs.contains(b) {
+                s.add(b as u32);
+            }
+        }
+        s.normalize();
+        s
+    };
+    if neg { set.negate() } else { set }
+}
+
+fn fold_cp(s: &CpSet, flags: u32) -> CpSet {
+    if flags & FLAG_IGNORECASE == 0 {
+        let mut s = s.clone();
+        s.normalize();
+        return s;
+    }
+    if flags & FLAG_UNICODE != 0 { s.fold_unicode() } else { s.fold_ascii() }
+}
+
+fn uclass(s: CpSet) -> Hir {
+    let mut s = s;
+    s.normalize();
+    if s.ranges.is_empty() { Hir::Fail } else { Hir::UClass(Box::new(s.ranges)) }
+}
+
+/// Text-mode lowering of single-character nodes.
+fn lower_text_char(n: &Node, flags: u32) -> Option<Hir> {
+    let unicode = flags & FLAG_UNICODE != 0;
+    Some(match n {
+        Node::Lit(c) => uclass(fold_cp(&CpSet::single(*c), flags)),
+        Node::NotLit(c) => uclass(fold_cp(&CpSet::single(*c), flags).negate()),
+        Node::Any => {
+            if flags & FLAG_DOTALL != 0 {
+                uclass(CpSet { ranges: vec![(0, super::unicode_class::MAX_CP)] })
+            } else {
+                uclass(CpSet::single(0x0a).negate())
+            }
+        }
+        Node::In { negate, items } => {
+            let mut lits = CpSet::default();
+            let mut cats = CpSet::default();
+            for it in items {
+                match *it {
+                    SetItem::Lit(c) => lits.add(c),
+                    SetItem::Range(a, b) => lits.add_range(a, b),
+                    SetItem::Cat(c) => cats.union(&cat_cpset(c, unicode)),
+                }
+            }
+            let mut all = fold_cp(&lits, flags);
+            all.union(&cats);
+            all.normalize();
+            uclass(if *negate { all.negate() } else { all })
+        }
+        _ => return None,
+    })
+}
+
+fn lit_set(c: u32, flags: u32) -> ByteSet {
+    let c = c.min(255) as u8;
     let mut s = ByteSet::single(c);
     if flags & FLAG_IGNORECASE != 0 {
         s.case_fold_ascii();
@@ -329,6 +426,11 @@ fn lower_node(n: &Node, flags: u32, gw: &[(u128, u128)], depth: usize) -> Result
     if depth > 2000 {
         return Err(Error::new("pattern too deeply nested", 0));
     }
+    if flags & FLAG_TEXT != 0 {
+        if let Some(h) = lower_text_char(n, flags) {
+            return Ok(h);
+        }
+    }
     Ok(match n {
         Node::Lit(c) => Hir::Class(lit_set(*c, flags)),
         Node::NotLit(c) => Hir::Class(lit_set(*c, flags).negate()),
@@ -344,8 +446,8 @@ fn lower_node(n: &Node, flags: u32, gw: &[(u128, u128)], depth: usize) -> Result
             let mut cats = ByteSet::EMPTY;
             for it in items {
                 match *it {
-                    SetItem::Lit(c) => lits.insert(c),
-                    SetItem::Range(a, b) => lits.insert_range(a, b),
+                    SetItem::Lit(c) => lits.insert(c.min(255) as u8),
+                    SetItem::Range(a, b) => lits.insert_range(a.min(255) as u8, b.min(255) as u8),
                     SetItem::Cat(c) => cats.union(&cat_set(c)),
                 }
             }
@@ -372,8 +474,20 @@ fn lower_node(n: &Node, flags: u32, gw: &[(u128, u128)], depth: usize) -> Result
                 }
             }
             At::EndString => Look::End,
-            At::Boundary => Look::WordB,
-            At::NonBoundary => Look::NotWordB,
+            At::Boundary => {
+                if flags & FLAG_TEXT != 0 && flags & FLAG_UNICODE != 0 {
+                    Look::WordBUni
+                } else {
+                    Look::WordB
+                }
+            }
+            At::NonBoundary => {
+                if flags & FLAG_TEXT != 0 && flags & FLAG_UNICODE != 0 {
+                    Look::NotWordBUni
+                } else {
+                    Look::NotWordB
+                }
+            }
         }),
         Node::Branch(items) => {
             let mut v = Vec::with_capacity(items.len());
@@ -426,7 +540,11 @@ fn lower_node(n: &Node, flags: u32, gw: &[(u128, u128)], depth: usize) -> Result
             }
         }
         Node::Failure => Hir::Fail,
-        Node::GroupRef(g) => Hir::Backref { group: *g, icase: flags & FLAG_IGNORECASE != 0 },
+        Node::GroupRef(g) => Hir::Backref {
+            group: *g,
+            icase: flags & FLAG_IGNORECASE != 0,
+            unicode: flags & FLAG_TEXT != 0 && flags & FLAG_UNICODE != 0,
+        },
         Node::GroupRefExists { group, yes, no } => Hir::Cond {
             group: *group,
             yes: Box::new(lower_seq(yes, flags, gw, depth + 1)?),

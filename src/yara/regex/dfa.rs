@@ -75,8 +75,8 @@ fn look_ok(l: Look, left: u8, right: u8) -> bool {
         Look::End => right & CTX_NONE != 0,
         Look::EndLine => right & (CTX_NONE | CTX_NL) != 0,
         Look::EndOrFinalNl => right & (CTX_NONE | CTX_FINAL_NL) != 0,
-        Look::WordB | Look::WordBYara => (left & CTX_WORD != 0) != (right & CTX_WORD != 0),
-        Look::NotWordB | Look::NotWordBYara => (left & CTX_WORD != 0) == (right & CTX_WORD != 0),
+        Look::WordB | Look::WordBUni => (left & CTX_WORD != 0) != (right & CTX_WORD != 0),
+        Look::NotWordB | Look::NotWordBUni => (left & CTX_WORD != 0) == (right & CTX_WORD != 0),
     }
 }
 
@@ -100,7 +100,7 @@ impl Dir {
                 (Look::End, true) => behind_mask |= CTX_NONE,
                 (Look::EndLine, true) => behind_mask |= CTX_NONE | CTX_NL,
                 (Look::EndOrFinalNl, true) => behind_mask |= CTX_NONE | CTX_FINAL_NL,
-                (Look::WordB | Look::NotWordB | Look::WordBYara | Look::NotWordBYara, _) => behind_mask |= CTX_WORD,
+                (Look::WordB | Look::NotWordB | Look::WordBUni | Look::NotWordBUni, _) => behind_mask |= CTX_WORD,
                 _ => {}
             }
         }

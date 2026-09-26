@@ -22,8 +22,8 @@ pub enum Cat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetItem {
-    Lit(u8),
-    Range(u8, u8),
+    Lit(u32),
+    Range(u32, u32),
     Cat(Cat),
 }
 
@@ -46,8 +46,8 @@ pub enum RepKind {
 
 #[derive(Clone, Debug)]
 pub enum Node {
-    Lit(u8),
-    NotLit(u8),
+    Lit(u32),
+    NotLit(u32),
     Any,
     In { negate: bool, items: Vec<SetItem> },
     At(At),
@@ -81,20 +81,22 @@ pub const MAXWIDTH: u128 = 1u128 << 64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tok {
-    Ch(u8),
-    Esc(u8),
+    Ch(u32),
+    Esc(u32),
 }
 
 struct Source<'a> {
-    s: &'a [u8],
+    s: &'a [u32],
+    /// str pattern (python `istext`)
+    text: bool,
     index: usize,
     next: Option<Tok>,
     next_len: usize,
 }
 
 impl<'a> Source<'a> {
-    fn new(s: &'a [u8]) -> Result<Source<'a>, Error> {
-        let mut src = Source { s, index: 0, next: None, next_len: 0 };
+    fn new(s: &'a [u32], text: bool) -> Result<Source<'a>, Error> {
+        let mut src = Source { s, text, index: 0, next: None, next_len: 0 };
         src.advance()?;
         Ok(src)
     }
@@ -107,7 +109,7 @@ impl<'a> Source<'a> {
             return Ok(());
         }
         let c = self.s[i];
-        if c == b'\\' {
+        if c == 0x5c {
             if i + 1 >= self.s.len() {
                 return Err(Error::new("bad escape (end of pattern)", self.s.len().saturating_sub(1)));
             }
@@ -129,7 +131,7 @@ impl<'a> Source<'a> {
     }
 
     fn matches(&mut self, c: u8) -> Result<bool, Error> {
-        if self.next == Some(Tok::Ch(c)) {
+        if self.next == Some(Tok::Ch(c as u32)) {
             self.advance()?;
             Ok(true)
         } else {
@@ -138,10 +140,10 @@ impl<'a> Source<'a> {
     }
 
     fn next_is_ch_in(&self, set: &[u8]) -> bool {
-        matches!(self.next, Some(Tok::Ch(c)) if set.contains(&c))
+        matches!(self.next, Some(Tok::Ch(c)) if c < 128 && set.contains(&(c as u8)))
     }
 
-    fn next_ch(&self) -> Option<u8> {
+    fn next_ch(&self) -> Option<u32> {
         match self.next {
             Some(Tok::Ch(c)) => Some(c),
             _ => None,
@@ -166,8 +168,8 @@ impl<'a> Source<'a> {
         let mut out = Vec::new();
         for _ in 0..n {
             match self.next {
-                Some(Tok::Ch(c)) if set.contains(&c) => {
-                    out.push(c);
+                Some(Tok::Ch(c)) if c < 128 && set.contains(&(c as u8)) => {
+                    out.push(c as u8);
                     self.advance()?;
                 }
                 _ => break,
@@ -176,7 +178,7 @@ impl<'a> Source<'a> {
         Ok(out)
     }
 
-    fn getuntil(&mut self, term: u8, name: &str) -> Result<Vec<u8>, Error> {
+    fn getuntil(&mut self, term: u8, name: &str) -> Result<Vec<u32>, Error> {
         let mut out = Vec::new();
         loop {
             let c = self.next;
@@ -188,7 +190,7 @@ impl<'a> Source<'a> {
                     }
                     return self.err(format!("missing {}, unterminated name", term as char));
                 }
-                Some(Tok::Ch(x)) if x == term => {
+                Some(Tok::Ch(x)) if x == term as u32 => {
                     if out.is_empty() {
                         return self.err(format!("missing {name}"));
                     }
@@ -196,7 +198,7 @@ impl<'a> Source<'a> {
                 }
                 Some(Tok::Ch(x)) => out.push(x),
                 Some(Tok::Esc(x)) => {
-                    out.push(b'\\');
+                    out.push(0x5c);
                     out.push(x);
                 }
             }
@@ -224,14 +226,35 @@ fn parse_int(digits: &[u8], radix: u32) -> u64 {
     v
 }
 
-fn is_identifier(name: &[u8]) -> bool {
+/// python `str.isidentifier()` (bytes patterns: ASCII only).
+fn is_identifier(name: &[u32], text: bool) -> bool {
+    let word = |c: u32| -> bool {
+        if c < 128 {
+            (c as u8).is_ascii_alphanumeric() || c == 0x5f
+        } else {
+            text && super::unicode_class::in_table(super::unicode::WORD, c)
+        }
+    };
+    let start = |c: u32| -> bool {
+        if c < 128 {
+            (c as u8).is_ascii_alphabetic() || c == 0x5f
+        } else {
+            word(c) && !super::unicode_class::in_table(super::unicode::DIGIT, c)
+        }
+    };
     match name.first() {
         None => false,
-        Some(&c) if c.is_ascii_alphabetic() || c == b'_' => {
-            name.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_')
-        }
+        Some(&c) if start(c) => name.iter().all(|&c| word(c)),
         _ => false,
     }
+}
+
+fn units_to_string(u: &[u32]) -> String {
+    u.iter().map(|&c| char::from_u32(c).unwrap_or('\u{fffd}')).collect()
+}
+
+fn units_digits(u: &[u32]) -> Option<Vec<u8>> {
+    if u.iter().all(|&c| (0x30..=0x39).contains(&c)) { Some(u.iter().map(|&c| c as u8).collect()) } else { None }
 }
 
 enum Esc {
@@ -275,7 +298,18 @@ impl State {
 }
 
 pub fn parse(pattern: &[u8], flags: u32) -> Result<Parsed, Error> {
-    let mut src = Source::new(pattern)?;
+    let units: Vec<u32> = pattern.iter().map(|&b| b as u32).collect();
+    parse_units(&units, flags, false)
+}
+
+/// Parse a python str pattern (codepoints).
+pub fn parse_str(pattern: &str, flags: u32) -> Result<Parsed, Error> {
+    let units: Vec<u32> = pattern.chars().map(|c| c as u32).collect();
+    parse_units(&units, flags, true)
+}
+
+fn parse_units(units: &[u32], flags: u32, text: bool) -> Result<Parsed, Error> {
+    let mut src = Source::new(units, text)?;
     let mut state = State {
         flags,
         names: Vec::new(),
@@ -285,12 +319,23 @@ pub fn parse(pattern: &[u8], flags: u32) -> Result<Parsed, Error> {
     };
     let verbose = flags & FLAG_VERBOSE != 0;
     let nodes = parse_sub(&mut src, &mut state, verbose, 0)?;
-    // fix_flags for bytes patterns
-    if state.flags & FLAG_UNICODE != 0 {
-        return Err(Error::new("cannot use UNICODE flag with a bytes pattern", 0));
-    }
-    if state.flags & FLAG_LOCALE != 0 && state.flags & FLAG_ASCII != 0 {
-        return Err(Error::new("ASCII and LOCALE flags are incompatible", 0));
+    // fix_flags
+    if text {
+        if state.flags & FLAG_LOCALE != 0 {
+            return Err(Error::new("cannot use LOCALE flag with a str pattern", 0));
+        }
+        if state.flags & FLAG_ASCII == 0 {
+            state.flags |= FLAG_UNICODE;
+        } else if state.flags & FLAG_UNICODE != 0 {
+            return Err(Error::new("ASCII and UNICODE flags are incompatible", 0));
+        }
+    } else {
+        if state.flags & FLAG_UNICODE != 0 {
+            return Err(Error::new("cannot use UNICODE flag with a bytes pattern", 0));
+        }
+        if state.flags & FLAG_LOCALE != 0 && state.flags & FLAG_ASCII != 0 {
+            return Err(Error::new("ASCII and LOCALE flags are incompatible", 0));
+        }
     }
     if src.next.is_some() {
         return src.err("unbalanced parenthesis");
@@ -326,17 +371,38 @@ fn parse_sub(src: &mut Source, state: &mut State, verbose: bool, nested: usize) 
     Ok(vec![Node::Branch(items)])
 }
 
-fn class_escape(src: &mut Source, c: u8) -> Result<Esc, Error> {
+/// `\u XXXX` / `\U XXXXXXXX` (str patterns only). Returns None when not applicable.
+fn unicode_escape(src: &mut Source, c: u8, start: usize) -> Result<Option<Esc>, Error> {
+    if !src.text || (c != b'u' && c != b'U') {
+        return Ok(None);
+    }
+    let n = if c == b'u' { 4 } else { 8 };
+    let h = src.getwhile(n, HEXDIGITS)?;
+    if h.len() != n {
+        return Err(Error::new(format!("incomplete escape \\{}{}", c as char, String::from_utf8_lossy(&h)), start));
+    }
+    let v = parse_int(&h, 16);
+    if v > 0x10ffff {
+        return Err(Error::new(format!("bad escape \\{}{}", c as char, String::from_utf8_lossy(&h)), start));
+    }
+    Ok(Some(Esc::Node(Node::Lit(v as u32))))
+}
+
+fn class_escape(src: &mut Source, c: u32) -> Result<Esc, Error> {
     let start = src.tell().saturating_sub(2);
+    if c >= 128 {
+        return Ok(Esc::Node(Node::Lit(c)));
+    }
+    let c = c as u8;
     match c {
         b'a' => return Ok(Esc::Node(Node::Lit(0x07))),
         b'b' => return Ok(Esc::Node(Node::Lit(0x08))),
         b'f' => return Ok(Esc::Node(Node::Lit(0x0c))),
-        b'n' => return Ok(Esc::Node(Node::Lit(b'\n'))),
-        b'r' => return Ok(Esc::Node(Node::Lit(b'\r'))),
-        b't' => return Ok(Esc::Node(Node::Lit(b'\t'))),
+        b'n' => return Ok(Esc::Node(Node::Lit(0x0a))),
+        b'r' => return Ok(Esc::Node(Node::Lit(0x0d))),
+        b't' => return Ok(Esc::Node(Node::Lit(0x09))),
         b'v' => return Ok(Esc::Node(Node::Lit(0x0b))),
-        b'\\' => return Ok(Esc::Node(Node::Lit(b'\\'))),
+        b'\\' => return Ok(Esc::Node(Node::Lit(0x5c))),
         b'd' => return Ok(Esc::Cat(Cat::Digit)),
         b'D' => return Ok(Esc::Cat(Cat::NotDigit)),
         b's' => return Ok(Esc::Cat(Cat::Space)),
@@ -350,7 +416,13 @@ fn class_escape(src: &mut Source, c: u8) -> Result<Esc, Error> {
         if h.len() != 2 {
             return Err(Error::new(format!("incomplete escape \\x{}", String::from_utf8_lossy(&h)), start));
         }
-        return Ok(Esc::Node(Node::Lit(parse_int(&h, 16) as u8)));
+        return Ok(Esc::Node(Node::Lit(parse_int(&h, 16) as u32)));
+    }
+    if let Some(e) = unicode_escape(src, c, start)? {
+        return Ok(e);
+    }
+    if c == b'N' && src.text {
+        return Err(Error::new("\\N{...} escapes are not supported", start));
     }
     if OCTDIGITS.contains(&c) {
         let mut d = vec![c];
@@ -359,16 +431,20 @@ fn class_escape(src: &mut Source, c: u8) -> Result<Esc, Error> {
         if v > 0o377 {
             return Err(Error::new("octal escape value outside of range 0-0o377", start));
         }
-        return Ok(Esc::Node(Node::Lit(v as u8)));
+        return Ok(Esc::Node(Node::Lit(v as u32)));
     }
     if DIGITS.contains(&c) || is_ascii_letter(c) {
         return Err(Error::new(format!("bad escape \\{}", c as char), start));
     }
-    Ok(Esc::Node(Node::Lit(c)))
+    Ok(Esc::Node(Node::Lit(c as u32)))
 }
 
-fn escape(src: &mut Source, state: &mut State, c: u8) -> Result<Esc, Error> {
+fn escape(src: &mut Source, state: &mut State, c: u32) -> Result<Esc, Error> {
     let start = src.tell().saturating_sub(2);
+    if c >= 128 {
+        return Ok(Esc::Node(Node::Lit(c)));
+    }
+    let c = c as u8;
     match c {
         b'A' => return Ok(Esc::Node(Node::At(At::BeginningString))),
         b'b' => return Ok(Esc::Node(Node::At(At::Boundary))),
@@ -382,11 +458,11 @@ fn escape(src: &mut Source, state: &mut State, c: u8) -> Result<Esc, Error> {
         b'W' => return Ok(Esc::Cat(Cat::NotWord)),
         b'a' => return Ok(Esc::Node(Node::Lit(0x07))),
         b'f' => return Ok(Esc::Node(Node::Lit(0x0c))),
-        b'n' => return Ok(Esc::Node(Node::Lit(b'\n'))),
-        b'r' => return Ok(Esc::Node(Node::Lit(b'\r'))),
-        b't' => return Ok(Esc::Node(Node::Lit(b'\t'))),
+        b'n' => return Ok(Esc::Node(Node::Lit(0x0a))),
+        b'r' => return Ok(Esc::Node(Node::Lit(0x0d))),
+        b't' => return Ok(Esc::Node(Node::Lit(0x09))),
         b'v' => return Ok(Esc::Node(Node::Lit(0x0b))),
-        b'\\' => return Ok(Esc::Node(Node::Lit(b'\\'))),
+        b'\\' => return Ok(Esc::Node(Node::Lit(0x5c))),
         _ => {}
     }
     if c == b'x' {
@@ -394,21 +470,27 @@ fn escape(src: &mut Source, state: &mut State, c: u8) -> Result<Esc, Error> {
         if h.len() != 2 {
             return Err(Error::new(format!("incomplete escape \\x{}", String::from_utf8_lossy(&h)), start));
         }
-        return Ok(Esc::Node(Node::Lit(parse_int(&h, 16) as u8)));
+        return Ok(Esc::Node(Node::Lit(parse_int(&h, 16) as u32)));
+    }
+    if let Some(e) = unicode_escape(src, c, start)? {
+        return Ok(e);
+    }
+    if c == b'N' && src.text {
+        return Err(Error::new("\\N{...} escapes are not supported", start));
     }
     if c == b'0' {
         let mut d = vec![c];
         d.extend(src.getwhile(2, OCTDIGITS)?);
-        return Ok(Esc::Node(Node::Lit(parse_int(&d, 8) as u8)));
+        return Ok(Esc::Node(Node::Lit(parse_int(&d, 8) as u32)));
     }
     if DIGITS.contains(&c) {
         let mut d = vec![c];
-        if let Some(n) = src.next_ch() {
+        if let Some(n) = src.next_ch().filter(|&n| n < 128).map(|n| n as u8) {
             if DIGITS.contains(&n) {
                 src.get()?;
                 d.push(n);
                 if OCTDIGITS.contains(&d[0]) && OCTDIGITS.contains(&d[1]) {
-                    if let Some(n3) = src.next_ch() {
+                    if let Some(n3) = src.next_ch().filter(|&n| n < 128).map(|n| n as u8) {
                         if OCTDIGITS.contains(&n3) {
                             src.get()?;
                             d.push(n3);
@@ -416,7 +498,7 @@ fn escape(src: &mut Source, state: &mut State, c: u8) -> Result<Esc, Error> {
                             if v > 0o377 {
                                 return Err(Error::new("octal escape value outside of range 0-0o377", start));
                             }
-                            return Ok(Esc::Node(Node::Lit(v as u8)));
+                            return Ok(Esc::Node(Node::Lit(v as u32)));
                         }
                     }
                 }
@@ -436,7 +518,7 @@ fn escape(src: &mut Source, state: &mut State, c: u8) -> Result<Esc, Error> {
     if is_ascii_letter(c) {
         return Err(Error::new(format!("bad escape \\{}", c as char), start));
     }
-    Ok(Esc::Node(Node::Lit(c)))
+    Ok(Esc::Node(Node::Lit(c as u32)))
 }
 
 fn cat_node(c: Cat) -> Node {
@@ -459,19 +541,19 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
     loop {
         let this = match src.next {
             None => break,
-            Some(Tok::Ch(b'|')) | Some(Tok::Ch(b')')) => break,
+            Some(Tok::Ch(0x7c)) | Some(Tok::Ch(0x29)) => break,
             Some(t) => t,
         };
         src.get()?;
         if verbose {
             if let Tok::Ch(c) = this {
-                if WHITESPACE.contains(&c) {
+                if c < 128 && WHITESPACE.contains(&(c as u8)) {
                     continue;
                 }
-                if c == b'#' {
+                if c == 0x23 {
                     loop {
                         match src.get()? {
-                            None | Some(Tok::Ch(b'\n')) => break,
+                            None | Some(Tok::Ch(0x0a)) => break,
                             _ => {}
                         }
                     }
@@ -484,8 +566,8 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                 Esc::Node(n) => sub.push(n),
                 Esc::Cat(c) => sub.push(cat_node(c)),
             },
-            Tok::Ch(c) if !SPECIAL.contains(&c) => sub.push(Node::Lit(c)),
-            Tok::Ch(b'[') => {
+            Tok::Ch(c) if c >= 128 || !SPECIAL.contains(&(c as u8)) => sub.push(Node::Lit(c)),
+            Tok::Ch(0x5b) => {
                 let here = src.tell() - 1;
                 let negate = src.matches(b'^')?;
                 let mut set: Vec<SetItem> = Vec::new();
@@ -493,7 +575,7 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                     let this = src.get()?;
                     let code1: Esc = match this {
                         None => return Err(Error::new("unterminated character set", here)),
-                        Some(Tok::Ch(b']')) if !set.is_empty() => break,
+                        Some(Tok::Ch(0x5d)) if !set.is_empty() => break,
                         Some(Tok::Esc(c)) => class_escape(src, c)?,
                         Some(Tok::Ch(c)) => Esc::Node(Node::Lit(c)),
                     };
@@ -501,13 +583,13 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                         let that = src.get()?;
                         let code2 = match that {
                             None => return Err(Error::new("unterminated character set", here)),
-                            Some(Tok::Ch(b']')) => {
+                            Some(Tok::Ch(0x5d)) => {
                                 match code1 {
                                     Esc::Cat(c) => set.push(SetItem::Cat(c)),
                                     Esc::Node(Node::Lit(c)) => set.push(SetItem::Lit(c)),
                                     Esc::Node(_) => {}
                                 }
-                                set.push(SetItem::Lit(b'-'));
+                                set.push(SetItem::Lit(0x2d));
                                 break;
                             }
                             Some(Tok::Esc(c)) => class_escape(src, c)?,
@@ -538,10 +620,10 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                 }
                 sub.push(Node::In { negate, items: set });
             }
-            Tok::Ch(c) if c == b'?' || c == b'*' || c == b'+' || c == b'{' => {
+            Tok::Ch(c) if c == 0x3f || c == 0x2a || c == 0x2b || c == 0x7b => {
                 let here = src.tell();
                 let (min, max);
-                match c {
+                match c as u8 {
                     b'?' => {
                         min = 0;
                         max = 1;
@@ -555,28 +637,28 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                         max = MAXREPEAT;
                     }
                     _ => {
-                        if src.next == Some(Tok::Ch(b'}')) {
-                            sub.push(Node::Lit(b'{'));
+                        if src.next == Some(Tok::Ch(0x7d)) {
+                            sub.push(Node::Lit(0x7b));
                             continue;
                         }
                         let mut lo = Vec::new();
                         let mut hi = Vec::new();
                         while src.next_is_ch_in(DIGITS) {
                             if let Some(Tok::Ch(d)) = src.get()? {
-                                lo.push(d);
+                                lo.push(d as u8);
                             }
                         }
                         if src.matches(b',')? {
                             while src.next_is_ch_in(DIGITS) {
                                 if let Some(Tok::Ch(d)) = src.get()? {
-                                    hi.push(d);
+                                    hi.push(d as u8);
                                 }
                             }
                         } else {
                             hi = lo.clone();
                         }
                         if !src.matches(b'}')? {
-                            sub.push(Node::Lit(b'{'));
+                            sub.push(Node::Lit(0x7b));
                             src.seek(here)?;
                             continue;
                         }
@@ -619,8 +701,8 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                 };
                 sub.push(Node::Repeat { min, max, kind, item });
             }
-            Tok::Ch(b'.') => sub.push(Node::Any),
-            Tok::Ch(b'(') => {
+            Tok::Ch(0x2e) => sub.push(Node::Any),
+            Tok::Ch(0x28) => {
                 let start = src.tell() - 1;
                 let mut capture = true;
                 let mut atomic = false;
@@ -631,22 +713,23 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                     let ch = match src.get()? {
                         None => return src.err("unexpected end of pattern"),
                         Some(Tok::Esc(_)) => return Err(Error::new("unknown extension ?\\", start)),
-                        Some(Tok::Ch(c)) => c,
+                        Some(Tok::Ch(c)) => if c < 128 { c as u8 } else { 0xff },
                     };
+                    let ch: u8 = if ch < 128 { ch as u8 } else { 0xff };
                     match ch {
                         b'P' => {
                             if src.matches(b'<')? {
                                 let n = src.getuntil(b'>', "group name")?;
-                                if !is_identifier(&n) {
+                                if !is_identifier(&n, src.text) {
                                     return src.err("bad character in group name");
                                 }
-                                name = Some(String::from_utf8_lossy(&n).into_owned());
+                                name = Some(units_to_string(&n));
                             } else if src.matches(b'=')? {
                                 let n = src.getuntil(b')', "group name")?;
-                                if !is_identifier(&n) {
+                                if !is_identifier(&n, src.text) {
                                     return src.err("bad character in group name");
                                 }
-                                let n = String::from_utf8_lossy(&n).into_owned();
+                                let n = units_to_string(&n);
                                 let gid = match state.names.iter().find(|(k, _)| *k == n) {
                                     Some(&(_, g)) => g,
                                     None => return src.err(format!("unknown group name '{n}'")),
@@ -670,7 +753,7 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                                 if src.next.is_none() {
                                     return Err(Error::new("missing ), unterminated comment", start));
                                 }
-                                if src.get()? == Some(Tok::Ch(b')')) {
+                                if src.get()? == Some(Tok::Ch(0x29)) {
                                     break;
                                 }
                             }
@@ -683,7 +766,7 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                             if ch == b'<' {
                                 ch = match src.get()? {
                                     None => return src.err("unexpected end of pattern"),
-                                    Some(Tok::Ch(c)) if c == b'=' || c == b'!' => c,
+                                    Some(Tok::Ch(c)) if c == 0x3d || c == 0x21 => c as u8,
                                     Some(_) => return src.err("unknown extension ?<"),
                                 };
                                 behind = true;
@@ -713,17 +796,18 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                         b'(' => {
                             let condname = src.getuntil(b')', "group name")?;
                             let condgroup: u32;
-                            if !(condname.iter().all(|c| c.is_ascii_digit())) {
-                                if !is_identifier(&condname) {
+                            let digits = units_digits(&condname);
+                            if digits.is_none() {
+                                if !is_identifier(&condname, src.text) {
                                     return src.err("bad character in group name");
                                 }
-                                let n = String::from_utf8_lossy(&condname).into_owned();
+                                let n = units_to_string(&condname);
                                 condgroup = match state.names.iter().find(|(k, _)| *k == n) {
                                     Some(&(_, g)) => g,
                                     None => return src.err(format!("unknown group name '{n}'")),
                                 };
                             } else {
-                                let g = parse_int(&condname, 10);
+                                let g = parse_int(&digits.unwrap_or_default(), 10);
                                 if g == 0 {
                                     return src.err("bad group number");
                                 }
@@ -739,7 +823,7 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                             let yes = parse_seq(src, state, verbose, nested + 1, false)?;
                             let no = if src.matches(b'|')? {
                                 let no = parse_seq(src, state, verbose, nested + 1, false)?;
-                                if src.next == Some(Tok::Ch(b'|')) {
+                                if src.next == Some(Tok::Ch(0x7c)) {
                                     return src.err("conditional backref with more than two branches");
                                 }
                                 Some(no)
@@ -806,9 +890,9 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                     sub.push(Node::Sub { group, add, del, p });
                 }
             }
-            Tok::Ch(b'^') => sub.push(Node::At(At::Beginning)),
-            Tok::Ch(b'$') => sub.push(Node::At(At::End)),
-            Tok::Ch(c) => return src.err(format!("unsupported special character {}", c as char)),
+            Tok::Ch(0x5e) => sub.push(Node::At(At::Beginning)),
+            Tok::Ch(0x24) => sub.push(Node::At(At::End)),
+            Tok::Ch(c) => return src.err(format!("unsupported special character {}", char::from_u32(c).unwrap_or('?'))),
         }
     }
     // Unpack non-capturing groups without flags.
@@ -849,8 +933,11 @@ fn parse_flags(src: &mut Source, state: &mut State, first: u8) -> Result<Option<
     if ch != b'-' {
         loop {
             let flag = flag_bit(ch);
-            if ch == b'u' {
+            if ch == b'u' && !src.text {
                 return src.err("bad inline flags: cannot use 'u' flag with a bytes pattern");
+            }
+            if ch == b'L' && src.text {
+                return src.err("bad inline flags: cannot use 'L' flag with a str pattern");
             }
             add |= flag;
             if flag & TYPE_FLAGS != 0 && add & TYPE_FLAGS != flag {
@@ -859,7 +946,7 @@ fn parse_flags(src: &mut Source, state: &mut State, first: u8) -> Result<Option<
             ch = match src.get()? {
                 None => return src.err("missing -, : or )"),
                 Some(Tok::Esc(_)) => return src.err("missing -, : or )"),
-                Some(Tok::Ch(c)) => c,
+                Some(Tok::Ch(c)) => if c < 128 { c as u8 } else { 0xff },
             };
             if ch == b')' || ch == b'-' || ch == b':' {
                 break;
@@ -877,7 +964,7 @@ fn parse_flags(src: &mut Source, state: &mut State, first: u8) -> Result<Option<
         ch = match src.get()? {
             None => return src.err("missing flag"),
             Some(Tok::Esc(_)) => return src.err("missing flag"),
-            Some(Tok::Ch(c)) => c,
+            Some(Tok::Ch(c)) => if c < 128 { c as u8 } else { 0xff },
         };
         if !is_flag(ch) {
             return src.err(if ch.is_ascii_alphabetic() { "unknown flag" } else { "missing flag" });
@@ -891,7 +978,7 @@ fn parse_flags(src: &mut Source, state: &mut State, first: u8) -> Result<Option<
             ch = match src.get()? {
                 None => return src.err("missing :"),
                 Some(Tok::Esc(_)) => return src.err("missing :"),
-                Some(Tok::Ch(c)) => c,
+                Some(Tok::Ch(c)) => if c < 128 { c as u8 } else { 0xff },
             };
             if ch == b':' {
                 break;
