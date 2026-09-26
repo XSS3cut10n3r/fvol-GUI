@@ -16,6 +16,8 @@ pub mod kdbg;
 pub mod objects;
 pub mod pdb;
 pub mod pe;
+pub mod pefile;
+mod pefile_ord;
 pub mod pool;
 pub mod token;
 pub mod vad;
