@@ -13,8 +13,8 @@
 
 use crate::context::Context;
 use crate::error::{Error, Result};
-use crate::layers::scan::{FnScanner, MultiStringScanner, scan_each};
-use crate::symbols::linux::search::{FastBytesScanner, Needle};
+use crate::layers::scan::{FnScanner, scan_each};
+use crate::symbols::linux::search::{FastBytesScanner, FastMultiStringScanner, Needle};
 use crate::layers::{IntelLayer, Layer, PagingMode, PteFlavor};
 use crate::objects::{LayerRef, Module};
 use crate::symbols::linux::vmcoreinfo::{VmValue, search_vmcoreinfo_elf_note};
@@ -119,7 +119,7 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
             _ => {
                 let _t = span("linux vmcoreinfo: banner scan (multi)");
                 let pats: Vec<&[u8]> = valid.iter().map(|(b, _)| b.as_slice()).collect();
-                let mss = MultiStringScanner::new(&pats);
+                let mss = FastMultiStringScanner::new(&pats);
                 let mut h = None;
                 scan_each(phys, &mss, None, |(_, idx)| {
                     h = Some(idx as usize);
@@ -260,7 +260,7 @@ pub fn find_aslr(phys: LayerRef, table: TableRef) -> Result<(i128, i128)> {
 /// python `LinuxIntelStacker.stack`. `Err` = python raised (the stacker fails).
 pub fn intel_stack(phys: LayerRef, banners: &[(Vec<u8>, IsfLocation)]) -> Result<Option<LinuxAutomagic>> {
     let pats: Vec<&[u8]> = banners.iter().map(|(b, _)| b.as_slice()).collect();
-    let mss = MultiStringScanner::new(&pats);
+    let mss = FastMultiStringScanner::new(&pats);
     let mut out: Option<Result<LinuxAutomagic>> = None;
     let _t = span("linux intel stacker: banner scan");
     scan_each(phys, &mss, None, |(_, idx)| {

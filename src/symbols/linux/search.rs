@@ -104,6 +104,68 @@ impl crate::layers::scan::Scanner for FastBytesScanner {
     }
 }
 
+/// python `scanners.MultiStringScanner(patterns)` (leftmost-longest, non-overlapping) with the
+/// fast search on the patterns' longest common prefix (all Linux banners start with
+/// `"Linux version "`): candidates come from [`Needle`], the trie decides at each candidate.
+/// Falls back to the plain trie scan when the common prefix is shorter than 2 bytes.
+/// Hit = (address, pattern index).
+pub struct FastMultiStringScanner {
+    mss: crate::layers::scan::MultiStringScanner,
+    lcp: Vec<u8>,
+    maxlen: usize,
+}
+
+impl FastMultiStringScanner {
+    pub fn new<P: AsRef<[u8]>>(patterns: &[P]) -> FastMultiStringScanner {
+        let pats: Vec<&[u8]> = patterns.iter().map(|p| p.as_ref()).filter(|p| !p.is_empty()).collect();
+        let mut lcp: Vec<u8> = pats.first().map(|p| p.to_vec()).unwrap_or_default();
+        for p in &pats {
+            let n = lcp.iter().zip(p.iter()).take_while(|(a, b)| a == b).count();
+            lcp.truncate(n);
+        }
+        let maxlen = pats.iter().map(|p| p.len()).max().unwrap_or(0);
+        FastMultiStringScanner { mss: crate::layers::scan::MultiStringScanner::new(patterns), lcp, maxlen }
+    }
+
+    /// Pattern by index (hits carry the index).
+    pub fn pattern(&self, idx: usize) -> &[u8] {
+        self.mss.pattern(idx)
+    }
+}
+
+impl crate::layers::scan::Scanner for FastMultiStringScanner {
+    type Hit = (u64, u32);
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        if self.lcp.len() < 2 {
+            return self.mss.scan(data, data_offset, hits);
+        }
+        let cs = self.chunk_size();
+        let mut next_allowed = 0usize;
+        Needle::new(&self.lcp).for_each(data, |i| {
+            if i < next_allowed {
+                return true;
+            }
+            if i as u64 >= cs {
+                return false;
+            }
+            // the longest pattern matching exactly at i (leftmost-longest => reported first)
+            let end = (i + self.maxlen).min(data.len());
+            let mut m = None;
+            self.mss.search(&data[i..end], |o, pi| {
+                if o == 0 {
+                    m = Some(pi);
+                }
+                false
+            });
+            if let Some(pi) = m {
+                hits.push((data_offset + i as u64, pi));
+                next_allowed = i + self.mss.pattern(pi as usize).len();
+            }
+            true
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +199,23 @@ mod tests {
             true
         });
         assert_eq!(v, (0..98).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn multi_matches_trie_scanner() {
+        use crate::layers::scan::{MultiStringScanner, Scanner};
+        let pats: Vec<&[u8]> = vec![b"Linux version 5.1 (a)\n\0", b"Linux version 5.1 (a)\n\0xx", b"Linux version 6.8 (b)\n\0", b"Linux version"];
+        let mut h = vec![0u8; 5000];
+        let put = |h: &mut Vec<u8>, at: usize, s: &[u8]| h[at..at + s.len()].copy_from_slice(s);
+        put(&mut h, 10, b"Linux version 5.1 (a)\n\0xx");
+        put(&mut h, 100, b"Linux version 6.8 (b)\n\0");
+        put(&mut h, 200, b"Linux version 7");
+        put(&mut h, 300, b"Linux versioLinux version 5.1 (a)\n\0");
+        put(&mut h, 4990, b"Linux vers");
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        MultiStringScanner::new(&pats).scan(&h, 0, &mut a);
+        FastMultiStringScanner::new(&pats).scan(&h, 0, &mut b);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 4);
     }
 }
