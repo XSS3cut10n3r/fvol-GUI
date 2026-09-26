@@ -32,14 +32,14 @@ pub(crate) const SPEC: &str = r#"
 0f 01 @d5 : xend
 0f 01 @d6 : xtest
 0f 01 @d7 : enclu
-0f 01 @d8 : vmrun aAX
+0f 01 @d8 : vmrun nAX
 0f 01 @d9 : vmmcall
-0f 01 @da : vmload aAX
-0f 01 @db : vmsave aAX
+0f 01 @da : vmload nAX
+0f 01 @db : vmsave nAX
 0f 01 @dc : stgi
 0f 01 @dd : clgi
 0f 01 @de : skinit eax
-0f 01 @df : invlpga aAX, ecx
+0f 01 @df : invlpga nAX, ecx
 0f 01 @ee : rdpkru
 0f 01 @ef : wrpkru
 0f 01 @f8 : swapgs
@@ -109,7 +109,8 @@ pub(crate) const SPEC: &str = r#"
 0f 1c 66 m : nop m:v/z
 0f 1d m : nop m:v/z
 0f 1e m : nop m:v/z
-0f 1f : nop m:v ; lock
+0f 1f o32|o64 : nop m:v ; lock
+0f 1f o16 : nop m:v
 # ------------------------------------------------------------------ 0F 20-2F
 0f 20 : mov R:n, r:c ; regform
 0f 21 : mov R:n, r:dr ; regform
@@ -370,6 +371,7 @@ pub(crate) const SPEC: &str = r#"
 0f ae np @e8 : lfence
 0f ae np @f0 : mfence
 0f ae np @f8 : sfence
+0f ae f3|f2 p66 w0 : INVALID
 0f ae 66 m /6 : clwb M:/b
 0f ae 66 m /7 : clflushopt M:/b
 0f ae 66 r /6 : tpause R:d
@@ -625,6 +627,8 @@ pub(crate) const SPEC: &str = r#"
 38 f0 f2 : crc32 r:y, m:b
 38 f1 f2|6f2 : crc32 r:y, m:v
 38 f8 66 m : movdir64b r:A, M:/zmm
+38 f8 np mode64 m a32 w1 : movdir64b r:A, M:/zmm
+38 f8 66 mode64 m a32 w1 : movdir64b r:q, M:/zmm
 38 f9 m : movdiri M:y, r:y
 38 f6 66 : adcx r:y, m:y
 38 f6 f3 : adox r:y, m:y
