@@ -9,6 +9,7 @@
 //!
 //! The x86 decoder is table driven and allocation free; see `x86/`.
 
+pub mod arm64;
 pub mod x86;
 
 pub use x86::{decode, disasm, Insn, Mem, MemSize, Mode, Operand, Reg};
@@ -28,6 +29,7 @@ pub fn format_capstone_into(data: &[u8], offset: u64, arch: &str, out: &mut Stri
     let mode = match arch {
         "intel" => Mode::X86_32,
         "intel64" => Mode::X86_64,
+        "arm64" => return arm64::format_arm64_into(data, offset, out),
         _ => return,
     };
     let mut pos = 0usize;
