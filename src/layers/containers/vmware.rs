@@ -17,25 +17,39 @@ const HEADER: u64 = 12; // "<4sII"
 const GROUP: u64 = 80; // "64sQQ"
 
 /// python `VmwareStacker.stack`: `<name>.vmem` + `<name>.vmss`, else `<name>.vmsn`.
-pub(crate) fn stack(base: &Base, location: &Path) -> Result<SegmentedLayer> {
-    let loc = location.as_os_str().as_bytes();
-    let Some(stem) = loc.strip_suffix(b".vmem") else {
-        return Err(Error::Layer("vmware: not a .vmem file".into()));
+/// `location` is the local file of the `.vmem`, `url` python's location of it (tested for
+/// the `.vmem` suffix, as python does; when remote, the metadata file next to it is
+/// downloaded into the rsvol cache like the image). Returns the layer and python's location
+/// of the metadata file (the meta_layer's `location` in configurations).
+pub(crate) fn stack(base: &Base, location: &Path, url: Option<&str>, offline: bool) -> Result<(SegmentedLayer, String)> {
+    let not_vmem = || Error::Layer("vmware: not a .vmem file".into());
+    let url_stem = match url {
+        Some(u) => Some(u.strip_suffix(".vmem").ok_or_else(not_vmem)?),
+        None => None,
     };
-    let with = |ext: &[u8]| -> PathBuf {
-        let mut v = stem.to_vec();
-        v.extend_from_slice(ext);
-        PathBuf::from(std::ffi::OsString::from_vec(v))
+    let stem = location.as_os_str().as_bytes().strip_suffix(b".vmem");
+    let open_meta = |ext: &str| -> Result<(FileLayer, String)> {
+        if let Some(us) = url_stem.filter(|u| crate::util::download::is_remote(u)) {
+            let meta_url = format!("{us}{ext}");
+            let p = crate::util::download::fetch(&meta_url, offline)?;
+            return Ok((FileLayer::open(&p)?, meta_url));
+        }
+        let mut v = stem.ok_or_else(not_vmem)?.to_vec();
+        v.extend_from_slice(ext.as_bytes());
+        let p = PathBuf::from(std::ffi::OsString::from_vec(v));
+        let meta_loc = match url_stem {
+            Some(us) => format!("{us}{ext}"),
+            None => crate::util::paths::path_to_file_uri(&p),
+        };
+        Ok((FileLayer::open(&p)?, meta_loc))
     };
     // python opens the file and reads 10 bytes; any IOError moves on to the .vmsn
-    let meta = match FileLayer::open(&with(b".vmss")) {
-        Ok(m) => m,
-        Err(_) => FileLayer::open(&with(b".vmsn"))
-            .map_err(|_| Error::Layer("vmware: no .vmss/.vmsn metadata next to the .vmem".into()))?,
-    };
+    let (meta, meta_loc) = open_meta(".vmss")
+        .or_else(|_| open_meta(".vmsn"))
+        .map_err(|_| Error::Layer("vmware: no .vmss/.vmsn metadata next to the .vmem".into()))?;
     let meta = Arc::new(meta);
     let segs = read_regions(&Base::from_file(&meta))?;
-    SegmentedLayer::new("VmwareLayer", base, segs)
+    Ok((SegmentedLayer::new("VmwareLayer", base, segs)?, meta_loc))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

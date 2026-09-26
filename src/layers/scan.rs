@@ -1952,7 +1952,7 @@ mod tests {
             eprintln!("set RSVOL_BENCH_IMG");
             return;
         };
-        let (phys, _) = crate::automagic::stack_physical(std::path::Path::new(&path), None).unwrap();
+        let (phys, _) = crate::automagic::stack_physical(std::path::Path::new(&path), None, false, None).unwrap();
         let mut layers: Vec<(&str, &dyn Layer)> = vec![("physical", phys.as_ref())];
         let ctx;
         if std::env::var_os("RSVOL_BENCH_WIN").is_some() {

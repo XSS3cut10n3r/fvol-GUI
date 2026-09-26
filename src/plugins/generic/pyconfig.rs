@@ -48,7 +48,8 @@ pub fn container_tree(ctx: &Context, prefix: &str, extra: bool) -> Result<Items>
     fn rec(listing: &[crate::layers::containers::StackEntry], i: usize, prefix: &str, extra: bool, location: &str, out: &mut Items) {
         let e = &listing[i];
         if e.class == "FileLayer" {
-            out.push((format!("{prefix}.location"), s(location)));
+            // the input file, or a file a stacker opened next to it (VMware metadata)
+            out.push((format!("{prefix}.location"), s(e.location.as_deref().unwrap_or(location))));
             out.push((format!("{prefix}.class"), s(layer_class_path(e.class))));
             return;
         }
