@@ -107,8 +107,10 @@ for p in &procs { let v = p.f(&pid).int()?; let d = p.f(&dtb).u64()?; }
 
 The prelude brings in `WinExt` (EPROCESS / ETHREAD / KTHREAD / LIST_ENTRY / UNICODE_STRING /
 KSYSTEM_TIME / EX_FAST_REF / LDR_DATA_TABLE_ENTRY / FILE_OBJECT...), `VadExt` (MMVAD tree),
-`TokenExt` (TOKEN), `KtimerExt` (KTIMER), `CacheExt` (CONTROL_AREA / SHARED_CACHE_MAP / VACB).
-Pool / object-header helpers live in `crate::symbols::windows::pool`.
+`TokenExt` (TOKEN), `KtimerExt` (KTIMER), `CacheExt` (CONTROL_AREA / SHARED_CACHE_MAP / VACB),
+`PoolExt` (POOL_HEADER / OBJECT_HEADER / executive objects / big-page tracker, in
+`symbols::windows::pool`) and `ObjectsExt` (DEVICE_OBJECT / DRIVER_OBJECT / symbolic links /
+mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning" below.
 
 | python | rust |
 |---|---|
@@ -245,6 +247,62 @@ let hits = scan(k.vlayer, &s, Some(&[(start, len)]));                           
 
 Scanner hits must respect python's rule "only report matches starting before `chunk_size`";
 the built-in scanners do. Per-hit validation can run inside the scanner (it runs in parallel).
+Scanners must use python's `chunk_size`/`overlap` values for that scanner class: the overlap
+changes python's last chunk of a section (hits there can be reported twice, like python).
+
+| python | rust |
+|---|---|
+| `layer.scan(ctx, scanners.BytesScanner(needle), sections)` | `scan(layer, &BytesScanner::new(needle), Some(&secs))` → `Vec<u64>` |
+| `layer.scan(ctx, scanners.MultiStringScanner(patterns))` | `scan_each(layer, &MultiStringScanner::new(&pats), None, \|(addr, idx)\| ..)` (AVX2 prefilter; `RSVOL_NO_SIMD=1` forces scalar) |
+| `layer.scan(ctx, scanners.RegExScanner(pattern))` | `FnScanner::new(\|data, off, out\| ..)` with the regex engine (apply the `chunk_size` rule yourself) |
+| `PdbSignatureScanner(names)` / `PDBUtility.pdbname_scan(...)` | `automagic::windows::{RsdsScanner, pdbname_scan}` (streaming) or `PdbSignatureScanner` (GUID/age in the hit) |
+| a scan that usually stops at an early hit (banners) | `scan_each_progressive(layer, &scanner, \|h\| h.0, \|h\| ..)` (growing batches; same hits/order as `scan_each`) |
+
+A custom scanner gets the fast paths by implementing the optional `Scanner` methods:
+`prescan`/`finish` (byte matching that depends only on the chunk's bytes: identical physical
+pages mapped at several virtual addresses are searched once) and `stream_window`/`prescan_piece`
+(big chunks read in 64 KiB cache-resident pieces). `BytesScanner`, `MultiStringScanner`,
+`RsdsScanner` and the pool header scanner implement them; a plain `scan` still works (mapped
+chunks, slower).
+
+### Pool scanning (`crate::plugins::windows::poolscanner`, `crate::symbols::windows::pool`)
+
+| python | rust |
+|---|---|
+| `PoolScanner.builtin_constraints(table, [b"Fil\xe5", b"File"])` | `builtin_constraints(k.table.name(), &[b"Fil\xe5", b"File"])` → `Vec<PoolConstraint>` |
+| `PoolConstraint(tag, type_name, object_type=, size=, page_type=, ...)` | `PoolConstraint::new(b"Tag", "nt!_TYPE").object_type("File").size(Some(min), None).page_type(pool_type::PAGED \| pool_type::NONPAGED)` |
+| `for c, obj, hdr in PoolScanner.generate_pool_scan(ctx, kernel, constraints)` | `generate_pool_scan_each(ctx, k, k.table, &cons, \|h: PoolHit\| { h.constraint; h.object; h.header; Ok(true) })?` (streaming, python order) or `generate_pool_scan(ctx, k, &cons)?` → `Vec<PoolHit>` |
+| `generate_pool_scan_extended(ctx, kernel, object_table, constraints)` | `generate_pool_scan_extended(ctx, k, table, &cons)?` |
+| `PoolScanner.pool_scan(ctx, layer, table, constraints, alignment)` | `pool_scan(ctx, k, layer, table, &cons, align)?` → `Vec<(constraint idx, _POOL_HEADER)>`; `pool_scan_with(.., post, f)` runs `post` on the scan threads |
+| `handles.Handles.get_type_map(...)` / `find_cookie(...)` | `poolscanner::get_type_map(k)?` (memoized) / `find_cookie(k)?` |
+| `pool_header.is_free_pool() / is_paged_pool() / is_nonpaged_pool()` | same names (`PoolExt`, in the prelude) |
+| `obj.get_object_header()` / `ExecutiveObject.get_name()` | `obj.get_object_header(None)?` / `obj.executive_name(None)?` → `Option<String>` |
+| `object_header.get_object_type(type_map, cookie)` / `NameInfo` / `get_name()` | `hdr.get_object_type(&type_map, cookie)?` / `hdr.name_info()?` / `hdr.header_name()?` |
+| `big_page.get_key() / get_pool_type() / get_number_of_bytes() / is_free() / is_valid()` | same names (`big_page_is_valid()`, or `is_valid()` via `WinExt`) |
+| `device.get_device_name()` / `get_attached_devices()` | `dev.get_device_name()?` / `dev.get_attached_devices()` → `Vec<Result<Obj>>` (`ObjectsExt`) |
+| `driver.get_driver_name()` / `link.get_link_name()` / `mutant.get_name()` | `get_driver_name()?` / `get_link_name()?` / `mutant_name()?` (`Err` with `objects::is_name_info_value_error` = python's `ValueError`) |
+| `file_obj.file_name_with_device()` / `access_string()` | `fo.file_name_with_device()?` → `Value::Str` or `Value::Unreadable` / `fo.access_string()?` |
+| `modules.Modules.get_kernel_space_start(ctx, kernel)` | `crate::plugins::windows::modules::get_kernel_space_start(k)?` |
+| `psscan.PsScan.scan_processes(ctx, kernel, filter_func)` | `crate::plugins::windows::psscan::scan_processes(ctx, k, &filter)` / `scan_processes_each(ctx, k, &filter, \|p\| ..)` |
+| `PsScan.virtual_process_from_physical / physical_offset_from_virtual / create_offset_filter / get_osversion` | same names in `psscan` |
+
+Worked example (python `filescan`), byte-identical to python:
+
+```rust
+use crate::plugins::windows::poolscanner::{builtin_constraints, generate_pool_scan_each};
+let cons = builtin_constraints(k.table.name(), &[b"Fil\xe5", b"File"]);
+generate_pool_scan_each(ctx, k, k.table, &cons, |h| {
+    match h.object.m("FileName").and_then(|n| n.get_string()) {
+        Ok(name) => out.row(0, vec![Value::Int(h.object.addr as i128), Value::Str(name)])?,
+        Err(e) if e.is_invalid_address() => {}          // python: continue
+        Err(e) => return Err(e),
+    }
+    Ok(true)
+})?;
+```
+
+The ignored test `context::bench::object_scans_via_core_api` rebuilds symlinkscan, mutantscan
+and driverscan this way and diffs them against python's output.
 
 ## Plugins & output
 

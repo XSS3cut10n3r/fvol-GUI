@@ -5,7 +5,7 @@
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
 use crate::error::{Error, Result};
-use crate::layers::scan::{BytesScanner, Scanner, find, scan, scan_each};
+use crate::layers::scan::{BytesScanner, MultiStringScanner, Scanner, find, scan, scan_each};
 use crate::layers::{IntelLayer, Layer, LayerExt, PagingMode, PteFlavor, metadata};
 use std::sync::Arc;
 
@@ -268,41 +268,95 @@ pub struct PdbSig {
     pub mz_offset: Option<u64>,
 }
 
+/// python `PdbSignatureScanner.overlap`.
+pub const PDB_SCANNER_OVERLAP: u64 = 0x4000;
+
 /// python `PdbSignatureScanner`: `RSDS` + 20 bytes + one of `names` + NUL (regex finditer,
 /// non-overlapping).
 pub struct PdbSignatureScanner {
     pub names: Vec<Vec<u8>>,
 }
 
+/// python's RSDS regex, non-overlapping and leftmost; alternatives tried in list order. Calls
+/// `f(position, name index)` for matches starting in `[from, limit)` and returns where the
+/// search would resume after the last match ending past `limit` (else `limit`).
+fn rsds_search(names: &[Vec<u8>], data: &[u8], from: usize, limit: usize, mut f: impl FnMut(usize, u32)) -> usize {
+    let mut next = limit;
+    let mut pos = from;
+    while pos < limit {
+        let Some(i) = find(&data[pos..], b"RSDS") else { break };
+        let p = pos + i;
+        if p >= limit {
+            break;
+        }
+        let name_at = p + 24;
+        let hit = names.iter().position(|n| data.len() > name_at + n.len() && &data[name_at..name_at + n.len()] == n.as_slice() && data[name_at + n.len()] == 0);
+        match hit {
+            Some(k) => {
+                f(p, k as u32);
+                pos = name_at + names[k].len() + 1;
+                next = next.max(pos);
+            }
+            None => pos = p + 1,
+        }
+    }
+    next
+}
+
+/// python's GUID string of an RSDS record (`data` = the 16 GUID bytes).
+fn rsds_guid(b: &[u8]) -> String {
+    const ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+    ORDER.iter().map(|&k| format!("{:02X}", b[k])).collect()
+}
+
 impl Scanner for PdbSignatureScanner {
     type Hit = (String, u32, String, u64);
+    fn overlap(&self) -> u64 {
+        PDB_SCANNER_OVERLAP
+    }
     fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<Self::Hit>) {
-        let cs = self.chunk_size() as usize;
-        let mut pos = 0usize;
-        while let Some(i) = find(&data[pos..], b"RSDS") {
-            let s = pos + i;
-            let name_at = s + 24;
-            let mut matched = None;
-            for n in &self.names {
-                if data.len() >= name_at + n.len() + 1 && &data[name_at..name_at + n.len()] == n.as_slice() && data[name_at + n.len()] == 0 {
-                    matched = Some(n);
-                    break;
-                }
-            }
-            match matched {
-                Some(n) => {
-                    if s < cs {
-                        let b = &data[s + 4..s + 24];
-                        let order = [3usize, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
-                        let guid: String = order.iter().map(|&k| format!("{:02X}", b[k])).collect();
-                        let age = u32::from_le_bytes(b[16..20].try_into().unwrap());
-                        hits.push((guid, age, String::from_utf8_lossy(n).into_owned(), data_offset + s as u64));
-                    }
-                    pos = name_at + n.len() + 1;
-                }
-                None => pos = s + 1,
-            }
+        let cs = (self.chunk_size() as usize).min(data.len());
+        rsds_search(&self.names, data, 0, cs, |p, k| {
+            let b = &data[p + 4..p + 24];
+            let age = u32::from_le_bytes(b[16..20].try_into().unwrap());
+            hits.push((rsds_guid(&b[..16]), age, String::from_utf8_lossy(&self.names[k as usize]).into_owned(), data_offset + p as u64));
+        });
+    }
+}
+
+/// [`PdbSignatureScanner`] in the executor's two-phase / streaming form: hits are
+/// `(offset, name index)`; the GUID and age are read back from the layer (the same bytes the
+/// chunk held). Lets the physical and virtual scans read small cache-resident pieces and
+/// search aliased pages once.
+pub struct RsdsScanner {
+    pub names: Vec<Vec<u8>>,
+}
+
+impl Scanner for RsdsScanner {
+    type Hit = (u64, u32);
+    fn overlap(&self) -> u64 {
+        PDB_SCANNER_OVERLAP
+    }
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        let cs = (self.chunk_size() as usize).min(data.len());
+        rsds_search(&self.names, data, 0, cs, |p, k| hits.push((data_offset + p as u64, k)));
+    }
+    fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
+        self.scan(data, 0, out);
+        true
+    }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        hits.extend(matches.iter().map(|&(o, k)| (data_offset + o, k)));
+    }
+    fn stream_window(&self) -> Option<usize> {
+        Some(25 + self.names.iter().map(|n| n.len()).max().unwrap_or(0))
+    }
+    fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
+        let cs_limit = self.chunk_size().saturating_sub(base).min(limit as u64) as usize;
+        if from >= cs_limit {
+            return limit;
         }
+        rsds_search(&self.names, data, from, cs_limit, |p, k| out.push((base + p as u64, k))).max(limit)
     }
 }
 
@@ -311,10 +365,15 @@ impl Scanner for PdbSignatureScanner {
 pub fn pdbname_scan(layer: &dyn Layer, names: &[&[u8]], start: Option<u64>, end: Option<u64>, mut f: impl FnMut(PdbSig) -> bool) {
     let start = start.unwrap_or(layer.min_address());
     let end = end.unwrap_or(layer.max_address());
-    let scanner = PdbSignatureScanner { names: names.iter().map(|n| n.to_vec()).collect() };
+    let scanner = RsdsScanner { names: names.iter().map(|n| n.to_vec()).collect() };
     let mut min_pfn: u64 = 0;
     let page_size = 0x1000u64;
-    scan_each(layer, &scanner, Some(&[(start, end.wrapping_sub(start))]), |(guid, age, pdb_name, sig_off)| {
+    scan_each(layer, &scanner, Some(&[(start, end.wrapping_sub(start))]), |(sig_off, k)| {
+        let mut rec = [0u8; 20];
+        layer.read_padded(sig_off.wrapping_add(4), &mut rec);
+        let guid = rsds_guid(&rec[..16]);
+        let age = u32::from_le_bytes(rec[16..20].try_into().unwrap());
+        let pdb_name = String::from_utf8_lossy(names[k as usize]).into_owned();
         let sig_pfn = sig_off / page_size;
         let mut mz = None;
         let mut invalid = 0;
@@ -452,44 +511,6 @@ enum OffHit {
     Module(u64),
 }
 
-/// Two BytesScanners in one pass (python semantics per needle: every occurrence starting in the
-/// first `chunk_size` bytes of a chunk).
-struct TwoNeedles {
-    a: &'static [u8],
-    b: &'static [u8],
-}
-
-impl Scanner for TwoNeedles {
-    type Hit = OffHit;
-    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<OffHit>) {
-        let cs = self.chunk_size() as usize;
-        let mut ha = Vec::new();
-        let mut hb = Vec::new();
-        for (needle, out) in [(self.a, &mut ha), (self.b, &mut hb)] {
-            let mut pos = 0usize;
-            while let Some(i) = find(&data[pos..], needle) {
-                let at = pos + i;
-                if at >= cs {
-                    break;
-                }
-                out.push(data_offset + at as u64);
-                pos = at + 1;
-            }
-        }
-        // merge by offset (the two needles can never start at the same offset)
-        let (mut i, mut j) = (0, 0);
-        while i < ha.len() || j < hb.len() {
-            if j >= hb.len() || (i < ha.len() && ha[i] < hb[j]) {
-                hits.push(OffHit::Kdbg(ha[i]));
-                i += 1;
-            } else {
-                hits.push(OffHit::Module(hb[j]));
-                j += 1;
-            }
-        }
-    }
-}
-
 /// python `method_kdbg_offset` followed by `method_module_offset`, in one physical pass:
 /// KDBG hits are validated as they stream in (stopping at the first valid kernel, like
 /// python); module-list hits are kept and tried afterwards in order, with python's separate
@@ -500,7 +521,10 @@ fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<
     let mut found = None;
     let mut err = None;
     let mut module_hits = Vec::new();
-    let scanner = TwoNeedles { a: b"KDBG", b: b"\\SystemRoot\\system32\\nt" };
+    // Two BytesScanners (default chunking) in one pass. Neither needle can overlap itself or
+    // the other, so the non-overlapping multi-string search yields exactly the union of both
+    // needles' occurrences, in offset order.
+    let scanner = MultiStringScanner::new(&[&b"KDBG"[..], &b"\\SystemRoot\\system32\\nt"[..]]);
     let try_hit = |hit: u64, ro: i64, seen: &mut crate::util::FxHashSet<u64>| -> std::result::Result<Option<KernelFound>, Error> {
         let at = (hit as i128 + ro as i128) as u64;
         let ptr = phys.read_u64(at)?;
@@ -510,9 +534,10 @@ fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<
         }
         Ok(check_kernel_offset(vlayer, address))
     };
-    scan_each(phys, &scanner, None, |h| match h {
+    scan_each(phys, &scanner, None, |(o, pi)| match if pi == 0 { OffHit::Kdbg(o) } else { OffHit::Module(o) } {
         OffHit::Kdbg(o) => match try_hit(o, 8, &mut seen) {
             Ok(Some(k)) => {
+                crate::util::trace::note(|| format!("pdbscan: kernel from KDBG hit at {o:#x}"));
                 found = Some(k);
                 false
             }
@@ -534,8 +559,10 @@ fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<
         return Ok(found);
     }
     let mut seen = crate::util::FxHashSet::default();
+    crate::util::trace::note(|| format!("pdbscan: no valid KDBG; {} module-list hits", module_hits.len()));
     for o in module_hits {
         if let Some(k) = try_hit(o, module_ro, &mut seen)? {
+            crate::util::trace::note(|| format!("pdbscan: kernel from module-list hit at {o:#x}"));
             return Ok(Some(k));
         }
     }
@@ -697,5 +724,99 @@ mod tests {
         let mut hits = Vec::new();
         s.scan(&data, 0x1000, &mut hits);
         assert_eq!(hits, vec![("030201000504070608090A0B0C0D0E0F".to_string(), 7, "ntkrnlmp.pdb".to_string(), 0x100a)]);
+    }
+
+    /// On real layers, the streaming `RsdsScanner` (pread pieces / aliased pages searched once)
+    /// yields exactly the hits of the whole-chunk `PdbSignatureScanner` (mapped chunks):
+    /// physical and kernel virtual layers of both Windows images.
+    #[test]
+    #[ignore]
+    fn rsds_stream_on_images() {
+        use crate::context::{Context, GlobalOptions};
+        let names: Vec<Vec<u8>> = [&b"ntkrnlmp.pdb"[..], b"ntdll.pdb", b"tcpip.pdb", b"win32k.pdb", b"hal.pdb", b"kernel32.pdb"].iter().map(|n| n.to_vec()).collect();
+        for img in ["/home/user/cbc2/task2/memory-dirty.raw", "/home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw"] {
+            let ctx = Context::new(GlobalOptions { file: Some(img.into()), ..Default::default() }).unwrap();
+            let k = ctx.windows_kernel().unwrap();
+            for (lname, layer) in [("physical", k.phys), ("kernel", k.vlayer)] {
+                let t = std::time::Instant::now();
+                let mut a = Vec::new();
+                scan_each(layer, &PdbSignatureScanner { names: names.clone() }, None, |h| {
+                    a.push((h.3, h.2, h.0, h.1));
+                    true
+                });
+                let ta = t.elapsed();
+                let t = std::time::Instant::now();
+                let mut b = Vec::new();
+                scan_each(layer, &RsdsScanner { names: names.clone() }, None, |(o, n)| {
+                    let mut rec = [0u8; 20];
+                    layer.read_padded(o + 4, &mut rec);
+                    b.push((o, String::from_utf8_lossy(&names[n as usize]).into_owned(), rsds_guid(&rec[..16]), u32::from_le_bytes(rec[16..20].try_into().unwrap())));
+                    true
+                });
+                let tb = t.elapsed();
+                assert_eq!(a, b, "{img} {lname}");
+                println!("{img} {lname}: {} RSDS hits identical; whole-chunk {:.1} ms, streaming {:.1} ms", a.len(), ta.as_secs_f64() * 1e3, tb.as_secs_f64() * 1e3);
+            }
+        }
+    }
+
+    /// The piecewise RSDS search equals the whole-chunk search (python's finditer) for every
+    /// piece size, chunk-size cut and a dense mix of partial / adjacent / overlapping records.
+    #[test]
+    fn rsds_stream_equals_whole_chunk() {
+        let names: Vec<Vec<u8>> = [&b"ntkrnlmp.pdb"[..], b"nt.pdb", b"ntkrnlmp.pd"].iter().map(|n| n.to_vec()).collect();
+        let mut x: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..300 {
+            let mut data = Vec::new();
+            while data.len() < 3000 {
+                match next() % 6 {
+                    0 => data.extend_from_slice(b"RSDS"),
+                    1 => {
+                        data.extend_from_slice(b"RSDS");
+                        data.extend((0..20).map(|_| next() as u8));
+                        let n = &names[(next() % 3) as usize];
+                        data.extend_from_slice(n);
+                        if next() % 4 != 0 {
+                            data.push(0);
+                        }
+                    }
+                    2 => data.extend_from_slice(b"RSDSRSDS"),
+                    _ => data.extend((0..(next() % 40)).map(|_| if next() % 3 == 0 { b'R' } else { next() as u8 })),
+                }
+            }
+            let sc = RsdsScanner { names: names.clone() };
+            let whole = PdbSignatureScanner { names: names.clone() };
+            let mut expect = Vec::new();
+            rsds_search(&names, &data, 0, data.len(), |p, k| expect.push((p as u64, k)));
+            let mut w = Vec::new();
+            whole.scan(&data[..], 0, &mut w);
+            assert_eq!(w.iter().map(|h| h.3).collect::<Vec<_>>(), expect.iter().map(|h| h.0).collect::<Vec<_>>(), "whole-chunk scanner");
+            let mut pre = Vec::new();
+            assert!(sc.prescan(&data, &mut pre));
+            assert_eq!(pre, expect, "prescan");
+            // the executor's piece loop (scan_pieces)
+            let win = sc.stream_window().unwrap() as u64;
+            let len = data.len() as u64;
+            for piece in [1u64, 2, 7, 24, 31, 64, 999] {
+                let mut got = Vec::new();
+                let (mut next, mut p) = (0u64, 0u64);
+                while p < len {
+                    let limit = (p + piece).min(len);
+                    let end = (limit + win - 1).min(len);
+                    if next < limit {
+                        let from = (next.max(p) - p) as usize;
+                        next = p + sc.prescan_piece(&data[p as usize..end as usize], p, from, (limit - p) as usize, &mut got) as u64;
+                    }
+                    p = limit;
+                }
+                assert_eq!(got, expect, "round {round} piece {piece}");
+            }
+        }
     }
 }
