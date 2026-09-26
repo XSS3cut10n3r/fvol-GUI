@@ -1,10 +1,12 @@
 // Derived from Volatility 3 (Volatility Software License 1.0):
 // framework/symbols/windows/pdbconv.py (PdbRetreiver), pdbutil.py (download_pdb_isf)
-//! Microsoft symbol server download (via `curl`) and PDB -> ISF caching.
+//! Microsoft symbol server download (via `curl`) and PDB -> ISF caching. The downloaded PDB
+//! stays in python's cache directory under python's name for it, `data_<sha512(url)>.cache`
+//! (python's `ResourceAccessor` caches it there and `download_pdb_isf` only removes local
+//! temporary files), and is reused instead of downloaded again.
 
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// volatility3 `constants.SYMBOL_SERVER_URL`.
 pub const SYMBOL_SERVER_URL: &str = "http://msdl.microsoft.com/download/symbols";
@@ -57,25 +59,39 @@ fn check_name(pdb_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// GETs `url` with curl (following redirects); Err on transport or HTTP errors.
-fn curl_get(url: &str) -> Result<Vec<u8>> {
-    let out = Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location", "--globoff"])
-        .args(["--connect-timeout", "30", "--retry", "2", "--output", "-", "--", url])
-        .output()
-        .map_err(|e| Error::Msg(format!("cannot run curl: {e}")))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(Error::Msg(format!("download of {url} failed: {}", err.trim())));
-    }
-    Ok(out.stdout)
+/// python's cache directory (`constants.CACHE_PATH` after `--cache-path`) and whether files
+/// already in it may be used (not after `--clear-cache`, which makes python delete them
+/// first). Set by `Context::new`; unset: `~/.cache/volatility3`, reused.
+static PY_CACHE: std::sync::RwLock<Option<(PathBuf, bool)>> = std::sync::RwLock::new(None);
+
+/// Sets where downloaded PDBs are kept (python's cache directory) and whether a PDB found
+/// there is used instead of downloading it again.
+pub fn set_python_cache(dir: PathBuf, reuse: bool) {
+    *PY_CACHE.write().unwrap_or_else(|e| e.into_inner()) = Some((dir, reuse));
 }
 
-/// Downloads a PDB from the Microsoft symbol server (python `PdbRetreiver.retreive_pdb` +
-/// reading the file). Returns the raw bytes of the first URL that succeeds (a `.pd_`
-/// fallback is returned as-is: like python, CAB-compressed files are not unpacked, so they
-/// fail to convert).
-pub fn download_pdb(pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<Vec<u8>> {
+fn python_cache() -> (PathBuf, bool) {
+    PY_CACHE.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| (crate::util::paths::vol3_cache_dir(None), true))
+}
+
+/// Where python's `ResourceAccessor` keeps the download of `url`:
+/// `<CACHE_PATH>/data_<sha512(url)>.cache`.
+pub fn pdb_cache_path(cache_dir: &Path, url: &str) -> PathBuf {
+    let d = crate::crypto::sha512::digest(&crate::util::download::raw_unicode_escape(url));
+    cache_dir.join(format!("data_{}.cache", crate::util::paths::hex(&d)))
+}
+
+/// Downloads a PDB from the Microsoft symbol server (python `PdbRetreiver.retreive_pdb`):
+/// the first of [`symbol_server_urls`] that succeeds is kept in python's cache directory
+/// under python's name for it (see [`pdb_cache_path`]), where python finds it too. A PDB
+/// already there is not downloaded again. Returns the file (a `.pd_` fallback is kept
+/// as-is: like python, CAB-compressed files are not unpacked, so they fail to convert).
+pub fn fetch_pdb(pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<PathBuf> {
+    let (dir, reuse) = python_cache();
+    fetch_pdb_in(&dir, reuse, pdb_name, guid, age, offline)
+}
+
+fn fetch_pdb_in(dir: &Path, reuse: bool, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<PathBuf> {
     if offline {
         return Err(Error::Unsatisfied(format!(
             "offline mode: not downloading {pdb_name} {}{age}",
@@ -84,13 +100,25 @@ pub fn download_pdb(pdb_name: &str, guid: &str, age: u32, offline: bool) -> Resu
     }
     let mut last_err = None;
     for url in symbol_server_urls(pdb_name, guid, age) {
-        match curl_get(&url) {
-            Ok(data) if !data.is_empty() => return Ok(data),
-            Ok(_) => last_err = Some(Error::Msg(format!("empty response from {url}"))),
+        let path = pdb_cache_path(dir, &url);
+        if reuse && std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return Ok(path);
+        }
+        match crate::util::download::download_to(&url, &path) {
+            Ok(()) if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) => return Ok(path),
+            Ok(()) => {
+                let _ = std::fs::remove_file(&path);
+                last_err = Some(Error::Msg(format!("empty response from {url}")));
+            }
             Err(e) => last_err = Some(e),
         }
     }
     Err(last_err.unwrap_or_else(|| Error::msg("PDB file could not be retrieved from the internet")))
+}
+
+/// [`fetch_pdb`], returning the file's contents.
+pub fn download_pdb(pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<Vec<u8>> {
+    Ok(std::fs::read(fetch_pdb(pdb_name, guid, age, offline)?)?)
 }
 
 /// The output file `<dir>/<rel>` in the first of `dirs` where it can be created (python opens
@@ -122,10 +150,11 @@ pub fn download_and_convert(pdb_name: &str, guid: &str, age: u32, dirs: &[PathBu
         ));
     };
     let res = (|| -> Result<Vec<u8>> {
-        let pdb = download_pdb(pdb_name, guid, age, false)?;
+        let file = std::fs::File::open(fetch_pdb(pdb_name, guid, age, false)?)?;
+        let pdb = crate::util::mmap::Mmap::map(&file)?;
         let json = {
             let _t = crate::util::trace::span("pdb conversion");
-            super::pdb_to_isf_json_named(&pdb, Some(pdb_name))?.into_bytes()
+            super::pdb_to_isf_json_named(pdb.as_slice(), Some(pdb_name))?.into_bytes()
         };
         drop(pdb);
         let xz = {
@@ -165,6 +194,26 @@ mod tests {
         let u = symbol_server_urls("noext", "AB", 1);
         assert_eq!(u[0], "http://msdl.microsoft.com/download/symbols/pdb/AB1/pdb");
         assert_eq!(u[1], "http://msdl.microsoft.com/download/symbols/pdb/AB1/pd_");
+    }
+
+    /// A PDB in python's cache (python's file name for the URL) is used without a download.
+    #[test]
+    fn pdb_kept_in_python_cache() {
+        // python: hashlib.sha512(bytes(url, "raw_unicode_escape")).hexdigest()
+        let url = &symbol_server_urls("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1)[0];
+        let name = pdb_cache_path(Path::new("/c"), url);
+        assert_eq!(
+            name.to_str().unwrap(),
+            "/c/data_4b0f7e7467e414c27795057e12998e845eea045d8863f194908ce99896253624284202aade8d0f24f4b61f1e1e5c2058bcc9bbc4fb9c9f0efb86176c5e305f11.cache"
+        );
+        let dir = std::env::temp_dir().join(format!("rsvol-pdbcache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // an unreachable symbol server would fail every download: the cached file is used
+        let p = pdb_cache_path(&dir, &symbol_server_urls("k.pdb", "AB", 2)[0]);
+        std::fs::write(&p, b"Microsoft C/C++ MSF 7.00\r\n").unwrap();
+        assert_eq!(fetch_pdb_in(&dir, true, "k.pdb", "ab", 2, false).unwrap(), p);
+        assert!(fetch_pdb_in(&dir, true, "k.pdb", "ab", 2, true).is_err(), "offline: never");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
