@@ -557,7 +557,7 @@ pub use crate::util::time::{float_to_timeval, fromtimestamp_local};
 /// single underscores between them). `None` = python raises `ValueError`. Values that do not
 /// fit an i128 saturate (they can never compare equal to anything we read).
 pub fn py_int_bytes(b: &[u8]) -> Option<i128> {
-    let is_ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | 0x1c..=0x1f);
+    let is_ws = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
     let start = b.iter().position(|c| !is_ws(c))?;
     let end = b.iter().rposition(|c| !is_ws(c))? + 1;
     let mut s = &b[start..end];
@@ -618,6 +618,9 @@ mod tests {
         assert_eq!(py_int_bytes(b"_13"), None);
         assert_eq!(py_int_bytes(b""), None);
         assert_eq!(py_int_bytes(b"2: Thu"), None);
+        // bytes int() strips ASCII whitespace only (not \x1c-\x1f like str)
+        assert_eq!(py_int_bytes(b" 13\x0b"), Some(13));
+        assert_eq!(py_int_bytes(b"13\x1c"), None);
     }
 
     #[test]

@@ -189,6 +189,12 @@ impl IntelLayer {
     /// Create a translation layer named `name` over `phys` with page table root `dtb`
     /// (python `page_map_offset`).
     pub fn new(name: &str, phys: Arc<dyn Layer>, dtb: u64, mode: PagingMode, flavor: PteFlavor) -> IntelLayer {
+        IntelLayer::with_table_cache(name, phys, dtb, mode, flavor, Arc::new(TableCache::new()))
+    }
+
+    /// `new` sharing an existing page-table validity cache (process layers share their
+    /// parent's: allocating and zeroing a fresh 128 KiB one per process is wasted work).
+    fn with_table_cache(name: &str, phys: Arc<dyn Layer>, dtb: u64, mode: PagingMode, flavor: PteFlavor, table_cache: Arc<TableCache>) -> IntelLayer {
         let p = params(mode, flavor);
         let initial_position = p.maxvirtaddr.min(p.bits_per_register) - 1;
         let initial_entry = mask_bits(dtb, initial_position, 0) | 1;
@@ -207,7 +213,7 @@ impl IntelLayer {
             initial_entry,
             vmask: if p.maxvirtaddr >= 64 { u64::MAX } else { (1u64 << p.maxvirtaddr) - 1 },
             register_mask: if p.bits_per_register >= 64 { u64::MAX } else { (1u64 << p.bits_per_register) - 1 },
-            table_cache: Arc::new(TableCache::new()),
+            table_cache,
             id,
             os: None,
             kernel_virtual_offset: None,
@@ -245,9 +251,8 @@ impl IntelLayer {
     /// A process address space: same class/config/physical layer, different DTB
     /// (python `_add_process_layer`). Shares the page-table cache.
     pub fn process_layer(&self, dtb: u64, name: &str) -> IntelLayer {
-        let mut l = IntelLayer::new(name, self.phys.clone(), dtb, self.mode, self.flavor);
+        let mut l = IntelLayer::with_table_cache(name, self.phys.clone(), dtb, self.mode, self.flavor, self.table_cache.clone());
         l.swap = self.swap.clone();
-        l.table_cache = self.table_cache.clone();
         l.os = self.os.clone();
         l.kernel_virtual_offset = self.kernel_virtual_offset;
         l.kernel_banner = self.kernel_banner.clone();
