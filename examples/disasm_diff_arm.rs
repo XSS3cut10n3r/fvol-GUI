@@ -8,7 +8,7 @@
 //!   cargo run --release --example disasm_diff_arm -- bench arm64 N
 //!        decode+format throughput on N pseudo-random words (same generator as arm_oracle rand)
 
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, unused_assignments)]
 #[path = "../src/disasm/mod.rs"]
 mod disasm;
 

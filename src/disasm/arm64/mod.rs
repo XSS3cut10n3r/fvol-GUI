@@ -4,6 +4,17 @@
 //! the capstone oracle (bench/scripts/gen_arm64_spec.py); `engine.rs` compiles it lazily into
 //! flat tables + a decision tree.  A few alias families whose printing depends on comparisons
 //! between operand values are formatted by hand-written handlers below.
+//!
+//! Verified against capstone 5.0.9 on all 2^32 instruction words (each at a pseudo-random
+//! 64-bit address): 0 differences.  Regenerating / re-verifying (bench venv with capstone):
+//!
+//! ```text
+//! bench/scripts/arm_spec_pipeline.sh arm64 WORKDIR --fresh     # learn + explore + emit
+//! bench/scripts/disasm_diff_arm.py exhaustive arm64            # 2^32 check (C oracle)
+//! bench/scripts/arm_spec_pipeline.sh arm64 WORKDIR --words WORKDIR/arm64.exh.words
+//! ```
+//!
+//! The last two steps repeat until the exhaustive check reports 0 mismatching words.
 
 pub(crate) mod engine;
 mod spec_data;
