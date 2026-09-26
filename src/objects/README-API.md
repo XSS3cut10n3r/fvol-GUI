@@ -155,6 +155,27 @@ mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning
 | `dos_header.get_nt_header()` / `reconstruct()` / `nt.get_sections()` | `crate::symbols::windows::pe::{get_nt_header, reconstruct, get_sections, write_pieces}` |
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
+| `mft.MFTEntry` / `MFTFileName` / `MFTAttribute` (`windows/mft` ISF) | `crate::symbols::windows::mft::{MftEntry, MftFileName, MftAttribute}` (`attributes()`, `standard_information_entries()`, `filename_entries()`, `longest_filename()`, `resident_data_attributes()`, `alternate_data_streams()`, `get_full_name()`, `get_resident_filename()`, `get_resident_filecontent()`) |
+| `MFTScan.enumerate_mft_records(ctx, path, primary)` | `crate::plugins::windows::mftscan::{enumerate_mft_records, enumerate_mft_batches}(layer, ...)` (yara `/FILE0\|FILE\*\|BAAD/` semantics, parse on the scan workers); layer = `mftscan::primary_memory_layer(ctx)?` |
+| `mbr.PARTITION_TABLE` / `PARTITION_ENTRY` (`windows/mbr` ISF) | `crate::symbols::windows::mbr::{PartitionTable, PartitionEntry}` |
+
+### PE files: pefile, pe_symbols, verinfo
+
+| python | rust |
+|---|---|
+| `pe_data = BytesIO(); for off, d in dos.reconstruct(): seek/write` (to parse it) | `let (view, err) = pe::reconstruct_view(&dos);` — lazy page view, reads only what is parsed; `err: Option<ReconError>` (`is_invalid_or_value()` = what `except (InvalidAddressException, ValueError)` catches; the view keeps the pieces written before it) |
+| `pefile.PE(data=pe_data.getvalue(), fast_load=True)` | `crate::symbols::windows::pefile::PeFile::parse(&view)?` (`PeError::Format` = PEFormatError, `PeError::Attribute` = AttributeError); works on `&[u8]`/`Vec<u8>` too |
+| `pe.parse_data_directories([EXPORT])` + `pe.DIRECTORY_ENTRY_EXPORT.symbols` | `pe.parse_exports()` → `Option<ExportDir>` (`.symbols: Vec<Export{ordinal, address, name, forwarder}>`) |
+| `pe.parse_data_directories([IMPORT])` + `pe.DIRECTORY_ENTRY_IMPORT` | `pe.parse_imports()` → `Option<Vec<ImportDesc{dll, time_date_stamp, imports: Vec<Import{name, ordinal, address}>}>>` |
+| `pe.parse_data_directories([RESOURCE])` + `pe.VS_FIXEDFILEINFO` | `pe.parse_version_info()` → `Vec<FixedFileInfo>` (empty = AttributeError) |
+| `pe.OPTIONAL_HEADER.ImageBase` / `pe.sections` / `get_data(rva, n)` / `get_string_at_rva` | `pe.optional_header.image_base` / `pe.sections` / same names |
+| `VerInfo.get_version_information(ctx, pe_table, layer, base)` | `crate::plugins::windows::verinfo::get_version_information(pe_table, Some(layer), base)` |
+| `PESymbols.addresses_for_process_symbols(ctx, path, kernel, {"ntdll.dll": {"names": [...]}})` | `pe_symbols::addresses_for_process_symbols(ctx, k, &vec![("ntdll.dll".into(), WantedSymbols::names(&[..]))])?` → `Vec<(module, Vec<(name, addr)>)>` |
+| `PESymbols.get_kernel_modules / get_process_modules(ctx, kernel, filter)` | `pe_symbols::get_kernel_modules(k, Some(&filter))?` / `get_process_modules(k, Some(&filter))?` → `CollectedModules` |
+| `PESymbols.find_symbols(ctx, path, wanted, collected)` | `pe_symbols::find_symbols(ctx, &wanted, &collected)?` → `(found, missing)` |
+| `PESymbols.path_and_symbol_for_address(ctx, path, collected, ranges, addr)` | `pe_symbols::path_and_symbol_for_address(ctx, &collected, &ranges, addr)?` |
+| `PESymbols.get_vads_for_process_cache / get_proc_vads_with_file_paths / filepath_for_address / range_info_for_address / filename_for_path` | same names in `crate::plugins::windows::pe_symbols` |
+| `PEDump.dump_pe_at_base / dump_kernel_pe_at_base` | `crate::plugins::windows::pedump::{dump_pe_at_base, dump_kernel_pe_at_base}` |
 
 ## Linux (`use crate::symbols::linux::prelude::*` - LinuxExt, FsExt, CapsExt, NetExt, ...)
 
@@ -236,6 +257,14 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `sysctl_oid.get_ctltype()` / `vnode.full_path()` | same names |
 | `datetime.datetime.fromtimestamp(t)` (naive local time) | `crate::util::time::fromtimestamp_local(t)` → `Result<DateTime, String>` (`Err` = python exception text) |
 | `mac.MacUtilities.virtual_to_physical_address(a)` | `crate::symbols::mac::virtual_to_physical_address(a)` |
+| `lsmod.Lsmod.list_modules(ctx, kernel)` | `crate::plugins::mac::lsmod::list_modules(k)` → `Vec<Result<Obj>>` (first a `kmod_info`, then `kmod_info *` pointers) |
+| `MacUtilities.generate_kernel_handler_info(ctx, layer, kernel, mods)` | `symbols::mac::generate_kernel_handler_info(k, list_modules(k))?` → `Vec<Handler>` |
+| `MacUtilities.lookup_module_address(ctx, handlers, addr, kernel_name)` | `symbols::mac::lookup_module_address(k.table, &handlers, addr, Some(k.offset))` (`None` = no module name passed) |
+| `kauth_scope.get_listeners()` | `scope.get_listeners()` (`MacExt`) |
+| `MacUtilities.files_descriptors_for_process(ctx, table, task)` | `symbols::mac::files::files_descriptors_for_process(&task)` → `Vec<Result<FdEntry>>`; map a trailing error with `files::raise_python` (python ValueError / UnboundLocalError crash the plugin) |
+| `socket.get_family() / get_state() / get_converted_connection_info()` ..., `inpcb.*`, `ifnet.sockaddr_dl()`, `str(sockaddr_dl)`, `sockaddr.get_address()` | `symbols::mac::net::{socket_get_family, socket_get_state, socket_get_converted_connection_info, inpcb_get_tcp_state, ifnet_sockaddr_dl, sockaddr_dl_str, sockaddr_get_address}` |
+| `conversion.convert_ipv4 / convert_ipv6 / convert_port / convert_network_four_tuple` | `symbols::mac::net::{convert_ipv4, convert_ipv6, ipv6_to_string, convert_port, convert_network_four_tuple}` (python 3.14 `ipaddress` formatting; host AF_INET6 = 10) |
+| `Mount.list_mounts` / `List_Files.list_files` / `Kevents.list_kernel_events` / `Netstat.list_sockets` / `Kauth_scopes.list_kauth_scopes` / `Dmesg.get_kernel_log_buffer` | same names in `crate::plugins::mac::{mount, list_files, kevents, netstat, kauth_scopes, dmesg}` |
 
 A trailing `Err` in a walker's `Vec` marks where python would have raised. Python exceptions
 that are not volatility exceptions (e.g. `ValueError` from `datetime`) crash python's plugin
@@ -367,8 +396,6 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
 | `YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `vadyarascan::yarascan_option_requirements()` / `vadyarascan::rules_from_config(cfg)?` |
 | `scanners.RegExScanner(pattern)` (DOTALL, `chunk_size` rule) | `vadregexscan::regex_scanner(&re)` → `FnScanner` |
 | `DirectSystemCalls` / `IndirectSystemCalls` machinery (`syscall_finder_type`, `_is_syscall_block`, `_generator`) | `malware::direct_system_calls::{SyscallFinder, DIRECT, run_finder}`, `malware::indirect_system_calls::INDIRECT` |
-| `PESymbols.get_process_modules / find_symbols` (names via PDB, then export table) | `malware::pesym::{get_process_modules, find_symbols_by_name}` (private subset, TODO(dedupe) W2b) |
-| `PESymbols.get_pefile_obj(...)` + pefile `parse_data_directories([EXPORT])` | `malware::pesym::pe_exports(ctx, layer, base)?` → `Option<Vec<Export { name, address }>>` |
 | a python dict keyed by int (insertion order) | `malware::hollowprocesses::OrderedMap<V>` |
 
 ## Plugins & output
@@ -381,12 +408,34 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
   `Value::NotApplicable` ("N/A"), `UnparsableValue()` = `Value::Unparsable` ("-").
 * Files: `let (file, name) = ctx.create_output_file(&sanitize_filename(..))?;` — `name` is the
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
+* A plugin's own unsatisfied requirement (e.g. `TranslationLayerRequirement(name="primary",
+  description=...)`): `Err(crate::plugins::unsatisfied_described(&[("primary", UnsatKind::Layer,
+  "Memory layer for the kernel")]))` prints python's message (kinds: Layer, Symbols, Other).
 * Errors: return `Err(e)`; python's "skip this row on InvalidAddressException" is
   `match row() { Err(e) if e.is_invalid_address() => continue, ... }`.
   An `Error::Msg` / `Error::Symbol` whose text starts with a python builtin exception name
   (`"AttributeError: ..."`, `"ValueError: ..."`, `"TypeError: ..."`, `"KeyError"`, ... see
   `cli::python_builtin_exception`) is reported like python's uncaught exception (traceback on
   stderr, no `"\n\n"` on stdout); other errors get python's `process_exceptions` block.
+
+* Timeliner (`TimeLinerInterface.generate_timeline`): implement `timeline()`; if the python
+  generator can raise AFTER its first yield, implement `timeline_events()` instead and return
+  the events yielded so far plus the error (python keeps them). `plugins::default_config(p)`
+  is the config the timeliner constructs a plugin with. The 22 python timeliner plugins are
+  listed in `plugins::generic::timeliner::TIMELINER_PLUGINS`.
+
+## Generic plugin helpers (`crate::plugins::generic`)
+
+| python | rust |
+|---|---|
+| `TranslationLayerRequirement(name="primary")` layer | `primary::primary(ctx, desc)?` (`.layer`, `.intel`, `.phys`, `.os`); `primary_intel` when python requires Intel32/64; `primary::physical(ctx, desc)?` for plugins stepping down to `memory_layer` |
+| `scanners.RegExScanner(pattern)` | `regexscan::RegExScanner::new(pattern)?` (two-phase `Scanner`, hit = address) |
+| `yarascan.YaraScanner(rules)` / `process_yara_options(config)` | `yarascan::YaraScanner { rules: &r }` / `yarascan::rules_from_config(cfg)` |
+| `renderers.LayerData(ctx, layer, offset, length)` | `yarascan::layer_data_value(layer, offset, length)` (`Value::LayerBytes` like the CLI renderer) |
+| `yarascan.get_yarascan_option_requirements()` | `yarascan::yarascan_option_requirements()` |
+| `Banners.locate_banners(ctx, layer)` | `banners::locate_banners(layer)?` |
+| `LayerWriter.write_layer(...)` | `layerwriter::write_layer(layer, &file, len)` (sparse, reflink / copy_file_range) |
+| a requirement's `build_configuration()` tree | `pyconfig::{primary_tree, kernel_tree, container_tree}` |
 
 ## Performance notes
 

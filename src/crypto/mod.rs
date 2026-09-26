@@ -18,6 +18,47 @@ pub mod rc4;
 pub mod sha1;
 pub mod sha256;
 
+/// Identity that pins `x` to a general-purpose register at this point (an empty
+/// `asm!` -- a comment, no instructions). It is an optimization barrier for the
+/// two LLVM transforms that hurt these hand-scheduled kernels:
+/// - the SLP vectorizer turning independent table lookups (DES rounds, IP/FP)
+///   into AVX2 gathers plus a horizontal XOR reduction (measured 2-3x slower
+///   than plain loads on Alder Lake);
+/// - reassociation moving a constant add *after* a value on the critical path
+///   (MD5: `(a + K + M) + f` becomes `(a + M + f) + K`, one extra cycle per step).
+#[inline(always)]
+pub(crate) fn gpr<T: Gpr>(x: T) -> T {
+    x.pin()
+}
+
+pub(crate) trait Gpr: Copy {
+    fn pin(self) -> Self;
+}
+
+macro_rules! impl_gpr {
+    ($t:ty, $x86:literal, $arm:literal) => {
+        impl Gpr for $t {
+            #[inline(always)]
+            #[allow(unused_mut)]
+            fn pin(mut self) -> Self {
+                // Safety: empty asm (a comment); it only claims to read and write
+                // the register.
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    std::arch::asm!($x86, inout(reg) self, options(pure, nomem, nostack, preserves_flags));
+                }
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    std::arch::asm!($arm, inout(reg) self, options(pure, nomem, nostack, preserves_flags));
+                }
+                self
+            }
+        }
+    };
+}
+impl_gpr!(u32, "/* {0:e} */", "/* {0:w} */");
+impl_gpr!(u64, "/* {0:r} */", "/* {0:x} */");
+
 // Differential tests against Python hashlib/pycryptodome; the embedded vectors
 // (~36 KB) are test-only and excluded from non-test builds.
 #[cfg(test)]

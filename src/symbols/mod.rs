@@ -14,7 +14,7 @@ pub mod mac;
 pub mod store;
 pub mod table;
 pub mod windows;
-mod zipfile;
+pub mod zipfile;
 
 pub use isf::BuildOptions;
 pub use store::{IsfLocation, SymbolPath};

@@ -380,13 +380,36 @@ fn push_micros(out: &mut Vec<u8>, micros: u32) {
 
 /// `dt.strftime("%Y-%m-%d %H:%M:%S.%f %Z")` (`%Z` is `UTC` for aware values, empty for naive).
 pub fn push_datetime_cli(out: &mut Vec<u8>, dt: &DateTime) {
-    push_date_time(out, dt, b' ');
-    out.push(b'.');
-    push_micros(out, dt.micros);
-    out.push(b' ');
-    if dt.utc {
-        out.extend_from_slice(b"UTC");
+    // small memo: sorted outputs (timeliner: 2.8M rows x 4 date columns) repeat the same
+    // values in consecutive rows
+    type Memo = ([Option<DateTime>; 4], [[u8; 48]; 4], [u8; 4], usize);
+    thread_local! {
+        static MEMO: std::cell::RefCell<Memo> = const { std::cell::RefCell::new(([None; 4], [[0; 48]; 4], [0; 4], 0)) };
     }
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(i) = m.0.iter().position(|x| *x == Some(*dt)) {
+            let n = m.2[i] as usize;
+            out.extend_from_slice(&m.1[i][..n]);
+            return;
+        }
+        let start = out.len();
+        push_date_time(out, dt, b' ');
+        out.push(b'.');
+        push_micros(out, dt.micros);
+        out.push(b' ');
+        if dt.utc {
+            out.extend_from_slice(b"UTC");
+        }
+        let n = out.len() - start;
+        if n <= 48 {
+            let i = m.3;
+            m.3 = (i + 1) % 4;
+            m.1[i][..n].copy_from_slice(&out[start..]);
+            m.2[i] = n as u8;
+            m.0[i] = Some(*dt);
+        }
+    })
 }
 
 /// python `str(dt)` (`sep=b' '`) or `dt.isoformat()` (`sep=b'T'`).
