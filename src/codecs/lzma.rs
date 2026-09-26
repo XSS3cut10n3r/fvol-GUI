@@ -598,9 +598,12 @@ macro_rules! mlit_last {
 }
 
 /// Length decoder of the length coder at byte offset $c; result in {sym}. $l1..$l3: labels.
+/// The low and mid trees use {t2} as their base. $low: code run after a low-tree length
+/// (2..9); $hi: code run as soon as the length is known to be >= 10 (the match coder uses
+/// them to set up the distance slot tree, whose choice depends only on min(len - 2, 3)).
 #[cfg(target_arch = "x86_64")]
 macro_rules! len_dec {
-    ($c:literal, $l1:literal, $l2:literal, $l3:literal) => {
+    ($c:literal, $l1:literal, $l2:literal, $l3:literal, $low:expr, $hi:expr) => {
         concat!(
             bit!(concat!("{probs} + ", $c), concat!($l1, "f")),
             // low: base = probs + c + 4 + pos_state * 16
@@ -608,18 +611,20 @@ macro_rules! len_dec {
             "sub {t1}, qword ptr [{ctx} + 16]\n",
             "and {t1:e}, 3\n",
             "shl {t1:e}, 4\n",
-            "lea {base}, [{probs} + {t1} + ", $c, " + 4]\n",
-            tree3a!("{base}", "5"),
+            "lea {t2}, [{probs} + {t1} + ", $c, " + 4]\n",
+            tree3a!("{t2}", "5"),
+            $low,
             "jmp ", $l3, "f\n",
             $l1, ":\n",
+            $hi,
             bit1!(concat!("{probs} + ", $c)),
             bit!(concat!("{probs} + ", $c, " + 2"), concat!($l2, "f")),
             "mov {t1}, {op}\n",
             "sub {t1}, qword ptr [{ctx} + 16]\n",
             "and {t1:e}, 3\n",
             "shl {t1:e}, 4\n",
-            "lea {base}, [{probs} + {t1} + ", $c, " + 260]\n",
-            tree3a!("{base}", "-3"),
+            "lea {t2}, [{probs} + {t1} + ", $c, " + 260]\n",
+            tree3a!("{t2}", "-3"),
             "jmp ", $l3, "f\n",
             $l2, ":\n",
             bit1!(concat!("{probs} + ", $c, " + 2")),
@@ -829,7 +834,7 @@ impl LzmaDecoder {
                 return Ok(Stop::Limit);
             }
         }
-        let fixed = self.props == Props { lc: 3, lp: 0, pb: 2 } && !force_generic();
+        let fixed = self.props == Props { lc: 3, lp: 0, pb: 2 } && !force_generic() && !cfg!(lzma_stats);
         // Main part: read the input in place while at least INPUT_MARGIN bytes remain (a
         // single symbol never reads more than ~50 bytes), so reads need no bounds checks.
         if input.len() >= INPUT_MARGIN && rc.ip <= input.len() - INPUT_MARGIN {
@@ -1312,6 +1317,11 @@ impl LzmaDecoder {
             stat!(8, len);
             stat!(9, (rep0 < 15) as u64);
             stat!(11, (len >= 18) as u64);
+            stat!(5, (len <= 32) as u64);
+            stat!(6, (len > 32 && len <= 64) as u64);
+            stat!(7, (len > 64) as u64);
+            stat!(14, if rep0 < 15 { len } else { 0 });
+            stat!(15, (rep0 == 0) as u64);
             let avail = limit - p;
             let n = if len <= avail { len } else { avail };
             // SAFETY: rep0 < p, p + n <= limit <= out_len.
@@ -1499,16 +1509,24 @@ impl LzmaDecoder {
                 bit!("{probs} + {t2}*2 + 384", "50f"),
                 "movzx {t0:e}, byte ptr [{ctx} + {t2} + 116]",
                 "mov qword ptr [{ctx} + 64], {t0}",
-                len_dec!("1636", "41", "42", "43"),
+                // distance slot tree at DIST_SLOT + min(len - 2, 3) * 64 (bytes: 864 + 128 *
+                // min(len - 2, 3)); fixed for lengths >= 10, set up before their length tree
+                len_dec!(
+                    "1636",
+                    "41",
+                    "42",
+                    "43",
+                    concat!(
+                        "mov {t0:e}, 5\n",
+                        "cmp {sym:e}, 5\n",
+                        "cmovb {t0:e}, {sym:e}\n",
+                        "shl {t0:e}, 7\n",
+                        "lea {base}, [{probs} + {t0} + 608]\n",
+                    ),
+                    "lea {base}, [{probs} + 1248]\n"
+                ),
                 "mov qword ptr [{ctx} + 96], {sym}",
-                // distance slot: tree at DIST_SLOT + min(len - 2, 3) * 64
                 mark!("05"),
-                "lea {t0:e}, [{sym} - 2]",
-                "mov {t1:e}, 3",
-                "cmp {t0:e}, 3",
-                "cmova {t0:e}, {t1:e}",
-                "shl {t0:e}, 7",
-                "lea {base}, [{probs} + {t0} + 864]",
                 tree6a!("{base}", "63"),
                 "cmp {sym:e}, 4",
                 "jb 48f",
@@ -1645,7 +1663,7 @@ impl LzmaDecoder {
                 "movzx {t0:e}, byte ptr [{ctx} + {t2} + 128]",
                 "mov qword ptr [{ctx} + 64], {t0}",
                 mark!("11"),
-                len_dec!("2664", "57", "58", "59"),
+                len_dec!("2664", "57", "58", "59", "", ""),
                 "mov qword ptr [{ctx} + 96], {sym}",
                 // ---- copy len ([ctx + 96]) bytes from distance rep0 + 1 ----
                 "60:",
@@ -1667,18 +1685,25 @@ impl LzmaDecoder {
                 "ja 75f",
                 "cmp {t0}, 15",
                 "jb 75f",
-                // distance >= 16: 16-byte chunks (each chunk's source is complete)
+                // distance >= 16: 16-byte chunks (each chunk's source is complete); 64
+                // bytes unconditionally (~85% of the matches in text are shorter)
                 "movdqu xmm0, xmmword ptr [{sym} - 1]",
                 "movdqu xmmword ptr [{op}], xmm0",
                 "movdqu xmm1, xmmword ptr [{sym} + 15]",
                 "movdqu xmmword ptr [{op} + 16], xmm1",
-                "cmp {t2}, 32",
+                "movdqu xmm0, xmmword ptr [{sym} + 31]",
+                "movdqu xmmword ptr [{op} + 32], xmm0",
+                "movdqu xmm1, xmmword ptr [{sym} + 47]",
+                "movdqu xmmword ptr [{op} + 48], xmm1",
+                "cmp {t2}, 64",
                 "jbe 63f",
-                "mov {t1}, 32",
+                "mov {t1}, 64",
                 "62:",
                 "movdqu xmm0, xmmword ptr [{sym} + {t1} - 1]",
                 "movdqu xmmword ptr [{op} + {t1}], xmm0",
-                "add {t1}, 16",
+                "movdqu xmm1, xmmword ptr [{sym} + {t1} + 15]",
+                "movdqu xmmword ptr [{op} + {t1} + 16], xmm1",
+                "add {t1}, 32",
                 "cmp {t1}, {t2}",
                 "jb 62b",
                 "63:",
