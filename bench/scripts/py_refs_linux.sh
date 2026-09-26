@@ -15,7 +15,7 @@ run() {
   [ -s "$OUT/$p.txt" ] && return
   d=$OUT/dump/$p; mkdir -p "$d"
   s=$(date +%s.%N)
-  timeout 3600 nice -n 10 "$PY" "$VOL" -q -s "$SYM" -o "$d" -f "$IMG" "$p" > "$OUT/$p.tmp" 2> "$OUT/$p.err"
+  /home/user/rs-vol/bench/scripts/limit.sh -m 8G timeout 3600 nice -n 10 "$PY" "$VOL" -q -s "$SYM" -o "$d" -f "$IMG" "$p" > "$OUT/$p.tmp" 2> "$OUT/$p.err"
   rc=$?
   e=$(date +%s.%N)
   mv "$OUT/$p.tmp" "$OUT/$p.txt"
