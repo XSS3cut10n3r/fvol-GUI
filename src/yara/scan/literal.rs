@@ -58,6 +58,11 @@ impl Check {
         self.pat.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.pat.is_empty()
+    }
+
     /// Does the variant match at `s` with xor key `key` (0 for non-xor)?
     #[inline]
     pub fn matches(&self, data: &[u8], s: usize, key: u8) -> bool {
@@ -76,10 +81,10 @@ impl Check {
             return false;
         }
         let key = if self.xor { data[p] ^ self.pat[a] } else { 0 };
-        if let (true, Some((lo, hi))) = (self.xor, range) {
-            if key < lo || key > hi {
-                return false;
-            }
+        if let (true, Some((lo, hi))) = (self.xor, range)
+            && (key < lo || key > hi)
+        {
+            return false;
         }
         eq_at(data, p, &self.pat[a..e], &self.fold[a..e], key)
     }
@@ -225,14 +230,13 @@ fn b64_nodes(s: &[u8], alphabet: &[u8], wide: bool, out: &mut Vec<Vec<u8>>) {
         let len = tmp.len();
         let pad = if len % 3 != 0 { 3 - len % 3 } else { 0 };
         let mut enc = Vec::with_capacity(len * 4 / 3 + 4);
-        let mut c = tmp.chunks_exact(3);
-        for t in &mut c {
+        let (triples, r) = tmp.as_chunks::<3>();
+        for t in triples {
             enc.push(alphabet[(t[0] >> 2) as usize]);
             enc.push(alphabet[((t[0] & 3) << 4 | t[1] >> 4) as usize]);
             enc.push(alphabet[((t[1] & 15) << 2 | t[2] >> 6) as usize]);
             enc.push(alphabet[(t[2] & 63) as usize]);
         }
-        let r = c.remainder();
         if !r.is_empty() {
             enc.push(alphabet[(r[0] >> 2) as usize]);
             if r.len() == 1 {
@@ -289,10 +293,10 @@ impl TextStr {
         if b64 && mods.xor.is_some() {
             return Err("invalid modifier combination: base64 xor".into());
         }
-        if let Some((a, b)) = mods.xor {
-            if a > b {
-                return Err("lower bound for xor range exceeded upper bound".into());
-            }
+        if let Some((a, b)) = mods.xor
+            && a > b
+        {
+            return Err("lower bound for xor range exceeded upper bound".into());
         }
         let ascii = mods.ascii || (!mods.wide && !b64);
         let wide = mods.wide;

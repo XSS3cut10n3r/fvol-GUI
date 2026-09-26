@@ -113,7 +113,7 @@ impl HashFilter {
         let mut q = from;
         #[cfg(target_arch = "x86_64")]
         {
-            if has_avx2() {
+            if has_avx2() && !super::teddy::force_scalar() {
                 let mut cands = [0u64; 256];
                 loop {
                     // SAFETY: AVX2 checked; the core bounds-checks its loads.

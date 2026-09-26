@@ -208,8 +208,8 @@ impl Teddy {
         }
         let mut bucket_off = [0u32; NB + 1];
         let mut members = Vec::new();
-        for b in 0..NB {
-            bucket_off[b] = members.len() as u32;
+        for (b, off) in bucket_off.iter_mut().enumerate().take(NB) {
+            *off = members.len() as u32;
             if let Some((_, list)) = clusters.get(b) {
                 for &i in list {
                     members.push(Member::new(ids[i], &windows[i]));
@@ -308,7 +308,7 @@ impl Teddy {
         let mut q = from;
         #[cfg(target_arch = "x86_64")]
         {
-            if has_avx2() {
+            if has_avx2() && !force_scalar() {
                 let mut cands = [0u64; CAND_CAP];
                 loop {
                     // SAFETY: AVX2 availability checked at runtime.
@@ -434,6 +434,22 @@ unsafe fn core_avx2<const M: usize>(
         q += 32;
     }
     (q, k)
+}
+
+/// Tests can force the portable paths (results are identical by design).
+#[cfg(test)]
+pub(crate) static FORCE_SCALAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[inline(always)]
+pub(crate) fn force_scalar() -> bool {
+    #[cfg(test)]
+    {
+        FORCE_SCALAR.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -93,9 +93,9 @@ enum Engine {
     None,
     /// Teddy plus, per bucket, the strings its patterns belong to (buckets whose
     /// strings are all disabled are switched off).
-    Teddy(Teddy, Vec<Vec<u32>>),
+    Teddy(Box<Teddy>, Vec<Vec<u32>>),
     /// Aho-Corasick over exact window atoms; `map[atom] = pattern`.
-    Aho { ac: AhoCorasick, map: Vec<u32> },
+    Aho { ac: Box<AhoCorasick>, map: Vec<u32> },
     /// Large sets: hashed 4-byte windows, plus an engine for the shorter windows.
     Hash { hf: HashFilter, short: Box<Engine> },
 }
@@ -240,7 +240,7 @@ impl Engine {
                 v.sort_unstable();
                 v.dedup();
             }
-            return Engine::Teddy(t, strings);
+            return Engine::Teddy(Box::new(t), strings);
         }
         // Exact windows with every case combination of folded letters.
         let expand = |p: &Pat| -> Vec<Vec<u8>> {
@@ -283,7 +283,7 @@ impl Engine {
                 map.push(id);
             }
         }
-        Engine::Aho { ac: AhoCorasick::new(&atoms), map }
+        Engine::Aho { ac: Box::new(AhoCorasick::new(&atoms)), map }
     }
 
     fn is_none(&self) -> bool {
@@ -483,7 +483,7 @@ impl Matcher {
             }
         });
         let mut top: Vec<(usize, usize)> = per.iter().copied().enumerate().filter(|x| x.1 > 0).collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.sort_by_key(|x| std::cmp::Reverse(x.1));
         let top: Vec<String> = top
             .iter()
             .take(8)
@@ -563,12 +563,12 @@ impl Matcher {
             return;
         }
         for &(si, off) in &self.fixed {
-            if off >= 0 && (off as u64) < n as u64 {
-                if let Kind::Text(ts) = &self.kinds[si as usize] {
-                    if let Some(mt) = ts.resolve(data, off as usize, usize::MAX) {
-                        out[si as usize].push(mt);
-                    }
-                }
+            if off >= 0
+                && (off as u64) < n as u64
+                && let Kind::Text(ts) = &self.kinds[si as usize]
+                && let Some(mt) = ts.resolve(data, off as usize, usize::MAX)
+            {
+                out[si as usize].push(mt);
             }
         }
         let mut raw_state = 0u32;

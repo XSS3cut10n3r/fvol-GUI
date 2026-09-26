@@ -221,8 +221,8 @@ fn yara_scan_bench() {
         for _ in 0..3 {
             let t = std::time::Instant::now();
             let mut x = 0u64;
-            for c in data.chunks_exact(8) {
-                x ^= u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+            for c in data.as_chunks::<8>().0 {
+                x ^= u64::from_le_bytes(*c);
             }
             eprintln!("floor (xor all words): {:.3}s {x}", t.elapsed().as_secs_f64());
         }

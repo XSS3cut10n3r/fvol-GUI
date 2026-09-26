@@ -207,7 +207,7 @@ impl AhoCorasick {
         let match_min = self.match_min;
         let mut s = *state;
         let mut i = from;
-        if s as usize >= trans.len() || s % self.stride != 0 {
+        if s as usize >= trans.len() || !s.is_multiple_of(self.stride) {
             s = 0;
         }
         match &self.prefilter {

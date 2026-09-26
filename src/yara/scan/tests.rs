@@ -157,6 +157,50 @@ fn yara_scan_many_strings_vs_naive() {
     }
 }
 
+/// The portable (non-SIMD) candidate paths give the same results.
+#[test]
+fn yara_scan_scalar_paths() {
+    use std::sync::atomic::Ordering;
+    let mut x = 0x0bad_5eed_1234_5678u64;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for &count in &[3usize, 30, 120] {
+        let words: Vec<Vec<u8>> = (0..count)
+            .map(|_| (0..1 + rnd() % 7).map(|_| b"abXY\x00 "[(rnd() % 6) as usize]).collect())
+            .collect();
+        let defs: Vec<StringDef> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let mods = match i % 4 {
+                    0 => Modifiers { nocase: true, ..m() },
+                    1 => Modifiers { ascii: true, wide: true, ..m() },
+                    2 => Modifiers { xor: Some((0, 255)), ..m() },
+                    _ => m(),
+                };
+                text(w, mods)
+            })
+            .collect();
+        let data: Vec<u8> = (0..300_000).map(|_| b"abXYxy\x00 -"[(rnd() % 9) as usize]).collect();
+        let simd = run(&defs, &data);
+        teddy::FORCE_SCALAR.store(true, Ordering::Relaxed);
+        let scalar = run(&defs, &data);
+        teddy::FORCE_SCALAR.store(false, Ordering::Relaxed);
+        assert_eq!(simd, scalar, "count {count}");
+    }
+}
+
+#[test]
+fn yara_scan_matcher_is_send_sync() {
+    fn check<T: Send + Sync>() {}
+    check::<Matcher>();
+    check::<Scratch>();
+}
+
 #[test]
 fn yara_scan_match_cap() {
     // yara-python keeps the first 1_000_000 matches (last offset 1999998).

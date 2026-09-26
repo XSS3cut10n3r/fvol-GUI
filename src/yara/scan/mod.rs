@@ -1,9 +1,19 @@
 //! YARA string matching engine: finds every match of every string declared in a
 //! rule set, with libyara 4.5 semantics (what yara-python reports).
 //!
-//! Ownership: `scan/mod.rs`, `scan/literal.rs` and `yara/aho.rs` belong to the
-//! strings/Aho-Corasick owner; `scan/re_string.rs` (hex + regex strings) belongs to
-//! the regex owner. The rule front-end (`yara/rules`) only uses [`Matcher`].
+//! Ownership: `scan/mod.rs`, `matcher.rs`, `literal.rs`, `teddy.rs`, `hashf.rs`,
+//! `freq.rs`, `bench.rs`, `tests.rs` and `yara/aho.rs` belong to the strings /
+//! Aho-Corasick owner; `scan/re_string.rs` (hex + regex strings) belongs to the regex
+//! owner. The rule front-end (`yara/rules`) only uses [`Matcher`] (and [`Scratch`]).
+//!
+//! Engine overview (see `matcher.rs`): every string is compiled into searchable
+//! literals (text variants, hex/regex atoms), each with a rare <= 4-byte *window*
+//! picked with byte-pair statistics of real memory; candidates come from one SIMD
+//! pass per L2-sized block (Teddy for <= 64 literals, a hashed-window filter with
+//! AVX2 gathers for larger sets, Aho-Corasick for short windows), xor strings are
+//! searched in the key-invariant stream `data[i] ^ data[i+1]`; verification replays
+//! libyara's rules (`literal.rs`, `re_string.rs`). `Matcher` is `Send + Sync`: share
+//! one across threads and give each thread its own [`Scratch`] (`scan_with`).
 //!
 //! Semantics summary (libyara):
 //! * every string reports ALL matching offsets (overlapping), one match per offset,
