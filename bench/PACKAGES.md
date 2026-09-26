@@ -64,3 +64,8 @@ Windows 1809 98/98, Linux 62/62 on each of 4 images (6.8 + 5.15, ELF + LiME), ma
 (isfinfo references refreshed: they depend on the live symbol-dir contents; ours == a fresh python run.)
 448 unit tests. Remaining: perf passes (scan cache, cold start, output pipeline/range walker), final
 benchmarks (ubuntu-vm), docs.
+
+## Hardening wave (2026-09-26)
+A option x renderer parity sweep | B robustness fuzzing (mutated images) | C more test images (Win7/XP/x86,
+old/new/32-bit Linux) + refs + multi-image checkers | D lazy symbol table for first-ever runs.
+Also running: compressed-image inputs (gz/bz2/xz), vmscan/vmcoreinfo warm paths.

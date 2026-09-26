@@ -25,6 +25,17 @@ use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+/// Cap on the number of runs one `mapping_with_targets` call emits. A valid address space maps
+/// far fewer (the busiest, the Windows kernel, is ~330k runs); a count above this means the page
+/// tables are corrupt -- a garbage page read as a page table makes the walk enumerate a
+/// practically unbounded set of scattered pages. python enumerates them lazily and so hangs
+/// forever (confirmed: `windows.memmap`/`windows.driverscan` on such a mutant run past a 120 s
+/// timeout emitting nothing); a consumer that collects the runs (memmap, the scanner) instead
+/// runs out of memory. The walk stops here, turning an OOM into a bounded, partial result
+/// (DESIGN "never OOM on malformed memory"). ~16M is ~48x any real layer, so no valid mapping is
+/// ever truncated.
+const MAX_MAPPING_RUNS: u64 = 16 << 20;
+
 /// Paging structure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PagingMode {
@@ -773,6 +784,7 @@ impl IntelLayer {
     pub fn mapping_with_targets(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping, Target) -> bool) {
         let mut stash: Option<(Mapping, Target)> = None;
         let mut stopped = false;
+        let mut emitted = 0u64;
         self.walk_ranges(addr, len, |off, size, mapped, t| {
             if let Some((ref mut m, st)) = stash {
                 if m.offset.wrapping_add(m.len) == off && m.mapped.wrapping_add(m.len) == mapped && st == t {
@@ -781,7 +793,10 @@ impl IntelLayer {
                 }
                 let prev = (*m, st);
                 stash = Some((Mapping { offset: off, len: size, mapped }, t));
-                if !f(prev.0, prev.1) {
+                emitted += 1;
+                // corrupt page tables can enumerate an unbounded number of runs (see
+                // MAX_MAPPING_RUNS): stop before a consumer that collects them exhausts memory.
+                if emitted > MAX_MAPPING_RUNS || !f(prev.0, prev.1) {
                     stopped = true;
                     return false;
                 }
