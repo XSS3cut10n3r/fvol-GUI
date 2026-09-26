@@ -44,11 +44,11 @@ enum Fail {
 
 /// The first failure python's `mapping(addr, huge)` raises: (failing address, end of the
 /// faulting entry's range, kind).
-fn first_failure(il: &IntelLayer, deps: &[std::sync::Arc<dyn Layer>], start: u64) -> (u64, u64, Fail) {
+fn first_failure(il: &IntelLayer, deps: &[std::sync::Arc<dyn Layer>], cur: &mut (u64, u64), start: u64) -> (u64, u64, Fail) {
     let space: u64 = il.max_address().wrapping_add(1);
     let mut addr = start;
     loop {
-        match il.translate_raw(addr) {
+        match il.translate_cursor(addr, cur) {
             Ok((phys, bits, target)) => {
                 let ps = 1u64.checked_shl(bits).unwrap_or(0);
                 let chunk = if ps == 0 { u64::MAX - addr } else { ps - (addr & (ps - 1)) };
@@ -93,12 +93,13 @@ fn statistics(il: &IntelLayer) -> [i128; 7] {
     let mut page_addr: u128 = 0;
     // (end of the faulting entry, failure) for the last search
     let mut cached: Option<(u64, Fail)> = None;
+    let mut cur = (0u64, 0u64);
     while page_addr < max {
         let p = page_addr as u64;
         let fail = match cached {
             Some((end, f)) if p < end => f,
             _ => {
-                let (_, end, f) = first_failure(il, &deps, p);
+                let (_, end, f) = first_failure(il, &deps, &mut cur, p);
                 cached = Some((end, f));
                 f
             }
