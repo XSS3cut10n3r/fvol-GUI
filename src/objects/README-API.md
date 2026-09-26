@@ -96,7 +96,28 @@ let dtb = Field::path(k.table, "_EPROCESS", "Pcb.DirectoryTableBase")?;
 for p in &procs { let v = p.f(&pid).int()?; let d = p.f(&dtb).u64()?; }
 ```
 
-## Windows class extensions (`use crate::symbols::windows::WinExt`)
+## Windows class extensions (`use crate::symbols::windows::prelude::*`)
+
+The prelude brings in `WinExt` (EPROCESS / ETHREAD / KTHREAD / LIST_ENTRY / UNICODE_STRING /
+KSYSTEM_TIME / EX_FAST_REF / LDR_DATA_TABLE_ENTRY / FILE_OBJECT...), `VadExt` (MMVAD tree),
+`TokenExt` (TOKEN), `KtimerExt` (KTIMER), `CacheExt` (CONTROL_AREA / SHARED_CACHE_MAP / VACB).
+Pool / object-header helpers live in `crate::symbols::windows::pool`.
+
+| python | rust |
+|---|---|
+| `proc.get_vad_root().traverse()` | `proc.get_vad_root()?.traverse()` → `Vec<Result<Obj>>` (nodes cast to `_MMVAD_SHORT`/`_MMVAD`) |
+| `vad.get_start()/get_end()/get_size()/get_parent()` | same names → `Result<u64>` / `Result<i128>` |
+| `vad.get_tag()` / `get_file_name()` | `vad.get_tag()` (`Option<String>`) / `vad.get_file_name()` (`Value`) |
+| `vad.get_commit_charge()` / `get_private_memory()` | same (member objects: `.int()?`) |
+| `vad.get_protection(protect_values, winnt_protections)` | `vad.get_protection(&vals, &vadinfo::WINNT_PROTECTIONS)?` with `vals = vadinfo::protect_values(k)?` |
+| `VadInfo.list_vads(proc, filter)` / `vad_dump(...)` | `crate::plugins::windows::vadinfo::{list_vads, vad_dump}` |
+| `token.get_sids()` / `privileges()` | `token.get_sids()?` / `token.privileges()?` |
+| `ktimer.get_dpc()` / `get_due_time()` / `valid_type()` / `get_signaled()` | same names |
+| `control_area.get_available_pages()` / `shared_cache_map.get_available_pages()` | `obj.get_available_pages()` → `Vec<Result<(u64, u64, u64)>>` |
+| `vacb.get_file_offset()` / `control_area.get_subsection()` / `get_pte(off)` | same names |
+| python f-string `f"{x:#010x}"`, `f"{s:<20}"` | `crate::util::pyformat::{fmt_int(x, "#010x"), fmt_str(s, "<20")}` |
+
+### Core Windows helpers (`WinExt`)
 
 | python | rust |
 |---|---|

@@ -103,6 +103,14 @@ fn keep_err<T>(r: &std::result::Result<T, String>) -> Result<&T> {
 impl Context {
     /// Cheap: records options and sets the symbol search path. Nothing is opened or scanned.
     pub fn new(opts: GlobalOptions) -> Result<Context> {
+        if opts.clear_cache {
+            // python --clear-cache wipes its identifier cache and cached data; ours are the
+            // identifier index, the automagic results and the binary symbol tables
+            let dir = crate::util::paths::rsvol_cache_dir();
+            let _ = std::fs::remove_file(dir.join("identifiers.cache"));
+            let _ = std::fs::remove_dir_all(dir.join("automagic"));
+            let _ = std::fs::remove_dir_all(dir.join("isf"));
+        }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         Ok(Context {
             opts,
