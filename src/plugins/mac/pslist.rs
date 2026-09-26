@@ -187,8 +187,13 @@ fn row(task: &Obj) -> Result<Vec<Value>> {
     let start = task.m("p_start")?;
     let secs = start.m("tv_sec")?.int()?;
     let usecs = start.m("tv_usec")?.int()?;
-    // datetime.datetime.fromtimestamp(sec + usec / 1e6): naive local time
-    let start_time = fromtimestamp_local(secs as f64 + usecs as f64 / 1e6)?;
+    // datetime.datetime.fromtimestamp(sec + usec / 1e6): naive local time. Garbage times make
+    // python raise ValueError (not a volatility exception): the plugin dies with a traceback
+    // and no "\n\n" block -- the rsvol CLI's equivalent of that is a plugin panic.
+    let start_time = match fromtimestamp_local(secs as f64 + usecs as f64 / 1e6) {
+        Ok(t) => t,
+        Err(py_exception) => panic!("{py_exception}"),
+    };
     let ppid = task.m("p_ppid")?.int()?;
     Ok(vec![
         Value::Int(task.addr as i128),

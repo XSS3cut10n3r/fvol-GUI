@@ -477,9 +477,10 @@ unsafe extern "C" {
 }
 
 /// python `_PyTime_ObjectToTimeval(t, ROUND_HALF_EVEN)`: (seconds, microseconds).
-pub fn float_to_timeval(t: f64) -> Result<(i64, u32)> {
+/// `Err` = the python exception text.
+pub fn float_to_timeval(t: f64) -> std::result::Result<(i64, u32), String> {
     if t.is_nan() {
-        return Err(Error::msg("ValueError: Invalid value NaN (not a number)"));
+        return Err("ValueError: Invalid value NaN (not a number)".into());
     }
     let mut intpart = t.trunc();
     let x = (t - intpart) * 1e6;
@@ -496,7 +497,7 @@ pub fn float_to_timeval(t: f64) -> Result<(i64, u32)> {
         intpart -= 1.0;
     }
     if !(intpart >= -9.223_372_036_854_775_808e18 && intpart < 9.223_372_036_854_775_808e18) {
-        return Err(Error::msg("OverflowError: timestamp out of range for platform time_t"));
+        return Err("OverflowError: timestamp out of range for platform time_t".into());
     }
     Ok((intpart as i64, floatpart as u32))
 }
@@ -504,19 +505,23 @@ pub fn float_to_timeval(t: f64) -> Result<(i64, u32)> {
 /// python `datetime.datetime.fromtimestamp(t)` without a tz: a NAIVE datetime in the process'
 /// local time zone (libc `localtime_r`, like CPython). The returned [`DateTime`] holds the
 /// local wall-clock time in `secs` (render-only; `utc = false`).
-pub fn fromtimestamp_local(t: f64) -> Result<DateTime> {
+///
+/// `Err` is the text of the python exception (`ValueError` for years outside 1..9999, ...),
+/// which is NOT a volatility exception: python plugins crash with a traceback there (the
+/// rsvol CLI's equivalent is a plugin panic, see `plugins::mac::pslist`).
+pub fn fromtimestamp_local(t: f64) -> std::result::Result<DateTime, String> {
     static TZ: std::sync::Once = std::sync::Once::new();
     TZ.call_once(|| unsafe { tzset() });
     let (secs, us) = float_to_timeval(t)?;
     let mut tm = std::mem::MaybeUninit::<Tm>::zeroed();
     let r = unsafe { localtime_r(&secs, tm.as_mut_ptr()) };
     if r.is_null() {
-        return Err(Error::msg("OSError: [Errno 75] Value too large for defined data type"));
+        return Err("OSError: [Errno 75] Value too large for defined data type".into());
     }
     let tm = unsafe { tm.assume_init() };
     let year = tm.tm_year as i64 + 1900;
     if !(1..=9999).contains(&year) {
-        return Err(Error::msg(format!("ValueError: year {year} is out of range")));
+        return Err(format!("ValueError: year must be in 1..9999, not {year}"));
     }
     let days = crate::util::time::days_from_civil(year, tm.tm_mon as u32 + 1, tm.tm_mday as u32);
     // CPython clamps leap seconds to 59
