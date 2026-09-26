@@ -675,7 +675,7 @@ fn fwd_search(
             }
         }
     }
-    if end < n {
+    if end < n && p == end {
         if let Some(fc) = cls.final_nl {
             let t = step(cls, d, c, &mut sid, fc);
             if t & TAG_MATCH != 0 {
