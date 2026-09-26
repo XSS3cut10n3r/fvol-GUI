@@ -6,11 +6,13 @@ pub mod bash;
 pub mod capabilities;
 pub mod elfs;
 pub mod envars;
+pub mod kthreads;
 pub mod library_list;
 pub mod malware;
 pub mod pidhashtable;
 pub mod proc;
 pub mod psaux;
+pub mod pscallstack;
 pub mod pslist;
 pub mod psscan;
 pub mod pstree;
@@ -37,4 +39,6 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&ptrace::Ptrace);
     v.push(&vmaregexscan::VmaRegExScan);
     v.push(&vmayarascan::VmaYaraScan);
+    v.push(&pscallstack::PsCallStack);
+    v.push(&kthreads::Kthreads);
 }
