@@ -327,19 +327,179 @@ impl HuffTable {
     }
 }
 
+/// 64-bit bit reader equivalent to the 32-bit reader of [MS-XCA] 2.2.4.
+///
+/// The spec keeps 16..32 bits buffered and reads the next 16-bit word at the current input
+/// position whenever fewer than 16 remain; match-length extension bytes are read at that same
+/// position, interleaved with the words. After consuming C bits the spec has read
+/// R(C) = max(2, ceil(C/16) + 1) words, so its input position is a function of C and of the
+/// length bytes read so far.
+///
+/// This reader instead refills branchlessly to 48..63 bits (four words loaded at once, the
+/// standard "OR in the lookahead, count only whole words" trick), which is enough for two
+/// symbols (or a literal and a whole match) per refill, keeping the refill off the per-literal
+/// dependency chain. When length bytes show up it recomputes the spec position, reads them
+/// there and drops the words it had prefetched from beyond them.
+struct BitReader {
+    /// Unconsumed bits, MSB first; bits below `cnt` are either zero or the upcoming data.
+    buf: u64,
+    cnt: u32,
+    /// Whole words counted into `buf` since the start of the block.
+    words: usize,
+    /// Input position of the next word to count.
+    ptr: usize,
+}
+
+impl BitReader {
+    /// Four 16-bit words at `p` as one big-endian bit string (w0 in the top bits). Bytes past
+    /// the end of the input read as zero: the reader prefetches beyond the last used symbol.
+    #[inline(always)]
+    fn lanes<const FAST: bool>(input: &[u8], p: usize) -> u64 {
+        let x = if FAST {
+            // SAFETY: FAST callers guarantee p + 8 <= input.len()
+            u64::from_le_bytes(unsafe { *(input.as_ptr().add(p) as *const [u8; 8]) })
+        } else {
+            let mut b = [0u8; 8];
+            if let Some(s) = input.get(p..) {
+                let k = s.len().min(8);
+                b[..k].copy_from_slice(&s[..k]);
+            }
+            u64::from_le_bytes(b)
+        };
+        let y = x.rotate_left(32);
+        ((y & 0x0000_FFFF_0000_FFFF) << 16) | ((y >> 16) & 0x0000_FFFF_0000_FFFF)
+    }
+
+    #[inline(always)]
+    fn byte<const FAST: bool>(input: &[u8], p: usize) -> Result<usize, XpressError> {
+        if FAST {
+            // SAFETY: FAST steps start with ptr + 16 <= len and length bytes lie below ptr + 8
+            Ok(unsafe { *input.get_unchecked(p) } as usize)
+        } else {
+            input.get(p).map(|&b| b as usize).ok_or(XpressError::Truncated)
+        }
+    }
+
+    /// Top up to 48..63 valid bits.
+    #[inline(always)]
+    fn refill<const FAST: bool>(&mut self, input: &[u8]) {
+        self.buf |= Self::lanes::<FAST>(input, self.ptr) >> self.cnt;
+        let k = (63 - self.cnt) >> 4;
+        self.ptr += 2 * k as usize;
+        self.words += k as usize;
+        self.cnt += 16 * k;
+    }
+
+    #[inline(always)]
+    fn consume(&mut self, n: u32) {
+        self.buf <<= n;
+        self.cnt -= n;
+    }
+
+    /// Words the spec decoder has read at this point.
+    #[inline(always)]
+    fn spec_words(&self) -> usize {
+        let consumed = 16 * self.words - self.cnt as usize;
+        (consumed.div_ceil(16) + 1).max(2)
+    }
+
+    /// Spec input position (after the words the spec has read).
+    #[inline(always)]
+    fn spec_ip(&self) -> usize {
+        (self.ptr + 2 * self.spec_words()) - 2 * self.words
+    }
+
+    /// Continue counting words at `p` (after length bytes), keeping only the unconsumed bits
+    /// of the words the spec has read.
+    #[inline(always)]
+    fn resync(&mut self, p: usize) {
+        let r = self.spec_words();
+        let keep = (16 * r - (16 * self.words - self.cnt as usize)) as u32; // 16..=31
+        self.buf &= !(u64::MAX >> keep);
+        self.cnt = keep;
+        self.words = r;
+        self.ptr = p;
+    }
+}
+
+/// The match part of a symbol (>= 256), with at least 30 bits buffered for symbol + offset.
+#[inline(always)]
+fn huff_match<const FAST: bool>(input: &[u8], out: &mut [u8], rd: &mut BitReader, op: &mut usize, sym: usize) -> Result<(), XpressError> {
+    let s = sym - 256;
+    let mut len = s & 15;
+    let obits = (s >> 4) as u32;
+    if len == 15 {
+        let mut p = rd.spec_ip();
+        len = BitReader::byte::<FAST>(input, p)?;
+        p += 1;
+        if len == 255 {
+            len = BitReader::byte::<FAST>(input, p)? | BitReader::byte::<FAST>(input, p + 1)? << 8;
+            p += 2;
+            if len == 0 {
+                len = 0;
+                for k in 0..4 {
+                    len |= BitReader::byte::<FAST>(input, p + k)? << (8 * k);
+                }
+                p += 4;
+            }
+            if len < 15 {
+                return Err(XpressError::BadLength);
+            }
+            len -= 15;
+        }
+        len += 15;
+        rd.resync(p);
+    }
+    len += 3;
+    let off = ((rd.buf >> 1 >> (63 - obits)) as usize) + (1usize << obits);
+    rd.consume(obits);
+    *op = copy_match(out, *op, off, len)?;
+    Ok(())
+}
+
+/// Decode symbols of one block until `block_end`; FAST while at least 16 input bytes remain.
+#[inline(always)]
+fn huff_run<const FAST: bool>(
+    input: &[u8],
+    out: &mut [u8],
+    table: &HuffTable,
+    rd: &mut BitReader,
+    op: &mut usize,
+    block_end: usize,
+) -> Result<(), XpressError> {
+    let fast_end = input.len().saturating_sub(16);
+    while *op < block_end && (!FAST || rd.ptr <= fast_end) {
+        rd.refill::<FAST>(input);
+        // >= 48 bits: a symbol (15) + offset (15), or a literal (15) + symbol + offset (30)
+        let (sym, bl) = table.decode((rd.buf >> 32) as u32);
+        rd.consume(bl);
+        if sym >= 256 {
+            huff_match::<FAST>(input, out, rd, op, sym)?;
+            continue;
+        }
+        // SAFETY: *op < block_end <= out.len()
+        unsafe { *out.get_unchecked_mut(*op) = sym as u8 };
+        *op += 1;
+        if *op >= block_end {
+            break;
+        }
+        let (sym, bl) = table.decode((rd.buf >> 32) as u32);
+        rd.consume(bl);
+        if sym >= 256 {
+            huff_match::<FAST>(input, out, rd, op, sym)?;
+            continue;
+        }
+        // SAFETY: as above
+        unsafe { *out.get_unchecked_mut(*op) = sym as u8 };
+        *op += 1;
+    }
+    Ok(())
+}
+
 /// Decompress Xpress "LZ77+Huffman" data into `out`; returns the number of bytes produced
 /// (always `out.len()` on success: the format has no in-band end of stream before that).
 pub fn huffman_decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, XpressError> {
     let n = input.len();
-    // Reads past the end of input yield zero bits: the bit reader prefetches up to 4 bytes
-    // beyond the last used symbol.
-    #[inline(always)]
-    fn rd16(input: &[u8], p: usize) -> u32 {
-        match input.get(p..p + 2) {
-            Some(b) => u16::from_le_bytes([b[0], b[1]]) as u32,
-            None => input.get(p).map_or(0, |&b| b as u32),
-        }
-    }
     let mut table = HuffTable::new();
     let mut ip = 0usize;
     let mut op = 0usize;
@@ -348,75 +508,11 @@ pub fn huffman_decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, Xp
             return Err(XpressError::Truncated);
         }
         table.build(&input[ip..ip + 256])?;
-        ip += 256;
-        let mut bits: u32 = (rd16(input, ip) << 16) | rd16(input, ip + 2);
-        ip += 4;
-        let mut extra: i32 = 16;
+        let mut rd = BitReader { buf: 0, cnt: 0, words: 0, ptr: ip + 256 };
         let block_end = op.saturating_add(HUFF_BLOCK).min(out.len());
-        // Branchless refill: whether 16 more bits are needed is data dependent (~50% per
-        // symbol), so a branch here mispredicts constantly.
-        #[inline(always)]
-        fn refill(input: &[u8], bits: &mut u32, extra: &mut i32, ip: &mut usize) {
-            let need = (*extra < 0) as u32;
-            let w = rd16(input, *ip);
-            *bits |= (w << ((-*extra) as u32 & 15)) & 0u32.wrapping_sub(need);
-            *extra += 16 * need as i32;
-            *ip += 2 * need as usize;
-        }
-        while op < block_end {
-            let (sym, bl) = table.decode(bits);
-            bits <<= bl;
-            extra -= bl as i32;
-            refill(input, &mut bits, &mut extra, &mut ip);
-            if sym < 256 {
-                // SAFETY: op < block_end <= out.len()
-                unsafe { *out.get_unchecked_mut(op) = sym as u8 };
-                op += 1;
-                continue;
-            }
-            // match (symbol 256 is only an end marker once all output is produced, which the
-            // loop condition already handles)
-            let s = sym - 256;
-            let mut len = s & 15;
-            let obits = (s >> 4) as u32;
-            if len == 15 {
-                if ip >= n {
-                    return Err(XpressError::Truncated);
-                }
-                len = input[ip] as usize;
-                ip += 1;
-                if len == 255 {
-                    if n - ip < 2 {
-                        return Err(XpressError::Truncated);
-                    }
-                    len = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
-                    ip += 2;
-                    if len == 0 {
-                        if n - ip < 4 {
-                            return Err(XpressError::Truncated);
-                        }
-                        len = u32::from_le_bytes([input[ip], input[ip + 1], input[ip + 2], input[ip + 3]]) as usize;
-                        ip += 4;
-                    }
-                    if len < 15 {
-                        return Err(XpressError::BadLength);
-                    }
-                    len -= 15;
-                }
-                len += 15;
-            }
-            len += 3;
-            // obits <= 15; shifting a u64 keeps obits == 0 well defined
-            let off = (((bits as u64) << obits) >> 32) as usize + (1usize << obits);
-            bits = ((bits as u64) << obits) as u32;
-            extra -= obits as i32;
-            if extra < 0 {
-                bits |= rd16(input, ip) << (-extra) as u32;
-                extra += 16;
-                ip += 2;
-            }
-            op = copy_match(out, op, off, len)?;
-        }
+        huff_run::<true>(input, out, &table, &mut rd, &mut op, block_end)?;
+        huff_run::<false>(input, out, &table, &mut rd, &mut op, block_end)?;
+        ip = rd.spec_ip();
     }
     Ok(op)
 }
@@ -556,4 +652,10 @@ mod fixture_tests {
             "\\VOLUME{01dd38fe2004ea92-f6200eb0}\\WINDOWS\\SYSTEM32\\MAPSBTSVC.DLL"
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn bench_build_table(t: &[u8]) -> bool {
+    let mut h = HuffTable::new();
+    h.build(t).is_ok() && std::hint::black_box(&h).fast[0] != 0xffff
 }

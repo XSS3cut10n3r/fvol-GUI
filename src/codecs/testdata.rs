@@ -94,6 +94,19 @@ fn codec_bench() {
             }
         }
     }
+    {
+        // share of the xpress huffman time spent building decode tables
+        let v = &sets[1].1;
+        let mut best = f64::MAX;
+        for _ in 0..reps {
+            let t = std::time::Instant::now();
+            for (_, c) in v {
+                std::hint::black_box(xpress::bench_build_table(&c[..256]));
+            }
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        println!("xpress_huff  table build {:.2} us/chunk", best / v.len() as f64 * 1e6);
+    }
     for (name, v, dec) in &sets {
         let mut best = f64::MAX;
         let mut total = 0usize;
