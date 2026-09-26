@@ -16,6 +16,7 @@ pub mod privileges;
 pub mod pslist;
 pub mod psscan;
 pub mod pstree;
+pub mod registry;
 pub mod sessions;
 pub mod sids;
 pub mod statistics;
@@ -43,4 +44,5 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&vadinfo::VadInfo);
     v.push(&vadwalk::VadWalk);
     v.push(&virtmap::VirtMap);
+    registry::register(v);
 }
