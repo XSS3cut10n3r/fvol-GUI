@@ -892,6 +892,12 @@ trait FinishWrite: Write + Send {
     fn finish(self: Box<Self>) -> std::io::Result<()>;
 }
 
+impl<W: Write + Send> FinishWrite for crate::codecs::bzip2_enc::Bzip2Encoder<W> {
+    fn finish(self: Box<Self>) -> std::io::Result<()> {
+        (*self).finish()?.flush()
+    }
+}
+
 impl<W: Write + Send> FinishWrite for crate::codecs::gzip_enc::GzipEncoder<W> {
     fn finish(self: Box<Self>) -> std::io::Result<()> {
         (*self).finish()?.flush()
@@ -915,6 +921,8 @@ fn open_compressor(format: &str, file: std::fs::File, mtime: u32) -> Result<Box<
             opts.level = GZ_LEVEL;
             Ok(Box::new(crate::codecs::gzip_enc::GzipEncoder::new(w, opts)))
         }
+        // python `bz2.BZ2File(fileobj, "w", compresslevel=9)`
+        "bz2" => Ok(Box::new(crate::codecs::bzip2_enc::Bzip2Encoder::new(w, 9))),
         other => Err(Error::msg(format!("compression format {other} not supported yet"))),
     }
 }
