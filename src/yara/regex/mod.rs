@@ -78,6 +78,23 @@ impl Error {
         }
         s
     }
+
+    /// [`Error::py_str`] for a python **str** pattern: positions count characters.
+    pub fn py_str_for_str(&self, pattern: &str) -> String {
+        let pos = char_offset(pattern.as_bytes(), self.pos);
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut s = format!("{} at position {}", self.msg, pos);
+        if chars.contains(&'\n') {
+            let pos = pos.min(chars.len());
+            let line = chars[..pos].iter().filter(|&&c| c == '\n').count() + 1;
+            let col = match chars[..pos].iter().rposition(|&c| c == '\n') {
+                Some(nl) => pos - nl,
+                None => pos + 1,
+            };
+            s.push_str(&format!(" (line {line}, column {col})"));
+        }
+        s
+    }
 }
 
 impl fmt::Display for Error {

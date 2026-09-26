@@ -846,8 +846,8 @@ impl Plugin for DumpFiles {
         } else {
             let re = match &filter {
                 Some(f) => {
-                    let pat = if cfg.get_bool("ignore-case") { format!("(?i){f}") } else { f.clone() };
-                    match Regex::new(&pat) {
+                    // re.compile(filter, re.I if ignore-case else 0)
+                    match Regex::new_flags(f, cfg.get_bool("ignore-case")) {
                         Ok(r) => Some(r),
                         Err(e) => return raise(Error::msg(format!("re.PatternError: {}", e.0))),
                     }
