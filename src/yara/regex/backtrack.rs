@@ -66,6 +66,8 @@ pub struct Prog {
     capture_dependent: bool,
     /// Groups referenced by backrefs / conditionals.
     ref_groups: Vec<u32>,
+    /// Candidate-start prefilter (only for non-nullable patterns).
+    pub prefilter: Option<super::literal::Prefilter>,
 }
 
 const MAX_INSTS: usize = 2_000_000;
@@ -417,6 +419,7 @@ impl Prog {
             nsubs: c.nsubs as usize,
             capture_dependent,
             ref_groups: c.ref_groups,
+            prefilter: None,
         })
     }
 }
@@ -581,6 +584,10 @@ impl<'a> Search<'a> {
         cache.regs.clear();
         cache.regs.resize(prog.nregs, NONE);
         let mut s = start;
+        let pre = if anchored { None } else { prog.prefilter.as_ref() };
+        if let Some(pf) = pre {
+            s = pf.find(hay, s)?;
+        }
         loop {
             if let Some(end) = self.run(cache, s, start, must_advance) {
                 if cache.slots.len() >= 2 {
@@ -593,6 +600,9 @@ impl<'a> Search<'a> {
                 return None;
             }
             s += 1;
+            if let Some(pf) = pre {
+                s = pf.find(hay, s)?;
+            }
         }
     }
 

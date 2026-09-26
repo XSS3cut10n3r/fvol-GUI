@@ -110,7 +110,10 @@ impl Regex {
         let parsed = parse::parse(pattern, flags)?;
         let lowered = hir::lower(parsed)?;
         let props = hir::props(&lowered.hir, &lowered.group_widths);
-        let bt = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+        let mut bt = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+        if lowered.hir.min_width(&lowered.group_widths) > 0 {
+            bt.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
+        }
         let engine = if props.is_regular() && props.nfa_size < 50_000 {
             match dfa::Searcher::new(&lowered.hir) {
                 Some(s) => Engine::Dfa(Box::new(s)),
