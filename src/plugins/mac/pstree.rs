@@ -4,7 +4,7 @@
 //!
 //! Output order depends on python container semantics: `_processes` / `_levels` /
 //! `_children` are insertion-ordered dicts, and each `_children` value is a python `set` of
-//! ints iterated in CPython's hash-table order, reproduced by [`PyIntSet`].
+//! ints iterated in CPython's hash-table order, reproduced by `util::pyset::PySet`.
 
 use crate::context::Context;
 use crate::error::Result;
@@ -13,115 +13,12 @@ use crate::objects::util::array_to_string;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::util::FxHashMap;
+use crate::util::pyset::{PySet, py_hash_int};
 
 pub struct PsTree;
 
-/// python `hash(int)`: `sign * (|v| mod (2**61 - 1))`, with -1 mapped to -2.
-pub fn py_hash_int(v: i128) -> i64 {
-    const P: u128 = (1 << 61) - 1;
-    let h = (v.unsigned_abs() % P) as i64;
-    let h = if v < 0 { -h } else { h };
-    if h == -1 { -2 } else { h }
-}
-
-/// A CPython `set` of python ints with CPython's exact slot layout, so iteration order matches
-/// (`Objects/setobject.c`: open addressing over a power-of-two table (min 8), probing 9
-/// following slots linearly (`LINEAR_PROBES`) before perturbing `i = i*5 + 1 + (perturb >>=
-/// 5)`; after an insert with `fill*5 >= mask*3` the table is rebuilt at the smallest power of
-/// two > `used*4` (`used*2` past 50000 entries), re-inserting in old slot order). Insert-only
-/// (no deletions, so no dummies), which is all pstree needs.
-#[derive(Clone, Debug)]
-pub struct PyIntSet {
-    /// slot -> (hash, key)
-    table: Vec<Option<(i64, i128)>>,
-    fill: usize,
-}
-
-const LINEAR_PROBES: usize = 9;
-const PERTURB_SHIFT: u32 = 5;
-
-impl Default for PyIntSet {
-    fn default() -> Self {
-        PyIntSet { table: vec![None; 8], fill: 0 }
-    }
-}
-
-impl PyIntSet {
-    pub fn new() -> PyIntSet {
-        PyIntSet::default()
-    }
-
-    /// python `set.add(key)`.
-    pub fn add(&mut self, key: i128) {
-        let hash = py_hash_int(key);
-        let mask = self.table.len() - 1;
-        let mut perturb = hash as u64 as usize;
-        let mut i = perturb & mask;
-        loop {
-            let probes = if i + LINEAR_PROBES <= mask { LINEAR_PROBES } else { 0 };
-            for j in 0..=probes {
-                match self.table[i + j] {
-                    None => {
-                        self.table[i + j] = Some((hash, key));
-                        self.fill += 1;
-                        if self.fill * 5 >= mask * 3 {
-                            let used = self.fill;
-                            self.resize(if used > 50000 { used * 2 } else { used * 4 });
-                        }
-                        return;
-                    }
-                    Some((h, k)) if h == hash && k == key => return,
-                    Some(_) => {}
-                }
-            }
-            perturb >>= PERTURB_SHIFT;
-            i = (i.wrapping_mul(5).wrapping_add(1).wrapping_add(perturb)) & mask;
-        }
-    }
-
-    /// `set_table_resize(so, minused)` + `set_insert_clean` for every entry in slot order.
-    fn resize(&mut self, minused: usize) {
-        let mut newsize = 8usize;
-        while newsize <= minused {
-            newsize <<= 1;
-        }
-        let old = std::mem::replace(&mut self.table, vec![None; newsize]);
-        let mask = newsize - 1;
-        for (hash, key) in old.into_iter().flatten() {
-            let mut perturb = hash as u64 as usize;
-            let mut i = perturb & mask;
-            'probe: loop {
-                if self.table[i].is_none() {
-                    self.table[i] = Some((hash, key));
-                    break;
-                }
-                if i + LINEAR_PROBES <= mask {
-                    for j in 1..=LINEAR_PROBES {
-                        if self.table[i + j].is_none() {
-                            self.table[i + j] = Some((hash, key));
-                            break 'probe;
-                        }
-                    }
-                }
-                perturb >>= PERTURB_SHIFT;
-                i = (i.wrapping_mul(5).wrapping_add(1).wrapping_add(perturb)) & mask;
-            }
-        }
-    }
-
-    /// Iteration order (python `for x in s`).
-    pub fn iter(&self) -> impl Iterator<Item = i128> + '_ {
-        self.table.iter().filter_map(|e| e.map(|(_, k)| k))
-    }
-
-    pub fn len(&self) -> usize {
-        self.fill
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.fill == 0
-    }
-}
+/// python `set` of ints (CPython slot order); pids are python ints, so negative values too.
+type PyIntSet = PySet<i128>;
 
 /// python's default recursion limit, minus the frames below `yield_processes` (vol.py, CLI,
 /// renderer, TreeGrid.populate, `_generator`): only a 2-cycle of parent pids (A.ppid == B,
@@ -172,7 +69,7 @@ impl Plugin for PsTree {
                 if ppid == 0 || ppid == pid {
                     break;
                 }
-                children.entry(ppid).or_default().add(cpid);
+                children.entry(ppid).or_default().add(py_hash_int(cpid), cpid);
                 cur = procs.get(&ppid).map(|e| (ppid, e.0));
                 level += 1;
                 // a parent cycle not through `pid`: python loops forever here
@@ -209,7 +106,7 @@ impl Plugin for PsTree {
                     }
                     let (depth, values) = row(pid)?;
                     out.row(depth, values)?;
-                    stack.push((children.get(&pid).unwrap_or(&empty).iter().collect(), 0));
+                    stack.push((children.get(&pid).unwrap_or(&empty).iter().copied().collect(), 0));
                 }
                 let Some((kids, i)) = stack.last_mut() else { break };
                 if *i < kids.len() {
@@ -231,19 +128,20 @@ mod tests {
     fn order(keys: &[i128]) -> Vec<i128> {
         let mut s = PyIntSet::new();
         for &k in keys {
-            s.add(k);
+            s.add(py_hash_int(k), k);
         }
-        s.iter().collect()
+        s.iter().copied().collect()
     }
 
     #[test]
     fn hash() {
-        assert_eq!(py_hash_int(5), 5);
-        assert_eq!(py_hash_int(-1), -2);
-        assert_eq!(py_hash_int(-2), -2);
-        assert_eq!(py_hash_int((1 << 61) - 1), 0);
-        assert_eq!(py_hash_int(1 << 61), 1);
-        assert_eq!(py_hash_int(-(1 << 61)), -1 - 1);
+        let h = |v: i128| py_hash_int(v) as i64;
+        assert_eq!(h(5), 5);
+        assert_eq!(h(-1), -2);
+        assert_eq!(h(-2), -2);
+        assert_eq!(h((1 << 61) - 1), 0);
+        assert_eq!(h(1 << 61), 1);
+        assert_eq!(h(-(1 << 61)), -1 - 1);
     }
 
     /// FNV-1a over the iteration order; the expected values were computed with CPython 3.14
@@ -274,11 +172,11 @@ mod tests {
                 if neg && next() & 1 == 1 {
                     v = -v;
                 }
-                s.add(v);
+                s.add(py_hash_int(v), v);
             }
             assert_eq!(s.len(), len);
             let mut h: u64 = 0xcbf29ce484222325;
-            for v in s.iter() {
+            for &v in s.iter() {
                 for b in (v as i64 as u64).to_le_bytes() {
                     h ^= b as u64;
                     h = h.wrapping_mul(0x100000001b3);
