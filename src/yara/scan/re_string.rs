@@ -42,6 +42,11 @@ struct Part {
     gap_max: i64,
     /// Literal fits entirely in its atom (STRING_FLAGS_FITS_IN_ATOM).
     fits_in_atom: bool,
+    /// Per atom: byte sets every forward match must start with (cheap rejection).
+    filters: Vec<Vec<[u64; 4]>>,
+    /// Per atom: byte sets every backward match must consume (from the atom start
+    /// going backwards).
+    bfilters: Vec<Vec<[u64; 4]>>,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +147,8 @@ impl ReString {
                 let max_len = if wide { lit.len() * 2 } else { lit.len() };
                 parts.push(Part {
                     kind: PartKind::Literal(lit),
+                    filters: Vec::new(),
+                    bfilters: Vec::new(),
                     atoms,
                     gap_min,
                     gap_max,
@@ -153,7 +160,35 @@ impl ReString {
                 if atoms.is_empty() {
                     atoms.push(ChosenAtom { atom: atoms::Atom::default(), node: None, backtrack: 0 });
                 }
-                parts.push(Part { kind: PartKind::Re { code: Box::new(code), fast: a.fast }, atoms, gap_min, gap_max, fits_in_atom: false });
+                let filters = atoms
+                    .iter()
+                    .map(|ca| {
+                        let start = match ca.node {
+                            Some(id) => code.fwd_ref.get(id as usize).copied().flatten(),
+                            None => Some(0),
+                        };
+                        match start {
+                            Some(st) => exec::required_prefix(&code.fwd, st, nocase, dotall, 8),
+                            None => Vec::new(),
+                        }
+                    })
+                    .collect();
+                let bfilters = atoms
+                    .iter()
+                    .map(|ca| match ca.node.and_then(|id| code.bwd_ref.get(id as usize).copied().flatten()) {
+                        Some(st) => exec::required_prefix(&code.bwd, st, nocase, dotall, 8),
+                        None => Vec::new(),
+                    })
+                    .collect();
+                parts.push(Part {
+                    kind: PartKind::Re { code: Box::new(code), fast: a.fast },
+                    atoms,
+                    gap_min,
+                    gap_max,
+                    fits_in_atom: false,
+                    filters,
+                    bfilters,
+                });
             }
         }
         // Flatten atoms (dedupe identical byte strings within a part).
@@ -196,6 +231,38 @@ impl ReString {
     /// Later matches at an existing offset replace the earlier one.
     pub fn greedy(&self) -> bool {
         self.greedy
+    }
+
+    /// Whether the prefix filter alone discards this hit (profiling aid).
+    #[doc(hidden)]
+    pub fn debug_filter_reject(&self, data: &[u8], atom: usize, pos: usize) -> bool {
+        let Some(&(pi, ai)) = self.atom_map.get(atom) else { return true };
+        let Some(part) = self.parts.get(pi as usize) else { return true };
+        let f = part.filters.get(ai as usize).map_or(&[][..], |f| &f[..]);
+        !filter_ok(f, data, pos, 1)
+    }
+
+    /// Whether the forward quick-reject alone discards this hit (profiling aid).
+    #[doc(hidden)]
+    pub fn debug_quick_reject(&self, data: &[u8], atom: usize, pos: usize) -> bool {
+        let Some(&(pi, ai)) = self.atom_map.get(atom) else { return true };
+        let (Some(part), Some(ca)) = (self.parts.get(pi as usize), None::<()>.or(Some(()))) else { return true };
+        let _ = ca;
+        let Some(ca) = part.atoms.get(ai as usize) else { return true };
+        match &part.kind {
+            PartKind::Re { code, .. } => {
+                let start = ca.node.and_then(|id| code.fwd_ref.get(id as usize).copied().flatten()).unwrap_or(0);
+                let mut flags = 0;
+                if self.nocase {
+                    flags |= exec::F_NOCASE;
+                }
+                if self.dotall {
+                    flags |= exec::F_DOTALL;
+                }
+                pos >= ca.backtrack && exec::quick_reject(&code.fwd, start, data, pos - ca.backtrack, flags)
+            }
+            PartKind::Literal(_) => false,
+        }
     }
 
     pub fn new_state(&self) -> ReState {
@@ -250,8 +317,14 @@ impl ReString {
                 let bwd_start = ca.node.and_then(|id| code.bwd_ref.get(id as usize).copied().flatten());
                 let mut noop = |_: usize, _: usize| {};
                 // libyara: an ASCII pass then (independently) a WIDE pass.
+                let filter = part.filters.get(ai as usize).map_or(&[][..], |f| &f[..]);
+                let bfilter = part.bfilters.get(ai as usize).map_or(&[][..], |f| &f[..]);
                 for wide_pass in [false, true] {
                     if (!wide_pass && !self.ascii) || (wide_pass && !self.wide) {
+                        continue;
+                    }
+                    let cs = if wide_pass { 2 } else { 1 };
+                    if !filter_ok(filter, data, offset, cs) || (bwd_start.is_some() && !bfilter_ok(bfilter, data, offset, cs)) {
                         continue;
                     }
                     let f = if wide_pass { flags | exec::F_WIDE } else { flags };
@@ -487,6 +560,53 @@ fn run(
     } else {
         m.exec(prog, start, data, pos, flags, cb).unwrap_or(-1)
     }
+}
+
+/// Every forward match from `pos` consumes bytes in `f[k]` at position k (one per
+/// character; wide characters need a zero high byte).
+#[inline]
+fn filter_ok(f: &[[u64; 4]], data: &[u8], pos: usize, cs: usize) -> bool {
+    let need = f.len() * cs;
+    if need == 0 {
+        return true;
+    }
+    if pos + need > data.len() {
+        return false;
+    }
+    let d = &data[pos..pos + need];
+    for (k, s) in f.iter().enumerate() {
+        let b = d[k * cs];
+        if s[(b >> 6) as usize] >> (b & 63) & 1 == 0 {
+            return false;
+        }
+        if cs == 2 && d[k * 2 + 1] != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Every backward match from `pos` consumes `f[k]` at character k before `pos`.
+#[inline]
+fn bfilter_ok(f: &[[u64; 4]], data: &[u8], pos: usize, cs: usize) -> bool {
+    let need = f.len() * cs;
+    if need == 0 {
+        return true;
+    }
+    if need > pos || pos > data.len() {
+        return false;
+    }
+    for (k, s) in f.iter().enumerate() {
+        let at = pos - (k + 1) * cs;
+        let b = data[at];
+        if s[(b >> 6) as usize] >> (b & 63) & 1 == 0 {
+            return false;
+        }
+        if cs == 2 && data[at + 1] != 0 {
+            return false;
+        }
+    }
+    true
 }
 
 /// Fullword check of `_yr_scan_match_callback`.

@@ -140,6 +140,146 @@ pub fn quick_reject(prog: &Program, start: u32, data: &[u8], pos: usize, flags: 
     false
 }
 
+/// Required byte sets of the first bytes of every successful run of `prog` from
+/// `start` (forward direction): a sound over-approximation (all branches, repeat
+/// counters ignored, assertions treated as satisfiable). Empty when the program can
+/// reach MATCH immediately. At most `max_len` positions.
+pub fn required_prefix(prog: &Program, start: u32, nocase: bool, dotall: bool, max_len: usize) -> Vec<[u64; 4]> {
+    let n = prog.ops.len();
+    let mut out: Vec<[u64; 4]> = Vec::new();
+    let mut frontier: Vec<usize> = vec![start as usize];
+    let add = |s: &mut [u64; 4], b: u8| s[(b >> 6) as usize] |= 1u64 << (b & 63);
+    while out.len() < max_len {
+        // epsilon closure
+        let mut seen = vec![false; n + 1];
+        let mut stack = frontier.clone();
+        let mut consumers: Vec<usize> = Vec::new();
+        let mut reaches_match = false;
+        let mut steps = 0usize;
+        while let Some(ip) = stack.pop() {
+            steps += 1;
+            if steps > 4096 || ip >= n {
+                return out;
+            }
+            if seen[ip] {
+                continue;
+            }
+            seen[ip] = true;
+            match prog.ops[ip] {
+                Op::SplitA { target, .. } | Op::SplitB { target, .. } => {
+                    stack.push(ip + 1);
+                    stack.push(target as usize);
+                }
+                Op::Jump(t) => stack.push(t as usize),
+                Op::RepeatStart { end, .. } => {
+                    stack.push(ip + 1);
+                    stack.push(end as usize);
+                }
+                Op::RepeatEnd { body, .. } => {
+                    stack.push(ip + 1);
+                    stack.push(body as usize);
+                }
+                Op::RepeatAny { .. } => {
+                    consumers.push(ip);
+                    stack.push(ip + 1);
+                }
+                Op::WordBoundary | Op::NonWordBoundary | Op::MatchAtStart | Op::MatchAtEnd => stack.push(ip + 1),
+                Op::Match => reaches_match = true,
+                _ => consumers.push(ip),
+            }
+        }
+        if reaches_match || consumers.is_empty() {
+            return out;
+        }
+        let mut set = [0u64; 4];
+        let mut next = Vec::new();
+        for &ip in &consumers {
+            match prog.ops[ip] {
+                Op::Literal(v) => {
+                    add(&mut set, v);
+                    if nocase {
+                        add(&mut set, altercase(v));
+                    }
+                }
+                Op::NotLiteral(v) => {
+                    for b in 0..=255u8 {
+                        if b != v {
+                            add(&mut set, b);
+                        }
+                    }
+                }
+                Op::MaskedLiteral(v, m) => {
+                    for b in 0..=255u8 {
+                        if b & m == v {
+                            add(&mut set, b);
+                        }
+                    }
+                }
+                Op::MaskedNotLiteral(v, m) => {
+                    for b in 0..=255u8 {
+                        if b & m != v {
+                            add(&mut set, b);
+                        }
+                    }
+                }
+                Op::Any | Op::RepeatAny { .. } => {
+                    for b in 0..=255u8 {
+                        if dotall || b != b'\n' {
+                            add(&mut set, b);
+                        }
+                    }
+                }
+                Op::Class(i) => {
+                    if let Some(cl) = prog.classes.get(i as usize) {
+                        for b in 0..=255u8 {
+                            let mut r = cl.has(b);
+                            if nocase {
+                                r |= cl.has(altercase(b));
+                            }
+                            if r != cl.negated {
+                                add(&mut set, b);
+                            }
+                        }
+                    }
+                }
+                Op::WordChar | Op::NonWordChar => {
+                    for b in 0..=255u8 {
+                        let w = b.is_ascii_alphanumeric() || b == b'_';
+                        if w == matches!(prog.ops[ip], Op::WordChar) {
+                            add(&mut set, b);
+                        }
+                    }
+                }
+                Op::Space | Op::NonSpace => {
+                    for b in 0..=255u8 {
+                        let sp = matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c);
+                        if sp == matches!(prog.ops[ip], Op::Space) {
+                            add(&mut set, b);
+                        }
+                    }
+                }
+                Op::Digit | Op::NonDigit => {
+                    for b in 0..=255u8 {
+                        if b.is_ascii_digit() == matches!(prog.ops[ip], Op::Digit) {
+                            add(&mut set, b);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if let Op::RepeatAny { .. } = prog.ops[ip] {
+                next.push(ip);
+            }
+            next.push(ip + 1);
+        }
+        out.push(set);
+        next.sort_unstable();
+        next.dedup();
+        frontier = next;
+    }
+    out
+}
+
 /// Reusable fiber storage.
 #[derive(Default)]
 pub struct Machine {

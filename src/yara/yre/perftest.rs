@@ -48,4 +48,35 @@ fn yara_yre_verify_perf() {
     }
     let dt = t.elapsed().as_secs_f64();
     eprintln!("verify: {:.3}s, {:.1} ns/hit, {} matches", dt, dt * 1e9 / hits.len().max(1) as f64, n);
+    // Split: hits producing no output vs with output, timed separately (warm cache).
+    let (empty, full): (Vec<_>, Vec<_>) = hits.iter().partition(|&&(p, k)| {
+        out.clear();
+        rs.verify(&mut st, hay, k, p, &mut out);
+        out.is_empty()
+    });
+    for (name, set) in [("no-match", &empty), ("match", &full)] {
+        let t = Instant::now();
+        for &(p, k) in set.iter() {
+            out.clear();
+            rs.verify(&mut st, hay, k, p, &mut out);
+        }
+        let dt = t.elapsed().as_secs_f64();
+        eprintln!("  {name}: {} hits, {:.1} ns/hit", set.len(), dt * 1e9 / set.len().max(1) as f64);
+    }
+    let t = Instant::now();
+    let mut rej = 0usize;
+    for &(p, k) in &hits {
+        if rs.debug_quick_reject(hay, k, p) {
+            rej += 1;
+        }
+    }
+    eprintln!("  quick_reject alone: {} of {} rejected, {:.1} ns/hit", rej, hits.len(), t.elapsed().as_secs_f64() * 1e9 / hits.len().max(1) as f64);
+    let t = Instant::now();
+    let mut rej = 0usize;
+    for &(p, k) in &hits {
+        if rs.debug_filter_reject(hay, k, p) {
+            rej += 1;
+        }
+    }
+    eprintln!("  prefix filter alone: {} of {} rejected, {:.1} ns/hit", rej, hits.len(), t.elapsed().as_secs_f64() * 1e9 / hits.len().max(1) as f64);
 }
