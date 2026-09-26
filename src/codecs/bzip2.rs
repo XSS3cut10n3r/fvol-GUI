@@ -45,7 +45,7 @@ const COL: usize = MAX_BLOCK + PAD;
 /// Blocks shorter than this use a single walker.
 const LANES_MIN: usize = 16 * 1024;
 /// Average segment length (the permutation is cut into n / SEG_LEN segments).
-const SEG_LEN: usize = 1024;
+const SEG_LEN: usize = 512;
 
 fn corrupt(what: &str) -> Error {
     Error::Msg(format!("bzip2: corrupt data ({what})"))
@@ -258,6 +258,8 @@ struct Segs {
     step: usize,
     orig: usize,
     n: usize,
+    /// Rounds of the last walk (statistics).
+    rounds: usize,
 }
 
 impl Segs {
@@ -276,7 +278,7 @@ struct Scratch {
     /// MTF output (BWT last column); capacity MAX_BLOCK + PAD.
     ll8: Vec<u8>,
     /// Inverse BWT vector (+1 sentinel entry); capacity MAX_BLOCK + 1.
-    tt: Vec<u32>,
+    tt: HugeBuf<u32>,
     /// Lane columns; capacity LANES * COL (only the walked prefix is ever touched).
     cols: Vec<u8>,
     /// Pre-RLE1 bytes in output order; capacity MAX_BLOCK + PAD.
@@ -293,6 +295,56 @@ const SNAPS: usize = 32;
 /// Independent scatter streams.
 const STREAMS: usize = 4;
 
+/// Uninitialised scratch memory, 2 MiB aligned and advised for transparent huge pages (the
+/// inverse BWT makes random accesses over `tt`; with 4 KiB pages most of them miss the TLB).
+struct HugeBuf<T> {
+    ptr: *mut T,
+    layout: std::alloc::Layout,
+}
+
+// SAFETY: plain owned memory.
+unsafe impl<T: Send> Send for HugeBuf<T> {}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+}
+
+impl<T> HugeBuf<T> {
+    const ALIGN: usize = 2 << 20;
+
+    fn new(len: usize) -> Result<Self> {
+        let size = (len.max(1) * std::mem::size_of::<T>()).next_multiple_of(Self::ALIGN);
+        let layout = std::alloc::Layout::from_size_align(size, Self::ALIGN).map_err(|_| alloc_error())?;
+        // SAFETY: non-zero size.
+        let ptr = unsafe { std::alloc::alloc(layout) } as *mut T;
+        if ptr.is_null() {
+            return Err(alloc_error());
+        }
+        #[cfg(target_os = "linux")]
+        // SAFETY: advisory only, on our own allocation (MADV_HUGEPAGE = 14).
+        unsafe {
+            madvise(ptr as *mut u8, size, 14);
+        }
+        Ok(HugeBuf { ptr, layout })
+    }
+
+    fn as_ptr(&self) -> *const T {
+        self.ptr
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr
+    }
+}
+
+impl<T> Drop for HugeBuf<T> {
+    fn drop(&mut self) {
+        // SAFETY: allocated in `new` with this layout.
+        unsafe { std::alloc::dealloc(self.ptr as *mut u8, self.layout) };
+    }
+}
+
 fn try_vec<T>(cap: usize) -> Result<Vec<T>> {
     let mut v = Vec::new();
     v.try_reserve_exact(cap).map_err(|_| alloc_error())?;
@@ -305,7 +357,7 @@ impl Scratch {
             tables: (0..MAX_GROUPS).map(|_| HuffTable::new()).collect(),
             selectors: Vec::with_capacity(MAX_SELECTORS),
             ll8: try_vec(MAX_BLOCK + PAD)?,
-            tt: try_vec(MAX_BLOCK + 1)?,
+            tt: HugeBuf::new(MAX_BLOCK + 1)?,
             cols: Vec::new(),
             pre: try_vec(MAX_BLOCK + PAD)?,
             segs: Segs {
@@ -319,6 +371,7 @@ impl Scratch {
                 step: 1,
                 orig: 0,
                 n: 0,
+                rounds: 0,
             },
             snap_pos: Vec::with_capacity(SNAPS + 1),
             snap_counts: Vec::with_capacity(SNAPS + 1),
@@ -759,7 +812,7 @@ unsafe fn walk_single(tt: *const u32, n: usize, orig: usize, pre: *mut u8) {
 /// `tt[..n]` is the scatter output (indices < n) with room for `tt[n]`; `cols` has
 /// capacity LANES * COL; `pre[..n]` writable; n >= LANES_MIN.
 unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *mut u8, s: &mut Segs) -> Result<()> {
-    let nseg = (n / SEG_LEN).max(LANES);
+    let nseg = (n / SEG_LEN).max(16 * LANES).min(n / 64);
     s.nseg = nseg;
     s.step = n / nseg;
     s.orig = orig;
@@ -828,6 +881,7 @@ unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *m
                 }
             }
         }
+        s.rounds = r;
         // Stitch the segments in chain order, starting with the one at `orig`.
         let mut k = 0usize;
         let mut total = 0usize;
@@ -1042,7 +1096,7 @@ mod tests {
         unsafe extern "C" {
             fn syscall(num: c_long, ...) -> c_long;
             fn ioctl(fd: c_int, req: c_ulong, ...) -> c_int;
-            fn read(fd: c_int, buf: *mut u8, n: usize) -> isize;
+            fn read(fd: c_int, buf: *mut std::ffi::c_void, n: usize) -> isize;
         }
         let pmu = std::fs::read_to_string("/sys/bus/event_source/devices/cpu_core/type")
             .ok()
@@ -1059,7 +1113,7 @@ mod tests {
         let tsc = || {
             if fd >= 0 {
                 let mut v = 0u64;
-                unsafe { read(fd, &mut v as *mut u64 as *mut u8, 8) };
+                unsafe { read(fd, &mut v as *mut u64 as *mut std::ffi::c_void, 8) };
                 v
             } else {
                 unsafe { std::arch::x86_64::_rdtsc() }
@@ -1069,6 +1123,7 @@ mod tests {
         let mut total_n = 0usize;
         let mut total_out = 0usize;
         let mut total_runs = 0usize;
+        let mut total_rounds = 0usize;
         for _ in 0..5 {
             let mut t = [0u64; 5];
             let mut sc = Scratch::new().unwrap();
@@ -1077,6 +1132,7 @@ mod tests {
             let mut br = BitReader::new(&data, 4);
             total_n = 0;
             total_runs = 0;
+            total_rounds = 0;
             loop {
                 let hi = br.bits(24) as u64;
                 let magic = (hi << 24) | br.bits(24) as u64;
@@ -1100,6 +1156,7 @@ mod tests {
                         }
                         walk_lanes(sc.tt.as_mut_ptr(), n, info.orig_ptr, sc.cols.as_mut_ptr(), sc.pre.as_mut_ptr(), &mut sc.segs)
                             .unwrap();
+                        total_rounds += sc.segs.rounds;
                     }
                     let t3 = tsc();
                     let start = out.len();
@@ -1117,6 +1174,11 @@ mod tests {
                 best[k] = best[k].min(t[k]);
             }
         }
+        if let Ok(r) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+            for l in r.lines().filter(|l| l.starts_with("AnonHuge")) {
+                println!("{l}");
+            }
+        }
         let names = ["entropy", "scatter", "walk", "unrle", "crc"];
         let sum: u64 = best.iter().sum();
         let line: Vec<String> = names
@@ -1125,11 +1187,48 @@ mod tests {
             .map(|(nm, &c)| format!("{nm} {:.2}", c as f64 / total_n as f64))
             .collect();
         println!(
-            "phases (cycles per BWT symbol, n={total_n}, out={total_out}, runs {:.2}): {} | total {:.1} Mticks",
+            "phases (cycles per BWT symbol, n={total_n}, out={total_out}, runs {:.2}, lane use {:.2}): {} | total {:.1} Mticks",
             total_runs as f64 / total_n as f64,
+            total_n as f64 / (total_rounds * LANES) as f64,
             line.join("  "),
             sum as f64 / 1e6
         );
+    }
+
+    /// Walk micro-benchmark on a random single-cycle permutation (Sattolo), warm caches.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore]
+    fn codecs_bzip2_walk_bench() {
+        for n in [100_000usize, 400_000, 900_000] {
+            let mut s = 0x9E37_79B9_7F4A_7C15u64;
+            let mut rnd = || {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s
+            };
+            let mut perm: Vec<u32> = (0..n as u32).collect();
+            for i in (1..n).rev() {
+                let j = (rnd() % i as u64) as usize;
+                perm.swap(i, j);
+            }
+            let orig: Vec<u32> = (0..n).map(|i| (perm[i] << 8) | (rnd() as u32 & 0xFF)).collect();
+            let mut tt = HugeBuf::<u32>::new(MAX_BLOCK + 1).unwrap();
+            let mut cols: Vec<u8> = Vec::with_capacity(LANES * COL);
+            let mut pre: Vec<u8> = Vec::with_capacity(MAX_BLOCK + PAD);
+            let mut sc = Scratch::new().unwrap();
+            let mut best = u64::MAX;
+            for _ in 0..20 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(orig.as_ptr(), tt.as_mut_ptr(), n);
+                    let t0 = std::arch::x86_64::_rdtsc();
+                    walk_lanes(tt.as_mut_ptr(), n, 0, cols.as_mut_ptr(), pre.as_mut_ptr(), &mut sc.segs).unwrap();
+                    best = best.min(std::arch::x86_64::_rdtsc() - t0);
+                }
+            }
+            println!("walk n={n} lanes={LANES}: {:.2} TSC ticks/step", best as f64 / n as f64);
+        }
     }
 
     #[test]
