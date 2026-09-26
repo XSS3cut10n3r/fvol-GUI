@@ -1395,7 +1395,7 @@ fn serialize_fast(o: &Out<'_>) -> Vec<u8> {
             }
         };
         if par {
-            crate::util::par::par_for(uranges.len(), |i| job(&uranges[i]));
+            crate::util::pool::for_each(uranges.len(), &|i| job(&uranges[i]));
         } else {
             uranges.iter().for_each(job);
         }
@@ -1687,7 +1687,7 @@ fn serialize_fast(o: &Out<'_>) -> Vec<u8> {
         }
     };
     if par {
-        crate::util::par::par_for(tasks.len(), run);
+        crate::util::pool::for_each(tasks.len(), &run);
     } else {
         (0..tasks.len()).for_each(run);
     }
@@ -2262,7 +2262,7 @@ mod fast {
             })?;
             Some(v)
         };
-        let eparts = if eranges.len() > 1 { crate::util::par::par_map(eranges.len(), run_enums) } else { (0..eranges.len()).map(run_enums).collect() };
+        let eparts = if eranges.len() > 1 { crate::util::pool::map(eranges.len(), run_enums) } else { (0..eranges.len()).map(run_enums).collect() };
         let mut edefs: Vec<EnumDef> = Vec::with_capacity(ekeys.len());
         for p in eparts {
             edefs.extend(p?);
@@ -2345,7 +2345,7 @@ mod fast {
             }
         };
         let n_items = nu + sranges.len();
-        let parts: Vec<Option<Part>> = if n_items > 1 && par { crate::util::par::par_map(n_items, run) } else { (0..n_items).map(run).collect() };
+        let parts: Vec<Option<Part>> = if n_items > 1 && par { crate::util::pool::map(n_items, run) } else { (0..n_items).map(run).collect() };
 
         drop(_tp);
         // ---- replay the node creations: user types in order, then symbols
@@ -2392,6 +2392,11 @@ mod fast {
         let meta = metadata.as_ref().map(|m| m.to_string_compact()).unwrap_or_default();
         let out = Out { fparts, sym_cdata: version >= (4, 1, 0), nodes: g.nodes, unresolved: g.unresolved, users, enums, syms, natives: natives.clone(), meta };
         drop(_t);
+        // a big index is freed off the critical path (unmapping tens of MB)
+        drop((run, run_enums, w));
+        if json.len() >= PAR_PARSE_MIN {
+            crate::util::bg::spawn(move || drop(idx));
+        }
         Some(serialize_fast(&out))
     }
 

@@ -263,6 +263,8 @@ pub(crate) fn ty_decode(b: &[u8]) -> Ty {
 /// Backing storage of a table blob.
 pub(crate) enum Blob {
     Owned(Vec<u8>),
+    /// shared with a background cache writer
+    Shared(std::sync::Arc<Vec<u8>>),
     Mapped(Mmap),
     #[allow(dead_code)]
     Static(&'static [u8]),
@@ -273,6 +275,7 @@ impl Blob {
     fn bytes(&self) -> &[u8] {
         match self {
             Blob::Owned(v) => v,
+            Blob::Shared(v) => v,
             Blob::Mapped(m) => m.as_slice(),
             Blob::Static(s) => s,
         }

@@ -384,7 +384,7 @@ impl Index {
             (out, esc, st, utf8)
         };
         let _t0 = crate::util::trace::span("stage1: chunks");
-        let parts: Vec<(Vec<u32>, Vec<u32>, State, bool)> = if n == 1 { vec![run(0)] } else { crate::util::par::par_map(n, run) };
+        let parts: Vec<(Vec<u32>, Vec<u32>, State, bool)> = if n == 1 { vec![run(0)] } else { crate::util::pool::map(n, run) };
         drop(_t0);
         let _t1 = crate::util::trace::span("stage1: concat");
         let mut chunks = Vec::with_capacity(n);
@@ -414,7 +414,7 @@ impl Index {
             unsafe impl Sync for Dst {}
             let dst = Dst(pos.as_mut_ptr());
             let (parts_ref, chunks_ref, dst_ref) = (&parts, &chunks, &dst);
-            crate::util::par::par_for(n, move |c| unsafe {
+            crate::util::pool::for_each(n, &move |c| unsafe {
                 let src = &parts_ref[c].0;
                 std::ptr::copy_nonoverlapping(src.as_ptr(), dst_ref.0.add(chunks_ref[c].first as usize), src.len());
             });
@@ -487,7 +487,7 @@ impl Index {
         if n == 1 {
             return walk(0);
         }
-        crate::util::par::par_map(n, walk).into_iter().flatten().collect()
+        crate::util::pool::map(n, walk).into_iter().flatten().collect()
     }
 }
 
@@ -1106,6 +1106,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(keep2, 42);
+    }
+
+    /// xz decode of an ISF into a fresh buffer vs a pre-faulted one (page-fault share).
+    /// `RSVOL_BENCH_XZ=file.json.xz cargo test --release xz_fault_share -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn xz_fault_share() {
+        let raw = std::fs::read(std::env::var("RSVOL_BENCH_XZ").unwrap()).unwrap();
+        let mut reuse = Vec::new();
+        crate::codecs::xz::decompress_reuse(&raw, &mut reuse, false).unwrap();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let v = crate::codecs::xz::decompress(&raw).unwrap();
+            let fresh = t.elapsed();
+            drop(v);
+            let t = std::time::Instant::now();
+            crate::codecs::xz::decompress_reuse(&raw, &mut reuse, false).unwrap();
+            let warm = t.elapsed();
+            println!("fresh buffer {:.2} ms, pre-faulted {:.2} ms", fresh.as_secs_f64() * 1e3, warm.as_secs_f64() * 1e3);
+        }
     }
 
     /// Cost of one `par_for` round (thread spawn + join) on this machine.

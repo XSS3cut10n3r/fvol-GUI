@@ -609,14 +609,15 @@ fn cached_blob_matches(file: &[u8], key: &[u8]) -> bool {
     kl == key.len() && &file[n - 12 - kl..n - 12] == key
 }
 
-/// The bytes of a cache file for `blob` under `key`.
+/// The bytes of a cache file for `blob` under `key`, as the parts written in order.
+fn cache_file_parts<'b>(blob: &'b [u8], key: &'b [u8], len: &'b [u8; 4]) -> [&'b [u8]; 4] {
+    [blob, key, len, ISFB_TRAILER]
+}
+
+#[cfg(test)]
 fn cache_file_bytes(blob: &[u8], key: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(blob.len() + key.len() + 12);
-    v.extend_from_slice(blob);
-    v.extend_from_slice(key);
-    v.extend_from_slice(&(key.len() as u32).to_le_bytes());
-    v.extend_from_slice(ISFB_TRAILER);
-    v
+    let len = (key.len() as u32).to_le_bytes();
+    cache_file_parts(blob, key, &len).concat()
 }
 
 /// Load a symbol table from `loc` (binary cache first). `name` is the table name.
@@ -642,11 +643,19 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
         let _t = crate::util::trace::span("isf parse+build");
         build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?
     };
-    if let Some((cf, key)) = &cf {
-        let _t = crate::util::trace::span("isf cache write");
-        let _ = paths::write_atomic(cf, &cache_file_bytes(&blob, key));
-    }
-    SymbolTable::from_blob(Blob::Owned(blob), name, &url)
+    let blob = std::sync::Arc::new(blob);
+    // the cache file is written in the background (overlapping the plugin run; joined
+    // before exit), and the decompressed JSON is freed there too
+    let writer = blob.clone();
+    crate::util::bg::spawn(move || {
+        drop(json);
+        if let Some((cf, key)) = cf {
+            let _t = crate::util::trace::span("isf cache write (background)");
+            let len = (key.len() as u32).to_le_bytes();
+            let _ = paths::write_atomic_parts(&cf, &cache_file_parts(&writer, &key, &len));
+        }
+    });
+    SymbolTable::from_blob(Blob::Shared(blob), name, &url)
 }
 
 /// Load an ISF by python sub_path/filename (e.g. `("windows", "pe")`), first match wins

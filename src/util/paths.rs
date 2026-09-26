@@ -48,11 +48,22 @@ pub fn hex(b: &[u8]) -> String {
 /// Write `data` to `path` atomically (temp file + rename), creating parent directories.
 /// Errors are returned but callers writing caches usually ignore them.
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    write_atomic_parts(path, &[data])
+}
+
+/// [`write_atomic`] of the concatenation of `parts` (no joined copy).
+pub fn write_atomic_parts(path: &Path, parts: &[&[u8]]) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    std::fs::write(&tmp, data)?;
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        for p in parts {
+            f.write_all(p)?;
+        }
+    }
     std::fs::rename(&tmp, path)
 }
 

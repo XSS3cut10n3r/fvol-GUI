@@ -62,5 +62,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         signal(SIGPIPE, SIG_IGN);
     }
     let code = std::panic::catch_unwind(cli::main).unwrap_or(101);
+    // background cache writes finish after the output, before exit
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    util::bg::join_all();
     std::process::exit(code)
 }
