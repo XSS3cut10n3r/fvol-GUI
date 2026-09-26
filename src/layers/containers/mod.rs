@@ -16,8 +16,9 @@
 //! of `choose_os_stackers` never removes them.
 //!
 //! All container layers are [`SegmentedLayer`]s: a flat sorted run table over the lower layer
-//! (the mmapped file), so reads are a binary search (with last-hit cache) plus one memcpy, and
-//! `slice()` is zero-copy. Layer names (`Layer::name`) are the python class names.
+//! (the mmapped file), so reads are a table lookup (binary search, or a bucket index for large
+//! tables) plus one memcpy, and `slice()` is zero-copy. Layer names (`Layer::name`) are the
+//! python class names.
 //!
 //! Notes for users of the layers:
 //!   * `mapping()` returns the valid runs; for raw runs `mapped` is the file offset. For
