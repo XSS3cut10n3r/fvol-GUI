@@ -27,25 +27,37 @@ This README describes rsvol 0.1.0, which tracks volatility3 2.28.2.
 ## Performance
 
 These numbers come from [bench/vm/BENCHMARKS.md](bench/vm/BENCHMARKS.md), which holds the full
-per-plugin tables, and are copied here so they can be updated from that file. They were measured
-on a dedicated KVM guest with 32 vCPUs of an AMD EPYC 7302P host and 30 GiB of RAM, running
-Ubuntu 25.04, with nothing else running. rsvol commit `344e88c` was compared with python
+per-plugin tables (run 1 is kept in [BENCHMARKS-run1.md](bench/vm/BENCHMARKS-run1.md)). They were
+measured on a dedicated KVM guest with 32 vCPUs of an AMD EPYC 7302P host and 30 GiB of RAM, running
+Ubuntu 25.04, with nothing else running. rsvol commit `95528b2` was compared with python
 volatility3 2.28.2 on CPython 3.14.7 and with vol-rs 1.0.0, another Rust port. Each figure is the
-wall-clock time of the whole process with the image in the page cache. The method is in
-[bench/vm/method.md](bench/vm/method.md).
+wall-clock time of the whole process with the image in the page cache, best of 5 interleaved runs.
+The method is in [bench/vm/method.md](bench/vm/method.md).
 
-| Measurement                                     | python    | vol-rs   | rsvol    |
-| ----------------------------------------------- | --------: | -------: | -------: |
-| Windows x64 build 22000, 5 GiB, 77 plugins, sum | 4078.23 s | 149.69 s | 6.26 s   |
-| Windows, median plugin                          | 4.49 s    | 164 ms   | 10.4 ms  |
-| Linux 6.8, 3 GiB ELF core, 48 plugins, sum      | 1655.71 s | 15.79 s  | 892 ms   |
-| Linux 6.8, median plugin                        | 18.03 s   | 314 ms   | 9.5 ms   |
-| `windows.pslist.PsList`, warm cache             | 998 ms    | 86.8 ms  | 3.0 ms   |
-| `windows.pslist.PsList`, empty cache            | 1.78 s    | 573 ms   | 73.1 ms  |
+rsvol has on-disk caches (see [Caching](#caching)), so it is reported three ways: **cold** (every
+rsvol cache wiped before each run: a first-ever run), **steady** (symbol caches warm, per-image scan
+cache disabled: the honest per-run cost of the scanning work) and **warm** (all caches warm: what a
+second run of a plugin costs). vol-rs is reported cold (its caches wiped) and warm.
 
-rsvol was the fastest of the three on 76 of 77 Windows plugins and on all 48 Linux plugins. The
-exception is `vmscan.Vmscan`: vol-rs ships no VMCS symbol files and returns an empty table
-without reading the image, while python and rsvol scan all 5 GiB.
+| Measurement (sum of per-plugin best)            | python    | vol-rs cold | vol-rs warm | rsvol cold | rsvol steady | rsvol warm |
+| ----------------------------------------------- | --------: | ----------: | ----------: | ---------: | -----------: | ---------: |
+| Windows 11 x64 build 22000, 5 GiB, 77 plugins   | 4078 s    | 183.8 s     | 148.6 s     | 8.82 s     | 4.43 s       | 2.18 s     |
+| Windows, median plugin                          | 4.49 s    | 624 ms      | 164 ms      | 68.6 ms    | 10.2 ms      | 8.6 ms     |
+| Linux 6.8, 3 GiB ELF core, 59 plugins           | 2804 s    | 217.2 s     | 105.2 s     | 35.4 s     | 4.80 s       | 4.42 s     |
+| Linux 6.8, median plugin                        | 18.3 s    | 2.23 s      | 311 ms      | 541 ms     | 10.1 ms      | 9.8 ms     |
+
+Like for like (rsvol cold vs vol-rs cold, rsvol warm vs vol-rs warm): Windows 20.8x / 68.1x faster in
+total, Linux 6.1x / 23.8x. rsvol steady and warm are the fastest of the three tools on every plugin
+except `vmscan.Vmscan`, where vol-rs ships no VMCS symbol files and returns an empty table without
+reading the image, while python and rsvol scan all 5 GiB. A first-ever Linux run pays ~0.5 s once to
+index and build the kernel's 64 MB symbol table, which is then cached.
+
+`windows.pslist.PsList` startup: rsvol 64.7 ms cold / 3.3 ms warm, vol-rs 563 ms / 80.6 ms,
+python 1.87 s / 1.20 s.
+
+On that run rsvol's stdout was byte-identical to python's on every plugin (after sorting for the
+two plugins whose python output order itself varies between runs); vol-rs matched on 59/77 Windows
+and 45/59 Linux plugins.
 
 ## Quick start
 
