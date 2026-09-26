@@ -906,6 +906,49 @@ mod tests {
         assert!(!w.is_valid(0x200000, 1));
     }
 
+    fn put32(v: &mut [u8], at: usize, e: u32) {
+        v[at..at + 4].copy_from_slice(&e.to_le_bytes());
+    }
+
+    #[test]
+    fn intel32_pse_and_4k() {
+        // PD at 0x1000 (1024 x 4-byte entries), PT at 0x2000
+        let mut m = vec![0u8; 0x800000];
+        put32(&mut m, 0x1000, 0x2000 | 1); // PDE[0] -> PT
+        put32(&mut m, 0x1004, 0x400000 | 0x81); // PDE[1]: 4 MiB page at phys 0x400000
+        put32(&mut m, 0x2000, 0x3000 | 1); // PTE[0] -> 0x3000
+        put32(&mut m, 0x2004, 0x5000 | 1);
+        m[0x3000] = 0x11;
+        m[0x400123] = 0x22;
+        let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1000, PagingMode::Intel32, PteFlavor::Generic);
+        assert_eq!(l.translate_addr(0x10), Some((0x3010, Target::Phys)));
+        assert_eq!(l.translate_addr(0x400123), Some((0x400123, Target::Phys)));
+        assert_eq!(l.read_u8(0x400123).unwrap(), 0x22);
+        assert_eq!(l.max_address(), 0xFFFF_FFFF);
+        // a 4 MiB page coalesces into one run
+        let ms = l.mappings(0x400000, 0x400000);
+        assert_eq!(ms, vec![Mapping { offset: 0x400000, len: 0x400000, mapped: 0x400000 }]);
+    }
+
+    #[test]
+    fn pae_three_levels() {
+        // PDPT at 0x1020 (32-byte aligned, not page aligned); the 4096-byte "table" read from
+        // it must not be uniform
+        let mut m = vec![0u8; 0x10000];
+        put(&mut m, 0x1020, 0x2000 | 1); // PDPTE[0] -> PD
+        put(&mut m, 0x1028, 0x8000 | 1);
+        put(&mut m, 0x2000, 0x3000 | 1); // PDE[0] -> PT
+        put(&mut m, 0x2008, 0x9000 | 1);
+        put(&mut m, 0x3000, 0x4000 | 1); // PTE[0]
+        put(&mut m, 0x3008, 0x6000 | 1);
+        m[0x4abc] = 0x33;
+        let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1020, PagingMode::Pae, PteFlavor::Generic);
+        assert_eq!(l.translate_addr(0xabc), Some((0x4abc, Target::Phys)));
+        assert_eq!(l.read_u8(0xabc).unwrap(), 0x33);
+        assert!(l.is_pae());
+        assert_eq!(crate::layers::metadata(&l).pae, Some(true));
+    }
+
     #[test]
     fn duplicate_tables_invalid() {
         let mut m = vec![0u8; 0x10000];
