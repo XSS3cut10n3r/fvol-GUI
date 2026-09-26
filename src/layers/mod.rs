@@ -33,6 +33,7 @@ pub mod file;
 pub mod intel;
 pub mod registry;
 pub mod scan;
+pub mod scancache;
 
 pub use file::FileLayer;
 pub use intel::{IntelLayer, PagingMode, PteFlavor};
