@@ -8,6 +8,7 @@ pub mod frameworkinfo;
 pub mod isfinfo;
 pub mod layerwriter;
 pub mod primary;
+pub mod pyconfig;
 pub mod regexscan;
 pub mod timeliner;
 pub mod vmscan;
