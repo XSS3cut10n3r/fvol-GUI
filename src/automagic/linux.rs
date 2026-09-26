@@ -17,7 +17,7 @@ use crate::layers::scan::{FnScanner, scan_each};
 use crate::symbols::linux::search::{FastBytesScanner, FastMultiStringScanner, Needle};
 use crate::layers::{IntelLayer, Layer, PagingMode, PteFlavor};
 use crate::objects::{LayerRef, Module};
-use crate::symbols::linux::vmcoreinfo::{VmValue, search_vmcoreinfo_elf_note};
+use crate::symbols::linux::vmcoreinfo::{VmCoreInfo, VmValue, search_vmcoreinfo_elf_note};
 use crate::symbols::linux::{register_kernel, virtual_to_physical_address_i};
 use crate::symbols::{IsfLocation, TableRef, Ty};
 use crate::util::trace::span;
@@ -78,16 +78,51 @@ const INTEL_STACKER: &str = "LinuxIntelStacker";
 
 /// python `LinuxIntelVMCOREINFOStacker.stack`. `Err` = python raised (the stacker fails).
 pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) -> Result<Option<LinuxAutomagic>> {
-    let mut found = None;
-    search_vmcoreinfo_elf_note(phys, |_off, vmci| {
+    vmcoreinfo_stack_notes(phys, banners, None)
+}
+
+/// The first notes `search_vmcoreinfo_elf_note` yields, in order: all of them and the error
+/// the search ended with (`complete`), or those up to a stop point, for
+/// [`vmcoreinfo_stack_notes`].
+pub struct Notes {
+    pub notes: Vec<VmCoreInfo>,
+    pub err: Option<Error>,
+    pub complete: bool,
+}
+
+/// Collect the VMCOREINFO notes of `phys` (see [`Notes`]); runs on another thread while the
+/// identifier index is built (the search needs no banners, only the notes' evaluation does).
+/// Stops after the first note of kernel release `stop_at` (the banner hint's; that note
+/// usually decides).
+pub fn collect_notes(phys: &dyn Layer, stop_at: Option<&[u8]>) -> Notes {
+    let _t = span("linux vmcoreinfo: note search (concurrent)");
+    let mut notes = Vec::new();
+    let mut complete = true;
+    let r = search_vmcoreinfo_elf_note(phys, |_off, vmci| {
+        notes.push(vmci.clone());
+        let stop = stop_at.is_some_and(|rel| matches!(vmci.get("OSRELEASE"), Some(VmValue::Str(s)) if s.as_bytes() == rel));
+        if stop {
+            complete = false;
+        }
+        !stop
+    });
+    Notes { notes, err: r.err(), complete }
+}
+
+/// [`vmcoreinfo_stack`]; with `pre`, the notes a concurrent [`collect_notes`] found are
+/// evaluated in order instead of searching now (the same decisions: python's generator is
+/// consumed until a note stacks, and an error after that note is never reached).
+pub fn vmcoreinfo_stack_notes(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)], pre: Option<Notes>) -> Result<Option<LinuxAutomagic>> {
+    // one note: Some(kernel) when it stacks
+    let eval = |vmci: &VmCoreInfo| -> Option<LinuxAutomagic> {
         // _vmcoreinfo_find_aslr
-        let (Some(phys_base), Some(kerneloffset)) = (vmci.get("NUMBER(phys_base)"), vmci.get("KERNELOFFSET")) else { return true };
-        let (VmValue::Int(phys_base), VmValue::Int(kerneloffset)) = (phys_base, kerneloffset) else { return true };
+        let (Some(phys_base), Some(kerneloffset)) = (vmci.get("NUMBER(phys_base)"), vmci.get("KERNELOFFSET")) else { return None };
+        let (VmValue::Int(phys_base), VmValue::Int(kerneloffset)) = (phys_base, kerneloffset) else { return None };
         let aslr_shift = *kerneloffset;
         // (VMCOREINFO values are arbitrary python ints: wrap instead of overflowing)
         let kaslr_shift = phys_base.wrapping_add(aslr_shift);
         // _vmcoreinfo_get_dtb
-        let Some(VmValue::Int(dtb_vaddr)) = vmci.get("SYMBOL(swapper_pg_dir)") else { return true };
+        let Some(VmValue::Int(dtb_vaddr)) = vmci.get("SYMBOL(swapper_pg_dir)") else { return None };
         let dtb = virtual_to_physical_address_i(*dtb_vaddr).wrapping_sub(aslr_shift).wrapping_add(kaslr_shift);
         // _vmcoreinfo_is_32bit
         let is_pae = matches!(vmci.get("CONFIG_X86_PAE"), Some(VmValue::Str(s)) if s == "y");
@@ -100,7 +135,7 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
         let uts_release = match vmci.get("OSRELEASE") {
             Some(VmValue::Str(s)) => s.clone(),
             Some(VmValue::Int(i)) => i.to_string(),
-            None => return true,
+            None => return None,
         };
         let prefix = format!("Linux version {uts_release} (").into_bytes();
         let valid: Vec<&(Vec<u8>, IsfLocation)> = banners.iter().filter(|(b, _)| !b.is_empty() && b.starts_with(&prefix)).collect();
@@ -131,7 +166,7 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
         match hit {
             Some(i) => {
                 let (banner, isf) = valid[i].clone();
-                found = Some(LinuxAutomagic {
+                Some(LinuxAutomagic {
                     stacker: VMCOREINFO_STACKER,
                     mode,
                     flavor: PteFlavor::Generic,
@@ -140,12 +175,36 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
                     kaslr_shift: kaslr_shift as u64,
                     banner,
                     isf,
-                });
+                })
+            }
+            None => None,
+        }
+    };
+    let mut found = None;
+    let search = |found: &mut Option<LinuxAutomagic>| {
+        search_vmcoreinfo_elf_note(phys, |_off, vmci| match eval(vmci) {
+            Some(a) => {
+                *found = Some(a);
                 false
             }
             None => true,
+        })
+    };
+    match pre {
+        None => search(&mut found)?,
+        Some(pre) => {
+            found = pre.notes.iter().find_map(&eval);
+            if found.is_none() {
+                if !pre.complete {
+                    // stopped early without a decision: search again, all of it (the
+                    // collected notes decide the same way again)
+                    search(&mut found)?;
+                } else if let Some(e) = pre.err {
+                    return Err(e);
+                }
+            }
         }
-    })?;
+    }
     Ok(found)
 }
 
@@ -316,13 +375,18 @@ pub fn intel_stack(phys: LayerRef, banners: &[(Vec<u8>, IsfLocation)]) -> Result
 /// to the Linux stackers, which only ever stack directly on the physical layer). `allow`
 /// filters stackers by python class name (`--stackers`).
 pub fn run(phys: LayerRef, banners: &[(Vec<u8>, IsfLocation)], allow: &dyn Fn(&str) -> bool) -> Option<LinuxAutomagic> {
+    run_with(phys, banners, allow, None)
+}
+
+/// [`run`] with VMCOREINFO notes collected beforehand (see [`collect_notes`]).
+pub fn run_with(phys: LayerRef, banners: &[(Vec<u8>, IsfLocation)], allow: &dyn Fn(&str) -> bool, notes: Option<Notes>) -> Option<LinuxAutomagic> {
     // "Never stack on top of an intel layer"; no banners -> nothing to do
     if phys.as_intel().is_some() || banners.is_empty() {
         return None;
     }
     if allow(VMCOREINFO_STACKER) {
         let _t = span("linux vmcoreinfo stacker");
-        if let Ok(Some(a)) = vmcoreinfo_stack(phys, banners) {
+        if let Ok(Some(a)) = vmcoreinfo_stack_notes(phys, banners, notes) {
             return Some(a);
         }
     }
@@ -387,19 +451,15 @@ fn mode_name(m: PagingMode) -> &'static str {
     }
 }
 
-/// The cache "kind": depends on the symbol search path and the `--stackers` filter.
+/// The cache "kind": depends on the symbol search path and the `--stackers` filter (full key
+/// material; the cache stores and compares it).
 fn cache_kind(ctx: &Context) -> String {
-    use crate::util::fxhash::FxHasher;
-    use std::hash::Hasher;
-    let mut h = FxHasher::default();
-    h.write_u64(ctx.symbol_path().os_fingerprint("linux"));
+    let mut k = format!("linux-{}", ctx.symbol_path().os_fingerprint("linux"));
     if let Some(s) = &ctx.opts.stackers {
-        for x in s {
-            h.write(x.as_bytes());
-            h.write_u8(0);
-        }
+        k.push('-');
+        k.push_str(&crate::util::paths::hex(s.join("\0").as_bytes()));
     }
-    format!("linux-{:016x}", h.finish())
+    k
 }
 
 fn load_cached(image: &std::path::Path, kind: &str) -> Option<LinuxAutomagic> {
@@ -471,12 +531,34 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
     let am = match load_cached(&image, &kind) {
         Some(a) => a,
         None => {
-            let banners = {
+            let (banners, notes) = {
                 let _t = span("linux banners (identifier index)");
-                crate::symbols::store::identifier_index(ctx.symbol_path()).dictionary("linux")
+                // the stackers load the matching kernel ISF next: the index builds it right away
+                // from the JSON it decompresses anyway, guided by the image's banner (found by a
+                // quick scan meanwhile)
+                crate::symbols::store::keep_decoded_for(Some("linux"));
+                let phys: LayerRef = *phys;
+                let hint = std::sync::Mutex::new(None);
+                let want_notes = phys.as_intel().is_none() && crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), VMCOREINFO_STACKER);
+                let d = crate::symbols::store::identifier_index_with(ctx.symbol_path(), &|| {
+                    // the index decompresses for a while: meanwhile, find the image's banner
+                    // (steers the index's speculative ISF build) and its VMCOREINFO notes
+                    let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
+                        let hint = crate::automagic::banner_hint(phys, b"Linux version ", b" (");
+                        let release = hint.as_ref().map(|h| h[b"Linux version ".len()..h.len() - 2].to_vec());
+                        crate::symbols::store::set_banner_hint(hint);
+                        want_notes.then(|| collect_notes(phys, release.as_deref()))
+                    });
+                    *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
+                })
+                .dictionary("linux");
+                let notes = hint.into_inner().unwrap_or_else(|e| e.into_inner()).and_then(|h| h.join().ok()).flatten();
+                (d, notes)
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
-            let a = run(*phys, &banners, &allow).ok_or_else(|| {
+            let found = run_with(*phys, &banners, &allow, notes);
+            crate::symbols::store::keep_decoded_for(None);
+            let a = found.ok_or_else(|| {
                 let why = if banners.is_empty() {
                     "No Linux banners found - if this is a linux plugin, please check your symbol files location"
                 } else {

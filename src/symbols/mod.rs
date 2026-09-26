@@ -143,6 +143,20 @@ pub fn load_location(loc: &IsfLocation, prefix: &str, natives: Option<TableRef>,
     Ok(t)
 }
 
+/// Register a table built elsewhere (e.g. speculatively on another thread) exactly as
+/// [`load_location`] would have loaded it: same memo key, same registered name. A table for
+/// that key already registered wins (the built one is dropped).
+pub fn adopt_location(loc: &IsfLocation, prefix: &str, natives: Option<TableRef>, symbol_mask: u64, mut t: SymbolTable) -> TableRef {
+    let key = format!("@{}|{}|{symbol_mask}", loc.url(), natives.map(|n| n.name()).unwrap_or(""));
+    if let Some(t) = LOADED.lock().unwrap().as_ref().and_then(|m| m.get(&key).copied()) {
+        return t;
+    }
+    t.set_symbol_mask(symbol_mask);
+    let t = register(t, prefix);
+    LOADED.lock().unwrap().get_or_insert_with(Default::default).insert(key, t);
+    t
+}
+
 /// Resolve a `table!type` reference from `from` (through its table mapping) to a registered
 /// table and type.
 pub fn resolve_ref(from: TableRef, name: &str) -> Option<(TableRef, Ty)> {

@@ -314,28 +314,55 @@ fn decode_block(data: &[u8], blk: &Block, out: &mut [u8]) -> Result<()> {
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     let (blocks, total) = scan(data)?;
     let mut out = super::try_zeroed(total)?;
-    let threads = if blocks.len() > 1 && total >= PARALLEL_MIN_BYTES {
+    decode_blocks(data, &blocks, &mut out, true)?;
+    Ok(out)
+}
+
+/// Uncompressed size of a complete `.xz` file (structural scan only, nothing is decoded).
+pub fn uncompressed_size(data: &[u8]) -> Result<usize> {
+    Ok(scan(data)?.1)
+}
+
+/// [`decompress`] into a caller-owned buffer that is reused across calls (a worker decoding
+/// many files faults its pages in once instead of once per file). `buf` grows to the largest
+/// output seen and is never shrunk; the output is `buf[..n]` for the returned `n`.
+/// `parallel`: decode multi-block files on several threads (false when the caller already
+/// runs one decode per core).
+pub fn decompress_reuse(data: &[u8], buf: &mut Vec<u8>, parallel: bool) -> Result<usize> {
+    let (blocks, total) = scan(data)?;
+    if buf.len() < total {
+        buf.clear();
+        buf.try_reserve_exact(total).map_err(|_| err("output too large"))?;
+        buf.resize(total, 0);
+    }
+    decode_blocks(data, &blocks, &mut buf[..total], parallel)?;
+    Ok(total)
+}
+
+fn decode_blocks(data: &[u8], blocks: &[Block], out: &mut [u8], parallel: bool) -> Result<()> {
+    let total = out.len();
+    let threads = if parallel && blocks.len() > 1 && total >= PARALLEL_MIN_BYTES {
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(blocks.len())
     } else {
         1
     };
     if threads <= 1 {
-        for blk in &blocks {
+        for blk in blocks {
             decode_block(data, blk, &mut out[blk.out_start..blk.out_start + blk.out_len])?;
         }
-        return Ok(out);
+        return Ok(());
     }
 
     // Split the output into per-block slices and hand them out to worker threads.
     let mut jobs: Vec<(&Block, &mut [u8])> = Vec::with_capacity(blocks.len());
-    let mut rest: &mut [u8] = &mut out;
-    for blk in &blocks {
+    let mut rest: &mut [u8] = out;
+    for blk in blocks {
         let (head, tail) = std::mem::take(&mut rest).split_at_mut(blk.out_len);
         jobs.push((blk, head));
         rest = tail;
     }
-    // Largest blocks first for better balance.
-    jobs.sort_by_key(|j| std::cmp::Reverse(j.1.len()));
+    // Largest blocks first for better balance (the queue pops from the end).
+    jobs.sort_by_key(|j| j.1.len());
     let queue = std::sync::Mutex::new(jobs);
     let first_err: std::sync::Mutex<Option<Error>> = std::sync::Mutex::new(None);
     let (q, fe_ref) = (&queue, &first_err);
@@ -367,7 +394,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     if let Some(e) = first_err.into_inner().ok().flatten() {
         return Err(e);
     }
-    Ok(out)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------

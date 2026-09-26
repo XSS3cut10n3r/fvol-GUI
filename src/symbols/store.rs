@@ -17,11 +17,9 @@
 use super::isf::{BuildOptions, build_blob};
 use super::table::{Blob, SymbolTable};
 use crate::error::{Error, Result};
-use crate::util::fxhash::{FxHasher, hash_bytes};
 use crate::util::json::Json;
 use crate::util::mmap::Mmap;
 use crate::util::paths;
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 /// ISF file extensions in python's preference order (`constants.ISF_EXTENSIONS`).
@@ -81,34 +79,11 @@ impl IsfLocation {
         }
     }
 
-    /// Cache identity: (url, size, mtime or content hash).
+    /// Change detector for the identifier index: a fully mixing hash of (url, size, mtime)
+    /// (the executable's for embedded ISFs: one stat for all ~170 entries instead of hashing
+    /// 6 MB on every index check). The index file stores the URL itself.
     fn stamp_with_url(&self, url: &str) -> Option<u64> {
-        let mut h = FxHasher::default();
-        h.write(url.as_bytes());
-        match self {
-            IsfLocation::File(p) => {
-                let (s, m) = paths::file_stamp(p)?;
-                h.write_u64(s);
-                h.write_u64(m as u64);
-            }
-            IsfLocation::Zip { zip, .. } => {
-                let (s, m) = paths::file_stamp(zip)?;
-                h.write_u64(s);
-                h.write_u64(m as u64);
-            }
-            IsfLocation::Url(u) => {
-                let (s, m) = paths::file_stamp(&url_local_path(u).ok()?)?;
-                h.write_u64(s);
-                h.write_u64(m as u64);
-            }
-            IsfLocation::Embedded { data, .. } => {
-                // embedded data only changes with the executable: its (size, mtime) is one stat
-                // for all ~170 entries instead of hashing 6 MB on every index check
-                h.write_u64(data.len() as u64);
-                h.write_u64(embedded_stamp(data));
-            }
-        }
-        Some(h.finish())
+        Some(crate::layers::scancache::key_hash(&source_identity(self, url)?))
     }
 }
 
@@ -121,8 +96,12 @@ pub fn url_local_path(url: &str) -> Result<PathBuf> {
     if !["http://", "https://", "ftp://"].iter().any(|s| url.starts_with(s)) {
         return Err(Error::msg(format!("URL does not reference an openable file: {url}")));
     }
-    let cache = paths::rsvol_cache_dir().join("remote").join(format!("{:016x}-{}.cache", hash_bytes(url.as_bytes()), url.len()));
-    if cache.is_file() {
+    // named by a fully mixing hash of the URL; the URL itself is kept next to the download
+    // and compared, so a hash collision re-downloads instead of serving another URL's file
+    let base = paths::rsvol_cache_dir().join("remote").join(format!("{:016x}-{}", crate::layers::scancache::key_hash(url.as_bytes()), url.len()));
+    let cache = base.with_extension("cache");
+    let tag = base.with_extension("url");
+    if cache.is_file() && std::fs::read(&tag).is_ok_and(|t| t == url.as_bytes()) {
         return Ok(cache);
     }
     let out = std::process::Command::new("curl")
@@ -133,6 +112,7 @@ pub fn url_local_path(url: &str) -> Result<PathBuf> {
         return Err(Error::msg(format!("download of {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
     paths::write_atomic(&cache, &out.stdout)?;
+    paths::write_atomic(&tag, url.as_bytes())?;
     Ok(cache)
 }
 
@@ -191,18 +171,12 @@ pub fn remote_identifiers(url: &str) -> Result<Vec<(String, Vec<u8>, String)>> {
     Ok(out)
 }
 
-/// Identity of the embedded ISF data: the running executable's (size, mtime); a content hash
-/// only when the executable cannot be stat'ed.
-fn embedded_stamp(data: &[u8]) -> u64 {
-    static EXE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let exe = EXE.get_or_init(|| {
-        let (s, m) = paths::file_stamp(paths::current_exe()?)?;
-        let mut h = FxHasher::default();
-        h.write_u64(s);
-        h.write_u64(m as u64);
-        Some(h.finish())
-    });
-    exe.unwrap_or_else(|| hash_bytes(data))
+/// Identity of the embedded ISF data: the running executable's (size, mtime), exactly; a
+/// content hash only when the executable cannot be stat'ed.
+fn embedded_stamp(data: &[u8]) -> (u64, i128) {
+    static EXE: std::sync::OnceLock<Option<(u64, i128)>> = std::sync::OnceLock::new();
+    let exe = EXE.get_or_init(|| paths::file_stamp(paths::current_exe()?));
+    exe.unwrap_or_else(|| (u64::MAX, crate::layers::scancache::key_hash(data) as i128))
 }
 
 /// Decompress according to the file extension.
@@ -333,20 +307,25 @@ impl SymbolPath {
     /// A cheap fingerprint of where `os` ISFs can come from, for per-image automagic caches:
     /// the roots, the mtimes of each root and its `<os>/` directory (adding or removing an ISF
     /// there changes them; deeper directories are not stat'ed) and the `-u` list URL.
-    pub fn os_fingerprint(&self, os: &str) -> u64 {
-        let mut h = FxHasher::default();
+    /// Returned as the full key material (hex), not a hash: callers store it and compare.
+    pub fn os_fingerprint(&self, os: &str) -> String {
+        let mut k: Vec<u8> = Vec::new();
         for r in &self.roots {
-            h.write(format!("{r:?}").as_bytes());
+            let d = format!("{r:?}");
+            k.extend_from_slice(&(d.len() as u64).to_le_bytes());
+            k.extend_from_slice(d.as_bytes());
             if let Root::Dir(d) = r {
                 for p in [d.clone(), d.join(os)] {
                     let (s, m) = paths::file_stamp(&p).unwrap_or((0, 0));
-                    h.write_u64(s);
-                    h.write_u64(m as u64);
+                    k.extend_from_slice(&s.to_le_bytes());
+                    k.extend_from_slice(&m.to_le_bytes());
                 }
             }
         }
-        h.write(super::remote_isf_url().unwrap_or_default().as_bytes());
-        h.finish()
+        let remote = super::remote_isf_url().unwrap_or_default();
+        k.extend_from_slice(&(remote.len() as u64).to_le_bytes());
+        k.extend_from_slice(remote.as_bytes());
+        paths::hex(&k)
     }
 
     pub fn all(&self) -> Vec<IsfLocation> {
@@ -573,47 +552,192 @@ fn path_ends_with(path: &Path, tail: &str) -> bool {
     s == tail || s.ends_with(&format!("/{tail}"))
 }
 
-/// Cache file for a location + options.
-fn cache_file(loc: &IsfLocation, opts: &BuildOptions) -> Option<PathBuf> {
-    let stamp = loc.stamp_with_url(&loc.url())?;
-    let mut h = FxHasher::default();
-    h.write_u64(stamp);
-    h.write_u32(super::table::BLOB_VERSION);
-    if let Some(n) = &opts.natives {
-        for (name, ty) in n {
-            h.write(name.as_bytes());
-            h.write(&super::table::ty_encode(ty));
+/// The exact identity of a location's source file: its URL plus (size, mtime) of the file on
+/// disk (the zip for pack members, the running executable for embedded ISFs).
+fn source_identity(loc: &IsfLocation, url: &str) -> Option<Vec<u8>> {
+    let mut k = Vec::with_capacity(url.len() + 32);
+    k.extend_from_slice(&(url.len() as u64).to_le_bytes());
+    k.extend_from_slice(url.as_bytes());
+    let (s, m) = match loc {
+        IsfLocation::File(p) => paths::file_stamp(p)?,
+        IsfLocation::Zip { zip, .. } => paths::file_stamp(zip)?,
+        IsfLocation::Url(u) => paths::file_stamp(&url_local_path(u).ok()?)?,
+        IsfLocation::Embedded { data, .. } => {
+            k.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            embedded_stamp(data)
+        }
+    };
+    k.extend_from_slice(&s.to_le_bytes());
+    k.extend_from_slice(&m.to_le_bytes());
+    Some(k)
+}
+
+/// Cache file of a location + options and its full key material. The file is named by a
+/// fully mixing 64-bit hash of the key and carries the key itself in a trailer
+/// (`blob | key | key_len u32 | ISFB_TRAILER`), verified on load: a hash collision is a miss,
+/// never a wrong table.
+fn cache_file(loc: &IsfLocation, url: &str, opts: &BuildOptions) -> Option<(PathBuf, Vec<u8>)> {
+    let mut key = b"rsvol-isfb\0".to_vec();
+    key.extend_from_slice(&super::table::BLOB_VERSION.to_le_bytes());
+    key.extend_from_slice(&source_identity(loc, url)?);
+    match &opts.natives {
+        None => key.push(0),
+        Some(n) => {
+            key.push(1);
+            key.extend_from_slice(&(n.len() as u64).to_le_bytes());
+            for (name, ty) in n {
+                key.extend_from_slice(&(name.len() as u64).to_le_bytes());
+                key.extend_from_slice(name.as_bytes());
+                key.extend_from_slice(&super::table::ty_encode(ty));
+            }
         }
     }
-    Some(paths::rsvol_cache_dir().join("isf").join(format!("{:016x}.isfb", h.finish())))
+    let h = crate::layers::scancache::key_hash(&key);
+    Some((paths::rsvol_cache_dir().join("isf").join(format!("{h:016x}.isfb")), key))
 }
+
+const ISFB_TRAILER: &[u8; 8] = b"RSVKEY01";
+
+/// The blob of a mapped cache file whose trailer holds exactly `key` (only the file's last
+/// bytes are compared before the blob is trusted).
+fn cached_blob_matches(file: &[u8], key: &[u8]) -> bool {
+    let n = file.len();
+    if n < 12 + key.len() || &file[n - 8..] != ISFB_TRAILER {
+        return false;
+    }
+    let kl = u32::from_le_bytes(file[n - 12..n - 8].try_into().unwrap()) as usize;
+    kl == key.len() && &file[n - 12 - kl..n - 12] == key
+}
+
+/// The bytes of a cache file for `blob` under `key`, as the parts written in order.
+fn cache_file_parts<'b>(blob: &'b [u8], key: &'b [u8], len: &'b [u8; 4]) -> [&'b [u8]; 4] {
+    [blob, key, len, ISFB_TRAILER]
+}
+
+#[cfg(test)]
+fn cache_file_bytes(blob: &[u8], key: &[u8]) -> Vec<u8> {
+    let len = (key.len() as u32).to_le_bytes();
+    cache_file_parts(blob, key, &len).concat()
+}
+
+/// Blobs built in this process, by cache key: the cache file is written in the background,
+/// so a second load of the same ISF (e.g. the Linux stacker's table and the kernel's, which
+/// differ only in the symbol mask) shares the blob instead of rebuilding it.
+static BUILT: std::sync::Mutex<Vec<(Vec<u8>, std::sync::Arc<Vec<u8>>)>> = std::sync::Mutex::new(Vec::new());
 
 /// Load a symbol table from `loc` (binary cache first). `name` is the table name.
 pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
     let url = loc.url();
-    let cf = cache_file(loc, opts);
-    if let Some(cf) = &cf {
+    let cf = cache_file(loc, &url, opts);
+    if let Some((_, key)) = &cf {
+        let built = BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|b| b.0 == *key).map(|b| b.1.clone());
+        if let Some(b) = built {
+            return SymbolTable::from_blob(Blob::Shared(b), name, &url);
+        }
+    }
+    if let Some((cf, key)) = &cf {
         if let Ok(f) = std::fs::File::open(cf) {
             if let Ok(m) = Mmap::map(&f) {
-                if let Ok(t) = SymbolTable::from_blob(Blob::Mapped(m), name, &url) {
-                    return Ok(t);
+                if cached_blob_matches(m.as_slice(), key) {
+                    if let Ok(t) = SymbolTable::from_blob(Blob::Mapped(m), name, &url) {
+                        return Ok(t);
+                    }
                 }
             }
         }
     }
-    let json = {
-        let _t = crate::util::trace::span("isf read+decompress");
-        loc.read()?
+    // the build is parallel: start the pool's workers while this thread decompresses
+    crate::util::pool::warm();
+    let json = match take_kept(loc, &url) {
+        Some(j) => std::borrow::Cow::Owned(j),
+        None => {
+            let _t = crate::util::trace::span("isf read+decompress");
+            loc.read()?
+        }
     };
+    let blob = build_remember(&url, cf, json, opts, true)?;
+    SymbolTable::from_blob(Blob::Shared(blob), name, &url)
+}
+
+/// Build the blob of an ISF's JSON, remember it in-process ([`BUILT`]) and write its cache
+/// file in the background (overlapping the plugin run; joined before exit), where the JSON is
+/// freed too.
+fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: std::borrow::Cow<'static, [u8]>, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
     let blob = {
         let _t = crate::util::trace::span("isf parse+build");
-        build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?
+        let b = if parallel { build_blob(&json, opts) } else { super::isf::build_blob_serial(&json, opts) };
+        b.map_err(|e| Error::msg(format!("{url}: {e}")))?
     };
-    if let Some(cf) = &cf {
-        let _t = crate::util::trace::span("isf cache write");
-        let _ = paths::write_atomic(cf, &blob);
+    let blob = std::sync::Arc::new(blob);
+    if let Some((_, key)) = &cf {
+        BUILT.lock().unwrap_or_else(|e| e.into_inner()).push((key.clone(), blob.clone()));
     }
-    SymbolTable::from_blob(Blob::Owned(blob), name, &url)
+    let writer = blob.clone();
+    crate::util::bg::spawn(move || {
+        drop(json);
+        if let Some((cf, key)) = cf {
+            let _t = crate::util::trace::span("isf cache write (background)");
+            let len = (key.len() as u32).to_le_bytes();
+            let _ = paths::write_atomic_parts(&cf, &cache_file_parts(&writer, &key, &len));
+        }
+    });
+    Ok(blob)
+}
+
+/// The banner of the image being analysed, when a quick scan found it (see [`set_banner_hint`]).
+static HINT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+/// A banner found in the image (`Linux version ...\n`, `Darwin Kernel Version ...`), set while
+/// the identifier index runs: the index then builds exactly the ISFs whose identifier starts
+/// with it (instead of guessing), and keeps no other JSON. Only a guide for speculation: the
+/// automagic still decides, from the complete index, python's way.
+pub fn set_banner_hint(banner: Option<Vec<u8>>) {
+    *HINT.lock().unwrap_or_else(|e| e.into_inner()) = banner;
+}
+
+/// Speculative table builds done by the identifier index (see [`keep_decoded_for`]).
+static SPEC_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// At most this many: a big symbol pack must not turn the index into a build farm.
+const MAX_SPEC_BUILDS: usize = 3;
+
+/// Inside the identifier index: `json` (all of `loc`) was identified as the OS whose kernel
+/// ISF is loaded next. Build its table now, on this worker (the other workers keep
+/// decompressing), for the first few such files; else keep the JSON (decompressed ones only)
+/// so the load skips the decompression.
+fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool) {
+    use std::sync::atomic::Ordering;
+    // plain JSON files load without decompression anyway: only compressed ones are worth it
+    if !decoded {
+        return;
+    }
+    let hint = HINT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(h) = hint {
+        // the image's own banner is known: build exactly the matching ISFs, keep nothing else
+        if identifier.starts_with(&h) && SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < 2 * MAX_SPEC_BUILDS {
+            let url = loc.url();
+            let cf = cache_file(loc, &url, &BuildOptions::default());
+            let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
+            if !known {
+                let _t = crate::util::trace::span("isf speculative build (identifier index, banner hint)");
+                let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+            }
+        }
+        return;
+    }
+    if !*GUESS.lock().unwrap_or_else(|e| e.into_inner()) {
+        return;
+    }
+    if SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < MAX_SPEC_BUILDS {
+        let url = loc.url();
+        let cf = cache_file(loc, &url, &BuildOptions::default());
+        let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
+        if !known {
+            let _t = crate::util::trace::span("isf speculative build (identifier index)");
+            let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+        }
+        return;
+    }
+    keep_decoded(loc, json);
 }
 
 /// Load an ISF by python sub_path/filename (e.g. `("windows", "pe")`), first match wins
@@ -637,10 +761,148 @@ pub struct IdentEntry {
     pub identifier: Vec<u8>,
 }
 
-/// Extract (os, identifier) from ISF JSON without building the table.
+/// Extract (os, identifier) from ISF JSON without building the table (python's identifier
+/// processors; the document must parse). The byte parser: in the identifier index many
+/// workers extract at once while decompressing, and there a structural index's extra memory
+/// traffic costs more than its faster skipping saves (measured: ~100 ms slower index).
 pub fn extract_identifier(json: &[u8]) -> Option<(String, Vec<u8>)> {
-    use crate::util::json::{Kind, Parser};
-    let mut p = Parser::new(json);
+    match extract_identifier_fast(json) {
+        Some(r) => r,
+        None => extract_identifier_with(&mut crate::util::json::Parser::new(json)),
+    }
+}
+
+unsafe extern "C" {
+    fn memchr(s: *const u8, c: i32, n: usize) -> *const u8;
+}
+
+/// libc `memchr` (vectorized; std does not expose one).
+fn find_byte(hay: &[u8], c: u8) -> Option<usize> {
+    if hay.is_empty() {
+        return None;
+    }
+    // SAFETY: `hay` is a valid slice; memchr reads at most `hay.len()` bytes
+    let p = unsafe { memchr(hay.as_ptr(), c as i32, hay.len()) };
+    (!p.is_null()).then(|| p as usize - hay.as_ptr() as usize)
+}
+
+/// The byte range end of the JSON value starting at `v` (a document without backslashes:
+/// strings end at the next quote), or None.
+fn value_end(json: &[u8], v: usize) -> Option<usize> {
+    match *json.get(v)? {
+        b'"' => Some(v + 1 + find_byte(&json[v + 1..], b'"')? + 1),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            let mut i = v;
+            while i < json.len() {
+                match json[i] {
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                    b'"' => i += 1 + find_byte(&json[i + 1..], b'"')?,
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => {
+            let n = json[v..].iter().position(|&b| matches!(b, b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t')).unwrap_or(json.len() - v);
+            Some(v + n)
+        }
+    }
+}
+
+/// [`extract_identifier`] without walking the whole document: one SIMD pass tracking bracket
+/// depth and spotting the candidate member names ([`crate::util::jsonidx::ident_marks`])
+/// locates the root's `metadata` / `symbols` members and the `symbols` members named
+/// `linux_banner` / `version`; only those values are parsed (the same code as the byte
+/// parser's path). ~4x faster than the byte parser, which skips member by member through the
+/// `symbols` section (half to three quarters of a dwarf2json ISF).
+/// `None` = not decidable this way (a backslash anywhere -- escapes could spell a key --,
+/// unbalanced brackets, the root or a `symbols` value not an object): the byte parser decides.
+fn extract_identifier_fast(json: &[u8]) -> Option<Option<(String, Vec<u8>)>> {
+    let marks = crate::util::jsonidx::ident_marks(json)?;
+    if marks.backslash {
+        return None;
+    }
+    let (d1, d2) = (marks.d1, marks.d2);
+    let ws = |mut i: usize| {
+        while json.get(i).is_some_and(|b| matches!(b, b' ' | b'\n' | b'\r' | b'\t')) {
+            i += 1;
+        }
+        i
+    };
+    let root = ws(if json.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 });
+    if json.get(root) != Some(&b'{') {
+        return None;
+    }
+    // the root's members: depth-1 strings followed by ':'
+    let mut keys: Vec<(usize, &[u8], usize)> = Vec::new();
+    for &p in &d1 {
+        let close = p + 1 + find_byte(&json[p + 1..], b'"')?;
+        let c = ws(close + 1);
+        if json.get(c) == Some(&b':') {
+            keys.push((p, &json[p + 1..close], ws(c + 1)));
+        }
+    }
+    let mut win: Option<(String, String, u64)> = None;
+    let mut linux: Option<String> = None;
+    let mut mac: Option<String> = None;
+    let parse = |v: usize| -> Option<crate::util::json::Json<'_>> {
+        let end = value_end(json, v)?;
+        crate::util::json::Parser::new(&json[v..end]).value().ok()
+    };
+    for (i, &(p, k, v)) in keys.iter().enumerate() {
+        match k {
+            b"metadata" => {
+                let val = parse(v)?;
+                if let Some(pdb) = val.path(&["windows", "pdb"]) {
+                    let guid = pdb.get("GUID").and_then(|g| g.as_str()).unwrap_or("").to_string();
+                    let db = pdb.get("database").and_then(|g| g.as_str()).unwrap_or("").to_string();
+                    let age = pdb.get("age").and_then(|g| g.as_u64()).unwrap_or(0);
+                    win = Some((guid, db, age));
+                }
+            }
+            b"symbols" => {
+                if json.get(v) != Some(&b'{') {
+                    return None;
+                }
+                let end = keys.get(i + 1).map(|n| n.0).unwrap_or(json.len());
+                let lo = d2.partition_point(|&q| q < p);
+                for &q in d2[lo..].iter().take_while(|&&q| q < end) {
+                    let close = q + 1 + find_byte(&json[q + 1..], b'"')?;
+                    let c = ws(close + 1);
+                    if json.get(c) != Some(&b':') {
+                        continue; // a string value, not a member name
+                    }
+                    let w = ws(c + 1);
+                    if json.get(w) != Some(&b'{') {
+                        continue; // the byte parser skips non-object values
+                    }
+                    let val = parse(w)?;
+                    if let Some(cd) = val.get("constant_data").and_then(|c| c.as_str()) {
+                        if &json[q + 1..close] == b"linux_banner" {
+                            linux = Some(cd.to_string());
+                        } else {
+                            mac = Some(cd.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(identifier_from(win, mac, linux))
+}
+
+/// [`extract_identifier`] through any pull parser.
+pub fn extract_identifier_with<'a, P: crate::util::jsonidx::Pull<'a>>(p: &mut P) -> Option<(String, Vec<u8>)> {
+    use crate::util::json::Kind;
     let mut win: Option<(String, String, u64)> = None;
     let mut linux: Option<String> = None;
     let mut mac: Option<String> = None;
@@ -679,6 +941,11 @@ pub fn extract_identifier(json: &[u8]) -> Option<(String, Vec<u8>)> {
     if r.is_err() {
         return None;
     }
+    identifier_from(win, mac, linux)
+}
+
+/// python's identifier processors, in order: windows (metadata.windows.pdb), mac, linux.
+fn identifier_from(win: Option<(String, String, u64)>, mac: Option<String>, linux: Option<String>) -> Option<(String, Vec<u8>)> {
     if let Some((guid, db, age)) = win {
         if !guid.is_empty() && age != 0 && !db.is_empty() {
             return Some(("windows".into(), format!("{db}|{}|{age}", guid.to_uppercase()).into_bytes()));
@@ -704,6 +971,12 @@ pub struct IdentifierIndex {
 impl IdentifierIndex {
     /// Build/refresh the index: only new or modified files are (decompressed and) parsed.
     pub fn update(path: &SymbolPath) -> IdentifierIndex {
+        Self::update_with(path, &|| {})
+    }
+
+    /// [`IdentifierIndex::update`]; `on_work` runs first when ISFs other than the shipped ones
+    /// must be (re)read.
+    pub fn update_with(path: &SymbolPath, on_work: &dyn Fn()) -> IdentifierIndex {
         let cache_path = paths::rsvol_cache_dir().join("identifiers.cache");
         // entries for every symbol path ever indexed are kept, so alternating `-s` dirs does
         // not rewrite (or re-extract) the cache on each run
@@ -727,15 +1000,14 @@ impl IdentifierIndex {
                 _ => true,
             })
             .collect();
-        // bounded: each item may decompress a 50-100 MB ISF (8 x 100 MB peak)
-        let fresh: Vec<Option<IdentEntry>> = crate::util::par::par_map_bounded(todo.len(), 8, |k| {
+        // (shipped ISFs are never kernel ISFs: re-reading only those needs no hint)
+        if todo.iter().any(|&i| !matches!(locs[i], IsfLocation::Embedded { .. })) {
+            on_work();
+        }
+        let fresh = extract_all(&locs, &todo, |k, ident| {
             let i = todo[k];
-            let stamp = stamps[i]?;
-            let (os, identifier) = match locs[i].read() {
-                Ok(json) => extract_identifier(&json).unwrap_or_default(),
-                Err(_) => Default::default(),
-            };
-            Some(IdentEntry { url: urls[i].clone(), stamp, os, identifier })
+            let (os, identifier) = ident.unwrap_or_default();
+            Some(IdentEntry { url: urls[i].clone(), stamp: stamps[i]?, os, identifier })
         });
         let mut changed = false;
         for e in fresh.into_iter().flatten() {
@@ -748,9 +1020,6 @@ impl IdentifierIndex {
                 }
             }
         }
-        if changed {
-            write_ident_cache(&cache_path, &all);
-        }
         let mut entries = Vec::with_capacity(locs.len());
         let mut locations = Vec::with_capacity(locs.len());
         for (l, u) in locs.into_iter().zip(&urls) {
@@ -758,6 +1027,10 @@ impl IdentifierIndex {
                 entries.push(all[j].clone());
                 locations.push(l);
             }
+        }
+        if changed {
+            // off the critical path (joined before exit)
+            crate::util::bg::spawn(move || write_ident_cache(&cache_path, &all));
         }
         IdentifierIndex { entries, locations }
     }
@@ -791,6 +1064,194 @@ impl IdentifierIndex {
     }
 }
 
+/// Rough decompressed size of an ISF location (for scheduling and the memory budget):
+/// compressed files are assumed to expand ~30x (dwarf2json / pdbconv output compresses
+/// 15-20x with xz).
+fn estimated_json_size(loc: &IsfLocation) -> u64 {
+    let (name, size) = match loc {
+        IsfLocation::Embedded { data, .. } => return data.len() as u64,
+        IsfLocation::File(p) => (p.to_string_lossy().into_owned(), std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)),
+        IsfLocation::Zip { member, .. } => (member.clone(), 64 << 20),
+        IsfLocation::Url(u) => (u.clone(), 64 << 20),
+    };
+    if name.ends_with(".json") { size } else { size.saturating_mul(30) }
+}
+
+/// The (decompressed) JSON of `loc`, decoded into the reusable `buf` when possible (plain and
+/// `.xz` files: no per-file allocation, pages faulted in once per worker), then `f(json)`.
+pub(crate) fn with_json<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
+    with_json_len(loc, buf, |j, _| f(j))
+}
+
+/// [`with_json`]; `f` also gets `Some((n, decompressed))` when the JSON is `buf[..n]`.
+fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8], Option<(usize, bool)>) -> R) -> Result<R> {
+    let owned;
+    let (json, decoded): (&[u8], Option<(usize, bool)>) = match loc {
+        IsfLocation::Embedded { data, .. } => (data, None),
+        IsfLocation::File(p) if p.to_string_lossy().ends_with(".xz") => {
+            let raw = std::fs::read(p)?;
+            let n = crate::codecs::xz::decompress_reuse(&raw, buf, false)?;
+            (&buf[..n], Some((n, true)))
+        }
+        IsfLocation::File(p) if p.to_string_lossy().ends_with(".json") => {
+            use std::io::Read;
+            let mut file = std::fs::File::open(p)?;
+            let len = file.metadata()?.len() as usize;
+            if buf.len() < len {
+                buf.clear();
+                buf.resize(len, 0);
+            }
+            file.read_exact(&mut buf[..len])?;
+            (&buf[..len], Some((len, false)))
+        }
+        _ => {
+            owned = loc.read()?;
+            (&owned, None)
+        }
+    };
+    Ok(f(json, decoded))
+}
+
+/// OS whose decompressed ISFs the identifier index keeps (see [`keep_decoded_for`]).
+static KEEP_OS: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// Decompressed ISFs kept by the identifier index: source identity -> JSON.
+static KEPT: std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Memory the kept JSON may use.
+const KEEP_BUDGET: usize = 512 << 20;
+
+/// While building the identifier index, keep the decompressed JSON of the ISFs identified as
+/// `os` (within [`KEEP_BUDGET`]): the automagic that asked for the index loads one of them next,
+/// and [`load`] then skips its decompression. `None` (once the automagic is done) stops
+/// keeping and frees what is kept and the speculative builds no table uses (in the
+/// background).
+pub fn keep_decoded_for(os: Option<&'static str>) {
+    keep_decoded_for_with(os, true)
+}
+
+/// Whether the index may build / keep ISFs without a banner hint (a few linux kernels: yes;
+/// a pack of 100+ mac kernels: guessing is pointless).
+static GUESS: std::sync::Mutex<bool> = std::sync::Mutex::new(true);
+
+/// [`keep_decoded_for`]; `guess`: build or keep ISFs of `os` even without a banner hint.
+pub fn keep_decoded_for_with(os: Option<&'static str>, guess: bool) {
+    *GUESS.lock().unwrap_or_else(|e| e.into_inner()) = guess;
+    *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner()) = os;
+    if os.is_none() {
+        set_banner_hint(None);
+        let kept = std::mem::take(&mut *KEPT.lock().unwrap_or_else(|e| e.into_inner()));
+        // speculative builds nobody loaded (only the memo holds them) go too
+        let unused: Vec<_> = {
+            let mut b = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+            let (keep, drop): (Vec<_>, Vec<_>) = std::mem::take(&mut *b).into_iter().partition(|e| std::sync::Arc::strong_count(&e.1) > 1);
+            *b = keep;
+            drop
+        };
+        if !kept.is_empty() || !unused.is_empty() {
+            crate::util::bg::spawn(move || drop((kept, unused)));
+        }
+    }
+}
+
+fn keep_decoded(loc: &IsfLocation, json: Vec<u8>) {
+    let Some(id) = source_identity(loc, &loc.url()) else { return };
+    let mut k = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    let used: usize = k.iter().map(|e| e.1.capacity()).sum();
+    if used + json.capacity() <= KEEP_BUDGET {
+        k.push((id, json));
+    }
+}
+
+/// The kept decompressed JSON of `loc` (taken: used once).
+fn take_kept(loc: &IsfLocation, url: &str) -> Option<Vec<u8>> {
+    let mut k = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if k.is_empty() {
+        return None;
+    }
+    let id = source_identity(loc, url)?;
+    let i = k.iter().position(|e| e.0 == id)?;
+    Some(k.swap_remove(i).1)
+}
+
+/// Identifier extraction for `todo` (indexes into `locs`) on all cores: `make(k, identifier)`
+/// builds the k-th result (`None` identifier = unreadable / not an ISF). Largest files first;
+/// each worker reuses one decode buffer; the worker count keeps the decode buffers within a
+/// memory budget.
+fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usize, Option<(String, Vec<u8>)>) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const BUDGET: u64 = 1536 << 20;
+    if todo.is_empty() {
+        return Vec::new();
+    }
+    let est: Vec<u64> = todo.iter().map(|&i| estimated_json_size(&locs[i])).collect();
+    let mut order: Vec<usize> = (0..todo.len()).collect();
+    order.sort_by_key(|&k| std::cmp::Reverse(est[k]));
+    let max_est = est.iter().copied().max().unwrap_or(1).max(1);
+    let threads = crate::util::par::threads().min(todo.len()).min((BUDGET / max_est).max(1) as usize);
+    let next = AtomicUsize::new(0);
+    let keep_os = *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner());
+    let work = |out: &mut Vec<(usize, R)>| {
+        let mut buf = Vec::new();
+        loop {
+            let j = next.fetch_add(1, Ordering::Relaxed);
+            let Some(&k) = order.get(j) else { break };
+            let loc = &locs[todo[k]];
+            let mut decoded = None;
+            let ident = with_json_len(loc, &mut buf, |json, n| {
+                decoded = n;
+                extract_identifier(json)
+            })
+            .ok()
+            .flatten();
+            // the OS the caller is about to load a kernel ISF for: build it now or keep the JSON
+            if let (Some((n, was_decoded)), Some(os), Some((ios, _))) = (decoded, keep_os, &ident)
+                && os == ios
+            {
+                let mut v = std::mem::take(&mut buf);
+                v.truncate(n);
+                speculate(loc, &ident.as_ref().map(|i| i.1.clone()).unwrap_or_default(), v, was_decoded);
+            }
+            out.push((k, make(k, ident)));
+        }
+    };
+    let mut parts: Vec<Vec<(usize, R)>> = if threads <= 1 {
+        let mut v = Vec::new();
+        work(&mut v);
+        vec![v]
+    } else {
+        std::thread::scope(|s| {
+            let hs: Vec<_> = (1..threads)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut v = Vec::new();
+                        work(&mut v);
+                        v
+                    })
+                })
+                .collect();
+            let mut v = Vec::new();
+            work(&mut v);
+            let mut parts: Vec<_> = hs.into_iter().map(|h| h.join().unwrap_or_default()).collect();
+            parts.push(v);
+            parts
+        })
+    };
+    let mut slots: Vec<Option<R>> = (0..todo.len()).map(|_| None).collect();
+    for p in parts.iter_mut() {
+        for (k, r) in p.drain(..) {
+            slots[k] = Some(r);
+        }
+    }
+    // a worker that panicked lost its items: recompute them here (never silently drop entries)
+    let mut buf = Vec::new();
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(k, r)| r.unwrap_or_else(|| make(k, with_json(&locs[todo[k]], &mut buf, extract_identifier).ok().flatten())))
+        .collect()
+}
+
 fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
     let Ok(b) = std::fs::read(path) else { return Vec::new() };
     let mut out = Vec::new();
@@ -800,7 +1261,7 @@ fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
         *i += n;
         Some(s)
     };
-    if rd(&mut i, 8) != Some(b"RSVOLID1") {
+    if rd(&mut i, 8) != Some(b"RSVOLID2") {
         return out;
     }
     loop {
@@ -826,7 +1287,7 @@ fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
 
 fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
     let mut b = Vec::new();
-    b.extend_from_slice(b"RSVOLID1");
+    b.extend_from_slice(b"RSVOLID2");
     for e in entries {
         b.extend_from_slice(&(e.url.len() as u32).to_le_bytes());
         b.extend_from_slice(e.url.as_bytes());
@@ -843,6 +1304,12 @@ fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
 /// SymbolCacheMagic update), built/refreshed on first use for `path`.
 /// `identifier_index(p).dictionary("linux")` = python `get_identifier_dictionary("linux")`.
 pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
+    identifier_index_with(path, &|| {})
+}
+
+/// [`identifier_index`]; `on_work` runs when ISFs must actually be read (a cold or stale
+/// index), e.g. to start a banner-hint scan only then.
+pub fn identifier_index_with(path: &SymbolPath, on_work: &dyn Fn()) -> &'static IdentifierIndex {
     // one index per distinct search path (a process normally has exactly one)
     type Key = (SymbolPath, Option<String>);
     static INDEX: std::sync::Mutex<Vec<(Key, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
@@ -852,7 +1319,7 @@ pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
         return i;
     }
     let _t = crate::util::trace::span("identifier index update");
-    let mut index = IdentifierIndex::update(path);
+    let mut index = IdentifierIndex::update_with(path, on_work);
     // python SymbolCacheMagic: remote rows are (re)inserted after the local scan, so they come
     // last and win `find_location` / `get_identifier_dictionary` ties
     if let Some(url) = &remote {
@@ -871,9 +1338,10 @@ pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
     i
 }
 
-/// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
-/// by name `windows/<pdb>/<GUID>-<AGE>.json*`, then by identifier, then download + convert).
-pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
+/// The first steps of [`find_windows_isf`]: an ISF found by name (canonical layout
+/// `<root>/windows/<pdb>/<GUID>-<AGE>.json*`, then python's rglob), without the identifier
+/// index or a download. Cheap (a few stats), for speculative loading.
+pub fn find_windows_isf_local(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32) -> Option<IsfLocation> {
     let pdb_name = pdb_name.trim_matches('\0');
     let filter = format!("{}/{}-{}", pdb_name, guid.to_uppercase(), age);
     // fast path: the canonical layout <root>/windows/<pdb>/<GUID>-<AGE>.json*
@@ -882,14 +1350,21 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
             for ext in ISF_EXTENSIONS {
                 let p = d.join("windows").join(format!("{filter}{ext}"));
                 if p.is_file() {
-                    return Ok(IsfLocation::File(p));
+                    return Some(IsfLocation::File(p));
                 }
             }
         }
     }
-    if let Some(l) = path.find_first("windows", &filter) {
+    path.find_first("windows", &filter)
+}
+
+/// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
+/// by name `windows/<pdb>/<GUID>-<AGE>.json*`, then by identifier, then download + convert).
+pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
+    if let Some(l) = find_windows_isf_local(path, pdb_name, guid, age) {
         return Ok(l);
     }
+    let pdb_name = pdb_name.trim_matches('\0');
     let idx = identifier_index(path);
     let ident = format!("{}|{}|{}", pdb_name, guid.to_uppercase(), age);
     if let Some(l) = idx.find(ident.as_bytes(), "windows") {
@@ -966,6 +1441,167 @@ mod tests {
             );
         }
         println!("SymbolPath::new {t_new:?}");
+    }
+
+    /// The fast extractor agrees with the byte parser on every ISF here and on shipped ones,
+    /// and on damaged copies whenever it decides (when the byte parser fails, the fast path
+    /// may still decide: it only checks bracket balance, like a byte-level skip).
+    #[test]
+    fn fast_identifier_equals_byte_parser() {
+        let byte = |j: &[u8]| extract_identifier_with(&mut crate::util::json::Parser::new(j));
+        let mut docs: Vec<Vec<u8>> = crate::symbols::embedded::FILES.iter().map(|&(rel, _, data)| if rel.ends_with(".xz") { crate::codecs::xz::decompress(data).unwrap() } else { data.to_vec() }).collect();
+        docs.push(br#"{"metadata": {"format": "6.2.0"}, "symbols": {"a": {"address": 1}, "version": {"address": 2, "constant_data": "RGFyd2lu"}, "linux_banner": {"constant_data": "TGludXg="}, "x": "version"}, "user_types": {"version": {"fields": {}}}}"#.to_vec());
+        docs.push(br#"{"symbols": {"linux_banner": {"constant_data": "TGludXg="}}, "metadata": {"windows": {"pdb": {"GUID": "ab", "age": 1, "database": "k.pdb"}}}, "symbols": {"version": 5}}"#.to_vec());
+        docs.push(br#"{"a": ["version", {"linux_banner": {"constant_data": "eA=="}}], "symbols": {"sub": {"version": {"constant_data": "eQ=="}}}}"#.to_vec());
+        let mut n = 0;
+        for d in &docs {
+            if let Some(f) = extract_identifier_fast(d) {
+                assert_eq!(f, byte(d), "{}", String::from_utf8_lossy(&d[..d.len().min(200)]));
+                n += 1;
+            }
+        }
+        assert!(n > 20, "{n}");
+        // damage
+        let base = &docs[docs.len() - 3];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in 0..base.len() {
+            for _ in 0..6 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let mut d = base.clone();
+                d[i] = b"{}[]:,\" \\ab"[(x >> 33) as usize % 11];
+                if let (Some(f), Some(b)) = (extract_identifier_fast(&d), byte(&d)) {
+                    assert_eq!(f, Some(b), "{}", String::from_utf8_lossy(&d));
+                }
+            }
+        }
+    }
+
+    /// Same on the ISFs of this machine (`cargo test --release fast_identifier_on_all_isfs -- --ignored`).
+    #[test]
+    #[ignore]
+    fn fast_identifier_on_all_isfs() {
+        let path = SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
+        let mut buf = Vec::new();
+        let (mut fast, mut n) = (0, 0);
+        for loc in path.all() {
+            let (f, b) = with_json(&loc, &mut buf, |j| (extract_identifier_fast(j), extract_identifier_with(&mut crate::util::json::Parser::new(j)))).unwrap();
+            if let Some(f) = f {
+                assert_eq!(f, b, "{}", loc.url());
+                fast += 1;
+            }
+            n += 1;
+        }
+        println!("{fast}/{n} decided by the fast extractor");
+    }
+
+    /// Where the identifier index's CPU goes, one thread: decompression vs extraction.
+    /// `cargo test --release ident_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ident_cost() {
+        let path = SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
+        let (mut td, mut te, mut bytes) = (0f64, 0f64, 0usize);
+        let mut buf = Vec::new();
+        for loc in path.all() {
+            let IsfLocation::File(p) = &loc else { continue };
+            if !p.to_string_lossy().ends_with(".xz") {
+                continue;
+            }
+            let raw = std::fs::read(p).unwrap();
+            let t = std::time::Instant::now();
+            let n = crate::codecs::xz::decompress_reuse(&raw, &mut buf, false).unwrap();
+            td += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            std::hint::black_box(extract_identifier(&buf[..n]));
+            te += t.elapsed().as_secs_f64();
+            bytes += n;
+        }
+        println!("{:.0} MB decompressed: decode {:.0} ms ({:.0} MB/s), extract {:.0} ms ({:.0} MB/s)", bytes as f64 / 1e6, td * 1e3, bytes as f64 / 1e6 / td, te * 1e3, bytes as f64 / 1e6 / te);
+    }
+
+    /// Components of the fast extractor on one document.
+    /// `RSVOL_BENCH_JSON=x.json cargo test --release fast_ident_parts -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn fast_ident_parts() {
+        use crate::symbols::linux::search::Needle;
+        let data = std::fs::read(std::env::var("RSVOL_BENCH_JSON").unwrap()).unwrap();
+        let best = |f: &mut dyn FnMut()| {
+            let mut b = f64::MAX;
+            for _ in 0..10 {
+                let t = std::time::Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let t_bs = best(&mut || { std::hint::black_box(find_byte(&data, b'\\')); });
+        let mut n = 0;
+        let t_n1 = best(&mut || {
+            n = 0;
+            Needle::new(b"\"linux_banner\"").for_each(&data, |_| {
+                n += 1;
+                true
+            })
+        });
+        let t_n2 = best(&mut || {
+            Needle::new(b"\"version\"").for_each(&data, |_| {
+                n += 1;
+                true
+            })
+        });
+        let t_d = best(&mut || drop(std::hint::black_box(crate::util::jsonidx::ident_marks(&data))));
+        let t_all = best(&mut || drop(std::hint::black_box(extract_identifier_fast(&data))));
+        let t_byte = best(&mut || drop(std::hint::black_box(extract_identifier_with(&mut crate::util::json::Parser::new(&data)))));
+        println!("{:.1} MB: memchr '\\\\' {t_bs:.2} ms, needle linux_banner {t_n1:.2} ms, needle version {t_n2:.2} ms, depth pass {t_d:.2} ms, fast total {t_all:.2} ms, byte parser {t_byte:.2} ms", data.len() as f64 / 1e6);
+    }
+
+    /// Identifier extraction: indexed walk vs the byte parser (same answers, speed).
+    /// `RSVOL_BENCH_JSON=a.json[:b.json...] cargo test --release ident_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ident_bench() {
+        for path in std::env::var("RSVOL_BENCH_JSON").unwrap().split(':') {
+            let data = std::fs::read(path).unwrap();
+            let best = |f: &mut dyn FnMut()| {
+                let mut b = f64::MAX;
+                for _ in 0..10 {
+                    let t = std::time::Instant::now();
+                    f();
+                    b = b.min(t.elapsed().as_secs_f64());
+                }
+                b * 1e3
+            };
+            let indexed = |d: &[u8]| {
+                let idx = crate::util::jsonidx::Index::build_with(d, false).ok()?;
+                extract_identifier_with(&mut idx.walker(d))
+            };
+            let a = indexed(&data);
+            let b = extract_identifier_with(&mut crate::util::json::Parser::new(&data));
+            assert_eq!(a, b);
+            let ti = best(&mut || drop(indexed(&data)));
+            let tb = best(&mut || drop(extract_identifier_with(&mut crate::util::json::Parser::new(&data))));
+            println!("{path}: {:.1} MB  indexed {ti:.2} ms  byte parser {tb:.2} ms  -> {:?}", data.len() as f64 / 1e6, a.map(|x| x.0));
+        }
+    }
+
+    /// The ISF cache trailer: only the exact key matches (a colliding file name is a miss).
+    #[test]
+    fn isfb_key_is_verified() {
+        let blob = b"RSVOLIS1 pretend blob bytes".to_vec();
+        let f = cache_file_bytes(&blob, b"key-a");
+        assert!(cached_blob_matches(&f, b"key-a"));
+        assert!(!cached_blob_matches(&f, b"key-b"));
+        assert!(!cached_blob_matches(&f, b"ey-a"));
+        assert!(!cached_blob_matches(&f[..f.len() - 1], b"key-a"));
+        assert!(!cached_blob_matches(&blob, b"key-a"));
+        let loc = IsfLocation::File(std::env::current_exe().unwrap());
+        let url = loc.url();
+        let (pa, ka) = cache_file(&loc, &url, &BuildOptions::default()).unwrap();
+        let (pb, kb) = cache_file(&loc, &url, &BuildOptions { natives: Some(vec![("int".into(), crate::symbols::Ty::Void)]) }).unwrap();
+        assert_ne!((pa, ka), (pb, kb));
     }
 
     #[test]

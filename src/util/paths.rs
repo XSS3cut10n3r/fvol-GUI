@@ -34,14 +34,36 @@ pub fn vol3_cache_dir(cache_path: Option<&str>) -> PathBuf {
     }
 }
 
+/// Lower-case hex of `b` (cache key material in text files).
+pub fn hex(b: &[u8]) -> String {
+    const D: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(b.len() * 2);
+    for &x in b {
+        s.push(D[(x >> 4) as usize] as char);
+        s.push(D[(x & 15) as usize] as char);
+    }
+    s
+}
+
 /// Write `data` to `path` atomically (temp file + rename), creating parent directories.
 /// Errors are returned but callers writing caches usually ignore them.
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    write_atomic_parts(path, &[data])
+}
+
+/// [`write_atomic`] of the concatenation of `parts` (no joined copy).
+pub fn write_atomic_parts(path: &Path, parts: &[&[u8]]) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    std::fs::write(&tmp, data)?;
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        for p in parts {
+            f.write_all(p)?;
+        }
+    }
     std::fs::rename(&tmp, path)
 }
 

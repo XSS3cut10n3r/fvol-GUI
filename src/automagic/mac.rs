@@ -93,7 +93,9 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
         Some(a) => a,
         None => {
             // python: the MacIntelStacker built no layer
-            let a = run(phys_arc).map_err(|e| unsatisfied(ctx, &e, LAYER))?;
+            let r = run(phys_arc);
+            symbols::store::keep_decoded_for(None);
+            let a = r.map_err(|e| unsatisfied(ctx, &e, LAYER))?;
             cache_store(&image, &fp, &a);
             a
         }
@@ -142,7 +144,22 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
     }
     let banners = {
         let _t = span("mac: identifier index");
-        symbols::store::identifier_index(symbols::symbol_path()).dictionary("mac")
+        // with the image's banner (a quick scan, meanwhile) the index builds the matching kernel
+        // ISF from the JSON it decompresses anyway; no guessing among many mac kernels
+        symbols::store::keep_decoded_for_with(Some("mac"), false);
+        let hint = std::sync::Mutex::new(None);
+        let d = symbols::store::identifier_index_with(symbols::symbol_path(), &|| {
+            let phys = phys.clone();
+            let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
+                symbols::store::set_banner_hint(crate::automagic::banner_hint(phys.as_ref(), b"Darwin Kernel Version ", b":"));
+            });
+            *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
+        })
+        .dictionary("mac");
+        if let Some(h) = hint.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            let _ = h.join();
+        }
+        d
     };
     if banners.is_empty() {
         return Err(Error::msg("No Mac banners found - if this is a mac plugin, please check your symbol files location"));
@@ -441,15 +458,11 @@ fn darwin_scan(data: &[u8], data_offset: u64, chunk_size: u64, hits: &mut Vec<u6
 // Cache
 // ---------------------------------------------------------------------------------------------
 
-/// Identity of the symbol search path (a different `-s` may resolve banners differently).
+/// Identity of the symbol search path (a different `-s` may resolve banners differently): the
+/// full key material, stored in the cache entry and compared.
 fn symbol_path_fingerprint() -> String {
-    use crate::util::fxhash::FxHasher;
-    use std::hash::Hasher;
     let sp = symbols::symbol_path();
-    let mut h = FxHasher::default();
-    h.write(format!("{:?}", sp.download_dir).as_bytes());
-    h.write_u64(sp.os_fingerprint("mac"));
-    format!("{:016x}", h.finish())
+    format!("{}-{}", crate::util::paths::hex(format!("{:?}", sp.download_dir).as_bytes()), sp.os_fingerprint("mac"))
 }
 
 fn hex(b: &[u8]) -> String {
