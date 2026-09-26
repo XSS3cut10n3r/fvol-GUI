@@ -188,6 +188,9 @@ pub(crate) const BASE_SZ: usize = 16; // name(8) prim(4) kindcode(4)
 /// header: magic(8) version(4) nsec(4) + N * (off u64, len u64) + format(3*u32) + pad
 pub(crate) const HDR_SZ: usize = 16 + sec::N * 16 + 16;
 
+/// Returned for out-of-range record indexes (corrupt input must not panic).
+static ZERO_REC: [u8; 32] = [0; 32];
+
 /// User type kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserKind {
@@ -570,7 +573,7 @@ impl SymbolTable {
 
     fn utype_rec(&self, i: u32) -> &[u8] {
         let s = self.sec(sec::UTYPES);
-        &s[i as usize * UTYPE_SZ..(i as usize + 1) * UTYPE_SZ]
+        s.get(i as usize * UTYPE_SZ..(i as usize + 1) * UTYPE_SZ).unwrap_or(&ZERO_REC)
     }
     /// Number of user types.
     pub fn user_type_count(&self) -> usize {
@@ -649,7 +652,7 @@ impl SymbolTable {
         let (mstart, mcount) = (rd32(r, 16), rd32(r, 20));
         let ms = self.sec(sec::MEMBERS);
         (mstart..mstart + mcount).map(move |mi| {
-            let rec = &ms[mi as usize * MEMBER_SZ..(mi as usize + 1) * MEMBER_SZ];
+            let rec = ms.get(mi as usize * MEMBER_SZ..(mi as usize + 1) * MEMBER_SZ).unwrap_or(&ZERO_REC);
             Member { name: self.rec_str(rec), offset: rd32(rec, 8) as u64, ty: ty_decode(&rec[16..32]) }
         })
     }
@@ -662,7 +665,7 @@ impl SymbolTable {
 
     fn base_rec(&self, i: u32) -> &[u8] {
         let s = self.sec(sec::BASES);
-        &s[i as usize * BASE_SZ..(i as usize + 1) * BASE_SZ]
+        s.get(i as usize * BASE_SZ..(i as usize + 1) * BASE_SZ).unwrap_or(&ZERO_REC[..BASE_SZ])
     }
     /// Number of native base types.
     pub fn base_type_count(&self) -> usize {
@@ -697,7 +700,7 @@ impl SymbolTable {
 
     fn enum_rec(&self, i: u32) -> &[u8] {
         let s = self.sec(sec::ENUMS);
-        &s[i as usize * ENUM_SZ..(i as usize + 1) * ENUM_SZ]
+        s.get(i as usize * ENUM_SZ..(i as usize + 1) * ENUM_SZ).unwrap_or(&ZERO_REC)
     }
     pub fn enum_count(&self) -> usize {
         self.sec(sec::ENUMS).len() / ENUM_SZ
@@ -719,7 +722,7 @@ impl SymbolTable {
         let (cs, cc) = (rd32(r, 16), rd32(r, 20));
         let s = self.sec(sec::CONSTS);
         (cs..cs + cc).map(move |ci| {
-            let rec = &s[ci as usize * CONST_SZ..(ci as usize + 1) * CONST_SZ];
+            let rec = s.get(ci as usize * CONST_SZ..(ci as usize + 1) * CONST_SZ).unwrap_or(&ZERO_REC[..CONST_SZ]);
             (self.rec_str(rec), rd64(rec, 8) as i64)
         })
     }
@@ -736,7 +739,7 @@ impl SymbolTable {
 
     fn sym_rec(&self, i: u32) -> &[u8] {
         let s = self.sec(sec::SYMBOLS);
-        &s[i as usize * SYMBOL_SZ..(i as usize + 1) * SYMBOL_SZ]
+        s.get(i as usize * SYMBOL_SZ..(i as usize + 1) * SYMBOL_SZ).unwrap_or(&ZERO_REC)
     }
     pub fn symbol_count(&self) -> usize {
         self.sec(sec::SYMBOLS).len() / SYMBOL_SZ
