@@ -96,6 +96,10 @@ where
     fn stream_window(&self) -> Option<usize> {
         Some(5)
     }
+    // prescan = the greedy literal search over the whole chunk (overlap included), capped
+    fn cache_query(&self) -> Option<crate::layers::scancache::CacheQuery<'_>> {
+        Some(crate::layers::scancache::CacheQuery::Greedy { patterns: self.ms.patterns(), limit: u64::MAX, cap: YR_MAX_STRING_MATCHES })
+    }
     fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
         let mut next = limit;
         if from < limit {

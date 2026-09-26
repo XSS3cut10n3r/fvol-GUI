@@ -132,6 +132,16 @@ impl Scanner for Occurrences {
         self.search(data, base, from, cs_limit, out);
         limit
     }
+    // cached as is: the key names everything the prescan depends on (bump the version when the
+    // verification changes)
+    fn cache_query(&self) -> Option<crate::layers::scancache::CacheQuery<'_>> {
+        let mut key = format!("banners.Occurrences/1 chunk={CHUNK} window={WINDOW}").into_bytes();
+        for p in KERNEL_PDBS {
+            key.push(0);
+            key.extend_from_slice(p);
+        }
+        Some(crate::layers::scancache::CacheQuery::Opaque { key })
+    }
 }
 
 /// Replay python's chunk list `(start, len)` over the sorted occurrences: the hits of one

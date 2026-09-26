@@ -338,6 +338,10 @@ where
     fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
         self.tags.prescan_piece(data, base, from, limit, out)
     }
+    // the prescan is the tag search: cached per image, the header checks run on every replay
+    fn cache_query(&self) -> Option<crate::layers::scancache::CacheQuery<'_>> {
+        self.tags.cache_query()
+    }
     fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<H>) {
         for &(rel, pi) in matches {
             let ci = pi as usize;

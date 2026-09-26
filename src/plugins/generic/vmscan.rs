@@ -71,31 +71,42 @@ fn gather_vmcs_structures() -> Vec<([u8; 4], String, TableRef)> {
     out
 }
 
+/// The `_VMCS` members python's checks read, resolved once per structure table (python looks
+/// them up on every page; `m()` on a probe at 0, rebased per page, gives the same objects).
+/// `None` when the type or a member is missing: python then raises on every page (skipped).
+struct VmcsMembers {
+    link: Obj,
+    host_cr4: Obj,
+    guest_cr3: Obj,
+    host_cr3: Obj,
+    guest_cr4: Obj,
+    ept: Obj,
+}
+
+fn vmcs_members(layer: &'static dyn Layer, table: TableRef) -> Option<VmcsMembers> {
+    let probe = Obj::named(Space::on(layer, table), "_VMCS", 0).ok()?;
+    let m = |n: &str| probe.m(n).ok();
+    Some(VmcsMembers { link: m("vmcs_link_ptr")?, host_cr4: m("host_cr4")?, guest_cr3: m("guest_cr3")?, host_cr3: m("host_cr3")?, guest_cr4: m("guest_cr4")?, ept: m("ept")? })
+}
+
 /// python `_verify_vmcs_page` + the row: `None` = python skipped the page (a failed test or an
-/// InvalidAddressException / AttributeError).
-fn check(layer: &'static dyn Layer, table: TableRef, off: u64) -> Option<(u64, u64)> {
+/// InvalidAddressException / AttributeError). Any failed test skips the page (python 3.11+:
+/// every non-empty `VMCSTest` flag combination has a `name`), and so does any later read error,
+/// so the checks stop at the first failure.
+fn check(layer: &'static dyn Layer, m: Option<&VmcsMembers>, off: u64) -> Option<(u64, u64)> {
+    let m = m?;
+    let at = |o: &Obj| Obj { sp: o.sp, ty: o.ty, addr: off.wrapping_add(o.addr) & o.sp.layer_mask };
     let r = (|| -> Result<Option<(u64, u64)>> {
-        let vmcs = Obj::named(Space::on(layer, table), "_VMCS", off)?;
-        let mut failed = false;
-        if layer.read_vec(off + 4, 4)? != [0, 0, 0, 0] {
-            failed = true;
-        }
-        if vmcs.m("vmcs_link_ptr")?.int()? != 0xFFFF_FFFF_FFFF_FFFF {
-            failed = true;
-        }
-        if vmcs.m("host_cr4")?.int()? & (1 << 13) == 0 {
-            failed = true;
-        }
-        if vmcs.m("guest_cr3")?.int()? == 0 || vmcs.m("host_cr3")?.int()? == 0 {
-            failed = true;
-        }
-        if vmcs.m("guest_cr4")?.int()? & 0xFFFF_FFFF_FF88_9000 != 0 {
-            failed = true;
-        }
+        let failed = layer.read_array::<4>(off + 4)? != [0, 0, 0, 0]
+            || at(&m.link).int()? != 0xFFFF_FFFF_FFFF_FFFF
+            || at(&m.host_cr4).int()? & (1 << 13) == 0
+            || at(&m.guest_cr3).int()? == 0
+            || at(&m.host_cr3).int()? == 0
+            || at(&m.guest_cr4).int()? & 0xFFFF_FFFF_FF88_9000 != 0;
         if failed {
             return Ok(None);
         }
-        Ok(Some((vmcs.m("ept")?.int()? as u64, vmcs.m("guest_cr3")?.int()? as u64)))
+        Ok(Some((at(&m.ept).int()? as u64, at(&m.guest_cr3).int()? as u64)))
     })();
     r.ok().flatten()
 }
@@ -115,7 +126,10 @@ impl Plugin for Vmscan {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         // python: the primary layer, moved down to its memory_layer when it has one
         let layer = super::primary::physical(ctx, "Physical base memory layer")?;
-        let structures = gather_vmcs_structures();
+        let structures = {
+            let _t = crate::util::trace::span("vmscan: vmcs tables");
+            gather_vmcs_structures()
+        };
         out.begin(vec![
             Column::new("Architecture", ColType::Str),
             Column::new("VMCS Physical offset", ColType::Hex),
@@ -126,7 +140,6 @@ impl Plugin for Vmscan {
             // python: PageStartScanner([]) raises ValueError("No signatures passed to constructor")
             panic!("ValueError: No signatures passed to constructor");
         }
-        let chunks = chunk_layout(layer, 0x1000000, 0x1000, None);
         // 4 bytes per page: `pread` them from the backing file (no page tables are built for
         // the 1.3M pages of a 5 GiB image, unlike touching the mapping)
         let file = crate::layers::base_file(layer);
@@ -147,29 +160,46 @@ impl Plugin for Vmscan {
             }
             layer.read_array::<4>(addr).ok()
         };
-        let per_chunk: Vec<Vec<(usize, u64, u64, u64)>> = crate::util::par::par_map(chunks.len(), |ci| {
-            let (start, len) = chunks[ci];
-            let mut hits = Vec::new();
-            // python: a data-layer chunk that cannot be read entirely has no hits
-            if layer.lower().is_none() && !layer.is_valid(start, len) {
-                return hits;
-            }
-            let mut ps = start % PAGE;
-            while ps + 4 <= len {
-                let addr = start + ps;
-                if let Some(sig) = sig_at(addr) {
-                    if let Some(si) = structures.iter().position(|s| s.0 == sig) {
-                        if let Some((ept, cr3)) = check(layer, structures[si].2, addr) {
-                            hits.push((si, addr, ept, cr3));
-                        }
-                    }
+        // the raw signature hits (chunk start, offset in chunk, structure) come from the scan
+        // cache when an earlier run (or another physical scan's sweep) recorded them; the VMCS
+        // checks run every time
+        let sigs: Vec<u32> = structures.iter().map(|s| u32::from_le_bytes(s.0)).collect();
+        let _t = crate::util::trace::span("vmscan: page starts + checks");
+        let raw = crate::layers::scancache::page_start_hits(layer, &sigs, || {
+            let chunks = chunk_layout(layer, 0x1000000, 0x1000, None);
+            let per_chunk: Vec<Vec<(u64, u64, u32)>> = crate::util::par::par_map(chunks.len(), |ci| {
+                let (start, len) = chunks[ci];
+                let mut hits = Vec::new();
+                // python: a data-layer chunk that cannot be read entirely has no hits
+                if layer.lower().is_none() && !layer.is_valid(start, len) {
+                    return hits;
                 }
-                ps += PAGE;
-            }
-            hits
+                let mut ps = start % PAGE;
+                while ps + 4 <= len {
+                    if let Some(sig) = sig_at(start + ps)
+                        && let Some(si) = structures.iter().position(|s| s.0 == sig)
+                    {
+                        hits.push((start, ps, si as u32));
+                    }
+                    ps += PAGE;
+                }
+                hits
+            });
+            per_chunk.concat()
         });
-        for (si, addr, ept, cr3) in per_chunk.into_iter().flatten() {
-            out.row(0, vec![Value::Str(structures[si].1.clone()), Value::Int(addr as i128), Value::Int(ept as i128), Value::Int(cr3 as i128)])?;
+        let members: Vec<Option<VmcsMembers>> = structures.iter().map(|s| vmcs_members(layer, s.2)).collect();
+        let check_one = |i: usize| {
+            let (start, ps, si) = raw[i];
+            members.get(si as usize).and_then(|m| check(layer, m.as_ref(), start + ps))
+        };
+        // each hit's first read faults a new page of the image mapping (~2 us): overlap the
+        // faults on all cores unless there are only a few hits
+        let checked: Vec<Option<(u64, u64)>> =
+            if raw.len() < 256 { (0..raw.len()).map(check_one).collect() } else { crate::util::par::par_map(raw.len(), check_one) };
+        for (&(start, ps, si), c) in raw.iter().zip(checked) {
+            if let Some((ept, cr3)) = c {
+                out.row(0, vec![Value::Str(structures[si as usize].1.clone()), Value::Int((start + ps) as i128), Value::Int(ept as i128), Value::Int(cr3 as i128)])?;
+            }
         }
         Ok(())
     }
