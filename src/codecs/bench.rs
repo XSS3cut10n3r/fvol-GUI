@@ -40,7 +40,7 @@ fn decode(codec: &str, data: &[u8]) -> Option<crate::error::Result<Vec<u8>>> {
         "gzip" => super::gzip::decompress(data),
         "zlib" => super::zlib::decompress(data),
         "deflate" => super::inflate::decompress(data),
-        // "bz2" => super::bzip2::decompress(data),
+        "bz2" => super::bzip2::decompress(data),
         // "lznt1" => super::lznt1::decompress(data),
         _ => return None,
     })

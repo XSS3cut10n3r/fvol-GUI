@@ -5,11 +5,13 @@
 
 #![allow(dead_code, unexpected_cfgs)]
 
+pub mod bzip2;
 pub mod crc;
 pub mod gzip;
 pub mod inflate;
 pub mod lzma;
 pub mod xz;
+pub mod zip;
 pub mod zlib;
 #[cfg(test)]
 mod bench;
