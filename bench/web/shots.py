@@ -76,6 +76,18 @@ def process():
     shot("02-process")
 
 
+@step("network")
+def network():
+    pid = c.eval("import('/assets/core.js').then(m => { const p = (m.store.procs||[]).find(p => /svchost|explorer|sshd|systemd-resolve/i.test(p.name) && p.exit === null); return p ? p.pid : 4; })")
+    c.eval(f"location.hash = 'proc/{pid}'")
+    c.wait("document.querySelector('#panes > .pane:not([hidden]) .subtab')", 10)
+    ok = c.eval("(() => { const b = [...document.querySelectorAll('#panes > .pane:not([hidden]) .subtab')].find(b => /Network|Sockets/.test(b.textContent) && !b.disabled); if (b) b.click(); return !!b; })()")
+    if ok:
+        c.wait("document.querySelector('#panes > .pane:not([hidden]) .subpanes > .pane:not([hidden]) .vt-row:not(.loading)') || document.querySelector('#panes > .pane:not([hidden]) .subpanes > .pane:not([hidden]) .vt-empty:not([hidden])')", 60)
+    c.pump(0.8)
+    shot("02b-process-network")
+
+
 @step("palette")
 def palette():
     c.key("k", mods=2)

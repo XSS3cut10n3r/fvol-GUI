@@ -445,6 +445,8 @@ export class ProcessTab {
     const holder = { node: el('div.pane') };
     this.panels.set(k, holder);
     this.subpanes.append(holder.node);
+    const wait = el('div.empty-state', {}, el('span.spinner', { style: { display: 'inline-block', verticalAlign: '-3px', marginRight: '8px' } }), `Running ${d.plugin}…`);
+    holder.node.append(wait);
     try {
       const args = pidArgs(d.plugin, this.pid);
       const byArg = Object.keys(args).length > 0;
@@ -457,12 +459,13 @@ export class ProcessTab {
         if (pc >= 0) fixed[pc] = '=' + this.pid;
       }
       const panel = new ResultPanel({
-        runId: run.id, fixed, label: `${d.label} of PID ${this.pid}`,
+        runId: run.id, fixed, label: `${d.label} of PID ${this.pid}`, fixedLabel: byArg ? null : `PID = ${this.pid}`,
         onUpdate: r => { d.btn.querySelector('.n').textContent = r.status === 'done' ? (byArg ? fmtCount(r.rows) : '') : r.status === 'failed' ? '!' : '…'; },
         extraBar: [el('button.btn.ghost', { type: 'button', title: 'Open this result in its own tab', on: { click: () => emit('nav', { kind: 'run', id: run.id }) } }, 'Open ↗')],
       });
       holder.panel = panel;
       holder.table = panel.table;
+      wait.remove();
       holder.node.append(panel.node);
       if (this.current === k) holder.node.hidden = false;
       const r = await whenDone(run.id);
@@ -470,6 +473,7 @@ export class ProcessTab {
         holder.node.prepend(errCard(r.error));
       }
     } catch (e) {
+      wait.remove();
       holder.node.append(el('div.errcard', {}, el('h4', { text: 'Could not run ' + d.plugin }), el('p', { text: e.message })));
     }
   }

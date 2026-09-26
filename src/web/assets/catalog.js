@@ -87,6 +87,30 @@ export const BLURBS = {
   'tty_check': 'Checks TTY operation handlers for hooks (keyloggers).',
   'mountinfo': 'Mount points per mount namespace.',
   'kmsg': 'The kernel log buffer (dmesg).',
+  'pscallstack': 'Kernel call stacks of every thread: where each task is blocked or running.',
+  'malware.process_spoofing': 'Processes whose name or path was changed after start (argv / comm spoofing).',
+  'pidhashtable': 'Tasks from the PID hash table: finds processes unlinked from the task list.',
+  'ptrace': 'Processes being traced (ptrace) — debuggers, and injectors.',
+  'kthreads': 'Kernel threads with their start functions.',
+  'vmayarascan': 'YARA rules over process memory.',
+  'yarascan': 'YARA rules over kernel or physical memory.',
+  'regexscan': 'A regular expression over physical memory.',
+  'banners': 'Kernel version banners found in the image (which symbols you need).',
+  'isfinfo': 'The symbol tables (ISF) available to this build.',
+  'list_files': 'Files known to the kernel\'s vnode caches.',
+  'ifconfig': 'Network interfaces and addresses.',
+  'mount': 'Mounted file systems.',
+  'check_sysctl': 'Checks sysctl handlers for hooks.',
+  'check_trap_table': 'Checks the mach trap table for hooks.',
+  'kevents': 'Kernel event queues per process.',
+  'trustedbsd': 'TrustedBSD MAC policy hooks (a rootkit favourite).',
+  'socket_filters': 'Socket filters (network interception).',
+  'dumpfiles': 'Extract cached file contents from memory.',
+  'pedump': 'Extract a PE file (process image or DLL) from memory.',
+  'iat': 'Import address tables of process modules.',
+  'etwpatch': 'Detects patched ETW functions (telemetry evasion).',
+  'mftscan': 'NTFS MFT records carved from memory: file names and timestamps.',
+  'verinfo': 'Version resources of PE files in memory (company, product).',
   'envars.Envars': 'Environment variables per process.',
 };
 
@@ -118,7 +142,9 @@ export const QUICK = {
     ['Command lines', ['linux.psaux.PsAux']],
     ['Network', ['linux.sockstat.Sockstat', 'linux.netstat.Netstat']],
     ['Injected code', ['linux.malware.malfind.Malfind', 'linux.malfind.Malfind']],
+    ['Hidden processes', ['linux.psscan.PsScan', 'linux.pidhashtable.PIDHashTable']],
     ['Shell history', ['linux.bash.Bash']],
+    ['Process spoofing', ['linux.malware.process_spoofing.ProcessSpoofing']],
     ['Open files', ['linux.lsof.Lsof']],
     ['Kernel modules', ['linux.lsmod.Lsmod']],
     ['Hidden modules', ['linux.malware.hidden_modules.Hidden_modules', 'linux.hidden_modules.Hidden_modules']],
@@ -185,6 +211,7 @@ export const PIVOTS = {
     ['Injected code', ['linux.malware.malfind.Malfind', 'linux.malfind.Malfind']],
     ['ELF files', ['linux.elfs.Elfs']],
     ['Libraries', ['linux.library_list.LibraryList']],
+    ['Call stacks', ['linux.pscallstack.PsCallStack']],
     ['Capabilities', ['linux.capabilities.Capabilities']],
   ],
   mac: [
@@ -199,7 +226,7 @@ export const PIVOTS = {
 export const CMDLINE = {
   windows: [['windows.cmdline.CmdLine', 'Args']],
   linux: [['linux.psaux.PsAux', 'ARGS']],
-  mac: [['mac.psaux.Psaux', 'Argv']],
+  mac: [['mac.psaux.Psaux', 'Arguments']],
 };
 
 /** Windows "find evil": expected parents and singleton processes. */

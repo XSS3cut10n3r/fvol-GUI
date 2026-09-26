@@ -13,6 +13,8 @@ mkdir -p "$dir"
 # the vol process itself (not the limit.sh / systemd-run wrappers)
 volpid() { pgrep -f -- "^[^ ]*/vol serve .*--token testtoken-$name-0123456789" | head -1; }
 stop() {
+  # wrappers still queued for a limit.sh slot would start a stale server later: drop them too
+  pkill -f -- "limit.sh -m 6G .*--token testtoken-$name-0123456789" 2>/dev/null
   local p; p=$(volpid)
   [ -n "$p" ] && kill "$p" 2>/dev/null
   for _ in $(seq 1 50); do [ -z "$(volpid)" ] && break; sleep 0.1; done

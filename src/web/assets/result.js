@@ -54,7 +54,9 @@ export class ResultPanel {
     const colsBtn = el('button.btn.ghost', { type: 'button', title: 'Show / hide columns', on: { click: () => this.columnsMenu(colsBtn) } }, 'Columns');
     this.timeBtn = el('button.btn.ghost', { type: 'button', title: 'Time histogram of a DateTime column; drag to filter a time range', hidden: true, on: { click: () => this.toggleHist() } }, 'Timeline');
     const exportBtn = el('button.btn.ghost', { type: 'button', title: 'Export', on: { click: () => this.exportMenu(exportBtn) } }, 'Export ▾');
-    this.bar.append(this.q, filtersBtn, colsBtn, this.timeBtn, el('span.spacer'), this.count, exportBtn);
+    this.bar.append(this.q, filtersBtn, colsBtn, this.timeBtn, el('span.spacer'));
+    if (opts.fixedLabel) this.bar.append(el('span.chip', { title: 'This plugin has no PID option: it ran for every process and this view keeps only this one', text: opts.fixedLabel }));
+    this.bar.append(this.count, exportBtn);
     if (opts.extraBar) this.bar.append(...opts.extraBar);
     this.body.append(this.table.root);
     this.node.append(this.bar, this.histBox, this.body);

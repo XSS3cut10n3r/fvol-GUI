@@ -494,7 +494,7 @@ button.chip:hover { border-color: var(--accent); color: var(--text); }
 .vt-cell.hex { color: var(--addr); }
 .vt-cell.hex.link { cursor: pointer; }
 .vt-cell.hex.link:hover { text-decoration: underline; text-underline-offset: 3px; }
-.vt-cell.ab { color: var(--faint); }
+.vt-cell.ab { color: var(--muted); }
 .vt-cell.t0 { padding-left: calc(8px + var(--d, 0) * 16px); position: relative; }
 .vt-cell.t0.tree::before { content: "└"; position: absolute; left: calc(var(--d, 0) * 16px - 6px); color: var(--faint); }
 .vt-cell .dim { color: var(--faint); }

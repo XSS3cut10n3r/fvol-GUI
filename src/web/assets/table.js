@@ -521,6 +521,8 @@ export class VirtualTable {
       msg = this.status === 'queued' ? 'Waiting for a free worker…' : this.status === 'running' ? 'Running… results appear here as soon as the plugin produces them.' : this.status === 'done' ? 'The plugin produced no table.' : '';
     } else if (this.total === 0) {
       if (this.status === 'running' || this.status === 'queued') msg = 'No rows yet…';
+      else if (this.hasSpec() && this.stored > 0 && this.o.fixed && Object.keys(this.o.fixed).length && !this.q && !Object.values(this.filters).some(Boolean) && !this.range)
+        msg = `Nothing for this process — the plugin found ${this.stored.toLocaleString()} rows in total (Open ↗ shows them all).`;
       else if (this.hasSpec() && this.stored > 0) msg = 'No rows match the current filters.';
       else if (this.status === 'done') msg = 'The plugin finished without results.';
     }
