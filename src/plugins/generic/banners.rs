@@ -232,7 +232,8 @@ mod tests {
     #[test]
     fn verify_banner_and_rsds() {
         let d = b"Linux version 5.15.0-191 xyz";
-        assert_eq!(Occurrences::verify(d, 0, 0), Some(KIND_BANNER | (19 << 2)));
+        // shortest match "Linux version 5.15.0" ends at 20
+        assert_eq!(Occurrences::verify(d, 0, 0), Some(KIND_BANNER | (20 << 2)));
         assert_eq!(Occurrences::verify(b"Linux version 5.15-1", 0, 0), None);
         assert_eq!(Occurrences::verify(b"Linux version 5.15.", 0, 0), None);
         let mut r = b"RSDS".to_vec();
