@@ -1,5 +1,6 @@
 //! python `ResourceAccessor.open` (framework/layers/resources.py) for the files layers read:
-//! the image (`-f` / `--single-location`), swap files and VMware metadata.
+//! the image (`-f` / `--single-location`) and swap files. (VMware metadata files never end in
+//! a compression extension: the stacker downloads them directly.)
 //!
 //! A remote location is downloaded once into the rsvol cache (see [`super::download`]). A
 //! compressed one is decompressed: python wraps the file in `lzma.LZMAFile`, `bz2.BZ2File` or
