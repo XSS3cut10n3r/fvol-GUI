@@ -2,14 +2,19 @@
 
 use crate::plugins::Plugin;
 
+pub mod getservicesids;
+pub mod getsids;
 pub mod info;
 pub mod modules;
 pub mod poolscanner;
 pub mod pslist;
 pub mod psscan;
+pub mod sids;
 pub mod vadinfo;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
+    v.push(&getservicesids::GetServiceSIDs);
+    v.push(&getsids::GetSIDs);
     v.push(&info::Info);
     v.push(&modules::Modules);
     v.push(&poolscanner::PoolScanner);
