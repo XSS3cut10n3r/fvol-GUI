@@ -52,3 +52,5 @@ L3 linux fs/net (after L1's extensions land).
 - handles.rs private registry key naming -> W3 RegExt helpers
 - hivescan private list_big_pools -> W1 bigpools::list_big_pools_each
 - core RSDS scanner duplicates symbols::windows::pdb::rsds_scan
+- W4 private: consoles.rs version-info reader + netscan.rs verinfo copy -> W2b verinfo
+- README-API.md: add W4 helpers (symbols/windows/{gui,network,consoles}.rs, windowstations scan helpers)
