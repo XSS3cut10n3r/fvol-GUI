@@ -1,5 +1,9 @@
 //! Minimal read-only memory mapping via direct libc FFI (std already links libc, so this adds
 //! no dependency).
+//!
+//! * [`Mmap`] – the whole file (used for random access: page-table walks, structure reads).
+//! * [`MapWindow`] – a window of a file, mapped per scan work item (parallel setup/teardown
+//!   of page tables makes full-image scans much faster than faulting the global mapping).
 
 use std::fs::File;
 use std::io;
@@ -13,11 +17,13 @@ unsafe extern "C" {
 
 const PROT_READ: i32 = 1;
 const MAP_SHARED: i32 = 1;
+const MAP_POPULATE: i32 = 0x8000;
 const MAP_FAILED: *mut u8 = !0usize as *mut u8;
 pub const MADV_NORMAL: i32 = 0;
 pub const MADV_RANDOM: i32 = 1;
 pub const MADV_SEQUENTIAL: i32 = 2;
 pub const MADV_WILLNEED: i32 = 3;
+pub const MADV_POPULATE_READ: i32 = 22;
 
 /// A read-only shared mapping of an entire file.
 pub struct Mmap {
@@ -76,6 +82,65 @@ impl Drop for Mmap {
         if self.len != 0 {
             unsafe {
                 munmap(self.ptr, self.len);
+            }
+        }
+    }
+}
+
+/// A read-only mapping of a window `[off, off+len)` of a file. Used by the scanners: mapping,
+/// scanning and unmapping each work item separately keeps page-table setup/teardown parallel
+/// (much faster than faulting in and tearing down one huge mapping for a full-image scan).
+pub struct MapWindow {
+    base: *mut u8,
+    map_len: usize,
+    skip: usize,
+    len: usize,
+}
+
+unsafe impl Send for MapWindow {}
+unsafe impl Sync for MapWindow {}
+
+impl MapWindow {
+    /// Map `len` bytes of `file` starting at byte `off` (need not be page aligned).
+    /// `populate` pre-faults the pages (MAP_POPULATE).
+    pub fn new(file: &File, off: u64, len: usize, populate: bool) -> io::Result<MapWindow> {
+        if len == 0 {
+            return Ok(MapWindow { base: std::ptr::NonNull::<u8>::dangling().as_ptr(), map_len: 0, skip: 0, len: 0 });
+        }
+        let aligned = off & !0xfff;
+        let skip = (off - aligned) as usize;
+        let map_len = skip + len;
+        let flags = MAP_SHARED | if populate { MAP_POPULATE } else { 0 };
+        let ptr = unsafe { mmap(std::ptr::null_mut(), map_len, PROT_READ, flags, file.as_raw_fd(), aligned as i64) };
+        if ptr == MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(MapWindow { base: ptr, map_len, skip, len })
+    }
+
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.base.add(self.skip), self.len) }
+    }
+
+    /// madvise on the whole window.
+    pub fn advise(&self, advice: i32) {
+        if self.map_len != 0 {
+            unsafe {
+                madvise(self.base, self.map_len, advice);
+            }
+        }
+    }
+}
+
+impl Drop for MapWindow {
+    fn drop(&mut self) {
+        if self.map_len != 0 {
+            unsafe {
+                munmap(self.base, self.map_len);
             }
         }
     }

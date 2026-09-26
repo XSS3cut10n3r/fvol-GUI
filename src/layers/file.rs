@@ -1,21 +1,33 @@
-//! The base layer: the input file, memory-mapped read-only.
+//! The base layer: the input file, memory-mapped read-only (python `layers.physical.FileLayer`).
+//!
+//! Derived from Volatility 3 (Volatility Software License 1.0).
 
-use super::{Layer, Mapping};
+use super::{Layer, Mapping, Metadata};
 use crate::error::{Error, Result};
-use crate::util::mmap::Mmap;
+use crate::util::mmap::{MapWindow, Mmap};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct FileLayer {
     name: String,
-    map: Mmap,
+    map: Arc<Mmap>,
+    file: Arc<File>,
+    path: PathBuf,
 }
 
 impl FileLayer {
+    /// Open and map `path`. The layer is named "FileLayer" (rename with [`FileLayer::with_name`]).
     pub fn open(path: &Path) -> Result<FileLayer> {
         let f = File::open(path)?;
         let map = Mmap::map(&f)?;
-        Ok(FileLayer { name: "FileLayer".to_string(), map })
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        Ok(FileLayer { name: "FileLayer".to_string(), map: Arc::new(map), file: Arc::new(f), path })
+    }
+
+    /// A cheap copy of this layer (same mapping) with another name.
+    pub fn with_name(&self, name: &str) -> FileLayer {
+        FileLayer { name: name.to_string(), map: self.map.clone(), file: self.file.clone(), path: self.path.clone() }
     }
 
     /// The whole file.
@@ -37,6 +49,25 @@ impl FileLayer {
     pub fn mmap(&self) -> &Mmap {
         &self.map
     }
+
+    /// The open file (for windowed mappings / pread).
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    /// Canonical path of the file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Map a private window `[off, off+len)` of the file (for scanning; see
+    /// [`crate::util::mmap::MapWindow`]). None if out of range or mmap fails.
+    pub fn window(&self, off: u64, len: usize) -> Option<MapWindow> {
+        if off.checked_add(len as u64)? > self.len() {
+            return None;
+        }
+        MapWindow::new(&self.file, off, len, false).ok()
+    }
 }
 
 impl Layer for FileLayer {
@@ -56,8 +87,8 @@ impl Layer for FileLayer {
                 Ok(())
             }
             None => {
-                // first failing address
-                let first_bad = if addr < self.len() { self.len() } else { addr };
+                // first failing address (python: max+1 if the start is inside the file)
+                let first_bad = if addr > 0 && addr < self.len() { self.len() } else { addr };
                 Err(Error::invalid(first_bad))
             }
         }
@@ -99,5 +130,17 @@ impl Layer for FileLayer {
 
     fn translate(&self, addr: u64) -> Option<(u64, u64)> {
         if addr < self.len() { Some((addr, self.len() - addr)) } else { None }
+    }
+
+    fn class_name(&self) -> &'static str {
+        "FileLayer"
+    }
+
+    fn own_metadata(&self) -> Metadata {
+        Metadata { os: Some("Unknown".into()), architecture: Some("Unknown".into()), ..Default::default() }
+    }
+
+    fn as_file(&self) -> Option<&FileLayer> {
+        Some(self)
     }
 }
