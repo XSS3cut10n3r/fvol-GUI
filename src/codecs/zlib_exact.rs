@@ -1758,10 +1758,25 @@ impl Deflater {
             self.prev_length = self.match_length;
             self.prev_match = self.match_start;
             self.match_length = MIN_MATCH - 1;
-            if hash_head != NIL
-                && self.prev_length < self.max_lazy_match
-                && self.strstart.wrapping_sub(hash_head) <= max_dist
-            {
+            // zlib's condition for calling longest_match. In F6 mode it is folded (without
+            // short-circuit branches) with "the 6-byte chain has a node to visit": if it has
+            // none the search would find nothing, leaving match_start alone and match_length
+            // = prev_length instead of MIN_MATCH - 1, and both lead to the same next step
+            // (emit the previous match if prev_length >= MIN_MATCH, else a literal).
+            let search = if F6 {
+                let limit = self.strstart.saturating_sub(max_dist);
+                // (stale when nothing was inserted, but then hash_head == NIL)
+                let first6 = (self.link6[self.strstart & self.w_mask] & 0xffff) as usize;
+                (hash_head != NIL)
+                    & (self.prev_length < self.max_lazy_match)
+                    & (self.strstart.wrapping_sub(hash_head) <= max_dist)
+                    & ((first6 > limit) | (first6 == hash_head))
+            } else {
+                hash_head != NIL
+                    && self.prev_length < self.max_lazy_match
+                    && self.strstart.wrapping_sub(hash_head) <= max_dist
+            };
+            if search {
                 self.match_length = if F6 { self.longest_match6(hash_head) } else { self.longest_match(hash_head) };
                 if self.match_length <= 5
                     && (filtered
