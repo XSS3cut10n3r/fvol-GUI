@@ -1,4 +1,6 @@
 #!/bin/bash
+# Each invocation writes to its own dir (concurrent runs used to clobber a shared bench/out).
+GATE_OUT=${GATE_OUT:-/home/user/rs-vol/testdata/scratch/gates/run-$$}; mkdir -p $GATE_OUT; find /home/user/rs-vol/testdata/scratch/gates -maxdepth 1 -name "run-*" -mmin +360 -exec rm -rf {} + 2>/dev/null
 # Shared driver of check_nix.sh / check_win_images.sh: compare our binary against the python references of
 # the images in bench/images.tsv (columns: name, os, image_path, symbol_args, ref_dir[, plugin_list]).
 # Usage: check_images.sh -o OS[,OS...] [-b BIN] [NAME|PATTERN ...]
@@ -35,7 +37,7 @@ while IFS=$'\t' read -r name os img symargs refdir plist; do
     [ -f "$refdir/$p.txt" ] || continue
     if [ "$p" = isfinfo.IsfInfo ]; then [ -n "${isf_seen[x$symargs]}" ] && continue; isf_seen[x$symargs]=1; fi
     if ! grep -qE "^ *$p( |$)" <<< "$avail"; then miss=$((miss+1)); continue; fi
-    r=$(IMG=$img REF=$refdir/$p.txt OUTDIR=${OUTBASE:-$ROOT/bench/out}/$name DIFFLINES=${DIFFLINES:-3} \
+    r=$(IMG=$img REF=$refdir/$p.txt OUTDIR=${OUTBASE:-$GATE_OUT}/$name DIFFLINES=${DIFFLINES:-3} \
         GLOBAL_ARGS="$symargs" $ROOT/bench/scripts/compare.sh -b $BIN $p 2>/dev/null < /dev/null)
     case "$r" in OK*) ok=$((ok+1));; *) bad=$((bad+1)); echo "[$name] $r";; esac
   done < $list
