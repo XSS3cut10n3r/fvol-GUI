@@ -10,6 +10,7 @@ pub mod crc;
 pub mod gzip;
 pub mod inflate;
 pub mod lzma;
+pub mod lznt1;
 pub mod xz;
 pub mod zip;
 pub mod zlib;
