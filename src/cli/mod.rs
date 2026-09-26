@@ -493,6 +493,32 @@ fn load_system_defaults() -> Result<Vec<(String, PyVal)>, String> {
     })
 }
 
+/// Plugin errors whose message names a python builtin exception (`"AttributeError: ..."`,
+/// `"ValueError: ..."`, ...): python does not catch those as `VolatilityException`s, so the
+/// CLI reports them as a traceback (see `report_error`). Returns the message.
+pub fn python_builtin_exception(e: &Error) -> Option<&str> {
+    const NAMES: [&str; 13] = [
+        "AttributeError",
+        "ValueError",
+        "TypeError",
+        "KeyError",
+        "IndexError",
+        "AssertionError",
+        "OverflowError",
+        "RecursionError",
+        "ZeroDivisionError",
+        "UnicodeDecodeError",
+        "struct.error",
+        "re.error",
+        "NotImplementedError",
+    ];
+    let m = match e {
+        Error::Msg(m) | Error::Symbol(m) => m.as_str(),
+        _ => return None,
+    };
+    NAMES.iter().any(|n| m.strip_prefix(n).is_some_and(|r| r.is_empty() || r.starts_with(':'))).then_some(m)
+}
+
 fn traceback(err: &mut dyn Write, msg: &str) -> i32 {
     let _ = write!(err, "Traceback (most recent call last):\n  File \"vol\", line 1, in <module>\n{msg}\n");
     1
@@ -819,6 +845,11 @@ fn report_error(e: &Error, failure: Option<&RenderFailure>, class: &str, out: &m
     }
     if let Error::Io(io) = e {
         return traceback(err, &format!("OSError: {io}"));
+    }
+    // a python builtin exception (not a VolatilityException) escapes the CLI as a traceback:
+    // no "\n\n" on stdout (same as a plugin panic)
+    if let Some(msg) = python_builtin_exception(e) {
+        return traceback(err, msg);
     }
     // CommandLine.process_exceptions
     let _ = out.write_all(b"\n\n");

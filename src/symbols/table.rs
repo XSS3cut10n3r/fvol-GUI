@@ -155,7 +155,7 @@ pub enum Ty {
 
 pub(crate) const MAGIC: &[u8; 8] = b"RSVOLIS1";
 /// Bump when the blob layout or the builder semantics change (invalidates caches).
-pub(crate) const BLOB_VERSION: u32 = 4;
+pub(crate) const BLOB_VERSION: u32 = 5;
 
 /// Section indexes in the header.
 pub(crate) mod sec {
@@ -180,7 +180,7 @@ pub(crate) mod sec {
 /// Record sizes.
 pub(crate) const NODE_SZ: usize = 16;
 pub(crate) const UTYPE_SZ: usize = 32; // name(8) kind(4) size(4) mstart(4) mcount(4) hstart(4) hlen(4)
-pub(crate) const MEMBER_SZ: usize = 32; // name(8) offset(4) pad(4) ty(16)
+pub(crate) const MEMBER_SZ: usize = 32; // name(8) offset(8, i64: ISF offsets may be negative) ty(16)
 pub(crate) const ENUM_SZ: usize = 32; // name(8) base prim(4) size(4) cstart(4) ccount(4) pad(8)
 pub(crate) const CONST_SZ: usize = 16; // name(8) value(8)
 pub(crate) const SYMBOL_SZ: usize = 32; // name(8) address(8) type(4) flags(4) cdata(8)
@@ -648,7 +648,7 @@ impl SymbolTable {
                     if s == nb {
                         // byte-equal to a valid &str, hence valid UTF-8
                         let n = std::str::from_utf8_unchecked(s);
-                        return Some(Member { name: n, offset: rd(rec, 8) as u64, ty: ty_decode(std::slice::from_raw_parts(rec.add(16), 16)) });
+                        return Some(Member { name: n, offset: u64::from_le((rec.add(8) as *const u64).read_unaligned()), ty: ty_decode(std::slice::from_raw_parts(rec.add(16), 16)) });
                     }
                 }
                 i = (i + 1) & mask;
@@ -666,7 +666,7 @@ impl SymbolTable {
         let mend = (mstart + rd32(r, 20) as u64).min(n);
         (mstart..mend).map(move |mi| {
             let rec = ms.get(mi as usize * MEMBER_SZ..(mi as usize + 1) * MEMBER_SZ).unwrap_or(&ZERO_REC);
-            Member { name: self.rec_str(rec), offset: rd32(rec, 8) as u64, ty: ty_decode(&rec[16..32]) }
+            Member { name: self.rec_str(rec), offset: rd64(rec, 8), ty: ty_decode(&rec[16..32]) }
         })
     }
     /// Iterate user type names (ISF order).
@@ -795,6 +795,20 @@ impl SymbolTable {
     pub fn symbols(&self) -> impl Iterator<Item = Symbol<'_>> + '_ {
         (0..self.symbol_count() as u32).map(move |i| self.sym_at(i))
     }
+    /// `symbols_at(offset, 0)` (python `get_symbols_by_location(offset)`: the names of the
+    /// symbols exactly at `offset`, sorted) without building the address index: a linear scan
+    /// over the raw records, cheap when only a handful of addresses are looked up.
+    pub fn symbols_at_exact(&self, offset: u64) -> Vec<&str> {
+        if self.by_addr.get().is_some() {
+            return self.symbols_at(offset, 0);
+        }
+        let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+        let recs = self.sec(sec::SYMBOLS);
+        let mut v: Vec<&str> = recs.chunks_exact(SYMBOL_SZ).filter(|r| rd64(r, 8) & mask == offset).map(|r| self.rec_str(r)).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Symbol names with `offset <= address <= offset + size` (python
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
@@ -812,7 +826,18 @@ impl SymbolTable {
                     j += 1;
                 }
                 if j - i > 1 {
-                    v[i..j].sort_unstable_by(|a, b| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1))));
+                    // compare the raw name bytes (== str order; no UTF-8 validation per compare)
+                    let pool = self.sec(sec::STRINGS);
+                    let name = |k: u32| -> &[u8] {
+                        let r = self.sym_rec(k);
+                        let (o, l) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
+                        pool.get(o..o.saturating_add(l)).unwrap_or(&[])
+                    };
+                    let mut run: Vec<(&[u8], u32)> = v[i..j].iter().map(|e| (name(e.1), e.1)).collect();
+                    run.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    for (k, e) in run.into_iter().enumerate() {
+                        v[i + k].1 = e.1;
+                    }
                 }
                 i = j;
             }

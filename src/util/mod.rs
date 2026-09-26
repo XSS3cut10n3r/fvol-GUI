@@ -8,6 +8,7 @@ pub mod par;
 pub mod paths;
 pub mod pyformat;
 pub mod pyset;
+pub mod sqlite;
 pub mod time;
 pub mod trace;
 
