@@ -59,6 +59,9 @@ use crate::renderers::{Value, ColType, Column};
 | `PDBUtility.module_from_pdb(...)` | `ctx.module_from_pdb(layer, "ntdll.pdb", Some(base), Some(size))?` → `Module` |
 | `PDBUtility.pdbname_scan(ctx, layer, page_size, names, start, end)` | `crate::automagic::windows::pdbname_scan(layer, &[b"x.pdb"], start, end, \|sig\| { ..; true })` |
 | `versions.is_win10(context, table)` | `crate::symbols::windows::versions::IS_WIN10.check(k.table)` |
+| `symbol_cache.get_identifier_dictionary(os)` / `find_location(id, os)` | `symbols::store::identifier_index(symbols::symbol_path()).dictionary("linux")` / `.find(id, "linux")` (includes `-u` remote lists, which win ties like python) |
+| `ResourceAccessor().open(url)` (file:// or cached download) | `IsfLocation::Url(url).read()?` (decompressed by extension) / `symbols::store::url_local_path(url)?` |
+| `urllib.parse.unquote(s)` / `file://` URL → path | `crate::util::paths::{unquote, file_uri_to_path}` |
 
 ## Objects
 
