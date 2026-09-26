@@ -18,7 +18,7 @@ use std::time::Instant;
 fn reference_path(p: &Path) -> PathBuf {
     let base = p.with_extension("");
     let last = base.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-    let variant = last == "mt"
+    let variant = last.starts_with("mt")
         || last == "x86"
         || last == "delta"
         || (last.len() >= 2 && last.starts_with('l') && last.as_bytes()[1].is_ascii_digit());

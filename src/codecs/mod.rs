@@ -2,6 +2,19 @@
 //!
 //! Every codec exposes `decompress(data: &[u8]) -> Result<Vec<u8>>` (plus format specific
 //! helpers). Malformed input never panics; it returns [`crate::error::Error`].
+//!
+//! * [`xz::decompress`] — `.xz` (all streams/blocks, LZMA2 + x86 BCJ / delta, CRC32/CRC64
+//!   verified; multi-block files decode in parallel). ISF symbol files are `.json.xz`.
+//! * [`lzma::decompress`] (`.lzma` / LZMA_Alone), [`lzma::decompress_lzma2`] (raw LZMA2),
+//!   [`lzma::decompress_lzma1_raw`] (raw LZMA1 with a properties byte, ZIP method 14).
+//! * [`inflate::decompress`] (raw DEFLATE), [`zlib::decompress`], [`gzip::decompress`]
+//!   (multi-member).
+//! * [`bzip2::decompress`] (multi-stream).
+//! * [`zip::ZipArchive`] — `parse`, `entries`, `find(name)`, `read(&entry)`.
+//! * [`lznt1::decompress`] — NTFS / RtlDecompressBuffer LZNT1.
+//! * [`crc`] — CRC-32, CRC-64/XZ, CRC-32/BZIP2 (PCLMULQDQ folding).
+//!
+//! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/run.sh`.
 
 #![allow(dead_code, unexpected_cfgs)]
 

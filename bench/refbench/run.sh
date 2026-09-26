@@ -31,7 +31,7 @@ for f in "$CORPUS"/*; do
     name=$(basename "$f")
     [[ -n "$FILTER" && "$name" != *$FILTER* ]] && continue
     case "$name" in
-        *.mt.xz) codec=xz-mt ;;
+        *.mt.xz|*.mt[0-9]*.xz) codec=xz-mt ;;
         *.xz) codec=xz ;;
         *.lzma) codec=lzma ;;
         *.gz) codec=gzip ;;
@@ -41,7 +41,7 @@ for f in "$CORPUS"/*; do
         *) continue ;;
     esac
     base=${f%.*}
-    case "${base##*.}" in l[0-9]*|mt|x86|delta) base=${base%.*} ;; esac
+    case "${base##*.}" in l[0-9]*|mt|mt[0-9]*|x86|delta) base=${base%.*} ;; esac
     pin=("$LIMIT" -m 2G taskset -c "$CPU")
     [[ $codec == xz-mt ]] && pin=("$LIMIT" -m 2G)
     cms=1e18; rms=1e18; ccy=1e18; rcy=1e18; out=0
