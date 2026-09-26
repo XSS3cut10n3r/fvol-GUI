@@ -50,6 +50,12 @@ struct State {
     jobs: Vec<*const Header>,
     /// workers asleep on `wake`
     idle: usize,
+    /// workers looking for a job before they sleep (see [`spin`])
+    spinning: usize,
+    /// workers started or being started
+    workers: usize,
+    /// workers still to be started by the ones starting (see [`grow`])
+    to_start: usize,
 }
 
 // SAFETY: the job pointers are only dereferenced under the rules of `run_job`
@@ -66,7 +72,7 @@ struct Pool {
 }
 
 static POOL: Pool = Pool {
-    state: Mutex::new(State { jobs: Vec::new(), idle: 0 }),
+    state: Mutex::new(State { jobs: Vec::new(), idle: 0, spinning: 0, workers: 0, to_start: 0 }),
     wake: Condvar::new(),
     done: Condvar::new(),
     epoch: AtomicU64::new(0),
@@ -76,37 +82,56 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// How long an idle worker keeps looking for the next job before it sleeps (back-to-back
-/// sections then start without a futex wake-up).
-const SPIN: std::time::Duration = std::time::Duration::from_micros(50);
+/// How long an idle worker keeps looking for the next job before it sleeps: back-to-back
+/// sections then start without a futex wake-up (`RSVOL_POOL_SPIN_US`, default 20).
+fn spin() -> std::time::Duration {
+    static US: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    std::time::Duration::from_micros(*US.get_or_init(|| std::env::var("RSVOL_POOL_SPIN_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20)))
+}
 
-/// Start the workers (once; returns at once). One thread is spawned here and spawns the rest,
-/// so the first parallel section pays for a single spawn and runs while the others start.
-fn start() {
-    static STARTED: AtomicBool = AtomicBool::new(false);
-    if STARTED.load(Ordering::Relaxed) || STARTED.swap(true, Ordering::AcqRel) {
-        return;
+/// Reserve `k` more workers (up to [`crate::util::par::threads`] in all); true when the caller
+/// must start one ([`spawn_worker`]). Every worker starting starts others while some are still
+/// due, so `k` workers are up after ~log2(k) thread creations instead of `k` in a row.
+fn grow(s: &mut State, k: usize) -> bool {
+    let k = k.min(crate::util::par::threads().saturating_sub(s.workers));
+    if k == 0 {
+        return false;
     }
-    let n = crate::util::par::threads();
-    if n <= 1 {
-        return;
-    }
-    let spawn = |f: fn()| std::thread::Builder::new().name("rsvol-pool".into()).spawn(f).is_ok();
-    // without any worker every owner simply runs its whole job itself
-    spawn(|| {
-        for _ in 1..crate::util::par::threads() {
-            if std::thread::Builder::new().name("rsvol-pool".into()).spawn(worker).is_err() {
+    s.workers += k;
+    s.to_start += k - 1;
+    true
+}
+
+fn spawn_worker() {
+    let started = std::thread::Builder::new().name("rsvol-pool".into()).spawn(|| {
+        // start the others still due first (each start is ~10-20 us of kernel work)
+        loop {
+            let mut s = lock(&POOL.state);
+            if s.to_start == 0 {
                 break;
             }
+            s.to_start -= 1;
+            drop(s);
+            spawn_worker();
         }
         worker();
     });
+    if started.is_err() {
+        // without workers every owner simply runs its whole job itself
+        let mut s = lock(&POOL.state);
+        s.workers -= 1 + std::mem::take(&mut s.to_start);
+    }
 }
 
-/// Start the pool's workers now, off the calling thread (returns at once): for callers that
-/// know parallel work is coming after something serial.
+/// Start the pool's workers now (returns at once): for callers that know parallel work is
+/// coming after something serial.
 pub fn warm() {
-    start();
+    let mut s = lock(&POOL.state);
+    let spawn = crate::util::par::threads() > 1 && grow(&mut s, usize::MAX);
+    drop(s);
+    if spawn {
+        spawn_worker();
+    }
 }
 
 fn worker() {
@@ -133,8 +158,9 @@ fn worker() {
             spun = false;
             continue;
         }
-        if !spun {
+        if !spun && !spin().is_zero() {
             let e = p.epoch.load(Ordering::Acquire);
+            s.spinning += 1;
             drop(s);
             let t0 = std::time::Instant::now();
             'spin: loop {
@@ -144,17 +170,19 @@ fn worker() {
                     }
                     std::hint::spin_loop();
                 }
-                if t0.elapsed() >= SPIN {
+                if t0.elapsed() >= spin() {
                     break;
                 }
             }
             s = lock(&p.state);
+            s.spinning -= 1;
             spun = true;
             continue;
         }
         s.idle += 1;
         s = p.wake.wait(s).unwrap_or_else(|e| e.into_inner());
         s.idle -= 1;
+        spun = true;
     }
 }
 
@@ -163,15 +191,15 @@ pub(crate) fn poke(k: usize) {
     let p = &POOL;
     let s = lock(&p.state);
     p.epoch.fetch_add(1, Ordering::Release);
-    notify(&s, k);
+    let (wake, all) = (k.min(s.idle), k >= s.idle);
+    drop(s);
+    notify(wake, all);
 }
 
-fn notify(s: &State, k: usize) {
-    let k = k.min(s.idle);
+/// Wake `k` sleeping workers (`all`: every one).
+fn notify(k: usize, all: bool) {
     if k == 0 {
-        return;
-    }
-    if k == s.idle {
+    } else if all {
         POOL.wake.notify_all();
     } else {
         for _ in 0..k {
@@ -187,7 +215,6 @@ pub(crate) fn run_job<R>(work: &(dyn Work + '_), max_helpers: usize, owner: impl
     if max_helpers == 0 || crate::util::par::threads() <= 1 {
         return owner();
     }
-    start();
     // SAFETY: only the lifetime is erased. The job is unpublished and every helper has left
     // it before this function returns or unwinds (`Unpublish`), and a helper only touches it
     // between registering and deregistering under the pool lock.
@@ -212,7 +239,16 @@ pub(crate) fn run_job<R>(work: &(dyn Work + '_), max_helpers: usize, owner: impl
         let mut s = lock(&p.state);
         s.jobs.push(&h);
         p.epoch.fetch_add(1, Ordering::Release);
-        notify(&s, max_helpers);
+        // wake sleepers; start workers when too few are around (busy ones join when their
+        // items are done)
+        let (wake, all) = (max_helpers.min(s.idle), max_helpers >= s.idle);
+        let short = max_helpers.saturating_sub(s.idle + s.spinning);
+        let spawn = short > 0 && grow(&mut s, short);
+        drop(s);
+        notify(wake, all);
+        if spawn {
+            spawn_worker();
+        }
     }
     let _unpublish = Unpublish(&h);
     owner()
