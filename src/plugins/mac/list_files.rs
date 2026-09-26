@@ -101,7 +101,7 @@ struct Walker {
     off_tqe_next: u64,
     entries: Vec<Entry>,
     index: FxHashMap<u64, u32>,
-    valid_memo: FxHashMap<u64, bool>,
+    null_valid: Option<bool>,
 }
 
 #[inline]
@@ -132,8 +132,8 @@ impl Walker {
             off_v_parent: t.offset_of("vnode", "v_parent")?,
             off_tqe_next: mnt.addr + mnt.member_offset("tqe_next")?,
             entries: Vec::new(),
-            index: FxHashMap::default(),
-            valid_memo: FxHashMap::default(),
+            index: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
+            null_valid: None,
         })
     }
 
@@ -187,15 +187,19 @@ impl Walker {
         info.parent.filter(|&p| self.valid_vnode(p))
     }
 
-    /// python `is_valid(p, vnode.size)` for a vnode struct address (memoized: parents repeat).
+    /// python `is_valid(p, vnode.size)` for a vnode struct address (NULL is by far the most
+    /// common invalid one: answered once).
     #[inline]
     fn valid_vnode(&mut self, p: u64) -> bool {
-        if let Some(&v) = self.valid_memo.get(&p) {
+        if p == 0 {
+            if let Some(v) = self.null_valid {
+                return v;
+            }
+            let v = self.layer.is_valid(0, self.vnode_size);
+            self.null_valid = Some(v);
             return v;
         }
-        let v = self.layer.is_valid(p, self.vnode_size);
-        self.valid_memo.insert(p, v);
-        v
+        self.layer.is_valid(p, self.vnode_size)
     }
 
     /// python `_add_vnode(context, vnode, loop_vnodes)`; returns `Some(info)` when added.
@@ -348,6 +352,73 @@ fn build_path(w: &Walker, names: &[String], i: usize) -> String {
     }
 }
 
+/// [`build_path`] for every entry, memoized along the parent chains (they are long: this image
+/// has directories ~600 levels deep). For an acyclic chain python's list is the parent's list
+/// plus the entry's name; a chain that runs into a cycle gives the bare name. When 0 is a key
+/// (python's `parent_offset = 0` could then continue a chain) the direct algorithm is used.
+fn build_paths(w: &Walker, names: &[String]) -> Vec<String> {
+    let n = w.entries.len();
+    if w.index.contains_key(&0) {
+        return par_map(n, |i| build_path(w, names, i));
+    }
+    const UNSEEN: u8 = 0;
+    const ACTIVE: u8 = 1;
+    const DONE: u8 = 2;
+    const CYCLIC: u8 = 3;
+    let parent_of = |j: usize| w.entries[j].parent.and_then(|p| w.index.get(&p)).map(|&x| x as usize);
+    let mut state = vec![UNSEEN; n];
+    let mut joined: Vec<String> = vec![String::new(); n];
+    let mut stack: Vec<usize> = Vec::new();
+    for i in 0..n {
+        if state[i] != UNSEEN {
+            continue;
+        }
+        let mut j = i;
+        let cyclic = loop {
+            state[j] = ACTIVE;
+            stack.push(j);
+            match parent_of(j) {
+                None => break false,
+                Some(p) => match state[p] {
+                    UNSEEN => j = p,
+                    DONE => break false,
+                    _ => break true, // ACTIVE (a cycle) or CYCLIC
+                },
+            }
+        };
+        while let Some(j) = stack.pop() {
+            if cyclic {
+                state[j] = CYCLIC;
+                continue;
+            }
+            joined[j] = match parent_of(j) {
+                Some(p) => {
+                    let mut s = String::with_capacity(joined[p].len() + 1 + names[j].len());
+                    s.push_str(&joined[p]);
+                    s.push('/');
+                    s.push_str(&names[j]);
+                    s
+                }
+                None => names[j].clone(),
+            };
+            state[j] = DONE;
+        }
+    }
+    joined
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if state[i] == CYCLIC {
+                names[i].clone()
+            } else if p.starts_with("//") {
+                p[1..].to_string()
+            } else {
+                p
+            }
+        })
+        .collect()
+}
+
 /// python `List_Files.list_files(context, kernel_module_name)`: `(vnode vol.offset, full
 /// path)` in python order.
 pub fn list_files(k: &MacKernel) -> Result<Vec<(u64, String)>> {
@@ -365,7 +436,7 @@ pub fn list_files(k: &MacKernel) -> Result<Vec<(u64, String)>> {
         res.into_iter().collect::<Result<_>>()?
     };
     let _t = crate::util::trace::span("list_files build paths");
-    let paths = par_map(w.entries.len(), |i| build_path(&w, &names, i));
+    let paths = build_paths(&w, &names);
     Ok(w.entries.iter().map(|e| e.key).zip(paths).collect())
 }
 
