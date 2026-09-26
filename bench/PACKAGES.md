@@ -54,3 +54,6 @@ L3 linux fs/net (after L1's extensions land).
 - core RSDS scanner duplicates symbols::windows::pdb::rsds_scan
 - W4 private: consoles.rs version-info reader + netscan.rs verinfo copy -> W2b verinfo
 - README-API.md: add W4 helpers (symbols/windows/{gui,network,consoles}.rs, windowstations scan helpers)
+- vmscan: 94 ms vs vol-rs 3 ms (vol-rs has no VMCS layouts installed and skips the scan). Needs a per-image
+  scan-index cache or a cheaper page-stride scan to win. Consider a general per-image scan-result cache
+  (all scanners' signatures recorded in one pass, keyed path+size+mtime) in the perf phase.
