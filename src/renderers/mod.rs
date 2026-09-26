@@ -183,6 +183,68 @@ pub trait RowSink {
     }
 }
 
+/// Depth-0 rows produced off the output thread (a worker of a parallel plugin), handed to the
+/// sink later in order with [`RowBlock::emit`]. With the sink's [`RowSink::encoder`] each row
+/// is formatted as it is pushed and its values are dropped right there (on the worker: no
+/// `Vec<Value>` outlives its row, the output thread only appends bytes); without one (a sink
+/// with `--filters`, an in-memory collector) the values are kept and emitted with
+/// [`RowSink::row`], exactly as a serial plugin would.
+pub struct RowBlock<'e> {
+    enc: Option<&'e text::RowEncoder>,
+    buf: Vec<u8>,
+    n: usize,
+    rows: Vec<Vec<Value>>,
+}
+
+impl<'e> RowBlock<'e> {
+    /// An empty block for the sink whose `encoder()` returned `enc`.
+    #[inline]
+    pub fn new(enc: Option<&'e text::RowEncoder>) -> RowBlock<'e> {
+        RowBlock { enc, buf: Vec::new(), n: 0, rows: Vec::new() }
+    }
+    /// Append one depth-0 row.
+    #[inline]
+    pub fn push(&mut self, values: Vec<Value>) {
+        match self.enc {
+            Some(e) => {
+                e.row(&mut self.buf, &values);
+                self.n += 1;
+            }
+            None => self.rows.push(values),
+        }
+    }
+    /// Append one depth-0 row from borrowed values (no `Vec` when formatting right away).
+    #[inline]
+    pub fn push_ref(&mut self, values: &[Value]) {
+        match self.enc {
+            Some(e) => {
+                e.row(&mut self.buf, values);
+                self.n += 1;
+            }
+            None => self.rows.push(values.to_vec()),
+        }
+    }
+    /// Number of rows pushed.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.n + self.rows.len()
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Hand the rows to `out` (after everything it received so far).
+    pub fn emit(self, out: &mut dyn RowSink) -> Result<()> {
+        if self.n > 0 {
+            out.rows_encoded_owned(self.buf, self.n)?;
+        }
+        for r in self.rows {
+            out.row(0, r)?;
+        }
+        Ok(())
+    }
+}
+
 /// In-memory sink, handy for tests and for plugins that post-process another plugin's rows.
 #[derive(Default)]
 pub struct CollectSink {

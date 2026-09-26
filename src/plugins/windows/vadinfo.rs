@@ -192,20 +192,14 @@ impl Plugin for VadInfo {
             rows
         };
         let procs = super::pslist::list_processes(k, &pid_filter);
-        // processes are independent: compute in parallel, emit in python order. With --dump,
-        // stay sequential so a failure stops before later dumps exactly like python.
-        let per_proc: Vec<Vec<Result<Vec<Value>>>> = if dump {
-            Vec::new()
-        } else {
-            crate::util::par::par_map(procs.len(), |i| match &procs[i] {
-                Ok(p) => proc_rows(p),
-                Err(_) => Vec::new(),
-            })
-        };
-        let mut per_proc = per_proc.into_iter();
+        // processes are independent: compute (and format) in parallel, emit in python order.
+        // With --dump, stay sequential so a failure stops before later dumps exactly like python.
+        if !dump {
+            return crate::plugins::emit_par_rows(out, procs, |p| proc_rows(p));
+        }
         for p in procs {
             let proc = p?;
-            let rows = if dump { proc_rows(&proc) } else { per_proc.next().unwrap_or_default() };
+            let rows = proc_rows(&proc);
             for r in rows {
                 out.row(0, r?)?;
             }

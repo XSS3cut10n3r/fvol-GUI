@@ -336,16 +336,6 @@ impl Plugin for VerInfo {
             }
             rows
         };
-        let per_proc = crate::util::par::par_map(procs.len(), |i| match &procs[i] {
-            Ok(p) => proc_rows(p),
-            Err(_) => Vec::new(),
-        });
-        for (p, rows) in procs.into_iter().zip(per_proc) {
-            p?;
-            for r in rows {
-                out.row(0, r?)?;
-            }
-        }
-        Ok(())
+        crate::plugins::emit_par_rows(out, procs, |p| proc_rows(p))
     }
 }

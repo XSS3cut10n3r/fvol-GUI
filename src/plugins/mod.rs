@@ -20,7 +20,7 @@ pub mod windows;
 
 use crate::context::Context;
 use crate::error::Result;
-use crate::renderers::{RowSink, Value};
+use crate::renderers::{RowBlock, RowSink, Value};
 use std::collections::HashMap;
 
 /// Kind of a CLI-visible requirement (mirrors volatility3's SimpleTypeRequirement subclasses,
@@ -379,4 +379,45 @@ pub fn all() -> Vec<&'static dyn Plugin> {
 /// Look up a plugin by its full name.
 pub fn find(name: &str) -> Option<&'static dyn Plugin> {
     all().into_iter().find(|p| p.name() == name)
+}
+
+/// `f(i, block)` for every `i in 0..n` in parallel, each pushing its rows into its own
+/// [`RowBlock`] (formatted on the worker when `out` has a row encoder); the blocks come back
+/// in index order with `f`'s results, for the caller to [`RowBlock::emit`] in python's order.
+pub fn par_blocks<'e, X: Send>(enc: Option<&'e crate::renderers::text::RowEncoder>, n: usize, f: impl Fn(usize, &mut RowBlock<'e>) -> X + Sync) -> Vec<(RowBlock<'e>, X)> {
+    crate::util::par::par_map(n, |i| {
+        let mut b = RowBlock::new(enc);
+        let x = f(i, &mut b);
+        (b, x)
+    })
+}
+
+/// python `for item in items: yield from rows(item)` with the items' rows computed (and
+/// formatted, see [`RowBlock`]) in parallel and emitted in order. An `Err` item = python raised
+/// there (before its rows); `f` returning `Err` = python raised after the rows it pushed.
+pub fn emit_par_blocks<T: Sync>(out: &mut dyn RowSink, items: Vec<Result<T>>, f: impl Fn(&T, &mut RowBlock) -> Result<()> + Sync) -> Result<()> {
+    let enc = out.encoder();
+    let blocks = par_blocks(enc.as_ref(), items.len(), |i, b| match &items[i] {
+        Ok(t) => f(t, b).err(),
+        Err(_) => None,
+    });
+    for (item, (b, err)) in items.into_iter().zip(blocks) {
+        item?;
+        b.emit(out)?;
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// [`emit_par_blocks`] for a per-item row function returning python's rows in order (a
+/// trailing `Err` = python raised there).
+pub fn emit_par_rows<T: Sync>(out: &mut dyn RowSink, items: Vec<Result<T>>, f: impl Fn(&T) -> Vec<Result<Vec<Value>>> + Sync) -> Result<()> {
+    emit_par_blocks(out, items, |t, b| {
+        for r in f(t) {
+            b.push(r?);
+        }
+        Ok(())
+    })
 }

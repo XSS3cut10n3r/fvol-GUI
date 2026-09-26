@@ -73,16 +73,6 @@ impl Plugin for VadWalk {
         let pids = cfg.get_ints("pid");
         let filter = super::pslist::pid_filter(&pids);
         let procs = super::pslist::list_processes(k, &filter);
-        let per_proc = crate::util::par::par_map(procs.len(), |i| match &procs[i] {
-            Ok(p) => proc_rows(p),
-            Err(_) => Vec::new(),
-        });
-        for (p, rows) in procs.into_iter().zip(per_proc) {
-            p?;
-            for r in rows {
-                out.row(0, r?)?;
-            }
-        }
-        Ok(())
+        crate::plugins::emit_par_rows(out, procs, |p| proc_rows(p))
     }
 }
