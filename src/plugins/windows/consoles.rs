@@ -272,6 +272,19 @@ pub fn get_console_settings_from_registry(ctx: &Context, k: &WinKernel, max_hist
 // conhost processes / symbol table
 // ------------------------------------------------------------------------------------------
 
+/// python `utility.array_to_string(proc.ImageFileName)`. When the whole array is readable,
+/// python's contiguous gather returns exactly those bytes: one read instead of walking the
+/// mapping (the process filter runs this for every process).
+pub fn image_file_name(proc: &Obj) -> Result<String> {
+    let a = proc.m("ImageFileName")?;
+    let n = a.count() as usize;
+    let mut buf = [0u8; 64];
+    if (1..=64).contains(&n) && a.layer().read(a.addr, &mut buf[..n]).is_ok() {
+        return crate::objects::strings::bytes_to_decoded_string(&buf[..n], crate::symbols::StrEnc::Utf8, crate::symbols::StrErrors::Replace);
+    }
+    array_to_string(&a, None)
+}
+
 /// A conhost.exe process (python `find_conhost_proc` yields it with its process layer).
 #[derive(Clone, Copy)]
 pub struct ConhostProc {
@@ -286,7 +299,7 @@ pub struct ConhostProc {
 /// where python raised.
 pub fn find_conhost_procs(k: &WinKernel, case_insensitive: bool) -> Vec<Result<ConhostProc>> {
     let filter = |p: &Obj| -> Result<bool> {
-        let name = array_to_string(&p.m("ImageFileName")?, None)?;
+        let name = image_file_name(p)?;
         Ok(if case_insensitive { name.to_lowercase() != "conhost.exe" } else { name != "conhost.exe" })
     };
     let mut out = Vec::new();
@@ -299,7 +312,7 @@ pub fn find_conhost_procs(k: &WinKernel, case_insensitive: bool) -> Vec<Result<C
             }
         };
         let r = (|| -> Result<Option<ConhostProc>> {
-            if array_to_string(&proc.m("ImageFileName")?, None)?.to_lowercase() != "conhost.exe" {
+            if image_file_name(&proc)?.to_lowercase() != "conhost.exe" {
                 return Ok(None);
             }
             proc.m("UniqueProcessId")?.int()?;
@@ -920,7 +933,7 @@ pub fn emit_rows(
     value: fn(Data) -> Value,
 ) -> Result<()> {
     let pid = proc.m("UniqueProcessId")?.int()?;
-    let name = array_to_string(&proc.m("ImageFileName")?, None)?;
+    let name = image_file_name(proc)?;
     let mut any = false;
     for f in found {
         let (addr, props) = f.map_err(raise)?;
