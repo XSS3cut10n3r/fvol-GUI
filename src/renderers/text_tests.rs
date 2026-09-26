@@ -195,12 +195,16 @@ fn encoded_rows_match_row_path() {
                         for v in &rows[..a] {
                             r.row_ref(0, v).unwrap();
                         }
-                        for (s, e) in [(a, b), (b, c)] {
+                        for (k, (s, e)) in [(a, b), (b, c)].into_iter().enumerate() {
                             let mut blk = Vec::new();
                             for v in &rows[s..e] {
                                 enc.row(&mut blk, v);
                             }
-                            r.rows_encoded(&blk, e - s).unwrap();
+                            if k == 0 {
+                                r.rows_encoded(&blk, e - s).unwrap();
+                            } else {
+                                r.rows_encoded_owned(blk, e - s).unwrap();
+                            }
                         }
                         for v in &rows[c..] {
                             r.row(0, v.clone()).unwrap();

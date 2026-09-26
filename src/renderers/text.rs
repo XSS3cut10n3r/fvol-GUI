@@ -1467,8 +1467,10 @@ struct Json<'a> {
     top: std::collections::VecDeque<Option<JNode>>,
     top_base: usize,
     scratch: Vec<u8>,
-    /// json: the finished top-level nodes in order, each as `,\n  {...}`
+    /// json: the finished top-level nodes in order, each as `,\n  {...}` (`pieces` first)
     done: Vec<u8>,
+    /// json: earlier parts of `done` and blocks of encoded rows, in order
+    pieces: Vec<Vec<u8>>,
     /// node buffers to reuse
     spare: Vec<Vec<u8>>,
     /// the last top-level row, written straight into the output (`b.buf` / `done`) as a leaf:
@@ -1570,6 +1572,7 @@ impl<'a> Json<'a> {
             top_base: 0,
             scratch: Vec::new(),
             done: Vec::new(),
+            pieces: Vec::new(),
             spare: Vec::new(),
             spec: None,
             leafy: true,
@@ -1771,6 +1774,23 @@ impl RowSink for Json<'_> {
         Ok(())
     }
 
+    fn rows_encoded_owned(&mut self, block: Vec<u8>, nrows: usize) -> Result<Option<Vec<u8>>> {
+        if self.lines {
+            self.rows_encoded(&block, nrows)?;
+            return Ok(Some(block));
+        }
+        // json keeps everything until the end: keep the block itself (no copy into `done`)
+        self.spec = None;
+        self.close_to(0);
+        self.emit_ready()?;
+        if !self.done.is_empty() {
+            self.pieces.push(std::mem::take(&mut self.done));
+        }
+        self.pieces.push(block);
+        self.b.encoded_rows(nrows, 0);
+        Ok(None)
+    }
+
     // rows_encoded_at: json nests child rows in their parents, which a block can't (its rows
     // would be closed before the next row arrives): the default (not taken) applies
 }
@@ -1784,15 +1804,20 @@ impl TextRenderer for Json<'_> {
         self.close_to(0);
         self.emit_ready()?;
         if !self.lines {
-            if self.done.is_empty() {
+            let done = std::mem::take(&mut self.done);
+            let mut pieces = std::mem::take(&mut self.pieces);
+            pieces.push(done);
+            pieces.retain(|p| !p.is_empty());
+            if pieces.is_empty() {
                 self.b.buf.extend_from_slice(b"[]\n");
             } else {
-                // `done` holds ",\n  {...}" per node: drop the first comma
+                // the pieces hold ",\n  {...}" per node: drop the first comma
                 self.b.buf.push(b'[');
                 self.b.flush_buf()?;
-                self.b.w.write_all(&self.done[1..])?;
+                for (k, p) in pieces.iter().enumerate() {
+                    self.b.w.write_all(if k == 0 { &p[1..] } else { p })?;
+                }
                 self.b.flushed = true;
-                self.done = Vec::new();
                 self.b.buf.extend_from_slice(b"\n]\n");
             }
         }
