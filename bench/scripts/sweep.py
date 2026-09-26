@@ -80,7 +80,7 @@ IMAGES = {
                      ref=REF + "/linux/bionic32-4.15-pae-elf", sym=True),
     "mac1012": dict(os="mac", path=ROOT + "/testdata/images/mac/securinets2019-contact_me-macos-10.12.6.raw",
                     ref=REF + "/mac/mac-10.12.6", sym=True),
-    # old 32-bit Windows (options only, rank 3): XP / 2003 raw, XP / Vista crash dumps, 2008 PAE
+    # old Windows (options only, rank 3): XP / 2003 raw, XP / Vista crash dumps, 2008 PAE, 7 / 2012 R2 x64
     "winxp": dict(os="windows", path=ROOT + "/testdata/images/windows/vol3-winxp-sp2-x86-laptop-2005-06-25.img",
                   ref=REF + "/windows/winxp-sp2-x86", sym=True),
     "xp3crash": dict(os="windows", path=ROOT + "/testdata/images/windows/m57-pat-xp-sp3-x86-2009-12-11.dmp",
@@ -92,12 +92,18 @@ IMAGES = {
                   ref=REF + "/windows/vista-sp2-x86-crash", sym=True),
     "win2008": dict(os="windows", path=ROOT + "/testdata/images/windows/samsclass-win2008-sp1-x86-memdump.mem",
                     ref=REF + "/windows/win2008-sp1-x86-pae", sym=True),
+    # pre-Windows-10 x64
+    "win7x64": dict(os="windows", path=ROOT + "/testdata/images/windows/memlabs-lab1-win7sp1-x64.raw",
+                    ref=REF + "/windows/win7sp1-x64", sym=True),
+    "win2012": dict(os="windows", path=ROOT + "/testdata/images/windows/dfirmadness-citadeldc01-win2012r2-x64.mem",
+                    ref=REF + "/windows/win2012r2-x64", sym=True),
 }
 # 0 = primary image of its OS (every case), 1 = second image, 2 = extra image: options only, run later
 IMAGE_RANK = {"win": 0, "noble": 0, "mac": 0, "win1809": 1, "jammy": 1, "win7x86": 2, "bionic32": 2, "mac1012": 2,
-              "winxp": 3, "xp3crash": 3, "win2003": 3, "vista": 3, "win2008": 3}
+              "winxp": 3, "xp3crash": 3, "win2003": 3, "vista": 3, "win2008": 3, "win7x64": 3, "win2012": 3}
 RENDERERS = ["quick", "csv", "json", "jsonl", "pretty", "none", "mermaid"]
-SECOND_IMAGES = ("win1809", "jammy", "win7x86", "bionic32", "mac1012", "winxp", "xp3crash", "win2003", "vista", "win2008")
+SECOND_IMAGES = ("win1809", "jammy", "win7x86", "bionic32", "mac1012", "winxp", "xp3crash", "win2003", "vista", "win2008",
+                 "win7x64", "win2012")
 
 
 def sym_args(img):
