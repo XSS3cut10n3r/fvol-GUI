@@ -712,7 +712,7 @@ impl Field {
                 _ => return Err(Error::Symbol(format!("AttributeError: no attribute {part}"))),
             };
             let m = table.member(ut, part).ok_or_else(|| Error::Symbol(format!("AttributeError: no attribute {part}")))?;
-            off += m.offset;
+            off = off.wrapping_add(m.offset);
             ty = m.ty;
         }
         Ok(Field { offset: off, ty, sp: None })
@@ -809,6 +809,12 @@ impl Module {
     pub fn symbols_at(&self, addr: u64, size: u64) -> Vec<&'static str> {
         let t: TableRef = self.sp.table;
         t.symbols_at(addr.wrapping_sub(self.offset), size)
+    }
+    /// `symbols_at(addr, 0)` without building the table's address index (linear scan; for a
+    /// few lookups).
+    pub fn symbols_at_exact(&self, addr: u64) -> Vec<&'static str> {
+        let t: TableRef = self.sp.table;
+        t.symbols_at_exact(addr.wrapping_sub(self.offset))
     }
     /// A module on another layer (e.g. a process layer) with the same table and base.
     pub fn on_layer(&self, layer: LayerRef) -> Module {

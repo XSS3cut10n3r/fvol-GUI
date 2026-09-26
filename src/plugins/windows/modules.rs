@@ -80,6 +80,37 @@ pub fn get_session_layers(k: &WinKernel, pids: &[i128]) -> Result<Vec<LayerRef>>
     Ok(out)
 }
 
+/// python `Modules.get_session_layers_map(context, kernel, pids)`: `(session id, process
+/// layer)` for the first process of each session, in process-list order (python's dict).
+pub fn get_session_layers_map(k: &WinKernel, pids: &[i128]) -> Result<Vec<(i128, LayerRef)>> {
+    let filter = super::pslist::pid_filter(pids);
+    let has_session_space = k.table.user_type("_MM_SESSION_SPACE").is_some();
+    let mut out: Vec<(i128, LayerRef)> = Vec::new();
+    for p in super::pslist::list_processes(k, &filter) {
+        let proc = p?;
+        let r = (|| -> Result<(i128, LayerRef)> {
+            let pl = proc.add_process_layer()?;
+            let session = proc.m("Session")?.u64()?;
+            let sid = if has_session_space {
+                k.object_abs("_MM_SESSION_SPACE", session)?.m("SessionId")?.int()?
+            } else {
+                k.object_abs("unsigned long", session.wrapping_add(8))?.int()?
+            };
+            Ok((sid, pl))
+        })();
+        match r {
+            Ok((sid, pl)) => {
+                if !out.iter().any(|(s, _)| *s == sid) {
+                    out.push((sid, pl));
+                }
+            }
+            Err(e) if e.is_invalid_address() => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
 /// python `Modules.find_session_layer(context, session_layers, base)`.
 pub fn find_session_layer(layers: &[LayerRef], base: u64) -> Option<LayerRef> {
     layers.iter().copied().find(|l| l.is_valid(base, 1))
@@ -136,20 +167,35 @@ impl Plugin for Modules {
         ]
     }
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        out.begin(vec![
-            Column::new("Offset", ColType::Hex),
-            Column::new("Base", ColType::Hex),
-            Column::new("Size", ColType::Hex),
-            Column::new("Name", ColType::Str),
-            Column::new("Path", ColType::Str),
-            Column::new("File output", ColType::Str),
-        ])?;
+        out.begin(columns())?;
+        let k = ctx.windows_kernel()?;
+        generate(ctx, cfg, out, &mut || list_modules(k))
+    }
+}
+
+/// The TreeGrid columns of `Modules` (and its subclass `ModScan`).
+pub fn columns() -> Vec<Column> {
+    vec![
+        Column::new("Offset", ColType::Hex),
+        Column::new("Base", ColType::Hex),
+        Column::new("Size", ColType::Hex),
+        Column::new("Name", ColType::Str),
+        Column::new("Path", ColType::Str),
+        Column::new("File output", ColType::Str),
+    ]
+}
+
+/// python `Modules._generator()` over `self._enumeration_method` (`enumerate` returns the
+/// module entries, a trailing `Err` = python raised there): the `--dump` / `--base` / `--name`
+/// handling shared by `Modules` and `ModScan`.
+pub fn generate(ctx: &Context, cfg: &Config, out: &mut dyn RowSink, enumerate: &mut dyn FnMut() -> Vec<Result<Obj>>) -> Result<()> {
+    {
         let k = ctx.windows_kernel()?;
         let dump = cfg.get_bool("dump");
         let base_filter = cfg.get_int("base").filter(|b| *b != 0);
         let name_filter = cfg.get_str("name").filter(|n| !n.is_empty());
         let (pe_table, session_layers) = if dump { (Some(ctx.load_isf("windows/pe")?), get_session_layers(k, &[])?) } else { (None, Vec::new()) };
-        for m in list_modules(k) {
+        for m in enumerate() {
             let m = m?;
             let dll_base = m.m("DllBase")?.u64()?;
             if let Some(b) = base_filter {
