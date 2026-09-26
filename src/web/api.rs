@@ -409,7 +409,11 @@ pub fn parse_config(plugin: &dyn Plugin, args: Option<&Json>) -> Result<(Config,
                 Json::Str(s) if matches!(s.as_str(), "true" | "on" | "1") => ConfigValue::Bool(true),
                 _ => return Err(format!("argument {flag}: expected true/false")),
             },
-            ReqKind::Int => ConfigValue::Int(int(v)?),
+            ReqKind::Int => match v {
+                // a one-element list is fine too (a PID picker hands over lists)
+                Json::Arr(a) if a.len() == 1 => ConfigValue::Int(int(&a[0])?),
+                v => ConfigValue::Int(int(v)?),
+            },
             ReqKind::ListInt => ConfigValue::List(words(v).iter().map(int).collect::<Result<Vec<_>, _>>()?.into_iter().map(ConfigValue::Int).collect()),
             ReqKind::Str => ConfigValue::Str(v.as_str().ok_or_else(|| format!("argument {flag}: expected text"))?.to_string()),
             ReqKind::ListStr => ConfigValue::List(
@@ -1013,7 +1017,16 @@ fn vol_export(app: &Arc<App>, run: Arc<Run>, req: &Request) -> Response {
             if !crate::renderers::text::is_structured(&renderer) {
                 w.write_all(format!("{}\n", crate::VERSION_BANNER).as_bytes())?;
             }
-            let ctx = run.session.ctx.clone();
+            // like the run itself: a plugin that writes files gets a Context whose output_dir is
+            // this export's own directory
+            let ctx = if super::runs::writes_files(run.plugin, &run.cfg) {
+                let mut o = run.session.ctx.opts.clone();
+                o.output_dir = dir.clone();
+                o.clear_cache = false;
+                crate::context::Context::new(o).map(Arc::new).unwrap_or_else(|_| run.session.ctx.clone())
+            } else {
+                run.session.ctx.clone()
+            };
             let mut r = crate::renderers::text::create(&renderer, w, Default::default()).ok_or_else(|| std::io::Error::other("renderer"))?;
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::context::with_output_dir(&dir, || run.plugin.run(&ctx, &run.cfg, &mut *r))));
             match res {

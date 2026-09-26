@@ -648,8 +648,22 @@ impl Runs {
             last_flush: Instant::now() - Duration::from_secs(1),
             begun: false,
         };
-        let ctx = run.session.ctx.clone();
         let dir = run.out_dir.to_string_lossy().into_owned();
+        // Runs that write files get a Context of their own whose output_dir is the run's
+        // directory: some plugins read `opts.output_dir` directly instead of going through
+        // `create_output_file`. A fresh Context costs a millisecond or two (automagic results
+        // and symbol tables are cached); everything else shares the session's warm Context.
+        let ctx = if writes_files(run.plugin, &run.cfg) {
+            let mut o = run.session.ctx.opts.clone();
+            o.output_dir = dir.clone();
+            o.clear_cache = false;
+            match crate::context::Context::new(o) {
+                Ok(c) => Arc::new(c),
+                Err(_) => run.session.ctx.clone(),
+            }
+        } else {
+            run.session.ctx.clone()
+        };
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::context::with_output_dir(&dir, || run.plugin.run(&ctx, &run.cfg, &mut sink))));
         sink.flush();
         let begun = sink.begun;
@@ -687,6 +701,17 @@ impl Runs {
         }
         d.seq = self.hub.bump();
     }
+}
+
+/// Whether a run may write files (so it needs its own output directory end to end).
+pub fn writes_files(plugin: &dyn Plugin, cfg: &Config) -> bool {
+    let n = plugin.name();
+    if ["dumpfiles", "pedump", "layerwriter", "configwriter", "module_extract"].iter().any(|p| n.contains(p)) {
+        return true;
+    }
+    cfg.values
+        .iter()
+        .any(|(k, v)| matches!(v, crate::plugins::ConfigValue::Bool(true)) && (k.contains("dump") || k.contains("bodyfile") || k.contains("record-config") || k.contains("record_config")))
 }
 
 /// Regular files directly inside `dir` (name, size), sorted by name.

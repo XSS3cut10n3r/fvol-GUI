@@ -240,6 +240,16 @@ def nosession():
     shot("14-session")
 
 
+@step("openimage")
+def openimage():
+    c.eval("document.getElementById('evidence').click()")
+    c.wait("document.querySelector('.dialog .fslist button')", 10)
+    c.eval("(() => { const i = document.querySelector('.dialog input'); i.value = '/home/user/rs-vol/testdata/images/'; i.dispatchEvent(new Event('input')); })()")
+    c.pump(1.0)
+    shot("17-open-image")
+    c.key("Escape")
+
+
 @step("help")
 def helpstep():
     c.key("?")

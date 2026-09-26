@@ -183,6 +183,23 @@ def main():
         st, raw, _ = w.req("GET", j["url"], headers={"X-Vol-Token": None}, raw=True)
         got[f["name"]] = hashlib.sha256(raw).hexdigest()
     check(f"dumped files identical to the CLI's ({len(ref)} files)", ref and got == ref, f"{got} vs {ref}")
+    # dumpfiles writes from parallel worker threads: its files must still land in the run's dir
+    st, j = w.req("POST", "/api/runs", {"plugin": "windows.dumpfiles.DumpFiles", "args": {"pid": 5816}})
+    did = j["id"]
+    w.req("GET", f"/api/runs/{did}/stream", raw=True)
+    st, dfiles = w.req("GET", f"/api/runs/{did}/files")
+    d2 = os.path.join(SCR, "cli-dumpfiles")
+    os.makedirs(d2, exist_ok=True)
+    for f in os.listdir(d2):
+        os.remove(os.path.join(d2, f))
+    cli(win, "windows.dumpfiles.DumpFiles", ["--pid", "5816"], outdir=d2)
+    ref2 = {f: hashlib.sha256(open(os.path.join(d2, f), "rb").read()).hexdigest() for f in os.listdir(d2)}
+    got2 = {}
+    for f in dfiles:
+        st, j = w.req("POST", "/api/ticket", {"path": f"/api/runs/{did}/files/{f['name']}"})
+        st, raw, _ = w.req("GET", j["url"], headers={"X-Vol-Token": None}, raw=True)
+        got2[f["name"]] = hashlib.sha256(raw).hexdigest()
+    check(f"dumpfiles (parallel writers): files identical to the CLI's ({len(ref2)} files)", ref2 and got2 == ref2, f"{len(got2)} vs {len(ref2)}")
     st, raw, _ = w.req("GET", f"/api/runs/{rid}/files/..%2f..%2fetc%2fpasswd", raw=True)
     check("download path traversal refused", st in (400, 404))
     st, raw, _ = w.req("GET", f"/api/runs/{rid}/files.zip", raw=True)
