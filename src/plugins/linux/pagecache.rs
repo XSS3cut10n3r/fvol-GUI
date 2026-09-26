@@ -16,7 +16,7 @@ use crate::automagic::linux::LinuxKernel;
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::layers::Layer;
-use crate::objects::Obj;
+use crate::objects::{Field, Obj};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement, TimeKind, TimelineEvent};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::fs::{ptr_ok, tgt};
@@ -78,10 +78,47 @@ fn symlink_dest(inode: &Obj) -> Result<Option<String>> {
     Ok(Some(l.deref()?.read_string(255, "utf-8", "replace")?))
 }
 
+/// Struct members of the dentry walk, resolved once (hot loop: no member-name hashing).
+struct WalkFields {
+    d_inode: Field,
+    d_name: Field,
+    q_name: Field,
+    i_ino: Field,
+    i_count: Field,
+    i_mode: Field,
+    i_mapping: Field,
+}
+
+impl WalkFields {
+    fn new(t: crate::symbols::TableRef) -> Result<WalkFields> {
+        Ok(WalkFields {
+            d_inode: Field::new(t, "dentry", "d_inode")?,
+            d_name: Field::new(t, "dentry", "d_name")?,
+            q_name: Field::new(t, "qstr", "name")?,
+            i_ino: Field::new(t, "inode", "i_ino")?,
+            i_count: Field::path(t, "inode", "i_count.counter")?,
+            i_mode: Field::new(t, "inode", "i_mode")?,
+            i_mapping: Field::new(t, "inode", "i_mapping")?,
+        })
+    }
+
+    /// python `inode.is_valid()` (exceptions kept).
+    #[inline]
+    fn inode_valid(&self, i: &Obj) -> Result<bool> {
+        Ok(i.f(&self.i_ino).int()? > 0 && i.f(&self.i_count).int()? >= 0)
+    }
+}
+
+const S_IFMT: i128 = 0o170000;
+const S_IFDIR: i128 = 0o040000;
+const S_IFLNK: i128 = 0o120000;
+
 /// python `Files._walk_dentry(seen_dentries, root_dentry, parent_dir)`: depth-first, calls
-/// `f(file_path, dentry)` (python's yield) before descending into a directory. `f` returns
-/// false to stop the whole walk (`Ok(false)` is propagated).
-fn walk_dentry(seen: &mut FxHashSet<u64>, root: Obj, parent_dir: &str, f: &mut dyn FnMut(String, Obj) -> Result<bool>) -> Result<bool> {
+/// `f(file_path, dentry, inode_ptr, inode)` (python's yield; `inode_ptr` / `inode` are the
+/// dentry's `d_inode` pointer and struct, already checked readable + valid exactly like python
+/// re-checks them) before descending into a directory. `f` returns false to stop the whole
+/// walk (`Ok(false)` is propagated).
+fn walk_dentry(w: &WalkFields, seen: &mut FxHashSet<u64>, root: Obj, parent_dir: &str, f: &mut dyn FnMut(String, Obj, &Obj, Obj) -> Result<bool>) -> Result<bool> {
     struct Frame {
         iter: crate::symbols::linux::SubdirIter,
         root_addr: u64,
@@ -97,24 +134,36 @@ fn walk_dentry(seen: &mut FxHashSet<u64>, root: Obj, parent_dir: &str, f: &mut d
         if dentry.addr == top.root_addr || !seen.insert(dentry.addr) {
             continue;
         }
-        let inode_ptr = dentry.m("d_inode")?;
+        let inode_ptr = dentry.f(&w.d_inode);
         if !ptr_ok(&inode_ptr)? {
             continue;
         }
         let inode = inode_ptr.deref()?;
-        if !inode_valid(&inode)? {
+        if !w.inode_valid(&inode)? {
             continue;
         }
-        let d_name = dentry.m("d_name")?;
-        if d_name.m("name")?.u64()? == 0 {
+        let d_name = dentry.f(&w.d_name);
+        if d_name.f(&w.q_name).u64()? == 0 {
             continue;
         }
-        let file_path = format!("{}/{}", top.parent_dir, d_name.name_as_str()?);
-        if !f(file_path.clone(), dentry)? {
+        let name = d_name.name_as_str()?;
+        let mut file_path = String::with_capacity(top.parent_dir.len() + 1 + name.len());
+        file_path.push_str(&top.parent_dir);
+        file_path.push('/');
+        file_path.push_str(&name);
+        // python evaluates `inode.is_dir` after the consumer ran; reading i_mode early has no
+        // side effect, its error (if any) is only returned at python's point
+        let mode = inode.f(&w.i_mode).int();
+        let dir_path = match &mode {
+            Ok(m) if m & S_IFMT == S_IFDIR => Some(file_path.clone()),
+            _ => None,
+        };
+        if !f(file_path, dentry, &inode_ptr, inode)? {
             return Ok(false);
         }
-        if inode.is_dir()? {
-            stack.push(Frame { iter: dentry.get_subdirs(), root_addr: dentry.addr, parent_dir: file_path });
+        mode?;
+        if let Some(parent_dir) = dir_path {
+            stack.push(Frame { iter: dentry.get_subdirs(), root_addr: dentry.addr, parent_dir });
         }
     }
     Ok(true)
@@ -124,6 +173,7 @@ fn walk_dentry(seen: &mut FxHashSet<u64>, root: Obj, parent_dir: &str, f: &mut d
 /// (superblock roots, then their dentry trees) to `f` in python's order; `f` returns false
 /// to stop. `Err` where python raises.
 pub fn get_inodes(k: &LinuxKernel, follow_symlinks: bool, f: &mut dyn FnMut(InodeInternal) -> Result<bool>) -> Result<()> {
+    let w = WalkFields::new(k.table)?;
     let mut seen_inodes = FxHashSet::default();
     let mut seen_dentries = FxHashSet::default();
     let sbs = {
@@ -142,15 +192,15 @@ pub fn get_inodes(k: &LinuxKernel, follow_symlinks: bool, f: &mut dyn FnMut(Inod
         if !root_dentry.is_root()? {
             continue;
         }
-        let root_inode_ptr = root_dentry.m("d_inode")?;
+        let root_inode_ptr = root_dentry.f(&w.d_inode);
         if !ptr_ok(&root_inode_ptr)? {
             continue;
         }
         let root_inode = root_inode_ptr.deref()?;
-        if !inode_valid(&root_inode)? {
+        if !w.inode_valid(&root_inode)? {
             continue;
         }
-        if !ptr_ok(&root_inode.m("i_mapping")?)? {
+        if !ptr_ok(&root_inode.f(&w.i_mapping))? {
             continue;
         }
         if !seen_inodes.insert(root_inode_ptr.u64()?) {
@@ -159,22 +209,15 @@ pub fn get_inodes(k: &LinuxKernel, follow_symlinks: bool, f: &mut dyn FnMut(Inod
         if !f(InodeInternal { superblock, mountpoint: mountpoint.clone(), inode: root_inode, path: mountpoint.to_string() })? {
             return Ok(());
         }
-        let cont = walk_dentry(&mut seen_dentries, root_dentry, parent_dir, &mut |file_path, file_dentry| {
-            let file_inode_ptr = file_dentry.m("d_inode")?;
-            if !ptr_ok(&file_inode_ptr)? {
-                return Ok(true);
-            }
-            let file_inode = file_inode_ptr.deref()?;
-            if !inode_valid(&file_inode)? {
-                return Ok(true);
-            }
-            if !ptr_ok(&file_inode.m("i_mapping")?)? {
+        let cont = walk_dentry(&w, &mut seen_dentries, root_dentry, parent_dir, &mut |file_path, _file_dentry, file_inode_ptr, file_inode| {
+            // python re-checks `d_inode` readable + `is_valid()` here: same memory, same result
+            if !ptr_ok(&file_inode.f(&w.i_mapping))? {
                 return Ok(true);
             }
             if !seen_inodes.insert(file_inode_ptr.u64()?) {
                 return Ok(true);
             }
-            let path = if follow_symlinks { follow_symlink(&file_inode_ptr, file_path)? } else { file_path };
+            let path = if follow_symlinks && file_inode.f(&w.i_mode).int()? & S_IFMT == S_IFLNK { follow_symlink(file_inode_ptr, file_path)? } else { file_path };
             f(InodeInternal { superblock, mountpoint: mountpoint.clone(), inode: file_inode, path })
         })?;
         if !cont {
