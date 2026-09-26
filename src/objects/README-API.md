@@ -308,6 +308,24 @@ and driverscan this way and diffs them against python's output.
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
 * Errors: return `Err(e)`; python's "skip this row on InvalidAddressException" is
   `match row() { Err(e) if e.is_invalid_address() => continue, ... }`.
+* Timeliner (`TimeLinerInterface.generate_timeline`): implement `timeline()`; if the python
+  generator can raise AFTER its first yield, implement `timeline_events()` instead and return
+  the events yielded so far plus the error (python keeps them). `plugins::default_config(p)`
+  is the config the timeliner constructs a plugin with. The 22 python timeliner plugins are
+  listed in `plugins::generic::timeliner::TIMELINER_PLUGINS`.
+
+## Generic plugin helpers (`crate::plugins::generic`)
+
+| python | rust |
+|---|---|
+| `TranslationLayerRequirement(name="primary")` layer | `primary::primary(ctx, desc)?` (`.layer`, `.intel`, `.phys`, `.os`); `primary_intel` when python requires Intel32/64; `primary::physical(ctx, desc)?` for plugins stepping down to `memory_layer` |
+| `scanners.RegExScanner(pattern)` | `regexscan::RegExScanner::new(pattern)?` (two-phase `Scanner`, hit = address) |
+| `yarascan.YaraScanner(rules)` / `process_yara_options(config)` | `yarascan::YaraScanner { rules: &r }` / `yarascan::rules_from_config(cfg)` |
+| `renderers.LayerData(ctx, layer, offset, length)` | `yarascan::layer_data_value(layer, offset, length)` (`Value::LayerBytes` like the CLI renderer) |
+| `yarascan.get_yarascan_option_requirements()` | `yarascan::yarascan_option_requirements()` |
+| `Banners.locate_banners(ctx, layer)` | `banners::locate_banners(layer)?` |
+| `LayerWriter.write_layer(...)` | `layerwriter::write_layer(layer, &file, len)` (sparse, reflink / copy_file_range) |
+| a requirement's `build_configuration()` tree | `pyconfig::{primary_tree, kernel_tree, container_tree}` |
 
 ## Performance notes
 
