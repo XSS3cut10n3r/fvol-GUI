@@ -484,6 +484,62 @@ mod bench {
         }
     }
 
+    /// The TLB fast path of multi-page `is_valid` answers exactly like python's `_mapping`
+    /// walk: random ranges (1 byte .. 64 pages) around mapped/unmapped boundaries of the
+    /// windows kernel, windows process layers and a linux ELF-core kernel (segmented phys).
+    #[test]
+    #[ignore]
+    fn is_valid_fast_path_is_exact() {
+        let check = |name: &str, l: &IntelLayer, seed: u64| {
+            let runs = l.mappings(0, l.max_address());
+            let mut x = seed | 1;
+            let mut next = || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            };
+            let (mut n, mut valid) = (0u64, 0u64);
+            for _ in 0..200_000 {
+                let m = &runs[next() as usize % runs.len()];
+                // start near either edge of a mapped run, or inside it
+                let base = match next() % 3 {
+                    0 => m.offset.wrapping_sub(next() % 0x3000),
+                    1 => (m.offset + m.len).wrapping_sub(next() % 0x3000),
+                    _ => m.offset + next() % m.len.max(1),
+                };
+                let len = match next() % 4 {
+                    0 => 1 + next() % 16,
+                    1 => 1 + next() % 0x1000,
+                    2 => 1 + next() % 0x10000,
+                    _ => 1 + next() % (64 * 0x1000),
+                };
+                let (fast, exact) = (l.is_valid(base, len), l.is_valid_exact(base, len));
+                assert_eq!(fast, exact, "{name}: is_valid({base:#x}, {len:#x})");
+                n += 1;
+                valid += fast as u64;
+            }
+            println!("{name}: {n} ranges, {valid} valid, identical");
+        };
+        let ctx = Context::new(GlobalOptions { file: Some("/home/user/cbc2/task2/memory-dirty.raw".into()), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        check("windows kernel", k.layer, 1);
+        let procs: Vec<_> = crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)).into_iter().filter_map(|p| p.ok()).collect();
+        for p in procs.iter().take(4) {
+            let dtb = p.m("Pcb").and_then(|pcb| pcb.m("DirectoryTableBase")).and_then(|d| d.u64()).unwrap();
+            let pl = k.layer.process_layer(dtb, "proc");
+            check("windows process", &pl, dtb);
+        }
+        let ctx = Context::new(GlobalOptions {
+            file: Some("/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf".into()),
+            symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let lk = ctx.linux_kernel().unwrap();
+        check("linux ELF kernel", lk.layer, 7);
+    }
+
     /// The Mac walkers and class helpers on a corrupted physical layer: every list method,
     /// process layers, map entries, fileglob types and vnode paths must never panic.
     #[test]

@@ -236,6 +236,12 @@ impl IntelLayer {
         self
     }
 
+    /// `is_valid` without the TLB fast path (python's exact `_mapping` walk), for tests.
+    #[cfg(test)]
+    pub(crate) fn is_valid_exact(&self, addr: u64, len: u64) -> bool {
+        self.walk(addr, len, false, |_, _, _, _| true).is_ok()
+    }
+
     /// A process address space: same class/config/physical layer, different DTB
     /// (python `_add_process_layer`). Shares the page-table cache.
     pub fn process_layer(&self, dtb: u64, name: &str) -> IntelLayer {
@@ -346,6 +352,14 @@ impl IntelLayer {
                 });
             }
         }
+        // segmented physical layers (ELF cores, LiME): zero-copy when the entry is file-backed
+        if let Some(b) = self.phys.slice(addr, self.p.entry_size as usize) {
+            return Some(if b.len() == 8 {
+                u64::from_le_bytes(b.try_into().ok()?)
+            } else {
+                u32::from_le_bytes(b.try_into().ok()?) as u64
+            });
+        }
         if self.p.entry_size == 8 {
             let mut b = [0u8; 8];
             self.phys.read(addr, &mut b).ok()?;
@@ -375,8 +389,10 @@ impl IntelLayer {
                 Some(end) if end <= len => unsafe { std::slice::from_raw_parts((ptr as *const u8).add(base as usize), 0x1000) },
                 _ => return false,
             }
+        } else if let Some(b) = self.phys.slice(base, 0x1000) {
+            b
         } else {
-            let mut b = vec![0u8; 0x1000];
+            let mut b = [0u8; 0x1000];
             if self.phys.read(base, &mut b).is_err() {
                 return false;
             }
@@ -746,8 +762,18 @@ impl Layer for IntelLayer {
     }
 
     fn is_valid(&self, addr: u64, len: u64) -> bool {
-        if len > 0 && (addr & 0xfff) + len <= 0x1000 && self.page_fast(addr).is_some() {
-            return true;
+        // TLB fast path: every 4 KiB page translating to a fully valid physical page implies
+        // python's answer (all mapped chunks valid); anything else takes the exact walk.
+        if len > 0 && len <= 64 * 0x1000 {
+            if let Some(end) = addr.checked_add(len - 1) {
+                let mut page = addr & !0xfff;
+                while self.page_fast(page).is_some() {
+                    if page >= end & !0xfff {
+                        return true;
+                    }
+                    page += 0x1000;
+                }
+            }
         }
         self.walk(addr, len, false, |_, _, _, _| true).is_ok()
     }
