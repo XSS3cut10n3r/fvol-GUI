@@ -94,6 +94,18 @@ pub fn virtual_process_from_physical(k: &WinKernel, proc: &Obj) -> Result<Option
     Ok(None)
 }
 
+/// The name python's psscan prints for a dump: `file_handle.preferred_filename` read BEFORE
+/// the handle is closed, i.e. the sanitized requested name (the file on disk may get a `-N`
+/// suffix). Same reads as `process_dump`, which succeeded when this is called.
+fn preferred_dump_name(k: &WinKernel, proc: &Obj) -> Option<String> {
+    let pl = proc.add_process_layer().ok()?;
+    let peb = Obj::named(crate::objects::Space::on(pl, k.table), "_PEB", proc.m("Peb").ok()?.u64().ok()?).ok()?;
+    let base = peb.m("ImageBaseAddress").ok()?.u64().ok()?;
+    let name = proc.image_file_name_str().ok()?;
+    let pid = proc.m("UniqueProcessId").ok()?.int().ok()?;
+    Some(crate::plugins::windows::pslist::sanitize_filename(&format!("{pid}.{name}.{base:#x}.dmp")))
+}
+
 fn rows(ctx: &Context, cfg: &Config, out: &mut dyn FnMut(Vec<Value>) -> Result<()>) -> Result<()> {
     let k = ctx.windows_kernel()?;
     let physical = cfg.get_bool("physical");
@@ -115,8 +127,8 @@ fn rows(ctx: &Context, cfg: &Config, out: &mut dyn FnMut(Vec<Value>) -> Result<(
             };
             file_output = Value::SStr("Error outputting file");
             if let Some(vproc) = vproc {
-                if let Some(name) = process_dump(ctx, k, &vproc) {
-                    file_output = Value::Str(name);
+                if let Some(written) = process_dump(ctx, k, &vproc) {
+                    file_output = Value::Str(preferred_dump_name(k, &vproc).unwrap_or(written));
                 }
             }
         }
