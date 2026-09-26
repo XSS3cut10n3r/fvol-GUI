@@ -4,7 +4,8 @@
 #
 #   bench/refbench/run.sh [CORPUS_DIR] [RUNS] [NAME_FILTER]
 #
-# CORPUS_DIR is made by bench/refbench/gen_corpus.sh (keep it on disk, not tmpfs /tmp).
+# CORPUS_DIR (default /home/user/rs-vol/testdata/scratch/codecs/corpus) is made by
+# bench/refbench/gen_corpus.sh; keep it on disk, never on tmpfs /tmp.
 # Both sides run pinned to one CPU ($CPU, default 8) and are interleaved ($ROUNDS rounds,
 # best taken) so background load affects them alike. Besides wall-clock MB/s, both harnesses
 # read user-mode CPU cycles with perf_event_open; the cycle ratio is insensitive to frequency
@@ -14,7 +15,7 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-CORPUS=${1:-$ROOT/bench/out/corpus}
+CORPUS=${1:-/home/user/rs-vol/testdata/scratch/codecs/corpus}
 RUNS=${2:-10}
 FILTER=${3:-}
 CPU=${CPU:-8}
