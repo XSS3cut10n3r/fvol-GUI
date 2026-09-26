@@ -5,3 +5,9 @@
 rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+crt-static"]
 # Several agents build concurrently on this 20-core / 62 GB box; keep each build's footprint bounded.
 jobs = 6
+
+[target.x86_64-unknown-linux-gnu]
+# cc (rust-lld) + hot-text ordering from .cargo/symbol-order.txt for the release `vol` binary;
+# every other link is passed through unchanged. See .cargo/linker.sh (its name must not look like
+# a known linker: rustc infers the linker flavour and its arguments from the name).
+linker = ".cargo/linker.sh"
