@@ -47,6 +47,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 LIMIT = "/home/user/rs-vol/bench/scripts/limit.sh"
 if not os.access(LIMIT, os.X_OK):
     LIMIT = os.path.join(ROOT, "bench/scripts/limit.sh")
+SCRATCH = "/home/user/rs-vol/testdata/scratch/yara"  # on disk, gitignored
 FIRST = 32  # instances listed in clear per string (must match FIRST_INSTANCES in benchdrv.rs)
 
 STD64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -1088,7 +1089,11 @@ def main():
 
     syn = synthetic(random.Random(args.seed ^ 0x5eed))
     mems, zeros = ([], []) if args.no_memory or not os.path.exists(args.img) else memory_slices(random.Random(args.seed), args.img, args.slices)
-    tmp = args.keep or tempfile.mkdtemp(prefix="yara_diff_")
+    # /tmp is RAM-backed tmpfs: work files go to the on-disk scratch area (DESIGN.md)
+    scratch = SCRATCH if os.path.isdir(os.path.dirname(SCRATCH)) else None
+    if scratch:
+        os.makedirs(scratch, exist_ok=True)
+    tmp = args.keep or tempfile.mkdtemp(prefix="yara_diff_", dir=scratch)
     os.makedirs(tmp, exist_ok=True)
 
     # vocabulary for the random rules: printable runs / binary snippets from the data
