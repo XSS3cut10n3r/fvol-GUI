@@ -137,7 +137,7 @@ fn build_chunks(layer: &dyn Layer, chunk: u64, overlap: u64, sections: &[(u64, u
     } else {
         // TranslationLayerInterface._scan_iterator (linear): per mapping run
         for &(start, length) in sections {
-            layer.mapping(start, length, &mut |m: Mapping| {
+            for m in collect_runs(layer, start, length) {
                 let run_end = m.offset + m.len;
                 let mut piece = m.offset;
                 while piece < run_end {
@@ -148,9 +148,69 @@ fn build_chunks(layer: &dyn Layer, chunk: u64, overlap: u64, sections: &[(u64, u
                         None => break,
                     };
                 }
-                true
-            });
+            }
         }
+    }
+    out
+}
+
+/// Granularity (log2) of the parallel mapping enumeration of Intel layers: no page (4 KiB up to
+/// 1 GiB) crosses such a boundary.
+const RUN_PIECE_BITS: u32 = 30;
+
+/// python `layer.mapping(start, length, ignore_errors=True)` as a Vec (runs coalesced exactly
+/// like python). Large ranges of Intel layers are enumerated in parallel: the range is cut at
+/// 1 GiB boundaries (a cheap sequential pass drops pieces under invalid upper-level entries,
+/// which python's walk skips as a whole too), pieces are walked concurrently and runs that
+/// meet at a boundary contiguously in both spaces are merged again. The page-by-page walk
+/// visits every piece boundary it does not skip over, so the result is identical.
+fn collect_runs(layer: &dyn Layer, start: u64, length: u64) -> Vec<Mapping> {
+    let mut out: Vec<Mapping> = Vec::new();
+    let g = 1u128 << RUN_PIECE_BITS;
+    let intel = layer.as_intel().filter(|_| length as u128 >= 8 * g && par::threads() > 1);
+    let Some(intel) = intel else {
+        layer.mapping(start, length, &mut |m| {
+            out.push(m);
+            true
+        });
+        return out;
+    };
+    let end = start as u128 + length as u128;
+    let mut pieces: Vec<(u64, u64)> = Vec::new();
+    let mut x = start as u128;
+    while x < end {
+        let pend = (((x >> RUN_PIECE_BITS) + 1) << RUN_PIECE_BITS).min(end);
+        if let Err(f) = intel.translate_raw(x as u64) {
+            if f.invalid_bits > RUN_PIECE_BITS && f.invalid_bits < 64 {
+                let span = 1u128 << f.invalid_bits;
+                x = (x / span + 1) * span;
+                continue;
+            }
+        }
+        pieces.push((x as u64, (pend - x) as u64));
+        x = pend;
+    }
+    let parts: Vec<Vec<Mapping>> = par::par_map(pieces.len(), |i| {
+        let (s, l) = pieces[i];
+        let mut v = Vec::new();
+        layer.mapping(s, l, &mut |m| {
+            v.push(m);
+            true
+        });
+        v
+    });
+    out.reserve(parts.iter().map(|p| p.len()).sum());
+    for part in parts {
+        let mut it = part.into_iter();
+        if let Some(first) = it.next() {
+            match out.last_mut() {
+                Some(last) if last.offset.wrapping_add(last.len) == first.offset && last.mapped.wrapping_add(last.len) == first.mapped => {
+                    last.len += first.len;
+                }
+                _ => out.push(first),
+            }
+        }
+        out.extend(it);
     }
     out
 }
@@ -190,6 +250,11 @@ fn file_span(layer: &dyn Layer, addr: u64, len: u64) -> Option<(&FileLayer, u64)
 //     so results keep python's order and an early stop wastes at most one round;
 //   * chunks that are not one contiguous span of the backing file are read through the layer.
 // ---------------------------------------------------------------------------------------------
+
+/// Tuning knob (temporary): env override of a constant.
+fn knob(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
 
 /// Chunks at least this big are a work item of their own.
 const BIG_CHUNK: u64 = 1 << 20;
@@ -279,7 +344,7 @@ fn make_plan(layer: &dyn Layer, chunks: Vec<Chunk>) -> Plan<'_> {
         }
         round_bytes += c.len;
         i += 1;
-        if round_bytes >= ROUND_BYTES {
+        if round_bytes >= knob("RSVOL_SCAN_ROUND", ROUND_BYTES >> 20) << 20 {
             close_round(&mut plan, round_start, i);
             round_start = i;
             round_bytes = 0;
@@ -296,7 +361,7 @@ fn close_round(plan: &mut Plan, start: usize, end: usize) {
     }
     let first_item = plan.items.len();
     // file-backed: group by window, ascending chunk index inside each group
-    let mut keyed: Vec<(u64, u32)> = (start..end).filter(|&i| plan.offs[i] != NO_FILE).map(|i| (plan.offs[i] >> WIN_SHIFT, i as u32)).collect();
+    let mut keyed: Vec<(u64, u32)> = (start..end).filter(|&i| plan.offs[i] != NO_FILE).map(|i| (plan.offs[i] >> knob("RSVOL_SCAN_WIN", WIN_SHIFT as u64), i as u32)).collect();
     keyed.sort_unstable();
     let mut k = 0;
     while k < keyed.len() {
@@ -514,7 +579,7 @@ where
         make_plan(layer, chunks)
     };
     let _t = crate::util::trace::span("scan: execute");
-    let lookahead = par::threads() * 4;
+    let lookahead = par::threads() * knob("RSVOL_SCAN_LA", 4) as usize;
     let mut round: Vec<ItemOut<S::Hit>> = Vec::new();
     par::par_map_stream(
         plan.items.len(),
@@ -1219,6 +1284,55 @@ mod tests {
         run("multi builtin(15)", &|| scan(&file, &all, None).len());
     }
 
+    /// Single-thread search kernel throughput on cache-resident data:
+    /// `cargo test --profile fast kernel_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn kernel_bench() {
+        use std::time::Instant;
+        let mut rng = Rng(12345);
+        let data: Vec<u8> = (0..(1 << 20)).map(|_| (rng.next() % 64) as u8 + if rng.below(4) == 0 { 0x40 } else { 0 }).collect();
+        let tags: [&[u8]; 15] = [
+            b"AtmT", b"Pro\xe3", b"Proc", b"Thr\xe5", b"Thre", b"Fil\xe5", b"File", b"Mut\xe1", b"Muta", b"Dri\xf6", b"Driv", b"MmLd", b"Sym\xe2",
+            b"Symb", b"CM10",
+        ];
+        for (name, s) in [("psscan(2)", MultiStringScanner::new(&[b"Pro\xe3".as_ref(), b"Proc"])), ("builtin(15)", MultiStringScanner::new(&tags))] {
+            for blk in [4096usize, 1 << 20] {
+                for simd in [false, true] {
+                    let reps = (256 << 20) / data.len();
+                    let t = Instant::now();
+                    let mut n = 0;
+                    for _ in 0..reps {
+                        for c in data.chunks(blk) {
+                            s.search_limit(c, usize::MAX, simd, |_, _| {
+                                n += 1;
+                                true
+                            });
+                        }
+                    }
+                    let dt = t.elapsed().as_secs_f64();
+                    eprintln!("{name:<12} block={blk:<8} simd={simd:<5} {:>8.0} MB/s  (hits {n})", (reps * data.len()) as f64 / dt / 1e6);
+                }
+            }
+        }
+        for simd in [false, true] {
+            let _ = simd;
+            let reps = (256 << 20) / data.len();
+            let t = Instant::now();
+            let mut n = 0;
+            for _ in 0..reps {
+                let mut pos = 0;
+                while let Some(i) = find(&data[pos..], b"Proc") {
+                    n += 1;
+                    pos += i + 1;
+                }
+            }
+            let dt = t.elapsed().as_secs_f64();
+            eprintln!("memmem Proc {:>8.0} MB/s (hits {n})", (reps * data.len()) as f64 / dt / 1e6);
+            break;
+        }
+    }
+
     /// Kernel virtual layer scan (what windows pool scanners do on Windows 10):
     /// `RSVOL_BENCH_IMG=... cargo test --profile fast vscan_bench -- --ignored --nocapture`
     #[test]
@@ -1234,6 +1348,19 @@ mod tests {
         let k = ctx.windows_kernel().unwrap();
         let l = k.vlayer;
         let secs = coalesce_sections(l, &default_sections(l));
+        // parallel run enumeration == python's sequential walk
+        let t = Instant::now();
+        let mut seq = Vec::new();
+        l.mapping(secs[0].0, secs[0].1, &mut |m| {
+            seq.push(m);
+            true
+        });
+        let t_seq = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let par_runs = collect_runs(l, secs[0].0, secs[0].1);
+        let t_par = t.elapsed().as_secs_f64();
+        assert!(seq == par_runs, "parallel runs differ: {} vs {}", seq.len(), par_runs.len());
+        eprintln!("runs: {} sequential {:.1} ms, parallel {:.1} ms (identical)", seq.len(), t_seq * 1e3, t_par * 1e3);
         let mut best = f64::MAX;
         let mut chunks = Vec::new();
         for _ in 0..reps {
