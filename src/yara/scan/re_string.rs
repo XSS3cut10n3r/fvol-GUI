@@ -404,19 +404,28 @@ impl ReString {
         } else {
             let lowest = st.unconfirmed[p].first().map_or(offset, |m| m.offset) as i64;
             let prev = &mut st.unconfirmed[p - 1];
+            // libyara walks the list removing negatively-confirmed entries until the
+            // first entry within the gap; do the removals in one compaction pass.
             let mut add = false;
-            let mut i = 0;
-            while i < prev.len() {
-                let m = prev[i];
+            let mut stop = prev.len();
+            let mut any_removed = false;
+            for (i, m) in prev.iter().enumerate() {
                 let ending = (m.offset + m.len) as i64;
                 if ending + part.gap_max < lowest {
-                    prev.remove(i);
-                    continue;
+                    any_removed = true;
                 } else if ending + part.gap_max >= offset as i64 && ending + part.gap_min <= offset as i64 {
                     add = true;
+                    stop = i;
                     break;
                 }
-                i += 1;
+            }
+            if any_removed {
+                let mut idx = 0usize;
+                prev.retain(|m| {
+                    let keep = idx >= stop || (m.offset + m.len) as i64 + part.gap_max >= lowest;
+                    idx += 1;
+                    keep
+                });
             }
             add
         };
@@ -435,16 +444,15 @@ impl ReString {
             }
             let full = (self.parts.len() - 1) as u32;
             let head = &mut st.unconfirmed[0];
-            let mut i = 0;
-            while i < head.len() {
-                if head[i].chain_length == full {
-                    let m = head.remove(i);
-                    let total = offset + len - m.offset;
-                    out.push(Match { offset: m.offset, len: total, xor_key: 0 });
-                    continue;
+            // Move fully confirmed head matches to the output (in list order).
+            head.retain(|m| {
+                if m.chain_length == full {
+                    out.push(Match { offset: m.offset, len: offset + len - m.offset, xor_key: 0 });
+                    false
+                } else {
+                    true
                 }
-                i += 1;
-            }
+            });
         } else {
             let list = &mut st.unconfirmed[p];
             if list.len() >= MAX_UNCONFIRMED {
