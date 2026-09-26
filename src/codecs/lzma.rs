@@ -6,8 +6,24 @@
 //!
 //! Design: the whole output lives in one flat buffer, so the "dictionary" is simply the
 //! output produced since the last dictionary reset. No circular window, no wrap checks.
-//! The hot loop keeps the range coder, state and reps in locals and decodes bits through
-//! macros so nothing is a function call.
+//!
+//! Speed is set by the range coder's dependency chain (shr, imul, sub, cmov: ~6 cycles per
+//! decoded bit) plus mispredicted branches. On x86-64 the symbol loop is one asm block
+//! (`decode_asm`) with a fixed register plan, which is what beats liblzma (1.10-1.2x on
+//! JSON, 1.1x on binaries, `bench/refbench/codec_xz_micro.sh`):
+//! * bit trees load both children before the bit is known and advance the node with sbb;
+//!   probability updates are loads from a (p, bit) table kept in front of the
+//!   probabilities, leaving ports 0/6 to the chain;
+//! * a literal with match byte walks the match byte's nodes with addresses that do not
+//!   depend on the decoding, and joins the plain literal tree at the first differing bit;
+//! * the next literal's coder (from the previous byte) and match byte are known before the
+//!   symbol starts: from three bits in the middle of a literal, or from the match source;
+//! * the distance slot tree of long matches is set up before their length is decoded, match
+//!   sources are prefetched once the distance is known to within 16 bytes, and matches copy
+//!   64 bytes at a time.
+//!
+//! The Rust loop (`decode_inner`) is the portable implementation (other targets) and, in
+//! tests, the independent reference the asm loop is checked against.
 
 use crate::error::{Error, Result};
 
@@ -586,7 +602,7 @@ struct AsmCtx {
     out_end: *mut u8,     // 24
     reps: [u64; 4],       // 32, 40, 48, 56
     state: u64,           // 64
-    lctx: u64,            // 72: literal context of the next literal (previous byte >> 5)
+    _unused: u64,         // 72
     pending: u64,         // 80
     status: u64,          // 88
     len: u64,             // 96
@@ -597,6 +613,20 @@ struct AsmCtx {
     hioff: [u32; 256],    // 184: (byte >> (8 - lc)) * 0x600, literal coder offset of a byte
     looff: [u32; 16],     // 1208: ((p & lp_mask) << lc) * 0x600 for p & 15
 }
+
+// The asm template addresses these fields by offset.
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    use std::mem::offset_of;
+    assert!(offset_of!(AsmCtx, in_limit) == 0 && offset_of!(AsmCtx, out_limit) == 8);
+    assert!(offset_of!(AsmCtx, out_start) == 16 && offset_of!(AsmCtx, out_end) == 24);
+    assert!(offset_of!(AsmCtx, reps) == 32 && offset_of!(AsmCtx, state) == 64);
+    assert!(offset_of!(AsmCtx, pending) == 80 && offset_of!(AsmCtx, status) == 88);
+    assert!(offset_of!(AsmCtx, len) == 96 && offset_of!(AsmCtx, next) == 104);
+    assert!(offset_of!(AsmCtx, dbase) == 152 && offset_of!(AsmCtx, scratch) == 168);
+    assert!(offset_of!(AsmCtx, pbmask) == 176 && offset_of!(AsmCtx, hioff) == 184);
+    assert!(offset_of!(AsmCtx, looff) == 1208);
+};
 
 #[cfg(target_arch = "x86_64")]
 const ASM_NEXT: [u8; 48] = [
@@ -1071,7 +1101,7 @@ impl LzmaDecoder {
             out_end: outp.wrapping_add(out.len()),
             reps: self.reps.map(|r| r as u64),
             state: self.state as u64,
-            lctx: 0,
+            _unused: 0,
             pending: 0,
             status: 0,
             len: 0,
