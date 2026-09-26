@@ -1,8 +1,7 @@
 //! gzip (RFC 1952) decoder: multiple members, zero padding between members (like python's
 //! `gzip.decompress`), CRC-32 and ISIZE verification.
 
-use super::crc::crc32;
-use super::inflate::inflate_into;
+use super::inflate::{Check, inflate_into_check};
 use crate::error::{Error, Result};
 
 fn err(what: &str) -> Error {
@@ -54,17 +53,20 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     } else {
         0
     };
-    let mut out = Vec::with_capacity(hint.saturating_add(512));
+    let mut out = Vec::new();
+    // Size hint only; a failed reservation just means growing later.
+    let _ = out.try_reserve(hint.saturating_add(512));
     let mut off = 0usize;
     loop {
         let start = parse_header(data, off)?;
         let member_start = out.len();
-        let used = inflate_into(&data[start..], &mut out)?;
+        let mut check = Check::crc32();
+        let used = inflate_into_check(&data[start..], &mut out, &mut check)?;
         let t = data.get(start + used..start + used + 8).ok_or_else(|| err("truncated trailer"))?;
         let crc = u32::from_le_bytes([t[0], t[1], t[2], t[3]]);
         let isize = u32::from_le_bytes([t[4], t[5], t[6], t[7]]);
         let member = &out[member_start..];
-        if crc32(member) != crc {
+        if check.value != crc {
             return Err(err("CRC check failed"));
         }
         if member.len() as u32 != isize {

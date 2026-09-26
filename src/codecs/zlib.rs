@@ -1,6 +1,6 @@
 //! zlib (RFC 1950) container: 2-byte header, raw DEFLATE, big-endian Adler-32 trailer.
 
-use super::inflate::inflate_into;
+use super::inflate::{Check, inflate_into_check};
 use crate::error::{Error, Result};
 
 fn err(what: &str) -> Error {
@@ -13,7 +13,9 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     decompress_with_capacity(data, data.len().saturating_mul(4).clamp(1 << 12, 1 << 28))
 }
 
-/// As [`decompress`], pre-allocating `capacity` bytes of output.
+/// As [`decompress`], pre-allocating `capacity` bytes of output (a hint: if that much memory
+/// is not available the output simply grows as needed; the hint is also capped at what
+/// DEFLATE can expand `data` to).
 pub fn decompress_with_capacity(data: &[u8], capacity: usize) -> Result<Vec<u8>> {
     if data.len() < 2 {
         return Err(err("truncated header"));
@@ -28,10 +30,12 @@ pub fn decompress_with_capacity(data: &[u8], capacity: usize) -> Result<Vec<u8>>
     if flg & 0x20 != 0 {
         return Err(err("preset dictionary not supported"));
     }
-    let mut out = Vec::with_capacity(capacity);
-    let used = inflate_into(&data[2..], &mut out)?;
+    let mut out = Vec::new();
+    let _ = out.try_reserve(capacity.min(data.len().saturating_mul(1032).saturating_add(1032)));
+    let mut check = Check::adler32();
+    let used = inflate_into_check(&data[2..], &mut out, &mut check)?;
     let t = data.get(2 + used..2 + used + 4).ok_or_else(|| err("truncated Adler-32 trailer"))?;
-    if adler32(&out) != u32::from_be_bytes([t[0], t[1], t[2], t[3]]) {
+    if check.value != u32::from_be_bytes([t[0], t[1], t[2], t[3]]) {
         return Err(err("incorrect data check"));
     }
     Ok(out)
@@ -49,8 +53,13 @@ pub fn adler32_update(adler: u32, data: &[u8]) -> u32 {
     const BLOCK: usize = 5536;
     let mut s1 = (adler & 0xFFFF) as u64;
     let mut s2 = (adler >> 16) as u64;
-    let mut blocks = data.chunks_exact(BLOCK);
-    for blk in &mut blocks {
+    let mut rest = data;
+    // Any multiple of 32 bytes (up to BLOCK) goes through the vector loop, so short and
+    // unaligned updates (inflate updates the checksum in 64 KiB chunks) stay fast.
+    while rest.len() >= 32 {
+        let n = rest.len().min(BLOCK) & !31;
+        let (blk, tail) = rest.split_at(n);
+        rest = tail;
         // Lane j sums bytes j, j+32, ... (a) and the running prefix sums (b); a plain loop
         // over fixed-size arrays that LLVM vectorises.
         let mut a = [0u32; 32];
@@ -69,11 +78,12 @@ pub fn adler32_update(adler: u32, data: &[u8]) -> u32 {
             sb += b[j] as u64;
             sj += j as u64 * a[j] as u64;
         }
-        // s2 += N*s1 + sum_t (N - t + 1) b_t, see the derivation in the tests.
-        s2 = (s2 + BLOCK as u64 * s1 + 32 * (sb + sa) - sj) % MOD;
+        // With k = n / 32 rows, byte (c, j) at t = 32c + j contributes (n - t) to s2:
+        // sum_j sum_c (32 (k - c) - j) x = 32 (b_j + a_j) - j a_j summed over the lanes.
+        s2 = (s2 + n as u64 * s1 + 32 * (sb + sa) - sj) % MOD;
         s1 = (s1 + sa) % MOD;
     }
-    for &byte in blocks.remainder() {
+    for &byte in rest {
         s1 += byte as u64;
         s2 += s1;
     }

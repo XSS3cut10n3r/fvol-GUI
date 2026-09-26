@@ -254,11 +254,73 @@ impl Bits {
     }
 }
 
+/// Checksum of the produced output, updated chunk by chunk while the bytes are still in
+/// cache (a separate pass afterwards would re-read the whole output from memory).
+pub(crate) struct Check {
+    kind: CheckKind,
+    /// Current checksum value (CRC-32 or Adler-32, standard initial values).
+    pub(crate) value: u32,
+    /// Output position up to which `value` is computed.
+    done: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckKind {
+    None,
+    Crc32,
+    Adler32,
+}
+
+/// Output bytes between checksum updates (the chunk stays in L2).
+const CHECK_CHUNK: usize = 64 << 10;
+
+impl Check {
+    pub(crate) fn none() -> Check {
+        Check { kind: CheckKind::None, value: 0, done: 0 }
+    }
+    pub(crate) fn crc32() -> Check {
+        Check { kind: CheckKind::Crc32, value: 0, done: 0 }
+    }
+    pub(crate) fn adler32() -> Check {
+        Check { kind: CheckKind::Adler32, value: 1, done: 0 }
+    }
+
+    /// Output position at which the fast loop should pause for an update.
+    #[inline]
+    fn limit(&self) -> usize {
+        if self.kind == CheckKind::None { usize::MAX } else { self.done + CHECK_CHUNK }
+    }
+
+    /// Folds `base[done..upto]` (written output) into the checksum.
+    ///
+    /// # Safety
+    /// `base[..upto]` initialised.
+    unsafe fn update(&mut self, base: *const u8, upto: usize) {
+        if upto <= self.done {
+            return;
+        }
+        // SAFETY: caller guarantees initialised bytes below `upto`.
+        let chunk = unsafe { std::slice::from_raw_parts(base.add(self.done), upto - self.done) };
+        self.value = match self.kind {
+            CheckKind::None => 0,
+            CheckKind::Crc32 => super::crc::crc32_update(self.value, chunk),
+            CheckKind::Adler32 => super::zlib::adler32_update(self.value, chunk),
+        };
+        self.done = upto;
+    }
+}
+
 /// Decodes a raw DEFLATE stream from `input`, appending to `out`. Back-references may only
 /// reach bytes produced by this stream. Returns the number of input bytes consumed (the
 /// stream end rounded up to a byte boundary).
 pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+    inflate_into_check(input, out, &mut Check::none())
+}
+
+/// As [`inflate_into`], also computing `check` over the bytes this stream appends.
+pub(crate) fn inflate_into_check(input: &[u8], out: &mut Vec<u8>, check: &mut Check) -> Result<usize> {
     let start = out.len();
+    check.done = start;
     let mut bits = Bits { buf: 0, count: 0, ip: 0 };
     let mut dynamic = Tables { lit: Vec::with_capacity(4096), dist: Vec::with_capacity(1024) };
     let mut pre = Vec::with_capacity(1 << PRE_BITS);
@@ -280,11 +342,13 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
                 let src = input.get(bits.ip..bits.ip + len).ok_or_else(|| corrupt("truncated stored block"))?;
                 out.try_reserve(len).map_err(|_| alloc_error())?;
                 out.extend_from_slice(src);
+                // SAFETY: out[..len] initialised.
+                unsafe { check.update(out.as_ptr(), out.len()) };
                 bits.ip += len;
             }
             1 => {
                 let t = fixed_tables();
-                decode_block(input, &mut bits, out, start, &t.lit, &t.dist)?;
+                decode_block(input, &mut bits, out, start, &t.lit, &t.dist, check)?;
             }
             2 => {
                 let hlit = bits.take(input, 5) as usize + 257;
@@ -346,7 +410,7 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
                 }
                 build_table(&lens[..hlit], LIT_BITS, Kind::Lit, &mut dynamic.lit)?;
                 build_table(&lens[hlit..n], DIST_BITS, Kind::Dist, &mut dynamic.dist)?;
-                decode_block(input, &mut bits, out, start, &dynamic.lit, &dynamic.dist)?;
+                decode_block(input, &mut bits, out, start, &dynamic.lit, &dynamic.dist, check)?;
             }
             _ => return Err(corrupt("invalid block type")),
         }
@@ -355,12 +419,22 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
         }
     }
     bits.check(input)?;
+    // SAFETY: out[..len] initialised.
+    unsafe { check.update(out.as_ptr(), out.len()) };
     // Round the consumed bit count up to whole bytes.
     Ok(bits.consumed_bits().div_ceil(8))
 }
 
 /// Decodes one Huffman-coded block (until end-of-block).
-fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, lt: &[u32], dt: &[u32]) -> Result<()> {
+fn decode_block(
+    input: &[u8],
+    bits: &mut Bits,
+    out: &mut Vec<u8>,
+    start: usize,
+    lt: &[u32],
+    dt: &[u32],
+    check: &mut Check,
+) -> Result<()> {
     const LMASK: u64 = (1 << LIT_BITS) - 1;
     const DMASK: u64 = (1 << DIST_BITS) - 1;
     let in_len = input.len();
@@ -421,7 +495,8 @@ fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, 
         // ---------------- fast loop ----------------
         if ip + FAST_IN <= in_len && pos + FAST_OUT <= cap {
             let in_end = in_len - FAST_IN;
-            let out_end = cap - FAST_OUT;
+            // The fast loop also pauses at checksum chunk boundaries.
+            let out_end = (cap - FAST_OUT).min(check.limit());
             // Branchless refill to >= 56 bits (ip <= in_end, so 8 bytes are readable).
             macro_rules! refill {
                 () => {{
@@ -512,8 +587,14 @@ fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, 
                 pos += len;
             }
             if ip <= in_end {
-                // Output space ran low.
-                grow!(0);
+                if pos + FAST_OUT > cap {
+                    // Output space ran low.
+                    grow!(0);
+                } else {
+                    // Checksum chunk boundary.
+                    // SAFETY: base[..pos] written.
+                    unsafe { check.update(base, pos) };
+                }
                 continue;
             }
         }
