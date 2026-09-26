@@ -35,27 +35,33 @@
 //!
 //! # Speed
 //!
-//! The chunk decoder works on raw pointers with the bounds proven once per 8-item group:
-//! literal runs are moved with one 8-byte copy (the flag byte's trailing zero count gives the
-//! run length), matches with 16-byte copies (8-byte for offsets 8..15, a replicated pattern
-//! word for offsets below 8), and the output buffer is sized up front from the chunk headers.
-//! Wide copies may write up to [`SLACK`] bytes past the chunk end; the spare capacity is
-//! reserved for that.
+//! The chunk decoder's main loop runs one branch-free step per token on raw pointers, with the
+//! bounds proven once per step (see [`decode_chunk_fast`]): an 8-byte copy for the literal
+//! run before the token, a 64-byte memmove for the match, the next flag byte preloaded a group
+//! ahead, and the offset/length split tracked outside the dependency chain. Branch
+//! mispredictions, not work, dominate simpler LZNT1 decoders (the number of items per flag
+//! byte is unpredictable). Overlapping or long matches go through a general copy (16/8-byte
+//! blocks, a replicated pattern word for offsets below 8). The output buffer is sized up
+//! front from the chunk headers.
 
 use crate::error::{Error, Result};
+use std::hint::select_unpredictable;
 use std::mem::MaybeUninit;
 use std::ptr;
 
 /// Maximum decompressed size of one chunk (also the chunk slot size on Windows).
 pub const CHUNK_SIZE: usize = 4096;
 
-/// Bytes the fast chunk decoder may write past the last byte it produces (wide copies write at
-/// most 16 bytes past the end of a chunk; the rest is margin).
+/// Bytes the chunk decoder may write past the end of a chunk (the general match copy rounds
+/// its length up to a multiple of 8 or 16 bytes).
 const SLACK: usize = 32;
 
-/// Input bytes a group needs for the unchecked path: the flag byte, 8 two-byte tokens and an
-/// 8-byte speculative literal read after the last item.
-const FAST_IN: usize = 1 + 16 + 8;
+/// Bytes moved by the straight-path match copy.
+const COPY: usize = 64;
+
+/// Input bytes a fast step may read: an 8-byte literal run copy, then (after at most 8 bytes)
+/// a `COPY`-byte copy from the input on a refill.
+const FAST_IN: usize = 8 + COPY;
 
 /// Why a compressed chunk is invalid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,16 +246,39 @@ unsafe fn rd16(p: *const u8) -> usize {
     u16::from_le_bytes(unsafe { ptr::read_unaligned(p as *const [u8; 2]) }) as usize
 }
 
+// Wide copies move `MaybeUninit` bytes: a speculative copy may pick up bytes of the output
+// buffer that are not written yet (they are overwritten before they count).
+type W8 = MaybeUninit<[u8; 8]>;
+type W16 = MaybeUninit<[u8; 16]>;
+
 #[inline(always)]
 unsafe fn copy8(src: *const u8, dst: *mut u8) {
     // SAFETY: caller guarantees 8 readable bytes at src and 8 writable bytes at dst.
-    unsafe { ptr::write_unaligned(dst as *mut [u8; 8], ptr::read_unaligned(src as *const [u8; 8])) }
+    unsafe { ptr::write_unaligned(dst as *mut W8, ptr::read_unaligned(src as *const W8)) }
 }
 
 #[inline(always)]
 unsafe fn copy16(src: *const u8, dst: *mut u8) {
     // SAFETY: caller guarantees 16 readable bytes at src and 16 writable bytes at dst.
-    unsafe { ptr::write_unaligned(dst as *mut [u8; 16], ptr::read_unaligned(src as *const [u8; 16])) }
+    unsafe { ptr::write_unaligned(dst as *mut W16, ptr::read_unaligned(src as *const W16)) }
+}
+
+/// Hides `x` from the optimizer, so that a condition combined from several flags stays one
+/// branch (LLVM would otherwise split `a & b` into two branches, one of them unpredictable).
+#[inline(always)]
+fn opaque(mut x: usize) -> usize {
+    // SAFETY: an empty asm block that only claims to modify a register.
+    unsafe { core::arch::asm!("/* {0} */", inout(reg) x, options(pure, nomem, nostack, preserves_flags)) };
+    x
+}
+
+/// (offset, length) of token `tok` at output position `pos`: offset bits = max(4,
+/// bit_length(pos - 1)). The mask keeps pos == 0 in range (the offset check then fails) and
+/// is a no-op for pos <= 8192.
+#[inline(always)]
+fn split(pos: usize, tok: usize) -> (usize, usize) {
+    let bits = 32 - (((pos as u32).wrapping_sub(1) | 15) & 0x1FFF).leading_zeros() as usize;
+    ((tok >> (16 - bits)) + 1, (tok & (0xFFFF >> bits)) + 3)
 }
 
 /// `REP[d]` replicates the low `d` bytes of a word across 8 bytes (d = 1..7).
@@ -269,20 +298,16 @@ const REP: [u64; 8] = [
 /// never starts before the pattern).
 const STEP: [usize; 8] = [0, 8, 8, 9, 8, 10, 12, 14];
 
-/// Expands the back-reference `tok` at output position `pos` (`op` = chunk start + `pos`);
-/// returns its length.
+/// Checks and expands the back-reference `tok` at output position `pos` (`op` = chunk start +
+/// `pos`), any offset and length; returns the length.
 ///
 /// # Safety
 /// `op - pos` is the start of a buffer holding `pos` initialized bytes followed by at least
 /// `CHUNK_SIZE - pos + 16` writable bytes when `pos <= CHUNK_SIZE`. Nothing is accessed when an
 /// error is returned.
-#[inline(always)]
+#[inline(never)]
 unsafe fn copy_match(op: *mut u8, pos: usize, tok: usize) -> core::result::Result<usize, Bad> {
-    // Offset bits = max(4, bit_length(pos - 1)); the mask keeps pos == 0 in range (the offset
-    // check then fails) and is a no-op for pos <= 8192.
-    let bits = 32 - (((pos as u32).wrapping_sub(1) | 15) & 0x1FFF).leading_zeros() as usize;
-    let off = (tok >> (16 - bits)) + 1;
-    let len = (tok & (0xFFFF >> bits)) + 3;
+    let (off, len) = split(pos, tok);
     if off > pos {
         return Err(Bad::Offset);
     }
@@ -342,7 +367,66 @@ unsafe fn copy_match(op: *mut u8, pos: usize, tok: usize) -> core::result::Resul
     Ok(len)
 }
 
+/// Last output position at which a fast step may start: an 8-literal run plus a `COPY`-byte
+/// copy then still end inside the chunk.
+const FAST_POS_MAX: usize = CHUNK_SIZE - COPY - 8;
+
+/// Decoder position inside a compressed chunk.
+struct Cursor {
+    /// Next input byte.
+    s: *const u8,
+    /// Output position (bytes produced so far).
+    pos: usize,
+    /// Pending item flags of the current group above a sentinel bit (1 = group used up).
+    f: u32,
+}
+
+/// Decodes one item (or reads one flag byte), checking everything; false at the end of input.
+///
+/// # Safety
+/// As [`decode_chunk_fast`]; `c.s <= end`.
+#[inline(always)]
+unsafe fn checked_item(c: &mut Cursor, end: *const u8, dst: *mut u8) -> core::result::Result<bool, Bad> {
+    if c.s >= end {
+        return Ok(false);
+    }
+    // SAFETY: c.s < end; literal writes stay below CHUNK_SIZE, copy_match checks its own.
+    unsafe {
+        if c.f == 1 {
+            c.f = *c.s as u32 | 0x100;
+            c.s = c.s.add(1);
+            return Ok(true);
+        }
+        if c.f & 1 == 0 {
+            if c.pos >= CHUNK_SIZE {
+                return Err(Bad::Overflow);
+            }
+            *dst.add(c.pos) = *c.s;
+            c.s = c.s.add(1);
+            c.pos += 1;
+        } else {
+            if (end as usize - c.s as usize) < 2 {
+                return Err(Bad::Truncated);
+            }
+            let tok = rd16(c.s);
+            c.s = c.s.add(2);
+            c.pos += copy_match(dst.add(c.pos), c.pos, tok)?;
+        }
+    }
+    c.f >>= 1;
+    Ok(true)
+}
+
 /// Decodes one compressed chunk into `dst`; returns the number of bytes produced (<= 4096).
+///
+/// The fast path takes one step per token: the literal run before it (one 8-byte copy; its
+/// length is the trailing zero count of the pending flags), then either the token or, when
+/// the flag byte is used up, a refill from the next flag byte (preloaded one group ahead).
+/// Token and refill are selected without branches: a `COPY`-byte memmove from the match
+/// source (exact whenever length <= min(offset, COPY)) or, harmlessly, from the input. So the
+/// number of items per flag byte never drives a branch; only overlapping or longer matches and
+/// invalid offsets leave the straight path. The last `COPY + 8` bytes of the chunk's output
+/// and its last `FAST_IN` input bytes are decoded one checked item at a time.
 ///
 /// # Safety
 /// `dst` must be valid for writes of `CHUNK_SIZE + SLACK` bytes. Only bytes written by this
@@ -351,69 +435,71 @@ unsafe fn decode_chunk_fast(src: &[u8], dst: *mut u8) -> core::result::Result<us
     let mut s = src.as_ptr();
     // SAFETY: one past the end of `src`.
     let end = unsafe { s.add(src.len()) };
+    // Last input position where a fast step may start.
+    let fast_end = (end as usize).saturating_sub(FAST_IN);
     let mut pos = 0usize;
-    // Groups whose 8 items are all inside the chunk, with room for the speculative reads:
-    // no per-item input checks. Output: `pos <= CHUNK_SIZE` holds at the start of each group
-    // and after each match, so the 8-byte literal copies stay within the slack; literals
-    // overrunning the chunk are caught at the end of the group (or by the next match check).
-    while end as usize - s as usize >= FAST_IN {
-        // SAFETY: FAST_IN readable bytes at s; see above for the writes.
+    // Pending item flags of the current group above a sentinel bit (1 = group used up).
+    let mut f: u32 = 1;
+    // Length bits of a token (16 - offset bits) for positions up to `thr`, updated when `pos`
+    // passes `thr` (a well predicted branch that keeps the split off the dependency chain
+    // through `pos`).
+    let mut lb = 12usize;
+    let mut thr = 16usize;
+    // The next flag byte, loaded a group ahead so that a refill does not wait for a load.
+    let mut g = if s as usize <= fast_end {
+        // SAFETY: the first flag byte.
+        unsafe { *s as u32 }
+    } else {
+        0
+    };
+    while (s as usize <= fast_end) & (pos <= FAST_POS_MAX) {
+        // SAFETY: reads stay within the FAST_IN input bytes (8-byte literal run copy, then
+        // token / refill byte and a COPY-byte copy after at most 8 bytes, the flag byte after
+        // next at most 17 bytes after the refill byte); writes end at pos + 8 + COPY <=
+        // CHUNK_SIZE; `from` is the input or, for a token that passed the checks (off <=
+        // pos), inside the output buffer.
         unsafe {
-            let mut f = *s as u32 | 0x100;
-            s = s.add(1);
-            loop {
-                // Literals before the next token (or before the sentinel bit).
-                let t = f.trailing_zeros() as usize;
-                copy8(s, dst.add(pos));
-                s = s.add(t);
-                pos += t;
-                f >>= t;
-                if f == 1 {
-                    break;
-                }
-                f >>= 1;
-                let tok = rd16(s);
+            let t = f.trailing_zeros() as usize;
+            copy8(s, dst.add(pos));
+            s = s.add(t);
+            pos += t;
+            f >>= t;
+            // Token (bit 0 set below the sentinel) or end of the flag byte (sentinel only).
+            let tok = f > 1;
+            let w = rd16(s);
+            if pos > thr {
+                let bits = 32 - ((pos - 1) as u32).leading_zeros() as usize;
+                lb = 16 - bits;
+                thr = 1 << bits;
+            }
+            let off = (w >> lb) + 1;
+            let len = (w & ((1 << lb) - 1)) + 3;
+            let op = dst.add(pos);
+            // Straight path: off <= pos, len <= min(off, COPY).
+            let slow = tok as usize & ((off > pos) | (len > off.min(COPY))) as usize;
+            if opaque(slow) != 0 {
+                pos += copy_match(op, pos, w)?;
                 s = s.add(2);
-                pos += copy_match(dst.add(pos), pos, tok)?;
+                f >>= 1;
+                continue;
             }
-        }
-        if pos > CHUNK_SIZE {
-            return Err(Bad::Overflow);
+            // On a refill `s` is the flag byte `g` came from; the flag byte after it is at most
+            // 17 bytes further (inside the FAST_IN window), so it is loaded unconditionally.
+            let g_r = *s.add(9 + g.count_ones() as usize) as u32;
+            let from = select_unpredictable(tok, op.wrapping_sub(off) as *const u8, s);
+            // memmove semantics: all bytes are loaded before any is stored, so every byte of a
+            // non-overlapping match (len <= off) is right; the rest is overwritten later.
+            ptr::copy(from, op, COPY);
+            pos += len & (tok as usize).wrapping_neg();
+            s = s.add(1 + tok as usize);
+            f = select_unpredictable(tok, f >> 1, g | 0x100);
+            g = select_unpredictable(tok, g, g_r);
         }
     }
-    // Tail: the last groups, checking every item.
-    while s < end {
-        // SAFETY: s < end.
-        let mut flags = unsafe { *s };
-        s = unsafe { s.add(1) };
-        let mut n = 0;
-        while n < 8 && s < end {
-            if flags & 1 == 0 {
-                if pos >= CHUNK_SIZE {
-                    return Err(Bad::Overflow);
-                }
-                // SAFETY: s < end, pos < CHUNK_SIZE.
-                unsafe {
-                    *dst.add(pos) = *s;
-                    s = s.add(1);
-                }
-                pos += 1;
-            } else {
-                if (end as usize - s as usize) < 2 {
-                    return Err(Bad::Truncated);
-                }
-                // SAFETY: 2 readable bytes at s; pos <= CHUNK_SIZE (literals are checked).
-                unsafe {
-                    let tok = rd16(s);
-                    s = s.add(2);
-                    pos += copy_match(dst.add(pos), pos, tok)?;
-                }
-            }
-            flags >>= 1;
-            n += 1;
-        }
-    }
-    Ok(pos)
+    let mut c = Cursor { s, pos, f };
+    // SAFETY: c.s <= end throughout.
+    while unsafe { checked_item(&mut c, end, dst) }? {}
+    Ok(c.pos)
 }
 
 /// Byte-at-a-time chunk decoder into `out` (at most 4096 bytes: the chunk's output window).
@@ -1173,6 +1259,42 @@ mod tests {
                     let c = e.chunk();
                     assert_eq!(decompress(&c).unwrap(), want, "start {start} off {off} len {len}");
                 }
+            }
+        }
+    }
+
+    /// Matches around the straight-path limits (len <= min(off, COPY)) in the middle of a
+    /// chunk, followed by enough input to stay on the fast path, and literal runs of every
+    /// length in front of them.
+    #[test]
+    fn codecs_lznt1_straight_path_boundaries() {
+        let mut rng = Rng(5);
+        for off in (1..=80).chain([127, 128, 129, 1000]) {
+            for len in [3usize, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 66, off - 1, off, off + 1] {
+                // Up to 66-byte lengths are encodable at positions 513..=1024.
+                let at = if off > 500 { 1100 } else { 600 } + rng.below(9);
+                let bits = (usize::BITS - (at - 1).leading_zeros()) as usize;
+                if len < 3 || len - 3 > 0xFFFF >> bits {
+                    continue;
+                }
+                let mut e = Enc::new();
+                let mut want = Vec::new();
+                while e.pos < at {
+                    let b = rng.next() as u8;
+                    e.lit(b);
+                    want.push(b);
+                }
+                e.tok(off, len);
+                for _ in 0..len {
+                    want.push(want[want.len() - off]);
+                }
+                for _ in 0..100 {
+                    let b = rng.next() as u8;
+                    e.lit(b);
+                    want.push(b);
+                }
+                let c = e.chunk();
+                assert_eq!(decompress(&c).unwrap(), want, "off {off} len {len}");
             }
         }
     }
