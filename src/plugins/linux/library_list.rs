@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::objects::Obj;
 use crate::objects::util::array_to_string;
 use crate::plugins::linux::pslist::{collect_tasks, pid_filter};
+use crate::plugins::linux::pyexc::raise_if_python;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::TableRef;
@@ -101,11 +102,11 @@ impl Plugin for LibraryList {
                 out.row(0, row)?;
             }
             if let Some(e) = err {
-                return Err(e);
+                return Err(raise_if_python(e));
             }
         }
         match tail {
-            Some(e) => Err(e),
+            Some(e) => Err(raise_if_python(e)),
             None => Ok(()),
         }
     }

@@ -12,7 +12,10 @@ pub mod proc;
 pub mod psaux;
 pub mod pslist;
 pub mod pstree;
+pub mod pyexc;
 pub mod ptrace;
+pub mod vmaregexscan;
+pub mod vmayarascan;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&bash::Bash);
@@ -28,4 +31,6 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&pslist::PsList);
     v.push(&pstree::PsTree);
     v.push(&ptrace::Ptrace);
+    v.push(&vmaregexscan::VmaRegExScan);
+    v.push(&vmayarascan::VmaYaraScan);
 }
