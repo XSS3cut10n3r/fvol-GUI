@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::util::fxhash::hash_bytes;
 use crate::util::json::Json;
 use crate::util::mmap::Mmap;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Index of a type node. High bit set = runtime-created node.
@@ -368,6 +368,8 @@ pub struct SymbolTable {
     meta_json: OnceLock<Json<'static>>,
     table_mapping: Vec<(String, String)>,
     by_addr: OnceLock<Vec<(u64, u32)>>,
+    /// per user type: 0 = not yet validated, 1 = valid, 2 = corrupt (see `validate_type`)
+    checked: Box<[AtomicU8]>,
 }
 
 // ----- raw little-endian readers -----
@@ -398,39 +400,11 @@ impl SymbolTable {
         }
         let fo = 16 + sec::N * 16;
         let format = (rd32(b, fo), rd32(b, fo + 4), rd32(b, fo + 8));
-        // The string pool holds only names: validate it once (one SIMD-friendly pass) so name
-        // slices only need char-boundary checks afterwards.
-        let (so, sl) = secs[sec::STRINGS];
-        if std::str::from_utf8(&b[so..so + sl]).is_err() {
-            return Err(Error::msg("corrupt symbol table blob (strings)"));
-        }
-        // Validate the structures `member()` reads without bounds checks (one cheap pass).
-        {
-            let (uo, ul) = secs[sec::UTYPES];
-            let (mo, ml) = secs[sec::MEMBERS];
-            let (ho, hl) = secs[sec::MHASH];
-            let nmembers = ml / MEMBER_SZ;
-            let nslots = hl / 4;
-            if ul % UTYPE_SZ != 0 || ml % MEMBER_SZ != 0 {
-                return Err(Error::msg("corrupt symbol table blob (types)"));
-            }
-            for r in b[uo..uo + ul].chunks_exact(UTYPE_SZ) {
-                let (ms, mc, hs, hn) = (rd32(r, 16) as usize, rd32(r, 20) as usize, rd32(r, 24) as usize, rd32(r, 28) as usize);
-                let ok = ms.checked_add(mc).is_some_and(|e| e <= nmembers)
-                    && hs.checked_add(hn).is_some_and(|e| e <= nslots)
-                    && (hn == 0 || hn.is_power_of_two())
-                    && b[ho + hs * 4..ho + (hs + hn) * 4].chunks_exact(4).all(|v| (u32::from_le_bytes(v.try_into().unwrap()) as usize) <= mc);
-                if !ok {
-                    return Err(Error::msg("corrupt symbol table blob (member index)"));
-                }
-            }
-            for r in b[mo..mo + ml].chunks_exact(MEMBER_SZ) {
-                let (off, len) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
-                if off.checked_add(len).is_none_or(|e| e > sl) {
-                    return Err(Error::msg("corrupt symbol table blob (member names)"));
-                }
-            }
-        }
+        // Validation is lazy (a 27 MB kernel blob would be faulted in and checked on every
+        // load): names are UTF-8-checked when returned as &str, and each user type's member
+        // index is checked the first time `member()` probes it.
+        let ntypes = secs[sec::UTYPES].1 / UTYPE_SZ;
+        let checked = (0..ntypes).map(|_| AtomicU8::new(0)).collect();
         Ok(SymbolTable {
             name: name.to_string(),
             blob,
@@ -442,7 +416,36 @@ impl SymbolTable {
             meta_json: OnceLock::new(),
             table_mapping: Vec::new(),
             by_addr: OnceLock::new(),
+            checked,
         })
+    }
+
+    /// Check user type `ut`'s member range, hash slots and member name ranges (what `member()`
+    /// reads without bounds checks). Memoized per type.
+    #[cold]
+    fn validate_type(&self, ut: usize) -> bool {
+        let b = self.b();
+        let (uo, ul) = self.secs[sec::UTYPES];
+        let (mo, ml) = self.secs[sec::MEMBERS];
+        let (ho, hl) = self.secs[sec::MHASH];
+        let sl = self.secs[sec::STRINGS].1;
+        let (nmembers, nslots) = (ml / MEMBER_SZ, hl / 4);
+        let ok = (ut + 1) * UTYPE_SZ <= ul && {
+            let r = &b[uo + ut * UTYPE_SZ..uo + (ut + 1) * UTYPE_SZ];
+            let (ms, mc, hs, hn) = (rd32(r, 16) as usize, rd32(r, 20) as usize, rd32(r, 24) as usize, rd32(r, 28) as usize);
+            ms.checked_add(mc).is_some_and(|e| e <= nmembers)
+                && hs.checked_add(hn).is_some_and(|e| e <= nslots)
+                && (hn == 0 || hn.is_power_of_two())
+                && b[ho + hs * 4..ho + (hs + hn) * 4].chunks_exact(4).all(|v| (u32::from_le_bytes(v.try_into().unwrap()) as usize) <= mc)
+                && b[mo + ms * MEMBER_SZ..mo + (ms + mc) * MEMBER_SZ].chunks_exact(MEMBER_SZ).all(|m| {
+                    let (off, len) = (rd32(m, 0) as usize, rd32(m, 4) as usize);
+                    off.checked_add(len).is_some_and(|e| e <= sl)
+                })
+        };
+        if let Some(c) = self.checked.get(ut) {
+            c.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
+        }
+        ok
     }
 
     /// Table name (python symbol table name; informational).
@@ -497,10 +500,8 @@ impl SymbolTable {
     }
     #[inline(always)]
     fn str_at(&self, off: u32, len: u32) -> &str {
-        // SAFETY: the whole pool was validated as UTF-8 in `from_blob`; `get` checks bounds and
-        // char boundaries, so any slice it returns is valid UTF-8 too
-        let pool = unsafe { std::str::from_utf8_unchecked(self.sec(sec::STRINGS)) };
-        pool.get(off as usize..(off as usize).saturating_add(len as usize)).unwrap_or("")
+        let pool = self.sec(sec::STRINGS);
+        pool.get(off as usize..(off as usize).saturating_add(len as usize)).and_then(|n| std::str::from_utf8(n).ok()).unwrap_or("")
     }
     #[inline(always)]
     fn name_eq(&self, rec: &[u8], name: &[u8]) -> bool {
@@ -609,8 +610,17 @@ impl SymbolTable {
         if (ut + 1) * UTYPE_SZ > ul {
             return None;
         }
-        // SAFETY: `from_blob` validated every user type's member range, hash range (power of
-        // two, slot values <= member count) and every member name range, so all reads below
+        match self.checked.get(ut).map(|c| c.load(Ordering::Relaxed)) {
+            Some(1) => {}
+            Some(0) => {
+                if !self.validate_type(ut) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        // SAFETY: `validate_type` checked this user type's member range, hash range (power of
+        // two, slot values <= member count) and its member name ranges, so all reads below
         // stay inside the blob.
         unsafe {
             let base = b.as_ptr();
@@ -649,9 +659,12 @@ impl SymbolTable {
     /// All members of user type `ut` in ISF order.
     pub fn members(&self, ut: u32) -> impl Iterator<Item = Member<'_>> + '_ {
         let r = self.utype_rec(ut);
-        let (mstart, mcount) = (rd32(r, 16), rd32(r, 20));
         let ms = self.sec(sec::MEMBERS);
-        (mstart..mstart + mcount).map(move |mi| {
+        // clamped to the section: a corrupt count must not become a 4-billion-step loop
+        let n = (ms.len() / MEMBER_SZ) as u64;
+        let mstart = (rd32(r, 16) as u64).min(n);
+        let mend = (mstart + rd32(r, 20) as u64).min(n);
+        (mstart..mend).map(move |mi| {
             let rec = ms.get(mi as usize * MEMBER_SZ..(mi as usize + 1) * MEMBER_SZ).unwrap_or(&ZERO_REC);
             Member { name: self.rec_str(rec), offset: rd32(rec, 8) as u64, ty: ty_decode(&rec[16..32]) }
         })
@@ -719,9 +732,11 @@ impl SymbolTable {
     /// The enum's constants in ISF order.
     pub fn enum_constants(&self, i: u32) -> impl Iterator<Item = (&str, i64)> + '_ {
         let r = self.enum_rec(i);
-        let (cs, cc) = (rd32(r, 16), rd32(r, 20));
         let s = self.sec(sec::CONSTS);
-        (cs..cs + cc).map(move |ci| {
+        let n = (s.len() / CONST_SZ) as u64;
+        let cs = (rd32(r, 16) as u64).min(n);
+        let ce = (cs + rd32(r, 20) as u64).min(n);
+        (cs..ce).map(move |ci| {
             let rec = s.get(ci as usize * CONST_SZ..(ci as usize + 1) * CONST_SZ).unwrap_or(&ZERO_REC[..CONST_SZ]);
             (self.rec_str(rec), rd64(rec, 8) as i64)
         })
