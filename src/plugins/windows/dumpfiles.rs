@@ -11,12 +11,19 @@
 //! 1. candidate file objects per process (handles, then VADs, filter applied) -- parallel;
 //! 2. python's `dumped_files` de-duplication -- sequential, python order;
 //! 3. `process_file_object` up to the dump loop (device type, name, valid caches) -- parallel;
-//! 4. output files are created sequentially in python order (the `-N` collision suffixes
-//!    depend on it; python also commits a file for every "Error dumping file" row, holding
-//!    whatever was written before the error);
-//! 5. page lists are computed in parallel and written largest-first on all cores with
-//!    `pwritev` straight from the mmapped image (no intermediate copies; gaps stay holes);
-//! 6. rows are emitted in order, then python's fatal error (if any) is returned.
+//! 4. page lists (`get_available_pages`, control-area PTEs decoded from bulk reads) --
+//!    parallel;
+//! 5. one output file per row (python also commits a file for every "Error dumping file"
+//!    row, holding whatever was written before the error). When no preferred name collides
+//!    (all distinct, none existing) the writers create them in parallel; otherwise they are
+//!    created one by one in python order, which decides the `-N` suffixes;
+//! 6. pages are written largest file first with `pwritev` straight from the mmapped image
+//!    (no intermediate copies). When a file's page ranges are disjoint, all-zero pages are
+//!    left as holes (python's gaps are holes too): same bytes, less page-cache writeback;
+//! 7. rows are emitted in order, then python's fatal error (if any) is raised.
+//!
+//! The run is bound by the kernel's buffered-write throughput (see the trace spans,
+//! `RSVOL_TRACE=1`); everything else takes a few tens of milliseconds.
 
 use crate::cli::regex::Regex;
 use crate::context::{Context, WinKernel};
@@ -34,6 +41,7 @@ use crate::util::par;
 use crate::util::trace::span;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct DumpFiles;
 
@@ -468,7 +476,7 @@ fn control_area_pages(ca: &Obj, dec: &PteDecoder, out: &mut Pages) -> Result<()>
         let at = if subsection.is_pointer() { subsection.u64()? } else { subsection.addr };
         if !seen.insert(at) {
             // python would loop forever on a subsection cycle
-            return Err(Error::msg("subsection list cycle"));
+            return Err(Error::msg(CYCLE));
         }
         let mut subsection_offset = subsection.m("StartingSector")?.u64()?.wrapping_mul(sector_size);
         let ptes = subsection.m("PtesInSubsection")?.u64()?;
@@ -502,6 +510,11 @@ fn control_area_pages(ca: &Obj, dec: &PteDecoder, out: &mut Pages) -> Result<()>
                     }
                 }
                 i += n;
+                if out.len() > MAX_PAGES {
+                    // a smeared PtesInSubsection: python would write a file of this size page
+                    // by page; we refuse to hold the page list
+                    return Err(Error::msg(CYCLE));
+                }
             }
         }
         subsection = subsection.m("NextSubsection")?;
@@ -509,25 +522,32 @@ fn control_area_pages(ca: &Obj, dec: &PteDecoder, out: &mut Pages) -> Result<()>
     Ok(())
 }
 
+/// Marker of a subsection list cycle (python would loop forever) or an absurd page count:
+/// reported as a dump error.
+const CYCLE: &str = "subsection list cycle or absurd size";
+/// 64 GiB worth of 4 KiB pages.
+const MAX_PAGES: usize = 1 << 24;
+
+/// What python's `dump_file_producer` does for one job.
+struct Dump {
+    /// pages written (in order) before python returned or raised
+    pages: Pages,
+    /// python returned the file handle (no exception, bytes written)
+    ok: bool,
+    /// an exception python does not catch there (it ends the plugin)
+    fatal: Option<Error>,
+}
+
 /// The pages python writes for a job and whether it reports success. `phys` is the layer the
 /// control area pages are read from.
-fn job_pages(job: &Job, dec: Option<&PteDecoder>, phys: LayerRef) -> (Pages, bool) {
+fn job_pages(job: &Job, dec: Option<&PteDecoder>, phys: LayerRef) -> Dump {
     match job.cache {
         Cache::Data | Cache::Image => {
             let mut pages = Vec::new();
-            let ok = match dec {
-                Some(dec) => control_area_pages(&job.mobj, dec, &mut pages).is_ok(),
-                None => {
-                    // unusual _MMPTE layout: the generic (object API) port
-                    let mut ok = true;
-                    for p in job.mobj.get_available_pages() {
-                        match p {
-                            Ok(p) => pages.push(p),
-                            Err(_) => ok = false,
-                        }
-                    }
-                    ok
-                }
+            let err = match dec {
+                Some(dec) => control_area_pages(&job.mobj, dec, &mut pages).err(),
+                // unusual _MMPTE layout: the generic (object API) port
+                None => job.mobj.get_available_pages().into_iter().filter_map(|p| p.map(|p| pages.push(p)).err()).next(),
             };
             // python's FileLayer.read raises for ranges outside the file even with pad=True
             // (padding only covers short reads): the dump stops at that page
@@ -535,20 +555,28 @@ fn job_pages(job: &Job, dec: Option<&PteDecoder>, phys: LayerRef) -> (Pages, boo
                 && let Some(bad) = pages.iter().position(|&(m, _, n)| !phys.is_valid(m, n))
             {
                 pages.truncate(bad);
-                return (pages, false);
+                return Dump { pages, ok: false, fatal: None };
             }
-            let ok = ok && !pages.is_empty();
-            (pages, ok)
+            match err {
+                None => {
+                    let ok = !pages.is_empty();
+                    Dump { pages, ok, fatal: None }
+                }
+                Some(e) if e.is_invalid_address() || matches!(&e, Error::Msg(m) if m == CYCLE) => Dump { pages, ok: false, fatal: None },
+                Some(e) => Dump { pages, ok: false, fatal: Some(e) },
+            }
         }
         Cache::Vacb => {
             // python builds the whole list first: an exception means nothing is written
-            let all = job.mobj.get_available_pages();
-            if all.iter().any(|p| p.is_err()) {
-                return (Vec::new(), false);
+            let mut all = job.mobj.get_available_pages();
+            if let Some(Err(_)) = all.last() {
+                let Some(Err(e)) = all.pop() else { unreachable!() };
+                let fatal = if e.is_invalid_address() { None } else { Some(e) };
+                return Dump { pages: Vec::new(), ok: false, fatal };
             }
             let pages: Pages = all.into_iter().filter_map(|p| p.ok()).collect();
             let ok = !pages.is_empty();
-            (pages, ok)
+            Dump { pages, ok, fatal: None }
         }
     }
 }
@@ -567,22 +595,43 @@ unsafe extern "C" {
 }
 
 const IOV_MAX: usize = 1024;
+/// Writer threads: the write phase is bound by page-cache writeback throttling, more writers
+/// only add filesystem lock contention.
+const WRITERS: usize = 8;
 static ZERO: [u8; PAGE as usize] = [0; PAGE as usize];
+
+/// Whether `b` is all zero bytes (64 bytes per step; data pages usually exit in the first).
+#[inline]
+fn is_zero(b: &[u8]) -> bool {
+    // SAFETY: u64 has no invalid bit patterns; align_to splits off unaligned ends
+    let (pre, mid, post) = unsafe { b.align_to::<u64>() };
+    if pre.iter().any(|&x| x != 0) || post.iter().any(|&x| x != 0) {
+        return false;
+    }
+    mid.chunks(8).all(|c| c.iter().fold(0, |a, &x| a | x) == 0)
+}
 
 /// Batches positional writes of contiguous file ranges into `pwritev` calls. Slices come
 /// straight from the mmapped layers (`'static`); padded fallback pages live in `arena` until
-/// the batch is flushed.
+/// the batch is flushed. With `sparse` (the file's page ranges are disjoint), all-zero pages
+/// are not written at all: they stay holes, which read back as the same zeros.
 struct PageWriter {
     fd: i32,
+    sparse: bool,
     iov: Vec<IoVec>,
     start: u64,
     end: u64,
     arena: Vec<Vec<u8>>,
+    /// end of the furthest byte actually written
+    written_end: u64,
+    /// bytes written / pwritev calls (trace statistics)
+    bytes: u64,
+    calls: u64,
 }
 
 impl PageWriter {
-    fn new(fd: i32) -> PageWriter {
-        PageWriter { fd, iov: Vec::with_capacity(IOV_MAX), start: 0, end: 0, arena: Vec::new() }
+    fn new(fd: i32, sparse: bool) -> PageWriter {
+        PageWriter { fd, sparse, iov: Vec::with_capacity(IOV_MAX), start: 0, end: 0, arena: Vec::new(), written_end: 0, bytes: 0, calls: 0 }
     }
 
     #[inline]
@@ -590,9 +639,11 @@ impl PageWriter {
         if data.is_empty() {
             return Ok(());
         }
-        if !self.iov.is_empty() && (off != self.end || self.iov.len() == IOV_MAX) {
-            self.flush()?;
+        if self.sparse && is_zero(data) {
+            return Ok(());
         }
+        self.written_end = self.written_end.max(off + data.len() as u64);
+        self.ensure(off)?;
         if self.iov.is_empty() {
             self.start = off;
             self.end = off;
@@ -608,12 +659,22 @@ impl PageWriter {
         Ok(())
     }
 
+    /// Flush the batch unless data at `off` can extend it.
+    #[inline]
+    fn ensure(&mut self, off: u64) -> std::io::Result<()> {
+        if !self.iov.is_empty() && (off != self.end || self.iov.len() == IOV_MAX) {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> std::io::Result<()> {
         let mut off = self.start;
         let mut first = 0usize;
         while first < self.iov.len() {
             let cnt = (self.iov.len() - first) as i32;
             let r = unsafe { pwritev(self.fd, self.iov[first..].as_ptr(), cnt, off as i64) };
+            self.calls += 1;
             if r < 0 {
                 let e = std::io::Error::last_os_error();
                 if e.kind() == std::io::ErrorKind::Interrupted {
@@ -630,6 +691,7 @@ impl PageWriter {
             }
             // advance past what was written (short writes)
             let mut n = r as usize;
+            self.bytes += n as u64;
             off += n as u64;
             while n > 0 {
                 let v = &mut self.iov[first];
@@ -660,12 +722,15 @@ impl PageWriter {
                 None => {
                     let mut b = vec![0u8; n as usize];
                     layer.read_padded(m, &mut b);
-                    if b.iter().all(|&x| x == 0) {
+                    if is_zero(&b) {
                         self.push(at, &ZERO[..n as usize])?;
                     } else {
+                        // flush first: the arena (which keeps the heap buffer alive and unmoved
+                        // until the batch is written) is cleared by every flush
+                        self.ensure(at)?;
                         let p: *const u8 = b.as_ptr();
                         self.arena.push(b);
-                        // the arena keeps the heap buffer alive (and unmoved) until the flush
+                        // SAFETY: `p` points into the buffer just moved into the arena
                         self.push(at, unsafe { std::slice::from_raw_parts(p, n as usize) })?;
                     }
                 }
@@ -676,57 +741,146 @@ impl PageWriter {
     }
 }
 
+/// Whether the file ranges of `pages` (in this order) are strictly ascending and disjoint.
+fn ascending_disjoint<'a>(pages: impl Iterator<Item = &'a (u64, u64, u64)>) -> bool {
+    let mut end = 0u64;
+    for &(_, foff, size) in pages {
+        if foff < end {
+            return false;
+        }
+        end = foff.saturating_add(size);
+    }
+    true
+}
+
+/// Write `pages` (python order) into `f` with the exact result of python's seek+write
+/// sequence: when the ranges are disjoint their order is irrelevant, so they are written in
+/// file order and all-zero pages are left as holes (the file is extended to python's size);
+/// overlapping ranges are written in python order, zeros included, so later pages win.
 fn write_pages(f: &File, layer: LayerRef, pages: &Pages) -> std::io::Result<()> {
-    let mut w = PageWriter::new(f.as_raw_fd());
-    for &(mem, foff, size) in pages {
+    let sorted;
+    let (list, sparse): (&Pages, bool) = if ascending_disjoint(pages.iter()) {
+        (pages, true)
+    } else {
+        let mut s = pages.clone();
+        s.sort_by_key(|p| p.1);
+        sorted = s;
+        if ascending_disjoint(sorted.iter().filter(|p| p.2 > 0)) { (&sorted, true) } else { (pages, false) }
+    };
+    let mut w = PageWriter::new(f.as_raw_fd(), sparse);
+    for &(mem, foff, size) in list {
         w.page(layer, mem, foff, size)?;
     }
-    w.flush()
+    w.flush()?;
+    let end = pages.iter().filter(|p| p.2 > 0).map(|p| p.1 + p.2).max().unwrap_or(0);
+    if w.written_end < end {
+        f.set_len(end)?;
+    }
+    if crate::util::trace::enabled() {
+        STATS[0].fetch_add(pages.iter().map(|p| p.2).sum::<u64>(), Ordering::Relaxed);
+        STATS[1].fetch_add(w.bytes, Ordering::Relaxed);
+        STATS[2].fetch_add(w.calls, Ordering::Relaxed);
+    }
+    Ok(())
 }
+
+/// trace counters: bytes python writes, bytes we write, pwritev calls
+static STATS: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 
 // ---------------------------------------------------------------------------------------------
 // driver
 
-/// Create the output files in python order, then compute and write every file's pages on
-/// all cores. Returns (final name, success) per created job and the error that stopped the
-/// creation (python would have raised there).
-fn dump_jobs(ctx: &Context, k: &WinKernel, jobs: &[Job]) -> Result<(Vec<(String, bool)>, Option<Error>)> {
-    let dec = PteDecoder::new(k.table).ok();
-    let mut files = Vec::with_capacity(jobs.len());
-    let mut stop = None;
-    {
+/// Whether none of `names` (all distinct) exists in `dir`: then python's `CLIFileHandler`
+/// gives every file its preferred name whatever the creation order, so the parallel writers
+/// can create them.
+fn names_free(dir: &str, names: &[String]) -> bool {
+    let mut uniq: FxHashSet<&str> = FxHashSet::default();
+    if !names.iter().all(|n| uniq.insert(n.as_str())) {
+        return false;
+    }
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.into_iter().all(|e| e.is_ok_and(|e| e.file_name().to_str().is_none_or(|n| !uniq.contains(n)))),
+        Err(_) => false,
+    }
+}
+
+/// Compute every job's pages (parallel), create the output files as python would up to the
+/// first job python crashes in, write them on all cores (largest first). Returns the number
+/// of jobs whose rows python prints, (final name, success) per created file, and the error
+/// that ended the plugin, if any.
+fn dump_jobs(ctx: &Context, k: &WinKernel, jobs: &[Job]) -> Result<(usize, Vec<(String, bool)>, Option<Error>)> {
+    let mut dumps: Vec<Dump> = {
+        let _t = span("dumpfiles: page lists");
+        let dec = PteDecoder::new(k.table).ok();
+        par::par_map(jobs.len(), |i| job_pages(&jobs[i], dec.as_ref(), k.phys))
+    };
+    // python opens the file of the job it crashes in, but never yields its row
+    let (mut rows, create_upto, mut fatal) = match dumps.iter().position(|d| d.fatal.is_some()) {
+        Some(f) => (f, f + 1, dumps[f].fatal.take()),
+        None => (jobs.len(), jobs.len(), None),
+    };
+    let names: Vec<String> = jobs[..create_upto]
+        .iter()
+        .map(|j| format!("file.{:#x}.{:#x}.{}.{}.{}", j.fo, j.mobj.addr, j.cache.name(), j.base, j.cache.ext()))
+        .collect();
+    let dir = if ctx.opts.output_dir.is_empty() { "." } else { ctx.opts.output_dir.as_str() };
+    let parallel = !names.is_empty() && std::fs::create_dir_all(dir).is_ok() && names_free(dir, &names);
+    // the order-dependent case (python's `-N` collision suffixes): create one by one
+    let mut files: Vec<(File, String)> = Vec::new();
+    if !parallel {
         let _t = span("dumpfiles: create files");
-        for j in jobs {
-            let desired = format!("file.{:#x}.{:#x}.{}.{}.{}", j.fo, j.mobj.addr, j.cache.name(), j.base, j.cache.ext());
-            match ctx.create_output_file(&desired) {
+        for name in &names {
+            match ctx.create_output_file(name) {
                 Ok(f) => files.push(f),
                 Err(e) => {
-                    stop = Some(e);
+                    rows = rows.min(files.len());
+                    fatal = Some(e);
                     break;
                 }
             }
         }
     }
-    let n = files.len();
-    let pages: Vec<(Pages, bool)> = {
-        let _t = span("dumpfiles: page lists");
-        par::par_map(n, |i| job_pages(&jobs[i], dec.as_ref(), k.phys))
-    };
+    let n = if parallel { names.len() } else { files.len() };
+    let mut final_names: Vec<String> = vec![String::new(); n];
     {
-        let _t = span("dumpfiles: write");
+        let _t = span("dumpfiles: create + write");
         let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(pages[i].0.iter().map(|p| p.2).sum::<u64>()));
-        let errs: Vec<Option<std::io::Error>> = par::par_map(n, |o| {
+        order.sort_by_key(|&i| std::cmp::Reverse(dumps[i].pages.iter().map(|p| p.2).sum::<u64>()));
+        let res: Vec<std::io::Result<String>> = par::par_map_bounded(n, WRITERS, |o| {
             let i = order[o];
             let layer = if jobs[i].cache == Cache::Vacb { k.vlayer } else { k.phys };
-            write_pages(&files[i].0, layer, &pages[i].0).err()
+            if !parallel {
+                write_pages(&files[i].0, layer, &dumps[i].pages)?;
+                return Ok(files[i].1.clone());
+            }
+            let path = format!("{dir}/{}", names[i]);
+            let (f, name) = match std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
+                Ok(f) => (f, names[i].clone()),
+                // someone else created it meanwhile: python would pick the next free `-N` name
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    ctx.create_output_file(&names[i]).map_err(|e| std::io::Error::other(e.to_string()))?
+                }
+                Err(e) => return Err(e),
+            };
+            write_pages(&f, layer, &dumps[i].pages)?;
+            Ok(name)
         });
-        if let Some(e) = errs.into_iter().flatten().next() {
-            return Err(e.into());
+        for (o, r) in res.into_iter().enumerate() {
+            final_names[order[o]] = r?;
+        }
+        if crate::util::trace::enabled() {
+            let [a, b, c] = &STATS;
+            eprintln!(
+                "[trace] dumpfiles: {n} files (parallel create: {parallel}), python writes {} MiB, we write {} MiB in {} pwritev calls",
+                a.load(Ordering::Relaxed) >> 20,
+                b.load(Ordering::Relaxed) >> 20,
+                c.load(Ordering::Relaxed)
+            );
         }
     }
-    let res = files.into_iter().zip(pages).map(|((_, name), (_, ok))| (name, ok)).collect();
-    Ok((res, stop))
+    drop(files);
+    let res = final_names.into_iter().zip(dumps).map(|(name, d)| (name, d.ok)).collect();
+    Ok((rows, res, fatal))
 }
 
 /// Jobs for the unique file objects in `cands` (in order), stopping at python's first fatal
@@ -777,6 +931,24 @@ fn build_jobs(cands: Vec<Step>, dedupe: bool) -> (Vec<Job>, Option<Error>) {
     (jobs, fatal)
 }
 
+/// End the plugin with `e`: python exceptions that are not volatility exceptions (ValueError,
+/// TypeError, re.error, the "Vad tree is too deep" RuntimeError, ...) crash python with a
+/// traceback, which is a panic here; volatility exceptions are returned.
+fn raise(e: Error) -> Result<()> {
+    const PY: [&str; 8] = ["ValueError", "TypeError", "NameError", "RuntimeError", "re.error", "AttributeError", "ZeroDivisionError", "IndexError"];
+    let m = match &e {
+        Error::Msg(m) | Error::Symbol(m) => m.as_str(),
+        _ => "",
+    };
+    if m == "Vad tree is too deep" {
+        panic!("RuntimeError: {m}");
+    }
+    if PY.iter().any(|p| m.starts_with(p)) {
+        panic!("{m}");
+    }
+    Err(e)
+}
+
 impl Plugin for DumpFiles {
     fn name(&self) -> &'static str {
         "windows.dumpfiles.DumpFiles"
@@ -798,7 +970,7 @@ impl Plugin for DumpFiles {
         let virt = cfg.get_ints("virtaddr");
         let phys = cfg.get_ints("physaddr");
         if filter.is_some() && (!virt.is_empty() || !phys.is_empty()) {
-            return Err(Error::msg("ValueError: Cannot use filter flag with an address flag"));
+            return raise(Error::msg("ValueError: Cannot use filter flag with an address flag"));
         }
         let k = ctx.windows_kernel()?;
         out.begin(vec![
@@ -822,7 +994,10 @@ impl Plugin for DumpFiles {
             let re = match &filter {
                 Some(f) => {
                     let pat = if cfg.get_bool("ignore-case") { format!("(?i){f}") } else { f.clone() };
-                    Some(Regex::new(&pat).map_err(|e| Error::msg(format!("re.error: {}", e.0)))?)
+                    match Regex::new(&pat) {
+                        Ok(r) => Some(r),
+                        Err(e) => return raise(Error::msg(format!("re.error: {}", e.0))),
+                    }
                 }
                 None => None,
             };
@@ -850,8 +1025,8 @@ impl Plugin for DumpFiles {
             drop(_t);
             build_jobs(steps, true)
         };
-        let (results, stop) = dump_jobs(ctx, k, &jobs)?;
-        for (j, (name, ok)) in jobs.iter().zip(results) {
+        let (nrows, results, stop) = dump_jobs(ctx, k, &jobs)?;
+        for (j, (name, ok)) in jobs.iter().zip(results).take(nrows) {
             out.row(
                 0,
                 vec![
@@ -863,7 +1038,7 @@ impl Plugin for DumpFiles {
             )?;
         }
         match stop.or(fatal) {
-            Some(e) => Err(e),
+            Some(e) => raise(e),
             None => Ok(()),
         }
     }
@@ -879,5 +1054,106 @@ mod tests {
         assert_eq!(ntpath_basename("\\Device\\HarddiskVolume2\\"), "");
         assert_eq!(ntpath_basename("\\Device\\Mup\\a/b.txt"), "b.txt");
         assert_eq!(ntpath_basename("x"), "x");
+    }
+
+    /// A memory layer whose pages >= `slice_limit` are only readable through `read` (the
+    /// padded fallback path of the writer); everything past the buffer reads as zeros.
+    struct MemLayer {
+        data: Vec<u8>,
+        slice_limit: u64,
+    }
+
+    impl crate::layers::Layer for MemLayer {
+        fn name(&self) -> &str {
+            "mem"
+        }
+        fn max_address(&self) -> u64 {
+            self.data.len() as u64 - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            let a = addr as usize;
+            match self.data.get(a..a + buf.len()) {
+                Some(s) => {
+                    buf.copy_from_slice(s);
+                    Ok(())
+                }
+                None => Err(Error::invalid(addr)),
+            }
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            addr + len <= self.data.len() as u64
+        }
+        fn mapping(&self, _addr: u64, _len: u64, _f: &mut dyn FnMut(crate::layers::Mapping) -> bool) {}
+        fn slice(&self, addr: u64, len: usize) -> Option<&[u8]> {
+            if addr >= self.slice_limit {
+                return None;
+            }
+            self.data.get(addr as usize..addr as usize + len)
+        }
+    }
+
+    /// python's `seek(off); write(layer.read(mem, size, pad=True))` sequence on a fresh file.
+    fn model(layer: LayerRef, pages: &Pages) -> Vec<u8> {
+        let mut f: Vec<u8> = Vec::new();
+        for &(mem, foff, size) in pages {
+            let mut b = vec![0u8; size as usize];
+            layer.read_padded(mem, &mut b);
+            let end = (foff + size) as usize;
+            if f.len() < end {
+                f.resize(end, 0);
+            }
+            f[foff as usize..end].copy_from_slice(&b);
+        }
+        f
+    }
+
+    #[test]
+    fn writer_matches_python_seek_write() {
+        let mut data = vec![0u8; 64 * 0x1000];
+        for (i, b) in data.iter_mut().enumerate() {
+            let page = i / 0x1000;
+            // pages 3, 7, 12 and 40 are all zero
+            if ![3, 7, 12, 40].contains(&page) {
+                *b = (i * 7 + page) as u8 | 1;
+            }
+        }
+        let layer = crate::objects::leak_layer(std::sync::Arc::new(MemLayer { data, slice_limit: 32 * 0x1000 }));
+        let p = |page: u64, foff: u64| (page * 0x1000, foff, 0x1000u64);
+        let cases: Vec<Pages> = vec![
+            // ascending with zero pages, holes and a trailing zero page (file extended)
+            vec![p(1, 0), p(3, 0x1000), p(4, 0x3000), p(5, 0x4000), p(7, 0x9000)],
+            // unordered but disjoint, fallback (non-sliceable) pages mixed in, unaligned offsets
+            vec![p(35, 0x5400), p(2, 0x400), p(36, 0x6400), p(40, 0x7400), p(9, 0x1400), p(33, 0x2400)],
+            // overlapping: later pages win, zeros included
+            vec![p(1, 0), p(2, 0x800), p(3, 0x1000), p(34, 0x400), p(12, 0x2000), p(5, 0x2000)],
+            // beyond the layer (padded zeros) at the end
+            vec![p(10, 0), p(100, 0x1000)],
+            // more than IOV_MAX contiguous chunks, alternating slice / fallback sources
+            (0..1500u64).map(|i| p(if i % 3 == 0 { 33 + i % 20 } else { i % 30 }, i * 0x1000)).collect(),
+            // a 256 KiB VACB-style page straddling the fallback boundary
+            vec![(30 * 0x1000 + 0x10, 0x100, 0x40000)],
+        ];
+        let dir = std::env::temp_dir().join(format!("rsvol-dumpfiles-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, pages) in cases.iter().enumerate() {
+            let path = dir.join(format!("case{i}"));
+            let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+            write_pages(&f, layer, pages).unwrap();
+            drop(f);
+            assert!(std::fs::read(&path).unwrap() == model(layer, pages), "case {i}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn zero_check() {
+        let mut b = vec![0u8; 4096 + 3];
+        assert!(is_zero(&b[1..]));
+        b[4096 + 2] = 1;
+        assert!(!is_zero(&b[1..]));
+        b[4096 + 2] = 0;
+        b[1] = 1;
+        assert!(!is_zero(&b[1..]));
+        assert!(is_zero(&b[2..]));
     }
 }
