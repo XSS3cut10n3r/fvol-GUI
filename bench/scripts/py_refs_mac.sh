@@ -1,6 +1,6 @@
 #!/bin/bash
 # Generate Python volatility3 reference outputs for each no-arg mac plugin on a Linux image.
-# Usage: IMG=<image> NAME=<imagename> [PAR=8] [LIST=mac_noarg.txt] py_refs_linux.sh
+# Usage: IMG=<image> NAME=<imagename> [PAR=2] [LIST=mac_noarg.txt] py_refs_mac.sh
 # Mirrors bench/scripts/py_refs.sh (the Windows equivalent) but for Linux images.
 IMG=${IMG:?set IMG to the memory image path}
 NAME=${NAME:?set NAME to the image short name}
@@ -25,7 +25,7 @@ run() {
 }
 export -f run; export IMG NAME SYM OUT VOL PY
 : > "$OUT/times.tsv"
-cat "$LIST" | xargs -P ${PAR:-8} -I{} bash -c 'run {}'
+cat "$LIST" | xargs -P ${PAR:-2} -I{} bash -c 'run {}'
 echo "=== done: $NAME ==="
 sort -t$'\t' -k3 -n "$OUT/times.tsv" | tail -8
 awk -F'\t' '$2!=0{print "FAILED rc="$2": "$1}' "$OUT/times.tsv"

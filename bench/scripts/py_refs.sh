@@ -1,5 +1,6 @@
 #!/bin/bash
 # Generate Python volatility3 reference outputs for each plugin (no args) on the Windows image.
+# PAR python processes run at once (default 2; each takes 2-8 GB).
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
 OUT=${OUT:-/home/user/rs-vol/bench/ref/py}
 LIST=${1:-/home/user/rs-vol/bench/win_noarg.txt}
@@ -15,4 +16,4 @@ run() {
   echo -e "$p\t$rc\t$(python3 -c "print(round($e-$s,3))")" >> $OUT/times.tsv
 }
 export -f run; export IMG OUT
-cat $LIST | xargs -P ${PAR:-6} -I{} bash -c 'run {}'
+cat $LIST | xargs -P ${PAR:-2} -I{} bash -c 'run {}'
