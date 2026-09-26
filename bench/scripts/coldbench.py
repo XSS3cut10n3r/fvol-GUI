@@ -2,6 +2,11 @@
 """Cold / warm start benchmark: rsvol (private RSVOL_CACHE) vs vol-rs (private HOME).
 
 Usage: coldbench.py [-n N] [--bin BIN] [--base BIN] [--no-volrs] [--only NAME[,NAME]] [--scratch DIR]
+                    [--rsvol-args "ARGS"] [--rsvol-env K=V[,K=V]]
+
+--rsvol-args / --rsvol-env: extra global options / environment for the rsvol runs only (e.g.
+`--rsvol-args "--cache-path DIR"`: seed the identifier index from python's cache in DIR;
+`--rsvol-env RSVOL_NO_PY_IDENT_SEED=1`: rsvol's own identifier index).
 
 Cases per (image, plugin), for each rsvol binary (--base: a baseline build, measured
 interleaved with --bin so machine load affects both alike):
@@ -26,6 +31,8 @@ BIN = opt("--bin", os.path.join(ROOT, "target/release/vol"))
 BASE = opt("--base")
 SCRATCH = opt("--scratch", os.path.join(ROOT, "testdata/scratch/coldstart"))
 ONLY = opt("--only")
+RSVOL_ARGS = (opt("--rsvol-args") or "").split()
+RSVOL_ENV = dict(kv.split("=", 1) for kv in (opt("--rsvol-env") or "").split(",") if kv)
 VOLRS = os.path.expanduser("~/cbc2/vol-rs/target/release/vol-rs")
 SYMS = "/home/user/rs-vol/testdata/symbols"
 T = "/home/user/rs-vol/testdata/images"
@@ -70,14 +77,14 @@ MODES = [
 def rsvol_all(binary, cache, img, plugin, extra):
     """best time per mode over N rounds of cold, newimg, symcold, warm (each mode starts from
     the caches the previous run left)"""
-    env = dict(os.environ, RSVOL_CACHE=cache)
+    env = dict(os.environ, RSVOL_CACHE=cache, **RSVOL_ENV)
     env.pop("RSVOL_TRACE", None)
     best = {m: 1e9 for m, _ in MODES}
     rc = 0
     for _ in range(N):
         for mode, names in MODES:
             rm(cache, *names)()
-            d, r = run([binary, "-q"] + extra + ["-f", img, plugin], env)
+            d, r = run([binary, "-q"] + RSVOL_ARGS + extra + ["-f", img, plugin], env)
             rc = rc or r
             best[mode] = min(best[mode], d)
     return best, rc
