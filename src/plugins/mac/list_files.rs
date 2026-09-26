@@ -170,6 +170,20 @@ impl Walker {
         }
     }
 
+    /// Starts loading the walk's fields of the vnode at `base` into the CPU cache (the walk
+    /// visits it next; its lines usually come from DRAM).
+    #[inline]
+    fn prefetch_vnode(&self, base: u64) {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(s) = self.layer.slice(base, self.vnode_size as usize) {
+            use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+            for off in [self.off_v_flag, self.off_v_name, self.off_v_parent, self.off_tqe_next] {
+                // SAFETY: `off` is inside the vnode, which is inside `s`; prefetch never faults
+                unsafe { _mm_prefetch::<_MM_HINT_T0>(s.as_ptr().add(off as usize) as *const i8) };
+            }
+        }
+    }
+
     /// python `_vnode_name(vnode)`, deciding only whether it is None (the string itself is
     /// read later unless python computes `full_path()`).
     fn vnode_name(&self, base: u64, info: &VInfo) -> Result<Option<Name>> {
@@ -230,6 +244,9 @@ impl Walker {
             return Ok(None);
         }
         let info = self.vinfo(v.base());
+        if let Some(next) = info.next {
+            self.prefetch_vnode(next);
+        }
         let Some(name) = self.vnode_name(v.base(), &info)? else { return Ok(None) };
         let parent = self.get_parent(&info);
         self.index.insert(key, self.entries.len() as u32);
