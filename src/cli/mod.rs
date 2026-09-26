@@ -890,3 +890,5 @@ fn report_unsatisfied(msg: &str, class: &str, out: &mut dyn Write, err: &mut dyn
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod e2e_tests;

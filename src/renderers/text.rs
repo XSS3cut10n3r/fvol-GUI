@@ -1236,4 +1236,4 @@ impl TextRenderer for Mermaid<'_> {
 
 #[cfg(test)]
 #[path = "text_tests.rs"]
-mod tests;
+pub(crate) mod tests_support;
