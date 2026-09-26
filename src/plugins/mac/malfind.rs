@@ -13,7 +13,7 @@ use crate::objects::util::array_to_string;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::mac::MacExt;
-use crate::symbols::mac::vm::MacVmExt;
+use crate::symbols::mac::vm::{MacVmExt, map_entries};
 
 pub struct Malfind;
 
@@ -22,26 +22,33 @@ pub struct Malfind;
 fn task_rows(task: &Obj, kernel_table: &str, arch: &'static str) -> Vec<Result<Vec<Value>>> {
     let mut rows = Vec::new();
     let r = (|| -> Result<()> {
-        let process_name = array_to_string(&task.m("p_comm")?, None)?;
+        // one small leak per task instead of a String per row
+        let process_name: &'static str = Box::leak(array_to_string(&task.m("p_comm")?, None)?.into_boxed_str());
         let Some(layer) = task.add_process_layer()? else { return Ok(()) };
-        for vma in task.get_map_iter() {
-            let e = vma?.deref()?;
-            if e.is_suspicious(kernel_table)? {
+        // python re-reads these per row: same memory, same values, and add_process_layer()
+        // already read p_pid successfully
+        let mut p_pid: Option<i128> = None;
+        for e in map_entries(task) {
+            let e = e?;
+            // is_suspicious(): get_perms() (python calls it again for the row: same value)
+            let perms = e.vma_perms()?;
+            if perms == "rwx" || (perms == "r-x" && e.get_path(kernel_table)?.is_empty()) {
                 continue;
             }
-            let links = e.m("links")?;
-            let start = links.m("start")?.u64()?;
+            // links.start (the data read), then p_pid, links.start, links.end: p_pid cannot
+            // fail (see above), so reading start and end together is equivalent
+            let (start, end) = e.vma_range()?;
             let data = layer.read_vec_padded(start, 64);
-            // the tuple: p_pid, links.start, links.end, get_perms() are read in this order
-            let pid = task.m("p_pid")?.int()?;
-            let end = links.m("end")?.u64()?;
-            let perms = e.get_perms()?;
+            let pid = match p_pid {
+                Some(p) => p,
+                None => *p_pid.insert(task.m("p_pid")?.int()?),
+            };
             rows.push(Ok(vec![
                 Value::Int(pid),
-                Value::Str(process_name.clone()),
+                Value::SStr(process_name),
                 Value::Int(start as i128),
                 Value::Int(end as i128),
-                Value::Str(perms),
+                Value::SStr(perms),
                 Value::Bytes(data.clone()),
                 Value::Disassembly { data, offset: start, arch: Some(arch) },
             ]));

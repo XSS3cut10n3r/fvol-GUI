@@ -12,7 +12,7 @@ use crate::objects::util::array_to_string;
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::mac::MacExt;
-use crate::symbols::mac::vm::MacVmExt;
+use crate::symbols::mac::vm::{MacVmExt, map_entries};
 use std::io::Write;
 
 pub struct Maps;
@@ -20,12 +20,13 @@ pub struct Maps;
 /// python `Maps.MAXSIZE_DEFAULT` (1 GiB).
 pub const MAXSIZE_DEFAULT: i128 = 1024 * 1024 * 1024;
 
-/// python `Maps.list_vmas(task, filter_func)`: the task's `vm_map_entry *` pointers for which
-/// `keep` returns true (python's filter_func returns True to KEEP). A trailing `Err` means
-/// python raised there.
+/// python `Maps.list_vmas(task, filter_func)`: the task's map entries for which `keep` returns
+/// true (python's filter_func returns True to KEEP). NOTE: yields the `vm_map_entry` structs
+/// (python yields `vm_map_entry *` pointers; member access is the same). A trailing `Err`
+/// means python raised there.
 pub fn list_vmas(task: &Obj, keep: &dyn Fn(&Obj) -> Result<bool>) -> Vec<Result<Obj>> {
     let mut out = Vec::new();
-    for vma in task.get_map_iter() {
+    for vma in map_entries(task) {
         match vma.and_then(|v| keep(&v).map(|k| (v, k))) {
             Ok((v, true)) => out.push(Ok(v)),
             Ok((_, false)) => {}
@@ -78,7 +79,7 @@ struct VmaRow {
     start: u64,
     end: u64,
     path: String,
-    perms: Result<String>,
+    perms: Result<&'static str>,
 }
 
 /// A task's vma rows in python order; a trailing `Err` is where python raised (before that
@@ -108,15 +109,13 @@ fn task_rows(task: &Obj, addresses: &[i128], kernel_table: &str) -> Vec<Result<V
     let mut rows = Vec::new();
     for vma in list_vmas(task, &keep) {
         let r = (|| -> Result<VmaRow> {
-            let e = vma?.deref()?;
-            let links = e.m("links")?;
-            let start = links.m("start")?.u64()?;
-            let end = links.m("end")?.u64()?;
+            let e = vma?;
+            let (start, end) = e.vma_range()?;
             let mut path = e.get_path(kernel_table)?;
             if path.is_empty() {
-                path = e.get_special_path()?.to_string();
+                path = e.vma_special_path()?.to_string();
             }
-            Ok(VmaRow { start, end, path, perms: e.get_perms() })
+            Ok(VmaRow { start, end, path, perms: e.vma_perms() })
         })();
         let stop = r.is_err();
         rows.push(r);
@@ -171,7 +170,8 @@ impl Plugin for Maps {
         // parallel, emitted (and dumped) in python order
         let per_task = crate::util::par::par_map(tasks.len(), |i| {
             let Ok(task) = &tasks[i] else { return Err(crate::error::Error::msg("")) };
-            let name = array_to_string(&task.m("p_comm")?, None)?;
+            // one small leak per task instead of a String per row
+            let name: &'static str = Box::leak(array_to_string(&task.m("p_comm")?, None)?.into_boxed_str());
             let pid = task.m("p_pid")?.int()?;
             Ok((pid, name, task_rows(task, &addresses, kernel_table)))
         });
@@ -192,10 +192,10 @@ impl Plugin for Maps {
                     0,
                     vec![
                         Value::Int(pid),
-                        Value::Str(name.clone()),
+                        Value::SStr(name),
                         Value::Int(r.start as i128),
                         Value::Int(r.end as i128),
-                        Value::Str(r.perms?),
+                        Value::SStr(r.perms?),
                         Value::Str(r.path),
                         file_output,
                     ],
