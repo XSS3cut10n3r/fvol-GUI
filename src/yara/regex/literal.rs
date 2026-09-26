@@ -67,7 +67,7 @@ const MAX_POSITIONS: usize = 32;
 /// Required leading byte-set sequence; `complete` = every match of `h` has exactly
 /// this length (so a following concat element may extend it).
 pub fn positions(h: &Hir) -> (Vec<ByteSet>, bool) {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(16);
     let complete = pos_into(h, &mut out, 0);
     if out.len() > MAX_POSITIONS {
         out.truncate(MAX_POSITIONS);
@@ -288,7 +288,24 @@ impl Prefilter {
     /// Choose the best prefix prefilter for `h` (None when not selective enough).
     pub fn for_hir(h: &Hir) -> Option<(Prefilter, u64)> {
         const MAX_RATE: u64 = (1 << 20) / 12;
-        let (pseq, _) = positions(h);
+        let alts = if top_alt(h, 0) { alt_seqs(h) } else { None };
+        // For a plain top-level alternation the per-alternative sequences are what
+        // `positions` would compute again: take their union directly.
+        let pseq = match (&alts, h) {
+            (Some(a), Hir::Alt(v)) if a.len() == v.len() => {
+                let min = a.iter().map(|x| x.len()).min().unwrap_or(0);
+                (0..min)
+                    .map(|i| {
+                        let mut u = ByteSet::EMPTY;
+                        for x in a {
+                            u.union(&x[i]);
+                        }
+                        u
+                    })
+                    .collect()
+            }
+            _ => positions(h).0,
+        };
         let seq_rate_v = if pseq.is_empty() { u64::MAX } else { seq_rate(&pseq) };
         let mut best: Option<(Prefilter, u64)> = None;
         if seq_rate_v < MAX_RATE {
@@ -296,7 +313,7 @@ impl Prefilter {
                 best = Some((Prefilter::Seq(f), seq_rate_v));
             }
         }
-        if let Some(alts) = if top_alt(h, 0) { alt_seqs(h) } else { None } {
+        if let Some(alts) = alts {
             if alts.len() > 1 {
                 let m = alts.iter().map(|s| s.len()).min().unwrap_or(0).min(3);
                 if m >= 1 {
@@ -307,7 +324,7 @@ impl Prefilter {
                         .saturating_mul(2);
                     let better = best.as_ref().map_or(true, |b| rate * 2 < b.1);
                     if rate < MAX_RATE && better {
-                        if let Some(t) = crate::yara::teddy::Teddy::new(&alts) {
+                        if let Some(t) = crate::yara::teddy::Teddy::from_vec(alts) {
                             best = Some((Prefilter::Teddy(t), rate));
                         }
                     }

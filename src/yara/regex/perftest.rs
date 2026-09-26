@@ -160,6 +160,13 @@ fn yara_regex_compile_stages() {
         let t_fixed = best(&mut || super::fixed_sequence(&l.hir).map(|s| s.len()));
         let t_dfa = best(&mut || super::dfa::Searcher::new(&l.hir).map(|s| s.strategy_name()));
         let t_nfa = best(&mut || super::nfa::Nfa::new(&l.hir, false).map(|n| n.states.len()));
+        if let Some(alts) = super::literal::alt_seqs(&l.hir) {
+            let t_pos = best(&mut || super::literal::positions(&l.hir).0.len());
+            let t_alts = best(&mut || super::literal::alt_seqs(&l.hir).map(|a| a.len()));
+            let t_teddy = best(&mut || crate::yara::teddy::Teddy::new(&alts).is_some());
+            let t_seqf = best(&mut || super::literal::SeqFinder::new(&super::literal::positions(&l.hir).0).is_some());
+            eprintln!("   prefilter parts: positions {t_pos:.2} alt_seqs {t_alts:.2} teddy {t_teddy:.2} seqfinder(+positions) {t_seqf:.2}");
+        }
         let re = Regex::new(&p, 0).unwrap();
         let t_first = best(&mut || {
             let r = Regex::new(&p, 0).unwrap();

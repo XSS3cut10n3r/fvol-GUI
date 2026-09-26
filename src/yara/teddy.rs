@@ -28,6 +28,11 @@ pub struct Teddy {
 impl Teddy {
     /// Build for 1..=64 non-empty patterns.
     pub fn new(pats: &[Vec<ByteSet>]) -> Option<Teddy> {
+        Self::from_vec(pats.to_vec())
+    }
+
+    /// [`Teddy::new`] taking ownership of the patterns (no copy).
+    pub fn from_vec(pats: Vec<Vec<ByteSet>>) -> Option<Teddy> {
         if pats.is_empty() || pats.len() > 64 || pats.iter().any(|p| p.is_empty() || p.iter().any(|s| s.is_empty())) {
             return None;
         }
@@ -63,7 +68,7 @@ impl Teddy {
             }
         }
         let ascii = pats.iter().all(|p| p[..m].iter().all(|s| s.0[2] == 0 && s.0[3] == 0));
-        Some(Teddy { pats: pats.to_vec(), buckets, m, lo, hi, min_len, ascii })
+        Some(Teddy { pats, buckets, m, lo, hi, min_len, ascii })
     }
 
     #[inline]

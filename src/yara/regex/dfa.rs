@@ -82,7 +82,8 @@ fn look_ok(l: Look, left: u8, right: u8) -> bool {
 
 /// One search direction (NFA + configuration).
 struct Dir {
-    nfa: Nfa,
+    /// (shared: the prefiltered and the plain forward directions use one NFA)
+    nfa: std::sync::Arc<Nfa>,
     reverse: bool,
     /// Context bits of the "behind" byte kept in the state.
     behind_mask: u8,
@@ -91,7 +92,7 @@ struct Dir {
 }
 
 impl Dir {
-    fn new(nfa: Nfa, reverse: bool, leftmost_first: bool, start_tag: bool) -> Dir {
+    fn new(nfa: std::sync::Arc<Nfa>, reverse: bool, leftmost_first: bool, start_tag: bool) -> Dir {
         let mut behind_mask = 0u8;
         for &l in &nfa.looks {
             match (l, reverse) {
@@ -330,6 +331,15 @@ fn flatten_concat(h: &Hir) -> Vec<Hir> {
             _ => out.push(h.clone()),
         }
     }
+    // Anything but a concatenation / splittable repeat (under captures) flattens to
+    // itself: a single element, of no use to the caller, so skip the copy.
+    let mut top = h;
+    while let Hir::Capture { sub, .. } = top {
+        top = sub;
+    }
+    if !matches!(top, Hir::Concat(_) | Hir::Repeat { min: 1..=8, .. }) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let mut budget = 256usize;
     go(h, &mut out, &mut budget);
@@ -338,7 +348,7 @@ fn flatten_concat(h: &Hir) -> Vec<Hir> {
 
 impl Searcher {
     pub fn new(h: &Hir) -> Option<Searcher> {
-        let fnfa = Nfa::new(h, false)?;
+        let fnfa = std::sync::Arc::new(Nfa::new(h, false)?);
         let rnfa = Nfa::new(h, true)?;
         let nullable = h.min_width(&[]) == 0;
         // Prefix prefilter.
@@ -352,7 +362,6 @@ impl Searcher {
         }
         // Inner literal strategy for top-level concatenations.
         let mut strategy = Strategy::Core;
-        let mut inner_nfa = None;
         // An inner sequence must be 8x more selective than the prefix prefilter (and every
         // sequence rate is >= 1): skip the analysis when the prefix is already that good.
         let flat = if pre_rate > 8 { flatten_concat(h) } else { Vec::new() };
@@ -380,17 +389,14 @@ impl Searcher {
                 if rate < (1 << 20) / 64 && rate.saturating_mul(8) < pre_rate {
                     let prefix = Hir::Concat(v[..i].to_vec());
                     if let (Some(f), Some(pn)) = (SeqFinder::new(&seq), Nfa::new(&prefix, true)) {
-                        inner_nfa = Some(pn.clone());
-                        strategy = Strategy::Inner { finder: f, pre: Dir::new(pn, true, false, false) };
+                        strategy = Strategy::Inner { finder: f, pre: Dir::new(std::sync::Arc::new(pn), true, false, false) };
                     }
                 }
             }
         }
-        let mut nfas: Vec<&Nfa> = vec![&fnfa, &rnfa];
-        if let Some(n) = &inner_nfa {
-            nfas.push(n);
-        }
-        let cls = Classes::new(&nfas);
+        // Byte classes: every NFA here (forward, reverse, inner prefix) is built from the
+        // classes and assertions of the same HIR, so the forward NFA's suffice.
+        let cls = Classes::new(&[&*fnfa]);
         let use_start_tag = prefilter.is_some();
         let name = match (&strategy, &prefilter) {
             (Strategy::Inner { .. }, _) => "dfa+inner",
@@ -401,7 +407,7 @@ impl Searcher {
             cls,
             plain: Dir::new(fnfa.clone(), false, true, false),
             fwd: Dir::new(fnfa, false, true, use_start_tag),
-            rev: Dir::new(rnfa, true, false, false),
+            rev: Dir::new(std::sync::Arc::new(rnfa), true, false, false),
             prefilter,
             strategy,
             name,
