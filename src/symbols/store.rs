@@ -733,6 +733,10 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
 /// Whether big ISFs load as lazy tables (see [`set_lazy_tables`]).
 static LAZY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+fn lazy_tables_on() -> bool {
+    LAZY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// JSON documents at least this big load lazily (the kernel ISFs; the small ISFs shipped with
 /// volatility3 build in well under a millisecond).
 const LAZY_MIN: usize = 1 << 20;
@@ -763,12 +767,17 @@ fn lazy_build(loc: &IsfLocation, url: &str, cf: &Option<(PathBuf, Vec<u8>)>, jso
         return Err(json);
     }
     let core = std::sync::Arc::new(LazyCore::build(json, opts)?);
+    lazy_register(loc, url, cf, &core);
+    Ok(core)
+}
+
+/// Remember a lazy table in-process by its cache key and defer its blob.
+fn lazy_register(loc: &IsfLocation, url: &str, cf: &Option<(PathBuf, Vec<u8>)>, core: &std::sync::Arc<LazyCore>) {
     crate::util::trace::note(|| format!("lazy table: {url}"));
     if let Some((cf, key)) = cf {
         LAZY_BUILT.lock().unwrap_or_else(|e| e.into_inner()).push((key.clone(), core.clone()));
         DEFERRED.lock().unwrap_or_else(|e| e.into_inner()).push(Deferred { loc: loc.clone(), core: core.clone(), cf: cf.clone(), key: key.clone() });
     }
-    Ok(core)
 }
 
 /// How the blobs of lazy tables are written (`RSVOL_DEFERRED_ISFB`): `helper` (default) = a
@@ -996,29 +1005,68 @@ const MAX_SPEC_BUILDS: usize = 3;
 /// decompressing), for the first few such files; else keep the JSON (decompressed ones only)
 /// so the load skips the decompression.
 fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool) {
-    use std::sync::atomic::Ordering;
     // plain JSON files load without decompression anyway: only compressed ones are worth it
     if !decoded {
         return;
     }
+    match spec_decision(identifier) {
+        Spec::Build => {
+            let _t = crate::util::trace::span("isf speculative load (identifier index)");
+            spec_build(loc, json);
+        }
+        Spec::Keep => keep_decoded(loc, json),
+        Spec::Skip => {}
+    }
+}
+
+/// What the identifier index does with a decoded ISF of the OS whose kernel table is loaded
+/// next (see [`speculate`]).
+enum Spec {
+    Build,
+    Keep,
+    Skip,
+}
+
+fn spec_decision(identifier: &[u8]) -> Spec {
+    use std::sync::atomic::Ordering;
     let hint = HINT.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(h) = hint {
         // the image's own banner is known: build exactly the matching ISFs, keep nothing else
-        if identifier.starts_with(&h) && SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < 2 * MAX_SPEC_BUILDS {
-            let _t = crate::util::trace::span("isf speculative load (identifier index, banner hint)");
-            spec_build(loc, json);
-        }
-        return;
+        return if identifier.starts_with(&h) && SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < 2 * MAX_SPEC_BUILDS { Spec::Build } else { Spec::Skip };
     }
     if !*GUESS.lock().unwrap_or_else(|e| e.into_inner()) {
-        return;
+        return Spec::Skip;
     }
-    if SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < MAX_SPEC_BUILDS {
-        let _t = crate::util::trace::span("isf speculative load (identifier index)");
-        spec_build(loc, json);
-        return;
+    if SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < MAX_SPEC_BUILDS { Spec::Build } else { Spec::Keep }
+}
+
+/// The identifier of a decoded ISF read through its lazy table (built right away instead of
+/// after a separate identifier pass): for a big ISF of the OS whose kernel table is loaded next
+/// (the likely kernel ISF). The lazy table is kept when [`speculate`] would build it. `Err`
+/// gives the JSON back when no lazy table can be built (the caller extracts the identifier the
+/// usual way).
+fn lazy_identifier(loc: &IsfLocation, os: &str, json: Vec<u8>) -> std::result::Result<Option<(String, Vec<u8>)>, Vec<u8>> {
+    let opts = BuildOptions::default();
+    let core = match LazyCore::build(JsonBuf::Owned(json), &opts) {
+        Ok(c) => std::sync::Arc::new(c),
+        Err(JsonBuf::Owned(v)) => return Err(v),
+        Err(_) => return Ok(None), // (never: the JSON went in owned)
+    };
+    let (win, mac, linux) = core.identifier_fields();
+    let ident = identifier_from(win, mac, linux);
+    if let Some((ios, iid)) = &ident
+        && ios == os
+        && matches!(spec_decision(iid), Spec::Build)
+    {
+        let url = loc.url();
+        let cf = cache_file(loc, &url, &opts);
+        let lock = cf.as_ref().map(|(_, k)| key_lock(k));
+        let _g = lock.as_ref().map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
+        if load_known(&url, &cf, "").is_none() {
+            lazy_register(loc, &url, &cf, &core);
+        }
     }
-    keep_decoded(loc, json);
+    Ok(ident)
 }
 
 /// A speculative table of `loc` from its decoded `json` (see [`speculate`]): a lazy table when
@@ -1260,7 +1308,7 @@ pub fn extract_identifier_with<'a, P: crate::util::jsonidx::Pull<'a>>(p: &mut P)
 }
 
 /// python's identifier processors, in order: windows (metadata.windows.pdb), mac, linux.
-fn identifier_from(win: Option<(String, String, u64)>, mac: Option<String>, linux: Option<String>) -> Option<(String, Vec<u8>)> {
+pub(crate) fn identifier_from(win: Option<(String, String, u64)>, mac: Option<String>, linux: Option<String>) -> Option<(String, Vec<u8>)> {
     if let Some((guid, db, age)) = win {
         if !guid.is_empty() && age != 0 && !db.is_empty() {
             return Some(("windows".into(), format!("{db}|{}|{age}", guid.to_uppercase()).into_bytes()));
@@ -1708,8 +1756,8 @@ fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, parallel: bool, f: imp
             let mut file = std::fs::File::open(p)?;
             let len = file.metadata()?.len() as usize;
             if buf.len() < len {
-                buf.clear();
-                buf.resize(len, 0);
+                // fresh zero pages, not a memset of the grown buffer (the read writes them all)
+                *buf = crate::codecs::try_zeroed(len)?;
             }
             file.read_exact(&mut buf[..len])?;
             (&buf[..len], Some((len, false)))
@@ -1815,12 +1863,35 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
             let mut decoded = None;
             let t0 = crate::util::trace::enabled().then(std::time::Instant::now);
             let mut t1 = None;
+            // a big compressed ISF in a `<os>/` directory while the automagic waits for that
+            // OS's kernel table: its lazy table gives the identifier (no separate pass)
+            let lazy_first = keep_os.is_some_and(|os| lazy_tables_on() && est[k] >= LAZY_MIN as u64 && loc.url().contains(&format!("/{os}/")));
             let ident = with_json_len(loc, &mut buf, big_par && est[k] >= BIG, |json, n| {
                 decoded = n;
                 t1 = t0.map(|_| std::time::Instant::now());
-                extract_identifier(json)
+                if lazy_first && matches!(n, Some((_, true))) && json.len() >= LAZY_MIN { None } else { Some(extract_identifier(json)) }
             })
             .map_err(drop);
+            let ident = match ident {
+                Ok(Some(id)) => Ok(id),
+                Err(()) => Err(()),
+                Ok(None) => {
+                    // lazy-first: the JSON is buf[..n]
+                    let n = decoded.map_or(0, |d| d.0);
+                    let mut v = std::mem::take(&mut buf);
+                    v.truncate(n);
+                    decoded = None; // the lazy table (if kept) has the JSON now
+                    match lazy_identifier(loc, keep_os.unwrap_or(""), v) {
+                        Ok(id) => Ok(id),
+                        Err(v) => {
+                            let id = extract_identifier(&v);
+                            buf = v;
+                            decoded = Some((n, true));
+                            Ok(id)
+                        }
+                    }
+                }
+            };
             if let (Some(t0), Some(t1)) = (t0, t1)
                 && est[k] >= 4 << 20
             {

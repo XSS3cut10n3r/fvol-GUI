@@ -645,6 +645,9 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
     let am = match load_cached(&image, &kind) {
         Some(a) => a,
         None => {
+            // the kernel ISF's decompression and lazy index run on the worker pool soon: start
+            // its threads now, off the critical path
+            crate::util::pool::warm();
             let (index, banners, notes) = {
                 let _t = span("linux banners (identifier index)");
                 // the stackers load the matching kernel ISF next: the index builds it right away

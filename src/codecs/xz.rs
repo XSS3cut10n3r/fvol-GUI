@@ -331,10 +331,9 @@ pub fn uncompressed_size(data: &[u8]) -> Result<usize> {
 pub fn decompress_reuse(data: &[u8], buf: &mut Vec<u8>, parallel: bool) -> Result<usize> {
     let (blocks, total) = scan(data)?;
     if buf.len() < total {
-        buf.clear();
-        buf.try_reserve_exact(total).map_err(|_| err("output too large"))?;
-        super::advise_huge(buf.as_mut_ptr(), buf.capacity());
-        buf.resize(total, 0);
+        // fresh zero pages (the decoder faults them in as it writes) instead of growing and
+        // zero-filling the old buffer: a 64 MB ISF would be memset once before being decoded
+        *buf = super::try_zeroed(total).map_err(|_| err("output too large"))?;
     }
     decode_blocks(data, &blocks, &mut buf[..total], parallel)?;
     Ok(total)

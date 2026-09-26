@@ -267,14 +267,34 @@ impl fast::Names for LazyCore {
     }
 }
 
-/// Validation output of one range of a big section.
+/// Validation output of one range of a big section (the per-key results are written in place).
 enum Checked<'a> {
-    /// (name hash, name length, escaped name) per member
-    Users(Vec<(u64, u32, Option<Box<str>>)>),
+    /// the decoded names of keys that are not their text as is: (key position, name)
+    Esc(Vec<(u32, Box<str>)>),
     /// the enumerations (parsed)
     Enums(Vec<EnumDef<'a>>),
-    /// (key position, name length, escaped name, address) of every symbol (object value)
-    Syms(Vec<(u32, u32, Option<Box<str>>, u64)>),
+}
+
+/// `slen` marker of a `symbols` member whose value is not an object (not a symbol).
+const NOT_SYMBOL: u32 = u32::MAX - 1;
+
+/// A slice the range tasks of the index pass write at disjoint indexes.
+struct Shared<T>(*mut T, usize);
+// SAFETY: tasks write disjoint indexes (each key belongs to one range) of a slice that outlives
+// them; nothing reads it until they are all done
+unsafe impl<T: Send> Send for Shared<T> {}
+unsafe impl<T: Send> Sync for Shared<T> {}
+
+impl<T> Shared<T> {
+    fn new(v: &mut [T]) -> Shared<T> {
+        Shared(v.as_mut_ptr(), v.len())
+    }
+    #[inline]
+    fn set(&self, i: usize, x: T) {
+        assert!(i < self.1);
+        // SAFETY: in bounds; see the Sync impl
+        unsafe { *self.0.add(i) = x }
+    }
 }
 
 /// Ranges of about `per` bytes over `keys` (sorted positions).
@@ -446,6 +466,12 @@ impl LazyCore {
                 }
             }
         };
+        // per-key results, written in place by the ranges (disjoint key indexes)
+        let mut uhash_v = vec![0u64; uk.len()];
+        let mut ulen_v = vec![0u32; uk.len()];
+        let mut slen_v = vec![NOT_SYMBOL; sk.len()];
+        let mut addr_v = vec![0u64; sk.len()];
+        let (uh, ul, sl, sa) = (Shared::new(&mut uhash_v), Shared::new(&mut ulen_v), Shared::new(&mut slen_v), Shared::new(&mut addr_v));
         let run = |i: usize| -> Option<Checked> {
             thread_local! {
                 static POS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -453,22 +479,24 @@ impl LazyCore {
             POS.with(|pos| {
                 let pos = &mut *pos.borrow_mut();
                 let mut arena: Vec<Desc> = Vec::new();
-                // (length of a name that is its key's text as is | NAME_DECODED, the decoded name)
-                let esc = |name: Cow<str>| match name {
-                    Cow::Owned(n) => (NAME_DECODED, Some(n.into_boxed_str())),
-                    Cow::Borrowed(b) => (b.len() as u32, None),
+                // keys whose name is not their text as is (escapes, invalid UTF-8): decoded
+                let mut esc: Vec<(u32, Box<str>)> = Vec::new();
+                let mut len_of = |p: u32, name: Cow<str>| match name {
+                    Cow::Owned(n) => {
+                        esc.push((p, n.into_boxed_str()));
+                        NAME_DECODED
+                    }
+                    Cow::Borrowed(b) => b.len() as u32,
                 };
                 if i < nu {
-                    let mut out = Vec::with_capacity(ur[i].len());
-                    fast::each_member_local(json, uk, ur[i].clone(), uclose, pos, |p, _, name| {
+                    fast::each_member_local(json, uk, ur[i].clone(), uclose, pos, |p, j, name| {
                         arena.clear();
                         fast::read_user(p, &mut arena)?;
-                        let h = hash_bytes(name.as_bytes());
-                        let (len, e) = esc(name);
-                        out.push((h, len, e));
+                        uh.set(j, hash_bytes(name.as_bytes()));
+                        ul.set(j, len_of(uk[j], name));
                         Ok(())
                     })?;
-                    Some(Checked::Users(out))
+                    Some(Checked::Esc(esc))
                 } else if i < nu + ne {
                     let mut out = Vec::with_capacity(er[i - nu].len());
                     fast::each_member_local(json, ek, er[i - nu].clone(), eclose, pos, |p, _, name| {
@@ -477,7 +505,6 @@ impl LazyCore {
                     })?;
                     Some(Checked::Enums(out))
                 } else {
-                    let mut out = Vec::with_capacity(sr[i - nu - ne].len());
                     fast::each_member_local(json, sk, sr[i - nu - ne].clone(), sclose, pos, |p, j, name| {
                         if p.peek_kind()? != crate::util::json::Kind::Obj {
                             return p.skip(); // not a symbol (python's delegate skips it)
@@ -485,11 +512,11 @@ impl LazyCore {
                         arena.clear();
                         let (address, _, _) = fast::read_symbol(p, &mut arena)?;
                         sinsert(j as u32, hash_bytes(name.as_bytes()), &name);
-                        let (len, e) = esc(name);
-                        out.push((sk[j], len, e, address as u64));
+                        sa.set(j, address as u64);
+                        sl.set(j, len_of(sk[j], name));
                         Ok(())
                     })?;
-                    Some(Checked::Syms(out))
+                    Some(Checked::Esc(esc))
                 }
             })
         };
@@ -522,54 +549,40 @@ impl LazyCore {
         });
         let skeleton = skeleton?;
         let mut escaped: FxHashMap<u32, Box<str>> = FxHashMap::default();
-        let mut uhashes: Vec<u64> = Vec::with_capacity(uk.len());
-        let mut ulen: Vec<u32> = Vec::with_capacity(uk.len());
-        let mut slen: Vec<u32> = Vec::with_capacity(sk.len());
-        let mut skeys: Vec<u32> = Vec::with_capacity(sk.len());
-        // every symbol's address, from the pass (address lookups need them all)
-        let mut addrs: Vec<u64> = Vec::with_capacity(sk.len());
         for p in parts {
             match p? {
-                Checked::Users(v) => {
-                    for (h, len, e) in v {
-                        if let Some(e) = e {
-                            escaped.insert(uk[uhashes.len()], e);
-                        }
-                        uhashes.push(h);
-                        ulen.push(len);
-                    }
-                }
+                Checked::Esc(v) => escaped.extend(v),
                 Checked::Enums(_) => return None,
-                Checked::Syms(v) => {
-                    for (k, len, e, a) in v {
-                        addrs.push(a);
-                        if let Some(e) = e {
-                            escaped.insert(k, e);
-                        }
-                        skeys.push(k);
-                        slen.push(len);
-                    }
-                }
             }
         }
         drop(_t);
         let _t = crate::util::trace::span("isf lazy: names");
         // names are unique (python dict semantics otherwise: the reference path)
         let key = |p: u32, len: u32| -> &str { name_at(json, &escaped, p, len) };
-        let unames = NameIndex::build(&uhashes, |a, b| key(uk[a as usize], ulen[a as usize]) == key(uk[b as usize], ulen[b as usize]))?;
+        let unames = NameIndex::build(&uhash_v, |a, b| key(uk[a as usize], ulen_v[a as usize]) == key(uk[b as usize], ulen_v[b as usize]))?;
         if sdup.load(Ordering::Relaxed) {
             return None;
         }
         // SAFETY: AtomicU32 has the size, alignment and bit validity of u32
         let snames = NameIndex { slots: unsafe { std::mem::transmute::<Vec<AtomicU32>, Vec<u32>>(stab) }.into_boxed_slice() };
-        // key index -> symbol ordinal, unless every member is a symbol (the identity)
-        let sord: Option<Box<[u32]>> = (skeys.len() != sk.len()).then(|| {
+        // the symbols: every member of `symbols` (the usual case), or those whose value is an
+        // object (then a key index -> ordinal map)
+        let (skeys, slen, addrs, sord): (Vec<u32>, Vec<u32>, Vec<u64>, Option<Box<[u32]>>) = if slen_v.iter().all(|&l| l != NOT_SYMBOL) {
+            (sk.to_vec(), slen_v, addr_v, None)
+        } else {
             let mut m = vec![u32::MAX; sk.len()];
-            for (ord, &p) in skeys.iter().enumerate() {
-                m[sk.partition_point(|&q| q < p)] = ord as u32;
+            let (mut k, mut l, mut a) = (Vec::new(), Vec::new(), Vec::new());
+            for j in 0..sk.len() {
+                if slen_v[j] != NOT_SYMBOL {
+                    m[j] = k.len() as u32;
+                    k.push(sk[j]);
+                    l.push(slen_v[j]);
+                    a.push(addr_v[j]);
+                }
             }
-            m.into_boxed_slice()
-        });
+            (k, l, a, Some(m.into_boxed_slice()))
+        };
+        let ulen = ulen_v;
         Some(Indexed {
             skeleton,
             ukeys: uk.into(),
@@ -594,6 +607,28 @@ impl LazyCore {
     /// The JSON the table reads from.
     pub(crate) fn json(&self) -> &[u8] {
         &self.json
+    }
+
+    /// What `store::extract_identifier` reads from an ISF, from this table: (the
+    /// `metadata.windows.pdb` GUID, database and age; the `constant_data` string of the
+    /// `version` symbol; that of `linux_banner`), with the same semantics (a symbol's value
+    /// parsed as a python dict, whatever the format version).
+    pub(crate) fn identifier_fields(&self) -> (Option<(String, String, u64)>, Option<String>, Option<String>) {
+        let win = super::table::SymbolTable::from_blob(super::table::Blob::Shared(self.skeleton.clone()), "", "").ok().and_then(|t| {
+            let pdb = t.metadata().path(&["windows", "pdb"])?;
+            let guid = pdb.get("GUID").and_then(|g| g.as_str()).unwrap_or("").to_string();
+            let db = pdb.get("database").and_then(|g| g.as_str()).unwrap_or("").to_string();
+            let age = pdb.get("age").and_then(|g| g.as_u64()).unwrap_or(0);
+            Some((guid, db, age))
+        });
+        let cdata = |name: &str| -> Option<String> {
+            let o = self.find_symbol(name)? as usize;
+            self.with_member(self.skeys[o], self.sym_end(o), |w| {
+                let v = w.value().ok()?;
+                v.get("constant_data").and_then(|c| c.as_str()).map(str::to_string)
+            })
+        };
+        (win, cdata("version"), cdata("linux_banner"))
     }
 
     /// The name of the member key at position `p` whose name is `len` bytes.
@@ -923,6 +958,9 @@ mod tests {
         let opts = BuildOptions::default();
         let full = SymbolTable::from_blob(super::super::table::Blob::Owned(build_blob(json, &opts).ok()?), "t", "u").unwrap();
         let core = LazyCore::build(JsonBuf::Owned(json.to_vec()), &opts).ok()?;
+        // the identifier index reads the identifier of a lazily indexed ISF from its table
+        let (win, mac, linux) = core.identifier_fields();
+        assert_eq!(crate::symbols::store::identifier_from(win, mac, linux), crate::symbols::store::extract_identifier(json), "identifier");
         Some((full, SymbolTable::from_lazy(Arc::new(core), "t", "u").unwrap()))
     }
 
