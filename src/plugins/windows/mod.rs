@@ -7,6 +7,7 @@ pub mod modules;
 pub mod poolscanner;
 pub mod pslist;
 pub mod psscan;
+pub mod registry;
 pub mod vadinfo;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
@@ -16,4 +17,5 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&pslist::PsList);
     v.push(&psscan::PsScan);
     v.push(&vadinfo::VadInfo);
+    registry::register(v);
 }
