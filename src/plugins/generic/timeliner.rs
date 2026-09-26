@@ -579,62 +579,17 @@ pub fn usable_plugins(filter: &[String]) -> Vec<&'static dyn Plugin> {
         .collect()
 }
 
-/// The python requirements of the timeliner plugins as far as `build_configuration()` records
-/// them: `K` = ModuleRequirement("kernel"), `P` = TranslationLayerRequirement("primary"),
-/// `v:` VersionRequirement (recorded as `false`), `b:` BooleanRequirement (its value),
-/// `l:` optional ListRequirement without default (recorded as `[]`). Int/String requirements
-/// without a default are not recorded.
-const TIMELINER_REQS: [(&str, &[&str]); 22] = [
-    ("windows.pslist.PsList", &["K", "b:physical", "v:timeliner", "l:pid", "b:dump"]),
-    ("windows.psscan.PsScan", &["K", "v:pslist", "v:timeliner", "v:info", "v:poolscanner", "l:pid", "b:dump", "b:physical"]),
-    ("linux.pslist.PsList", &["K", "v:elfs", "l:pid", "v:timeliner", "b:threads", "b:decorate_comm", "b:dump"]),
-    ("linux.bash.Bash", &["K", "v:pslist", "v:timeliner", "v:multi_string_scanner", "v:bytes_scanner", "l:pid"]),
-    ("linux.boottime.Boottime", &["K", "v:timeliner", "v:pslist"]),
-    ("linux.lsof.Lsof", &["K", "v:pslist", "v:timeliner", "v:linuxutils", "l:pid", "b:files_only"]),
-    ("linux.pagecache.Files", &["K", "v:mountinfo", "v:timeliner", "l:type"]),
-    ("mac.bash.Bash", &["K", "v:pslist", "v:timeliner", "v:multi_string_scanner", "v:bytes_scanner", "l:pid"]),
-    ("windows.registry.amcache.Amcache", &["K", "v:hivelist", "v:timeliner"]),
-    ("windows.thrdscan.ThrdScan", &["K", "v:poolscanner", "v:pe_symbols", "v:timeliner"]),
-    ("windows.threads.Threads", &["K", "v:thrdscan", "v:pslist"]),
-    ("windows.orphan_kernel_threads.Threads", &["K", "v:thrdscan", "v:ssdt", "v:modules"]),
-    ("windows.dlllist.DllList", &["K", "v:pslist", "v:timeliner", "v:psscan", "v:pedump", "v:info", "l:pid", "b:ignore-case", "b:dump"]),
-    ("windows.mftscan.MFTScan", &["P", "v:timeliner", "v:yarascanner", "v:yarascan"]),
-    ("windows.netscan.NetScan", &["K", "v:poolscanner", "v:info", "v:timeliner", "v:verinfo", "b:include-corrupt"]),
-    ("windows.netstat.NetStat", &["K", "v:netscan", "v:modules", "v:timeliner", "v:pdbutil", "v:info", "v:verinfo", "b:include-corrupt"]),
-    ("windows.registry.scheduled_tasks.ScheduledTasks", &["K", "v:hivelist", "v:timeliner"]),
-    ("windows.sessions.Sessions", &["K", "v:pslist", "v:timeliner", "l:pid"]),
-    ("windows.shimcachemem.ShimcacheMem", &["K", "v:pslist", "v:timeliner", "v:vadinfo", "v:modules"]),
-    ("windows.symlinkscan.SymlinkScan", &["K", "v:timeliner", "v:poolscanner"]),
-    ("windows.unloadedmodules.UnloadedModules", &["K", "v:timeliner", "v:modules"]),
-    ("windows.registry.userassist.UserAssist", &["K", "v:hivelist", "v:timeliner"]),
-];
-
 /// `--record-config`: python writes `config.json` (`json.dump(total_config, sort_keys=True,
-/// indent=2)`) with every constructed plugin's `build_configuration()` under `<Class>.`.
+/// indent=2)`) with every constructed plugin's `build_configuration()` under `<Class>.`. The
+/// plugins run with their defaults and with timeliner's (generic) stacker choice.
 fn record_config(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Result<()> {
     use crate::cli::json::Json;
     let mut items: super::pyconfig::Items = Vec::new();
+    let defaults = crate::plugins::Config::default();
     for p in plugins {
         let class = p.name().rsplit('.').next().unwrap_or("");
-        let cfg = crate::plugins::default_config(*p);
-        let reqs = TIMELINER_REQS.iter().find(|(n, _)| *n == p.name()).map(|(_, r)| *r).unwrap_or(&[]);
-        for r in reqs {
-            match *r {
-                "K" => items.extend(super::pyconfig::kernel_tree(ctx, p.name(), &format!("{class}.kernel"))?),
-                "P" => {
-                    let prim = super::primary::primary(ctx, "Memory layer for the kernel")?;
-                    items.extend(super::pyconfig::primary_tree(ctx, &prim, &format!("{class}.primary"), false, true)?);
-                }
-                r => {
-                    let (kind, name) = r.split_once(':').unwrap_or(("", r));
-                    let v = match kind {
-                        "v" => Json::Bool(false),
-                        "b" => Json::Bool(cfg.get_bool(name)),
-                        _ => Json::Arr(cfg.get_strs(name).into_iter().map(Json::Str).collect()),
-                    };
-                    items.push((format!("{class}.{name}"), v));
-                }
-            }
+        for (k, v) in super::pyconfig::plugin_configuration(ctx, p.name(), &defaults, true)? {
+            items.push((format!("{class}.{k}"), v));
         }
     }
     let (mut f, _) = ctx.create_output_file("config.json")?;

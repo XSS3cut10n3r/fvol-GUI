@@ -225,11 +225,15 @@ rsvol searches for symbol files, called ISF files, in this order:
 File names may end in `.json`, `.json.xz`, `.json.gz` or `.json.bz2`, and may sit inside `.zip`
 archives.
 
-Linux and macOS kernel ISFs are found by the kernel banner. When several ISFs on the search path
-carry the same banner, rsvol loads the one python volatility3 would load, which it learns from
-python's identifier cache, `~/.cache/volatility3/identifier.cache` or the one under
-`--cache-path`. Without that file, or with `RSVOL_NO_PY_IDENT_SEED=1`, the last one in search
-order wins.
+Linux and macOS kernel ISFs are found by the kernel banner, Windows ones by the PDB name, GUID
+and age. When several ISFs on the search path carry the same banner or PDB, for example the same
+Windows kernel ISF in volatility3's `symbols` directory and in `~/.cache/volatility3/symbols`,
+rsvol loads the one python volatility3 would load: the one listed last in python's identifier
+cache, `~/.cache/volatility3/identifier.cache` or the one under `--cache-path`, after python's
+update of that cache. Without that file, or with `--clear-cache`, rsvol takes the one python
+would list last in the cache it builds from scratch; that order depends on python's string
+hashing and matches a python run with `PYTHONHASHSEED=0`. With `RSVOL_NO_PY_IDENT_SEED=1` the
+last one in search order wins.
 
 To use a remote list of symbol files, pass its URL with `-u`. rsvol downloads the list and the
 files it needs once, with `curl`, and keeps them in `~/.cache/rsvol/` as `data_<SHA512>.cache`:
@@ -368,13 +372,18 @@ Rules that use `import` and precompiled rule files are not supported.
 
 ## Save and reuse a configuration
 
-`--save-config <FILE>` writes the plugin configuration of a run as JSON, and `-c <FILE>` loads
-it again. Default options can also be set in `~/.config/volatility3/vol.json`, as with python
-volatility3:
+`--save-config <FILE>` writes the configuration of a run as JSON, and `-c <FILE>` loads it
+again. The file is the one python volatility3 writes: the plugin's options and what kernel
+discovery found, the layer stack down to the image file (`kernel.layer_name.memory_layer...`),
+the kernel offset and the ISF of the kernel's symbol table. Files written by python and by rsvol
+are interchangeable. Like python, rsvol writes the file once the kernel is found, before the
+plugin runs, and writes nothing when the plugin's requirements are not met. A file loaded with
+`-c` names the image, so `-f` can be left out. Default options can also be set in
+`~/.config/volatility3/vol.json`, as with python volatility3:
 
 ```bash
 vol -f <IMAGE> --save-config pslist.json windows.pslist.PsList --pid 4
-vol -f <IMAGE> -c pslist.json windows.pslist.PsList
+vol -c pslist.json windows.pslist.PsList
 ```
 
 ## Troubleshoot a run that finds no kernel

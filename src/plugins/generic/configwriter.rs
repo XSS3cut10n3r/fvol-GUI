@@ -49,6 +49,10 @@ impl Plugin for ConfigWriter {
             };
             items.push(("automagic.LayerStacker.single_location".into(), Json::Str(loc)));
             items.push(("automagic.LayerStacker.stackers".into(), Json::Arr(stackers)));
+            if !ctx.opts.swap_locations.is_empty() {
+                let swaps = ctx.opts.swap_locations.iter().map(|x| Json::Str(x.clone())).collect();
+                items.push(("automagic.WinSwapLayers.single_swap_locations".into(), Json::Arr(swaps)));
+            }
             items.push(("plugins.ConfigWriter.extra".into(), Json::Bool(true)));
             items.push(("plugins.ConfigWriter.primary".into(), Json::Str("primary".into())));
             items.extend(primary_tree(ctx, &p, "plugins.ConfigWriter.primary", true, true)?);

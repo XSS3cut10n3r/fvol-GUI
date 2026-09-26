@@ -42,7 +42,7 @@ pub fn clear_cache_dir(dir: &Path) -> usize {
         let Ok(ft) = e.file_type() else { continue };
         // like python's glob("*.cache"), hidden names do not match
         let file = !ft.is_dir() && !name.starts_with('.') && name.ends_with(".cache");
-        let subdir = matches!(name, "automagic" | "isf" | "scan" | "remote" | crate::util::resource::CACHE_SUBDIR);
+        let subdir = matches!(name, "automagic" | "isf" | "isfchoice" | "scan" | "remote" | crate::util::resource::CACHE_SUBDIR);
         let removed = if ft.is_dir() && subdir {
             std::fs::remove_dir_all(e.path())
         } else if file || subdir {
