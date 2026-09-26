@@ -124,16 +124,10 @@ impl St<'_> {
         if self.pos + size > self.n {
             return None;
         }
-        let v = if let Some(w) = self.data.get(self.pos..).and_then(|x| x.first_chunk::<8>()) {
-            // one 8-byte load, masked to `size` (1..=8) bytes
-            u64::from_le_bytes(*w) & u64::MAX.checked_shr(64u32.saturating_sub(8 * size as u32)).unwrap_or(0)
-        } else {
-            let mut v = 0u64;
-            for k in 0..size {
-                v |= (self.d[self.pos + k] as u64) << (8 * k);
-            }
-            v
-        };
+        let mut v = 0u64;
+        for k in 0..size {
+            v |= (self.d[self.pos + k] as u64) << (8 * k);
+        }
         self.pos += size;
         Some(v)
     }
