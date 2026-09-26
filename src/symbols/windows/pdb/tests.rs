@@ -256,6 +256,42 @@ fn compare_dir() {
     assert_eq!(bad, 0);
 }
 
+/// Differential test of [`pe_codeview_info`] against volatility3's
+/// `PDBUtility.get_guid_from_mz` (pefile): `RSVOL_PE_REF` is a TSV of
+/// `path<TAB>None` / `path<TAB>GUID<TAB>age<TAB>name` lines produced by python over the
+/// same files (zero padded to SizeOfImage).
+#[test]
+#[ignore]
+fn pe_codeview_matches_python() {
+    let reference = std::fs::read_to_string(std::env::var("RSVOL_PE_REF").expect("RSVOL_PE_REF")).unwrap();
+    let (mut same, mut found, mut diff) = (0, 0, 0);
+    let t_all = std::time::Instant::now();
+    for line in reference.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        let mut data = std::fs::read(f[0]).unwrap();
+        if let Some(n) = pe_image_size(&data)
+            && (n as usize) > data.len()
+            && n < (256 << 20)
+        {
+            data.resize(n as usize, 0);
+        }
+        let ours = match pe_codeview_info(&data) {
+            None => "None".to_string(),
+            Some(cv) => format!("{}\t{}\t{}", cv.guid, cv.age, cv.pdb_name),
+        };
+        let want = f[1..].join("\t");
+        if ours == want {
+            same += 1;
+            found += (want != "None") as usize;
+        } else {
+            diff += 1;
+            eprintln!("DIFF {}\n  python: {want}\n  rsvol:  {ours}", f[0]);
+        }
+    }
+    eprintln!("{same} identical ({found} with CodeView info), {diff} different, in {:?}", t_all.elapsed());
+    assert_eq!(diff, 0);
+}
+
 /// Downloads every `name<TAB>GUID<TAB>age` line of `RSVOL_DL_LIST` into
 /// `RSVOL_DL_DIR/<name>/<GUID><age>/<name>` with [`download_pdb`].
 #[test]

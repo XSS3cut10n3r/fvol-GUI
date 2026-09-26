@@ -1253,23 +1253,49 @@ pub(crate) fn convert(pdb: &[u8], database: DbName, datetime: &str, version: &st
         phase("symbols");
         Ok(t)
     };
+    // Output size estimate from the stream sizes (the JSON is ~1.2x the symbol records plus
+    // ~4x the type records); the buffer is allocated and its pages faulted in by a helper
+    // thread while the real work runs, so writing the document never page-faults.
+    let symrec_size = dbi.stream.u16(dbi.stream.m(20)).ok().and_then(|n| msf.stream_size(n as i64)).unwrap_or(0);
+    let est = ((1u64 << 16) + symrec_size * 3 / 2 + tpi.size * 6).min(1 << 30) as usize;
     let sequential = cfg!(test) && std::env::var_os("RSVOL_PDB_SEQ").is_some();
     if sequential {
-        return types_and_output(&tpi, &meta, sym_work, &phase);
+        return types_and_output(&tpi, &meta, sym_work, || prefaulted(est), &phase);
     }
     std::thread::scope(|scope| {
         let job = std::cell::Cell::new(Some(scope.spawn(sym_work)));
+        let buf_job = std::cell::Cell::new(Some(scope.spawn(move || prefaulted(est))));
         let join = || match job.take() {
             Some(j) => j.join().unwrap_or_else(|_| Err(PErr::Other("symbol thread panicked".into()))),
             None => Err(PErr::Other("symbol thread already joined".into())),
         };
-        let r = types_and_output(&tpi, &meta, join, &phase);
+        let get_buf = || buf_job.take().and_then(|j| j.join().ok()).unwrap_or_default();
+        let r = types_and_output(&tpi, &meta, join, get_buf, &phase);
         // always join (an unjoined panicked scoped thread would make `scope` panic)
         if let Some(j) = job.take() {
             let _ = j.join();
         }
+        if let Some(j) = buf_job.take() {
+            let _ = j.join();
+        }
         r
     })
+}
+
+/// An empty `Vec` with `cap` bytes of capacity whose pages have been touched.
+fn prefaulted(cap: usize) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::new();
+    if v.try_reserve_exact(cap).is_err() {
+        return Vec::new();
+    }
+    let spare = v.spare_capacity_mut();
+    let mut i = 0;
+    while i < spare.len() {
+        spare[i].write(0);
+        i += 4096;
+    }
+    std::hint::black_box(&mut v);
+    v
 }
 
 /// read_tpi_stream + process_types, then the whole JSON document (`get_syms` supplies the
@@ -1278,6 +1304,7 @@ fn types_and_output(
     tpi: &Stream,
     meta: &Meta,
     get_syms: impl FnOnce() -> PResult<SymTable>,
+    get_buf: impl FnOnce() -> Vec<u8>,
     phase: &dyn Fn(&str),
 ) -> PResult<Vec<u8>> {
     let Info { types, subs, syn } = read_info_stream(tpi, "TPI", true)?;
@@ -1313,20 +1340,8 @@ fn types_and_output(
     let syms = get_syms()?;
     phase("joined");
 
-    // generous size estimate: untouched capacity costs nothing
-    let field_bytes: usize = conv
-        .fields
-        .iter()
-        .map(|f| {
-            let e = &conv.entries[f.entry as usize];
-            (e.end - e.start) as usize + 64 + 6 * (f.name.1 & !SYN) as usize
-        })
-        .sum();
-    let est = (1 << 16)
-        + (conv.consts.len() * 48 + conv.enums.len() * 128)
-            + (syms.syms.len() * 72 + syms.arena.len() * 12)
-            + (conv.user.len() * 128 + field_bytes);
-    let mut w = JsonWriter::with_capacity(est);
+    let mut w = JsonWriter { buf: get_buf() };
+    phase("buffer");
     let mut sb = SortBuf::default();
 
     w.buf.extend_from_slice(b"{\n  \"base_types\": ");

@@ -185,6 +185,14 @@ impl<'a> Msf<'a> {
         }
     }
 
+    /// Declared size of stream `index` (None when python has no layer for it).
+    pub(crate) fn stream_size(&self, index: i64) -> Option<u64> {
+        match self.streams.get(usize::try_from(index).ok()?) {
+            Some(Some(d)) => Some(d.size),
+            _ => None,
+        }
+    }
+
     /// Like [`Msf::stream`] but without materialising the stream: for streams of which only a
     /// few fields are read (DBI header, section headers).
     pub(crate) fn paged(&self, index: i64) -> Option<Paged<'a>> {
