@@ -658,9 +658,28 @@ fn recover_fs(ctx: &Context, k: &LinuxKernel, ps: u64, format: &str, tmpfs_only:
     let mtime = py_time();
     let uuid_as_prefix = k.table.user_type("super_block").is_some_and(|u| k.table.member(u, "s_uuid").is_some());
     let (inodes, tail) = collect_inodes(k, false);
+    // superblock types (python `superblock.get_type()`, evaluated per inode; same result for
+    // every inode of a superblock), used to skip work python never reaches
+    let mut sb_types: crate::util::FxHashMap<u64, Option<Option<String>>> = Default::default();
+    for ii in &inodes {
+        sb_types.entry(ii.superblock.addr).or_insert_with(|| ii.superblock.sb_get_type().ok());
+    }
+    let needed = |ii: &InodeInternal| -> bool {
+        if !ii.path.starts_with('/') {
+            return false;
+        }
+        match sb_types.get(&ii.superblock.addr) {
+            // python raises at `get_type()` first
+            Some(None) | None => false,
+            Some(Some(t)) => t.as_deref().is_some_and(|t| !t.is_empty() && (!tmpfs_only || t == "tmpfs")),
+        }
+    };
     let preps: Vec<Result<Prep>> = crate::util::par::par_map(inodes.len(), |idx| {
         let ii = &inodes[idx];
         let kind = inode_kind(&ii.inode)?;
+        if kind == Kind::Other || !needed(ii) {
+            return Ok(Prep { kind, writes: None, row: Err(Error::msg("not needed")) });
+        }
         let writes = if kind == Kind::Reg { Some(inode_page_writes(&ii.inode, ps)) } else { None };
         let row = inode_user_row(ii, ps);
         Ok(Prep { kind, writes, row })

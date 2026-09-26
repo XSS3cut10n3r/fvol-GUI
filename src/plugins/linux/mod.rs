@@ -6,6 +6,7 @@ pub mod bash;
 pub mod capabilities;
 pub mod elfs;
 pub mod envars;
+pub mod graphics;
 pub mod kthreads;
 pub mod library_list;
 pub mod lsof;
@@ -28,6 +29,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&capabilities::Capabilities);
     v.push(&elfs::Elfs);
     v.push(&envars::Envars);
+    v.push(&graphics::fbdev::Fbdev);
     v.push(&library_list::LibraryList);
     v.push(&lsof::Lsof);
     v.push(&malware::malfind::Malfind);
