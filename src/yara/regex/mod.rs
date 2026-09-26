@@ -396,3 +396,74 @@ pub fn escape(pattern: &[u8]) -> Vec<u8> {
 pub fn char_offset(s: &[u8], byte_off: usize) -> usize {
     s[..byte_off.min(s.len())].iter().filter(|&&b| b & 0xc0 != 0x80).count()
 }
+
+/// The regex volatility3's `MultiStringScanner` builds from its needles (byte-for-byte
+/// the same pattern as `MultiStringScanner._process_trie`): a trie where shared
+/// prefixes are factored and an ended needle makes the rest optional, i.e.
+/// leftmost-longest literal matching under python semantics. Compile it with
+/// `Regex::new(&pattern, 0)` and use `find_iter` (start offset + matched bytes).
+/// Returns None for an empty needle list (python raises ValueError on search).
+pub fn multi_string_pattern(needles: &[&[u8]]) -> Option<Vec<u8>> {
+    #[derive(Default)]
+    struct Node {
+        children: std::collections::BTreeMap<u8, Node>,
+        end: bool,
+    }
+    fn render(n: &Node, depth: usize) -> Vec<u8> {
+        if n.children.is_empty() || depth > 100_000 {
+            return Vec::new();
+        }
+        let mut choices: Vec<Vec<u8>> = Vec::new();
+        let mut suffixes: Vec<Vec<u8>> = Vec::new();
+        for (&b, child) in &n.children {
+            let rest = render(child, depth + 1);
+            let esc = escape(&[b]);
+            if !rest.is_empty() {
+                let mut c = esc;
+                c.extend(rest);
+                choices.push(c);
+            } else {
+                suffixes.push(esc);
+            }
+        }
+        if suffixes.len() == 1 {
+            choices.push(suffixes.pop().unwrap_or_default());
+        } else if suffixes.len() > 1 {
+            let mut c = b"[".to_vec();
+            for s in suffixes {
+                c.extend(s);
+            }
+            c.push(b']');
+            choices.push(c);
+        }
+        let mut resp = match choices.len() {
+            0 => Vec::new(),
+            1 => choices.pop().unwrap_or_default(),
+            _ => {
+                let mut r = b"(?:".to_vec();
+                r.extend(choices.join(&b"|"[..]));
+                r.push(b')');
+                r
+            }
+        };
+        if n.end {
+            let mut r = b"(?:".to_vec();
+            r.extend(resp);
+            r.extend_from_slice(b")?");
+            resp = r;
+        }
+        resp
+    }
+    if needles.is_empty() {
+        return None;
+    }
+    let mut root = Node::default();
+    for n in needles {
+        let mut cur = &mut root;
+        for &b in n.iter() {
+            cur = cur.children.entry(b).or_default();
+        }
+        cur.end = true;
+    }
+    Some(render(&root, 0))
+}

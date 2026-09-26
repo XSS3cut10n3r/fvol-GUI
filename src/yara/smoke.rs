@@ -54,6 +54,24 @@ fn yara_smoke_yre_strings() {
 }
 
 #[test]
+fn yara_smoke_multi_string_pattern() {
+    use super::regex::multi_string_pattern;
+    // expectations from volatility3's MultiStringScanner._regex
+    let cases: &[(&[&[u8]], &[u8])] = &[
+        (&[b"Proc", b"File", b"Thre"], b"(?:File|Proc|Thre)"),
+        (&[b"ab", b"abc", b"abd", b"x"], b"(?:ab(?:[cd])?|x)"),
+        (&[b"a.b", b"a-c", b"a[b"], b"a(?:\\-c|\\.b|\\[b)"),
+        (&[b"Linux version ", b"Linux version 5", b"Darwin Kernel"], b"(?:Darwin\\ Kernel|Linux\\ version\\ (?:5)?)"),
+    ];
+    for (needles, want) in cases {
+        let got = multi_string_pattern(needles).unwrap();
+        assert_eq!(String::from_utf8_lossy(&got), String::from_utf8_lossy(want));
+        let re = Regex::new(&got, 0).unwrap();
+        assert!(re.is_match(needles[0]));
+    }
+}
+
+#[test]
 fn yara_smoke_regex_basics() {
     let re = Regex::new(br"[a-z]{5,}\.exe", 16).unwrap();
     let hay = b"xx C:\\windows\\explorer.exe and svchost.exe; a.exe";
