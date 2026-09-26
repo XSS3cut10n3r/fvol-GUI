@@ -30,12 +30,14 @@ pub mod gzip;
 pub mod gzip_enc;
 pub mod inflate;
 pub mod lzma;
+pub(crate) mod lzma_enc;
 pub mod lznt1;
 pub mod snappy;
 #[cfg(test)]
 mod testdata;
 pub mod xpress;
 pub mod xz;
+pub mod xz_enc;
 pub mod zip;
 pub mod zlib;
 #[cfg(test)]
