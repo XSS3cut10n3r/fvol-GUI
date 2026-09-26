@@ -63,6 +63,15 @@ pub(crate) fn bench_rule(name: &str) -> Vec<(Vec<u8>, Modifiers)> {
             v.push((b"cmd.exe", Modifiers { ascii: true, wide: true, xor: Some((1, 255)), ..m() }));
             v
         }
+        "xoronly" => vec![
+            (b"This program cannot be run" as &[u8], Modifiers { xor: Some((1, 255)), ..m() }),
+            (b"http://", Modifiers { ascii: true, wide: true, xor: Some((0, 255)), ..m() }),
+            (b"cmd.exe", Modifiers { ascii: true, wide: true, xor: Some((1, 255)), ..m() }),
+        ],
+        "b64only" => vec![
+            (b"powershell" as &[u8], Modifiers { base64: Some(None), base64wide: Some(None), ..m() }),
+            (b"IEX (New-Object", Modifiers { base64: Some(None), ..m() }),
+        ],
         "rare" => vec![(b"\xf1\xf2\xf3\xf4zq" as &[u8], m())],
         "rare8" => (0..8u8)
             .map(|k| (Box::leak(vec![0xf1, 0xf2, 0xe0 + k, 0xf4, b'z'].into_boxed_slice()) as &[u8], m()))

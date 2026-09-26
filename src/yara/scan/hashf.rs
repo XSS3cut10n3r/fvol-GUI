@@ -54,7 +54,8 @@ impl HashFilter {
                 pair = i;
             }
         }
-        let mut table = vec![0u8; 1 << 16];
+        // 3 bytes of padding: the SIMD path gathers 4 bytes at every key.
+        let mut table = vec![0u8; (1 << 16) + 4];
         for w in windows {
             table[u16::from_le_bytes([w[pair], w[pair + 1]]) as usize] = 0xff;
         }
@@ -105,11 +106,31 @@ impl HashFilter {
     #[inline(always)]
     fn find_pair<const P: usize, F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, f: &mut F) {
         let end = to.min(hay.len().saturating_sub(3));
-        let t: &[u8; 1 << 16] = match self.table.as_slice().try_into() {
+        let t: &[u8; (1 << 16) + 4] = match self.table.as_slice().try_into() {
             Ok(t) => t,
             Err(_) => return,
         };
         let mut q = from;
+        #[cfg(target_arch = "x86_64")]
+        {
+            if has_avx2() {
+                let mut cands = [0u64; 256];
+                loop {
+                    // SAFETY: AVX2 checked; the core bounds-checks its loads.
+                    let (next, k) = unsafe { stage1_avx2::<P>(t, hay, q, end, &mut cands) };
+                    for &c in &cands[..k.min(cands.len())] {
+                        let p = c as usize;
+                        if let Some(w) = hay.get(p..p + 4) {
+                            self.stage2(p, u32::from_le_bytes([w[0], w[1], w[2], w[3]]), f);
+                        }
+                    }
+                    if next == q {
+                        break;
+                    }
+                    q = next;
+                }
+            }
+        }
         while q + 8 <= end {
             let c: &[u8; 11] = match hay[q..q + 11].try_into() {
                 Ok(c) => c,
@@ -133,6 +154,77 @@ impl HashFilter {
             q += 1;
         }
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn has_avx2() -> bool {
+    if cfg!(target_feature = "avx2") {
+        return true;
+    }
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let yes = std::is_x86_feature_detected!("avx2");
+            STATE.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+            yes
+        }
+    }
+}
+
+/// Stage 1 with AVX2 gathers: 16 positions per step; the 16-bit keys at `q + P + k`
+/// are built by interleaving the bytes with themselves shifted by one, then one
+/// dword gather per 8 keys reads the table. Writes candidate positions to `out`;
+/// returns (next position, count). Positions are relative to `hay` and kept below
+/// `end` (loads stay inside `hay`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline(never)]
+unsafe fn stage1_avx2<const P: usize>(
+    t: &[u8; (1 << 16) + 4],
+    hay: &[u8],
+    mut q: usize,
+    end: usize,
+    out: &mut [u64; 256],
+) -> (usize, usize) {
+    let n = hay.len();
+    let ptr = hay.as_ptr();
+    let tp = t.as_ptr() as *const i32;
+    let lowbyte = _mm256_set1_epi32(0xff);
+    let zero = _mm256_setzero_si256();
+    let mut k = 0usize;
+    // Loads read [q + P, q + P + 32) (17 bytes needed); positions q..q+16 < end.
+    while q + 16 <= end && q + P + 32 <= n && k + 16 <= out.len() {
+        // SAFETY: bounds checked above; table has 4 bytes of padding past any key.
+        let (m0, m1) = unsafe {
+            let x = _mm_loadu_si128(ptr.add(q + P) as *const __m128i);
+            let y = _mm_loadu_si128(ptr.add(q + P + 1) as *const __m128i);
+            let w0 = _mm_unpacklo_epi8(x, y); // keys for k = 0..8
+            let w1 = _mm_unpackhi_epi8(x, y); // keys for k = 8..16
+            let i0 = _mm256_cvtepu16_epi32(w0);
+            let i1 = _mm256_cvtepu16_epi32(w1);
+            let g0 = _mm256_and_si256(_mm256_i32gather_epi32::<1>(tp, i0), lowbyte);
+            let g1 = _mm256_and_si256(_mm256_i32gather_epi32::<1>(tp, i1), lowbyte);
+            let m0 = !_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(g0, zero))) & 0xff;
+            let m1 = !_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(g1, zero))) & 0xff;
+            (m0 as u32, m1 as u32)
+        };
+        let mut bits = m0 | m1 << 8;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            out[k] = (q + i) as u64;
+            k += 1;
+        }
+        q += 16;
+    }
+    (q, k)
 }
 
 #[cfg(test)]
