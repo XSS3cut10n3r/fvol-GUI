@@ -31,7 +31,7 @@ pub(crate) const NMAPS: usize = 16;
 
 // ---------------------------------------------------------------------------------------- selectors
 pub(crate) const SEL_MODE: u32 = 0; // 0 = 32-bit, 1 = 64-bit
-pub(crate) const SEL_PFX: u32 = 1; // 0 np, 1 66, 2 f3, 3 f2
+pub(crate) const SEL_PFX: u32 = 1; // 0 np, 1 66, 2 f3, 3 f2, 4 66+f3, 5 66+f2
 pub(crate) const SEL_W: u32 = 2;
 pub(crate) const SEL_L: u32 = 3; // 0..3
 pub(crate) const SEL_B: u32 = 4; // EVEX.b
@@ -44,7 +44,7 @@ pub(crate) const SEL_D: u32 = 10; // same, with 64-bit default operand size in l
 pub(crate) const SEL_A: u32 = 11; // address size 0 16, 1 32, 2 64
 pub(crate) const SEL_H66: u32 = 12; // 0x66 prefix present (0/1)
 pub(crate) const NSEL: usize = 13;
-const ARITY: [u32; NSEL] = [2, 4, 2, 4, 2, 2, 8, 8, 2, 3, 3, 3, 2];
+const ARITY: [u32; NSEL] = [2, 6, 2, 4, 2, 2, 8, 8, 2, 3, 3, 3, 2];
 
 // ---------------------------------------------------------------------------------------- operands
 // operand sources
@@ -280,15 +280,33 @@ fn parse_sel(tok: &str, sel: &mut [u8; NSEL]) -> Result<(), String> {
         }
     };
     // joinable prefixes / L values: "np|66", "l0|l1"
-    if tok.contains('|') || matches!(tok, "np" | "66" | "f3" | "f2") {
+    // mandatory prefix values: 0 np, 1 66, 2 f3, 3 f2, 4 66+f3, 5 66+f2.
+    // "f3"/"f2" include the 66-combined contexts; "xf3"/"xf2" exclude them; "6f3"/"6f2" are
+    // only the 66-combined ones.
+    if tok.contains('|') || matches!(tok, "np" | "66" | "f3" | "f2" | "xf3" | "xf2" | "6f3" | "6f2") {
         let mut m = 0u8;
         let mut kind = None;
         for p in tok.split('|') {
+            let pm: Option<u8> = match p {
+                "f3" => Some(0b010100),
+                "f2" => Some(0b101000),
+                "xf3" => Some(0b000100),
+                "xf2" => Some(0b001000),
+                "6f3" => Some(0b010000),
+                "6f2" => Some(0b100000),
+                _ => None,
+            };
+            if let Some(pm) = pm {
+                if kind.is_some() && kind != Some(SEL_PFX) {
+                    return Err(format!("mixed joined selector {tok}"));
+                }
+                kind = Some(SEL_PFX);
+                m |= pm;
+                continue;
+            }
             let (k, v) = match p {
                 "np" => (SEL_PFX, 0),
                 "66" => (SEL_PFX, 1),
-                "f3" => (SEL_PFX, 2),
-                "f2" => (SEL_PFX, 3),
                 "l0" => (SEL_L, 0),
                 "l1" => (SEL_L, 1),
                 "l2" => (SEL_L, 2),
@@ -428,6 +446,7 @@ fn parse_op(tok: &str) -> Result<OpSpec, String> {
         "kmask" => return Ok(OpSpec { src: S_KMASK, cls: 0, mk: 0 }),
         "eAX" => return Ok(OpSpec { src: S_ACC, cls: C_V, mk: 0 }),
         "zAX" => return Ok(OpSpec { src: S_ACC, cls: C_Z, mk: 0 }),
+        "aAX" => return Ok(OpSpec { src: S_ACC, cls: C_A, mk: 0 }),
         "far" => return Ok(OpSpec { src: S_FARPTR, cls: 0, mk: 0 }),
         "farc" => return Ok(OpSpec { src: S_FARPTR, cls: 1, mk: 0 }),
         _ => {}

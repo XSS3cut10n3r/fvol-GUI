@@ -212,14 +212,10 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             op = b2;
             opcode = [0x0F, b2, 0, 0];
         }
-        pfx = if lockrep == 0xF3 {
-            2
-        } else if lockrep == 0xF2 {
-            3
-        } else if has66 {
-            1
-        } else {
-            0
+        pfx = match lockrep {
+            0xF3 => 2 + 2 * has66 as usize,
+            0xF2 => 3 + 2 * has66 as usize,
+            _ => has66 as usize,
         };
     } else if (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
         // VEX (a LOCK or REX prefix makes it invalid; 66/F2/F3 are ignored)
@@ -352,14 +348,10 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         map = MAP_1;
         op = b;
         opcode = [b, 0, 0, 0];
-        pfx = if lockrep == 0xF3 {
-            2
-        } else if lockrep == 0xF2 {
-            3
-        } else if has66 {
-            1
-        } else {
-            0
+        pfx = match lockrep {
+            0xF3 => 2 + 2 * has66 as usize,
+            0xF2 => 3 + 2 * has66 as usize,
+            _ => has66 as usize,
         };
     }
 
@@ -1074,7 +1066,13 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
             }
             S_FIXED => Operand::Reg(Reg(s.cls)),
             S_ACC => {
-                let size = if s.cls == C_Z && st.osz == 8 { 4 } else { st.osz };
+                let size = if s.cls == C_A {
+                    st.asz
+                } else if s.cls == C_Z && st.osz == 8 {
+                    4
+                } else {
+                    st.osz
+                };
                 Operand::Reg(Reg(gpr(0, size, false)))
             }
             S_CONST1 => Operand::Imm(1),

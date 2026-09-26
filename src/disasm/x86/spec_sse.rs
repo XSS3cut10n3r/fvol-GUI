@@ -32,14 +32,14 @@ pub(crate) const SPEC: &str = r#"
 0f 01 @d5 : xend
 0f 01 @d6 : xtest
 0f 01 @d7 : enclu
-0f 01 @d8 : vmrun eAX
+0f 01 @d8 : vmrun aAX
 0f 01 @d9 : vmmcall
-0f 01 @da : vmload eAX
-0f 01 @db : vmsave eAX
+0f 01 @da : vmload aAX
+0f 01 @db : vmsave aAX
 0f 01 @dc : stgi
 0f 01 @dd : clgi
 0f 01 @de : skinit eax
-0f 01 @df : invlpga eAX, ecx
+0f 01 @df : invlpga aAX, ecx
 0f 01 @ee : rdpkru
 0f 01 @ef : wrpkru
 0f 01 @f8 mode64 : swapgs
@@ -103,7 +103,7 @@ pub(crate) const SPEC: &str = r#"
 0f 1b 66 : bndmov m:bnd/x, r:bnd
 0f 1b f3 m : bndmk r:bnd, M:
 0f 1b f2 : bndcn r:bnd, m:n/n
-0f 1c np m /0 : cldemote M:/b
+0f 1c np|xf3|xf2 m /0 : cldemote M:/b
 0f 1c 66 m : nop m:v/z
 0f 1d m : nop m:v/z
 0f 1e m : nop m:v/z
@@ -336,32 +336,50 @@ pub(crate) const SPEC: &str = r#"
 0f a3 : bt m:v, r:v
 0f a4 : shld m:v, r:v, i:b
 0f a5 : shld m:v, r:v, cl
+0f a6 @c0 : montmul
+0f a6 @c8 : xsha1
+0f a6 @d0 : xsha256
+0f a7 @c0 : xstore
+0f a7 @c8 : xcryptecb
+0f a7 @d0 : xcryptcbc
+0f a7 @d8 : xcryptctr
+0f a7 @e0 : xcryptcfb
+0f a7 @e8 : xcryptofb
 0f a8 : push gs ; d64
 0f a9 : pop gs ; d64
 0f aa : rsm
 0f ab : bts m:v, r:v ; lock
 0f ac : shrd m:v, r:v, i:b
 0f ad : shrd m:v, r:v, cl
-0f ae np m /0 : fxsave M:
-0f ae np m /1 : fxrstor M:
-0f ae np m /2 : ldmxcsr M:/d
-0f ae np m /3 : stmxcsr M:/d
-0f ae np m /4 : xsave M:/p
-0f ae np m /5 : xrstor M:/p
-0f ae np m /6 : xsaveopt M:/p
+0f ae m /0 np|66|xf3|xf2 w0 : fxsave M:
+0f ae m /0 np|66|xf3|xf2 w1 : fxsave64 M:/p
+0f ae m /1 np|66|xf3|xf2 w0 : fxrstor M:
+0f ae m /1 np|66|xf3|xf2 w1 : fxrstor64 M:/p
+0f ae m /2 np|66|xf3|xf2 : ldmxcsr M:/d
+0f ae m /3 np|66|xf3|xf2 : stmxcsr M:/d
+0f ae np m /4 w0 : xsave M:/p
+0f ae np m /4 w1 : xsave64 M:/p
+0f ae np m /5 w0 : xrstor M:/p
+0f ae np m /5 w1 : xrstor64 M:/p
+0f ae np m /6 w0 : xsaveopt M:/p
+0f ae np m /6 w1 : xsaveopt64 M:/p
 0f ae np m /7 : clflush M:/b
-0f ae np r /5 : lfence ; modrm
-0f ae np r /6 : mfence ; modrm
-0f ae np r /7 : sfence ; modrm
+0f ae np @e8 : lfence
+0f ae np @f0 : mfence
+0f ae np @f8 : sfence
 0f ae 66 m /6 : clwb M:/b
 0f ae 66 m /7 : clflushopt M:/b
+0f ae 66 r /6 : tpause R:d
+0f ae f3 r /6 : umonitor R:A
+0f ae f2 r /6 : umwait R:d
 0f ae f3 r /0 : rdfsbase R:y
 0f ae f3 r /1 : rdgsbase R:y
 0f ae f3 r /2 : wrfsbase R:y
 0f ae f3 r /3 : wrgsbase R:y
+0f ae f3 /4 : ptwrite m:y
 0f ae f3 r /5 w0 : incsspd R:d
 0f ae f3 r /5 w1 : incsspq R:q
-0f ae f3 m /6 : clrssbsy M:/q
+0f ae f3 m /6 : clrssbsy M:/d
 0f 1e f3 r /1 w0 : rdsspd R:d
 0f 1e f3 r /1 w1 : rdsspq R:q
 0f 1e f3 @fa : endbr64
@@ -411,15 +429,18 @@ pub(crate) const SPEC: &str = r#"
 0f c6 66 : shufpd r:x, m:x, i:b
 0f c7 m /1 o16|o32 : cmpxchg8b M:/q ; lock
 0f c7 m /1 o64 : cmpxchg16b M:/x ; lock
-0f c7 np m /3 : xrstors M:/p
-0f c7 np m /4 : xsavec M:/p
-0f c7 np m /5 : xsaves M:/p
+0f c7 m /3 np|66|xf3|xf2 w0 : xrstors M:/p
+0f c7 m /3 np|66|xf3|xf2 w1 : xrstors64 M:/p
+0f c7 m /4 np|66|xf3|xf2 w0 : xsavec M:/p
+0f c7 m /4 np|66|xf3|xf2 w1 : xsavec64 M:/p
+0f c7 m /5 np|66|xf3|xf2 w0 : xsaves M:/p
+0f c7 m /5 np|66|xf3|xf2 w1 : xsaves64 M:/p
 0f c7 np m /6 : vmptrld M:/q
 0f c7 np m /7 : vmptrst M:/q
 0f c7 66 m /6 : vmclear M:/q
 0f c7 f3 m /6 : vmxon M:/q
-0f c7 np r /6 : rdrand R:v
-0f c7 np r /7 : rdseed R:v
+0f c7 np|66 r /6 : rdrand R:v
+0f c7 np|66 r /7 : rdseed R:v
 0f c7 f3 r /7 : rdpid R:n
 0f c8-cf : bswap o:v
 # ------------------------------------------------------------------ 0F D0-FF
@@ -584,12 +605,12 @@ pub(crate) const SPEC: &str = r#"
 38 80 66 m : invept r:n, M:/x
 38 81 66 m : invvpid r:n, M:/x
 38 82 66 m : invpcid r:n, M:/x
-38 c8 np : sha1nexte r:x, m:x
-38 c9 np : sha1msg1 r:x, m:x
-38 ca np : sha1msg2 r:x, m:x
-38 cb np : sha256rnds2 r:x, m:x, xmm0
-38 cc np : sha256msg1 r:x, m:x
-38 cd np : sha256msg2 r:x, m:x
+38 c8 : sha1nexte r:x, m:x
+38 c9 : sha1msg1 r:x, m:x
+38 ca : sha1msg2 r:x, m:x
+38 cb : sha256rnds2 r:x, m:x, xmm0
+38 cc : sha256msg1 r:x, m:x
+38 cd : sha256msg2 r:x, m:x
 38 cf 66 : gf2p8mulb r:x, m:x
 38 db 66 : aesimc r:x, m:x
 38 dc 66 : aesenc r:x, m:x
@@ -600,6 +621,8 @@ pub(crate) const SPEC: &str = r#"
 38 f1 np|66 m : movbe M:v, r:v
 38 f0 f2 : crc32 r:y, m:b
 38 f1 f2 : crc32 r:y, m:v
+38 f8 66 m : movdir64b r:A, M:/zmm
+38 f9 m : movdiri M:y, r:y
 38 f6 66 : adcx r:y, m:y
 38 f6 f3 : adox r:y, m:y
 # ------------------------------------------------------------------ 0F 3A
@@ -629,7 +652,7 @@ pub(crate) const SPEC: &str = r#"
 3a 61 66 : pcmpestri r:x, m:x, i:b
 3a 62 66 : pcmpistrm r:x, m:x, i:b
 3a 63 66 : pcmpistri r:x, m:x, i:b
-3a cc np : sha1rnds4 r:x, m:x, i:b
+3a cc : sha1rnds4 r:x, m:x, i:b
 3a ce 66 : gf2p8affineqb r:x, m:x, i:b
 3a cf 66 : gf2p8affineinvqb r:x, m:x, i:b
 3a df 66 : aeskeygenassist r:x, m:x, i:b
