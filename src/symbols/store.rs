@@ -1483,12 +1483,12 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     if b.len() % 2 != 0 {
         return None;
     }
-    let mut out = Vec::with_capacity(b.len() / 2);
+    let mut out = vec![0u8; b.len() / 2];
     let mut bad = 0u8;
-    for p in b.chunks_exact(2) {
+    for (o, p) in out.iter_mut().zip(b.chunks_exact(2)) {
         let (h, l) = (NIB[p[0] as usize], NIB[p[1] as usize]);
         bad |= h | l;
-        out.push(h << 4 | l);
+        *o = h << 4 | l;
     }
     (bad & 0x80 == 0).then_some(out)
 }

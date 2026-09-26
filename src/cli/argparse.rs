@@ -282,23 +282,19 @@ struct OptTuple {
 }
 
 /// `needle in hay` (python) = `hay.contains(needle)`, for the ~250 short plugin names every run
-/// checks: a first-byte scan plus a compare is several times cheaper than setting up std's
-/// two-way searcher for each name.
+/// checks: comparing the needle's first 8 bytes as one word at each position is several times
+/// cheaper than setting up std's two-way searcher for each name.
 fn contains(hay: &str, needle: &str) -> bool {
     let (h, n) = (hay.as_bytes(), needle.as_bytes());
-    let Some((&first, rest)) = n.split_first() else { return true };
     if n.len() > h.len() {
         return false;
     }
-    let last_start = h.len() - n.len();
-    let mut i = 0;
-    while i <= last_start {
-        if h[i] == first && &h[i + 1..i + n.len()] == rest {
-            return true;
-        }
-        i += 1;
+    if n.len() < 8 {
+        return hay.contains(needle);
     }
-    false
+    let word = |s: &[u8]| u64::from_ne_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+    let head = word(n);
+    (0..=h.len() - n.len()).any(|i| word(&h[i..]) == head && h[i + 8..i + n.len()] == n[8..])
 }
 
 fn looks_negative(s: &str) -> bool {
@@ -971,8 +967,11 @@ impl Parser {
 mod tests {
     #[test]
     fn contains_matches_str_contains() {
-        let hays = ["", "a", "windows.pslist.PsList", "windows.psscan.PsScan", "linux.pslist.PsList", "aaab", "é.x"];
-        let needles = ["", "a", "ab", "aab", "pslist", "PsList", "windows.pslist.PsList", "windows.pslist.PsListX", "s.P", "é", "x", "b"];
+        let hays = ["", "a", "windows.pslist.PsList", "windows.psscan.PsScan", "linux.pslist.PsList", "aaab", "é.x", "abcdefgh", "xabcdefghy"];
+        let needles = [
+            "", "a", "ab", "aab", "pslist", "PsList", "windows.pslist.PsList", "windows.pslist.PsListX", "s.P", "é", "x", "b",
+            "abcdefgh", "bcdefghy", "abcdefghy", "pslist.PsList", "pslist.PsLisT",
+        ];
         for h in hays {
             for n in needles {
                 assert_eq!(super::contains(h, n), h.contains(n), "{h:?} {n:?}");
