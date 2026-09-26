@@ -83,16 +83,17 @@ pub struct MacAutomagic {
 /// Run the Mac automagic for `ctx` (called once by `Context::mac_kernel`).
 pub fn init(ctx: &Context) -> Result<MacKernel> {
     let _t = span("mac kernel init (total)");
-    let (phys_arc, phys) = ctx.physical_arc()?;
+    let (phys_arc, phys) = ctx.physical_arc().map_err(|e| unsatisfied(ctx, &e, LAYER))?;
     if !crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), "MacIntelStacker") {
-        return Err(Error::Unsatisfied("MacIntelStacker disabled by --stackers".into()));
+        return Err(unsatisfied(ctx, &Error::msg("MacIntelStacker disabled by --stackers"), LAYER));
     }
-    let image = ctx.image_path()?;
+    let image = ctx.image_path().map_err(|e| unsatisfied(ctx, &e, LAYER))?;
     let fp = symbol_path_fingerprint();
     let am = match cache_load(&image, &fp) {
         Some(a) => a,
         None => {
-            let a = run(phys_arc)?;
+            // python: the MacIntelStacker built no layer
+            let a = run(phys_arc).map_err(|e| unsatisfied(ctx, &e, LAYER))?;
             cache_store(&image, &fp, &a);
             a
         }
@@ -106,11 +107,26 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
     let vlayer: LayerRef = layer;
     let table = {
         let _t = span("mac kernel isf load");
-        // python MacSymbolFinder: symbol_mask = layer.address_mask
-        symbols::load_location(&am.isf, "symbol_table_name", None, vlayer.address_mask())?
+        // python MacSymbolFinder: symbol_mask = layer.address_mask (a layer without a kernel
+        // symbol table: only the symbol requirement is unsatisfied)
+        symbols::load_location(&am.isf, "symbol_table_name", None, vlayer.address_mask()).map_err(|e| unsatisfied(ctx, &e, SYMS))?
     };
     let module = Module::new(vlayer, table, am.kaslr_shift);
     Ok(MacKernel { module, layer, vlayer, phys: *phys, table, kaslr_shift: am.kaslr_shift, dtb: am.dtb, banner: am.banner, isf: am.isf })
+}
+
+/// python: no translation layer -> both kernel requirements are unsatisfied.
+const LAYER: &[&str] = &["kernel.layer_name", "kernel.symbol_table_name"];
+/// python: a layer but no kernel symbol table.
+const SYMS: &[&str] = &["kernel.symbol_table_name"];
+
+/// Log the failure detail (python logs these at -v levels) and return python's
+/// UnsatisfiedException for `paths` (the convention of `Context::init_windows`).
+fn unsatisfied(ctx: &Context, detail: &Error, paths: &[&str]) -> Error {
+    if ctx.opts.verbosity > 0 {
+        eprintln!("automagic: {detail}");
+    }
+    crate::plugins::unsatisfied(paths)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -118,23 +134,21 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
 // ---------------------------------------------------------------------------------------------
 
 /// python `MacIntelStacker.stack` on the physical layer (+ the MacSymbolFinder lookup, which
-/// resolves the same banner to the same ISF).
+/// resolves the same banner to the same ISF). `Err` = no layer (the detail python logs).
 pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
     // python: never stack on top of an intel layer
     if phys.as_intel().is_some() {
-        return Err(Error::Unsatisfied("Mac automagic: the memory layer is already a translation layer".into()));
+        return Err(Error::msg("Mac automagic: the memory layer is already a translation layer"));
     }
     let banners = {
         let _t = span("mac: identifier index");
         symbols::store::identifier_index(symbols::symbol_path()).dictionary("mac")
     };
     if banners.is_empty() {
-        return Err(Error::Unsatisfied(
-            "No Mac banners found - if this is a mac plugin, please check your symbol files location".into(),
-        ));
+        return Err(Error::msg("No Mac banners found - if this is a mac plugin, please check your symbol files location"));
     }
     let scanner = BannerScanner::new(banners.iter().map(|(b, _)| b.as_slice()).collect());
-    let abort = |e: Error| Error::Unsatisfied(format!("Mac automagic failed (exception during stacking: {e})"));
+    let abort = |e: Error| Error::msg(format!("Exception during stacking (MacIntelStacker): {e}"));
     // Phase 1: stop the scan at the first hit (the scanning threads are joined) and validate it
     // alone -- validating while all threads fault in and scan 16 MiB windows is many times
     // slower (memory bus + mmap lock contention), and the first hit is almost always the kernel.
@@ -150,7 +164,7 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
         first
     };
     let Some((off, idx)) = first else {
-        return Err(Error::Unsatisfied("No suitable mac banner could be matched".into()));
+        return Err(Error::msg("No suitable mac banner could be matched"));
     };
     {
         let _t = span("mac: banner validation");
@@ -187,7 +201,7 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
     match result {
         Some(Ok(a)) => Ok(a),
         Some(Err(e)) => Err(abort(e)),
-        None => Err(Error::Unsatisfied("No suitable mac banner could be matched".into())),
+        None => Err(Error::msg("No suitable mac banner could be matched")),
     }
 }
 
