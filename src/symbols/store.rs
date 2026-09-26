@@ -310,9 +310,16 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
             }
         }
     }
-    let json = loc.read()?;
-    let blob = build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?;
+    let json = {
+        let _t = crate::util::trace::span("isf read+decompress");
+        loc.read()?
+    };
+    let blob = {
+        let _t = crate::util::trace::span("isf parse+build");
+        build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?
+    };
     if let Some(cf) = &cf {
+        let _t = crate::util::trace::span("isf cache write");
         let _ = paths::write_atomic(cf, &blob);
     }
     SymbolTable::from_blob(Blob::Owned(blob), name, &url)

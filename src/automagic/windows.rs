@@ -519,9 +519,15 @@ pub struct WinAutomagic {
 
 /// Run the Windows automagic on the physical layer.
 pub fn run(phys: &Arc<dyn Layer>) -> Result<WinAutomagic> {
-    let d = find_dtb(phys)?.ok_or_else(|| Error::Unsatisfied("Unable to validate the plugin requirements: no Windows DTB found".into()))?;
+    let d = {
+        let _t = crate::util::trace::span("windows dtb scan");
+        find_dtb(phys)?.ok_or_else(|| Error::Unsatisfied("Unable to validate the plugin requirements: no Windows DTB found".into()))?
+    };
     let vl = IntelLayer::new("layer_name", phys.clone(), d.dtb, d.mode, PteFlavor::Windows);
-    let k = find_kernel(&vl, phys.as_ref())?.ok_or_else(|| Error::Unsatisfied("No suitable kernels found during pdbscan".into()))?;
+    let k = {
+        let _t = crate::util::trace::span("windows pdbscan");
+        find_kernel(&vl, phys.as_ref())?.ok_or_else(|| Error::Unsatisfied("No suitable kernels found during pdbscan".into()))?
+    };
     Ok(WinAutomagic { dtb: d.dtb, mode: d.mode, kvo: k.kvo, pdb_name: k.pdb.pdb_name, guid: k.pdb.guid, age: k.pdb.age })
 }
 

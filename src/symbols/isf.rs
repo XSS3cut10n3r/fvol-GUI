@@ -292,21 +292,27 @@ fn base_code(t: &Ty) -> u32 {
     }
 }
 
-struct Writer {
+/// String pool writer. Repeated names (member names) are interned with their hash cached;
+/// unique names are appended directly.
+struct Writer<'p> {
     strings: Vec<u8>,
-    interned: FxHashMap<String, (u32, u32)>,
+    interned: FxHashMap<&'p str, (u32, u32, u64)>,
 }
 
-impl Writer {
-    fn s(&mut self, s: &str) -> (u32, u32) {
+impl<'p> Writer<'p> {
+    /// Intern a repeated name: (offset, len, hash).
+    #[inline]
+    fn intern(&mut self, s: &'p str) -> (u32, u32, u64) {
         if let Some(&r) = self.interned.get(s) {
             return r;
         }
-        let r = (self.strings.len() as u32, s.len() as u32);
+        let r = (self.strings.len() as u32, s.len() as u32, hash_bytes(s.as_bytes()));
         self.strings.extend_from_slice(s.as_bytes());
-        self.interned.insert(s.to_string(), r);
+        self.interned.insert(s, r);
         r
     }
+    /// Append bytes: (offset, len).
+    #[inline]
     fn raw(&mut self, b: &[u8]) -> (u32, u32) {
         let r = (self.strings.len() as u32, b.len() as u32);
         self.strings.extend_from_slice(b);
@@ -314,29 +320,35 @@ impl Writer {
     }
 }
 
-fn put32(v: &mut Vec<u8>, x: u32) {
-    v.extend_from_slice(&x.to_le_bytes());
-}
-fn put64(v: &mut Vec<u8>, x: u64) {
-    v.extend_from_slice(&x.to_le_bytes());
-}
-
-/// Build an open-addressing index (u32 slots holding record index + 1).
-fn build_index<'s>(names: impl Iterator<Item = &'s str>, n: usize) -> Vec<u32> {
+/// Build an open-addressing index (u32 slots holding record index + 1) from precomputed
+/// hashes, appending the little-endian slots to `out`; returns the slot count.
+fn index_into(hashes: &[u64], out: &mut Vec<u8>) -> usize {
+    let n = hashes.len();
     if n == 0 {
-        return Vec::new();
+        return 0;
     }
     let slots = (n * 2).next_power_of_two().max(4);
     let mut t = vec![0u32; slots];
     let mask = slots - 1;
-    for (i, name) in names.enumerate() {
-        let mut j = hash_bytes(name.as_bytes()) as usize & mask;
+    for (i, &h) in hashes.iter().enumerate() {
+        let mut j = h as usize & mask;
         while t[j] != 0 {
             j = (j + 1) & mask;
         }
         t[j] = i as u32 + 1;
     }
-    t
+    out.reserve(slots * 4);
+    for x in t {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    slots
+}
+
+fn put32(v: &mut Vec<u8>, x: u32) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn put64(v: &mut Vec<u8>, x: u64) {
+    v.extend_from_slice(&x.to_le_bytes());
 }
 
 /// Lenient base64 decode (python `base64.b64decode` without validation: ignores characters
@@ -625,10 +637,24 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
 
     // ---- user types (with v6.2 anonymous flattening)
     let flatten = version >= (6, 2, 0);
-    let mut members_per_type: Vec<Vec<(String, u64, Ty)>> = Vec::with_capacity(parsed.users.len());
-    for u in &parsed.users {
-        let mut members: Vec<(String, u64, Ty)> = Vec::with_capacity(u.fields.len());
-        let mut pos: FxHashMap<String, usize> = FxHashMap::default();
+    let parsed_ref: &Parsed = &parsed;
+    let mut members_per_type: Vec<Vec<(&str, u64, Ty)>> = Vec::with_capacity(parsed.users.len());
+    for u in &parsed_ref.users {
+        let mut members: Vec<(&str, u64, Ty)> = Vec::with_capacity(u.fields.len());
+        let needs_flatten = flatten && u.fields.iter().any(|f| f.anonymous);
+        if !needs_flatten {
+            // common case: JSON object keys are unique -> fields map 1:1 to members
+            for f in &u.fields {
+                let ty = match f.ty {
+                    Some(t) => r.desc(t),
+                    None => Ty::Void,
+                };
+                members.push((f.name.as_ref(), f.offset.clamp(0, u32::MAX as i128) as u64, ty));
+            }
+            members_per_type.push(members);
+            continue;
+        }
+        let mut pos: FxHashMap<&str, usize> = FxHashMap::default();
         let mut stack: Vec<(&[FieldDef], usize, i128)> = vec![(&u.fields, 0, 0)];
         let mut depth_guard = 0;
         while let Some((fields, i, parent_off)) = stack.pop() {
@@ -638,12 +664,12 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
             stack.push((fields, i + 1, parent_off));
             let f = &fields[i];
             let new_off = parent_off + f.offset;
-            if flatten && f.anonymous {
-                let sub = f.ty.and_then(|t| parsed.descs[t as usize].name.as_deref()).and_then(|n| r.utype_idx.get(n).copied());
+            if f.anonymous {
+                let sub = f.ty.and_then(|t| parsed_ref.descs[t as usize].name.as_deref()).and_then(|n| r.utype_idx.get(n).copied());
                 if let Some(si) = sub {
                     depth_guard += 1;
                     if depth_guard < 100_000 {
-                        stack.push((&parsed.users[si as usize].fields, 0, new_off));
+                        stack.push((&parsed_ref.users[si as usize].fields, 0, new_off));
                     }
                 }
                 continue;
@@ -653,11 +679,12 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
                 None => Ty::Void,
             };
             let off = new_off.clamp(0, u32::MAX as i128) as u64;
-            match pos.get(f.name.as_ref()) {
-                Some(&k) => members[k] = (f.name.to_string(), off, ty),
+            let name: &str = f.name.as_ref();
+            match pos.get(name) {
+                Some(&k) => members[k] = (name, off, ty),
                 None => {
-                    pos.insert(f.name.to_string(), members.len());
-                    members.push((f.name.to_string(), off, ty));
+                    pos.insert(name, members.len());
+                    members.push((name, off, ty));
                 }
             }
         }
@@ -696,8 +723,9 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
 
     // nodes
     {
-        let unresolved: FxHashMap<u32, (u32, u32)> = r.unresolved.iter().map(|(i, n)| (*i, w.s(n))).collect();
+        let unresolved: FxHashMap<u32, (u32, u32)> = r.unresolved.iter().map(|(i, n)| (*i, w.raw(n.as_bytes()))).collect();
         let out = &mut sections[sec::NODES];
+        out.reserve(r.nodes.len() * NODE_SZ);
         for (i, t) in r.nodes.iter().enumerate() {
             let mut enc = ty_encode(t);
             if let Some(&(o, l)) = unresolved.get(&(i as u32)) {
@@ -709,50 +737,59 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
     }
     // user types + members + member hashes
     {
-        let mut ut = Vec::with_capacity(parsed.users.len() * UTYPE_SZ);
-        let mut ms = Vec::new();
-        let mut mh: Vec<u32> = Vec::new();
+        let total_members: usize = members_per_type.iter().map(|m| m.len()).sum();
+        let mut ut = Vec::with_capacity(parsed_ref.users.len() * UTYPE_SZ);
+        let mut ms = Vec::with_capacity(total_members * MEMBER_SZ);
+        let mut mh: Vec<u8> = Vec::with_capacity(total_members * 16);
+        let mut hashes: Vec<u64> = Vec::new();
+        let mut type_hashes: Vec<u64> = Vec::with_capacity(parsed_ref.users.len());
         let mut mcount_total = 0u32;
-        for (u, members) in parsed.users.iter().zip(&members_per_type) {
-            let (no, nl) = w.s(&u.name);
+        for (u, members) in parsed_ref.users.iter().zip(&members_per_type) {
+            let (no, nl) = w.raw(u.name.as_bytes());
+            type_hashes.push(hash_bytes(u.name.as_bytes()));
             let kind = match &*u.kind {
                 "union" => 1u32,
                 "class" => 2,
                 _ => 0,
             };
-            let idx = build_index(members.iter().map(|m| m.0.as_str()), members.len());
+            hashes.clear();
+            let hstart = (mh.len() / 4) as u32;
+            let mstart = ms.len();
+            for (name, off, ty) in members {
+                let (mo, ml, h) = w.intern(name);
+                hashes.push(h);
+                ms.extend_from_slice(&mo.to_le_bytes());
+                ms.extend_from_slice(&ml.to_le_bytes());
+                ms.extend_from_slice(&(*off as u32).to_le_bytes());
+                ms.extend_from_slice(&0u32.to_le_bytes());
+                ms.extend_from_slice(&ty_encode(ty));
+            }
+            debug_assert_eq!(ms.len() - mstart, members.len() * MEMBER_SZ);
+            let hlen = index_into(&hashes, &mut mh) as u32;
             put32(&mut ut, no);
             put32(&mut ut, nl);
             put32(&mut ut, kind);
             put32(&mut ut, u.size.clamp(0, u32::MAX as i128) as u32);
             put32(&mut ut, mcount_total);
             put32(&mut ut, members.len() as u32);
-            put32(&mut ut, mh.len() as u32);
-            put32(&mut ut, idx.len() as u32);
-            mh.extend_from_slice(&idx);
-            for (name, off, ty) in members {
-                let (mo, ml) = w.s(name);
-                put32(&mut ms, mo);
-                put32(&mut ms, ml);
-                put32(&mut ms, *off as u32);
-                put32(&mut ms, 0);
-                ms.extend_from_slice(&ty_encode(ty));
-            }
+            put32(&mut ut, hstart);
+            put32(&mut ut, hlen);
             mcount_total += members.len() as u32;
         }
         sections[sec::UTYPES] = ut;
         sections[sec::MEMBERS] = ms;
-        sections[sec::MHASH] = mh.iter().flat_map(|x| x.to_le_bytes()).collect();
-        sections[sec::H_UTYPES] =
-            build_index(parsed.users.iter().map(|u| u.name.as_ref()), parsed.users.len()).iter().flat_map(|x| x.to_le_bytes()).collect();
+        sections[sec::MHASH] = mh;
+        index_into(&type_hashes, &mut sections[sec::H_UTYPES]);
     }
     // enums
     {
-        let mut es = Vec::new();
+        let mut es = Vec::with_capacity(parsed_ref.enums.len() * ENUM_SZ);
         let mut cs = Vec::new();
+        let mut hashes = Vec::with_capacity(parsed_ref.enums.len());
         let mut ccount = 0u32;
-        for (e, p) in parsed.enums.iter().zip(&enum_prims) {
-            let (no, nl) = w.s(&e.name);
+        for (e, p) in parsed_ref.enums.iter().zip(&enum_prims) {
+            let (no, nl) = w.raw(e.name.as_bytes());
+            hashes.push(hash_bytes(e.name.as_bytes()));
             put32(&mut es, no);
             put32(&mut es, nl);
             put32(&mut es, p.pack());
@@ -761,7 +798,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
             put32(&mut es, e.constants.len() as u32);
             put64(&mut es, 0);
             for (cn, v) in &e.constants {
-                let (co, cl) = w.s(cn);
+                let (co, cl, _) = w.intern(cn);
                 put32(&mut cs, co);
                 put32(&mut cs, cl);
                 put64(&mut cs, *v as i64 as u64);
@@ -770,14 +807,15 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
         }
         sections[sec::ENUMS] = es;
         sections[sec::CONSTS] = cs;
-        sections[sec::H_ENUMS] =
-            build_index(parsed.enums.iter().map(|e| e.name.as_ref()), parsed.enums.len()).iter().flat_map(|x| x.to_le_bytes()).collect();
+        index_into(&hashes, &mut sections[sec::H_ENUMS]);
     }
     // symbols
     {
-        let mut ss = Vec::with_capacity(parsed.symbols.len() * SYMBOL_SZ);
-        for (s, t) in parsed.symbols.iter().zip(&sym_ty) {
-            let (no, nl) = w.s(&s.name);
+        let mut ss = Vec::with_capacity(parsed_ref.symbols.len() * SYMBOL_SZ);
+        let mut hashes = Vec::with_capacity(parsed_ref.symbols.len());
+        for (s, t) in parsed_ref.symbols.iter().zip(&sym_ty) {
+            let (no, nl) = w.raw(s.name.as_bytes());
+            hashes.push(hash_bytes(s.name.as_bytes()));
             put32(&mut ss, no);
             put32(&mut ss, nl);
             put64(&mut ss, s.address as u64);
@@ -797,14 +835,15 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
             }
         }
         sections[sec::SYMBOLS] = ss;
-        sections[sec::H_SYMBOLS] =
-            build_index(parsed.symbols.iter().map(|s| s.name.as_ref()), parsed.symbols.len()).iter().flat_map(|x| x.to_le_bytes()).collect();
+        index_into(&hashes, &mut sections[sec::H_SYMBOLS]);
     }
     // natives / base types
     {
         let mut bs = Vec::new();
+        let mut hashes = Vec::new();
         for n in &r.natives {
-            let (no, nl) = w.s(&n.name);
+            let (no, nl) = w.raw(n.name.as_bytes());
+            hashes.push(hash_bytes(n.name.as_bytes()));
             put32(&mut bs, no);
             put32(&mut bs, nl);
             let prim = match n.ty {
@@ -816,8 +855,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
             put32(&mut bs, base_code(&n.ty));
         }
         sections[sec::BASES] = bs;
-        sections[sec::H_BASES] =
-            build_index(r.natives.iter().map(|n| n.name.as_str()), r.natives.len()).iter().flat_map(|x| x.to_le_bytes()).collect();
+        index_into(&hashes, &mut sections[sec::H_BASES]);
     }
     sections[sec::META] = metadata.to_string_compact().into_bytes();
     sections[sec::STRINGS] = std::mem::take(&mut w.strings);
@@ -930,5 +968,46 @@ mod tests {
         assert_eq!(closest_version("2.0.0").unwrap(), (2, 1, 0));
         assert!(closest_version("6.3.0").is_err());
         assert!(closest_version("5.0.0").is_err());
+    }
+
+    /// `cargo test --release isf_bench -- --ignored --nocapture` (`RSVOL_BENCH_JSON=path`)
+    #[test]
+    #[ignore]
+    fn isf_bench() {
+        let path = std::env::var("RSVOL_BENCH_JSON")
+            .unwrap_or_else(|_| "/tmp/claude-1000/-home-user-rs-vol/c12d8bb7-14a2-4f12-b8c0-878249a94793/scratchpad/nt.json".into());
+        let data = std::fs::read(&path).unwrap();
+        let mb = data.len() as f64 / 1e6;
+        let best = |f: &mut dyn FnMut()| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..15 {
+                let t = std::time::Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let d_utf8 = best(&mut || assert!(std::str::from_utf8(&data).is_ok()));
+        let d0 = best(&mut || {
+            let mut p = Parser::new(&data);
+            p.skip().unwrap();
+        });
+        let d1 = best(&mut || drop(Json::parse(&data).unwrap()));
+        let d2 = best(&mut || drop(parse(&data).unwrap()));
+        let mut blen = 0;
+        let d3 = best(&mut || blen = build_blob(&data, &BuildOptions::default()).unwrap().len());
+        println!(
+            "{mb:.1}MB (best of 15): utf8 {:.2}ms | skip {:.2}ms ({:.0} MB/s) | dom {:.2}ms ({:.0} MB/s) | isf-parse {:.2}ms ({:.0} MB/s) | build_blob {:.2}ms ({:.0} MB/s) blob {}KB",
+            d_utf8 * 1e3,
+            d0 * 1e3,
+            mb / d0,
+            d1 * 1e3,
+            mb / d1,
+            d2 * 1e3,
+            mb / d2,
+            d3 * 1e3,
+            mb / d3,
+            blen / 1024
+        );
     }
 }

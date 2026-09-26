@@ -143,6 +143,7 @@ impl Context {
     }
 
     fn init_windows(&self) -> Result<WinKernel> {
+        let _t = crate::util::trace::span("windows kernel init (total)");
         let (phys_arc, phys) = self.physical_arc()?;
         let image = self.image_path()?;
         let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
@@ -197,8 +198,14 @@ impl Context {
             .with_swap(swap);
         let layer: &'static IntelLayer = Box::leak(Box::new(layer));
         let vlayer: LayerRef = layer;
-        let loc = symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline)?;
-        let table = symbols::load_location(&loc, "symbol_table_name", None, 0)?;
+        let loc = {
+            let _t = crate::util::trace::span("kernel isf lookup");
+            symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline)?
+        };
+        let table = {
+            let _t = crate::util::trace::span("kernel isf load");
+            symbols::load_location(&loc, "symbol_table_name", None, 0)?
+        };
         let module = Module::new(vlayer, table, am.kvo);
         Ok(WinKernel {
             module,

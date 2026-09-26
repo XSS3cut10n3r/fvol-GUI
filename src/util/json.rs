@@ -216,6 +216,8 @@ pub enum Kind {
 pub struct Parser<'a> {
     buf: &'a [u8],
     pos: usize,
+    /// the whole buffer is valid UTF-8 (checked once), so string slices need no validation
+    utf8: bool,
 }
 
 #[inline(always)]
@@ -227,7 +229,23 @@ impl<'a> Parser<'a> {
     pub fn new(buf: &'a [u8]) -> Parser<'a> {
         // skip a UTF-8 BOM like python's utf-8-sig would not; json.load rejects BOMs, but be lenient
         let pos = if buf.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
-        Parser { buf, pos }
+        // one validation pass for the whole document (std's ASCII fast path runs at many
+        // GB/s); string slices cut at '"' boundaries of valid UTF-8 are then valid too
+        let utf8 = std::str::from_utf8(buf).is_ok();
+        Parser { buf, pos, utf8 }
+    }
+
+    #[inline(always)]
+    fn slice_str(&self, s: &'a [u8]) -> Cow<'a, str> {
+        if self.utf8 {
+            // SAFETY: the whole buffer was validated and `s` is delimited by ASCII quotes
+            Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(s) })
+        } else {
+            match std::str::from_utf8(s) {
+                Ok(s) => Cow::Borrowed(s),
+                Err(_) => Cow::Owned(String::from_utf8_lossy(s).into_owned()),
+            }
+        }
     }
 
     /// Current byte offset.
@@ -235,25 +253,51 @@ impl<'a> Parser<'a> {
         self.pos
     }
 
+    #[cold]
+    #[inline(never)]
     fn err(&self, what: &str) -> Error {
         Error::Msg(format!("JSON parse error at byte {}: {what}", self.pos))
     }
 
     #[inline(always)]
     fn ws(&mut self) {
-        while self.pos < self.buf.len() && is_ws(self.buf[self.pos]) {
-            self.pos += 1;
+        let buf = self.buf;
+        let mut p = self.pos;
+        // most values follow directly; pretty-printed input has "\n" + runs of spaces
+        while p < buf.len() && is_ws(buf[p]) {
+            p += 1;
+            while p + 8 <= buf.len() && u64::from_le_bytes(buf[p..p + 8].try_into().unwrap()) == 0x2020_2020_2020_2020 {
+                p += 8;
+            }
         }
+        self.pos = p;
     }
 
     #[inline(always)]
     fn next_nonws(&mut self) -> Result<u8> {
+        if let Some(&b) = self.buf.get(self.pos) {
+            if b > b' ' {
+                return Ok(b);
+            }
+        }
         self.ws();
-        self.buf.get(self.pos).copied().ok_or_else(|| self.err("unexpected end of input"))
+        match self.buf.get(self.pos) {
+            Some(&b) => Ok(b),
+            None => Err(self.err("unexpected end of input")),
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn expect(&mut self, c: u8) -> Result<()> {
+        if self.buf.get(self.pos) == Some(&c) {
+            self.pos += 1;
+            return Ok(());
+        }
+        self.expect_slow(c)
+    }
+
+    #[inline(never)]
+    fn expect_slow(&mut self, c: u8) -> Result<()> {
         if self.next_nonws()? == c {
             self.pos += 1;
             Ok(())
@@ -263,6 +307,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Kind of the next value (skips whitespace).
+    #[inline(always)]
     pub fn peek_kind(&mut self) -> Result<Kind> {
         Ok(match self.next_nonws()? {
             b'n' => Kind::Null,
@@ -276,27 +321,34 @@ impl<'a> Parser<'a> {
     }
 
     /// Begin an object. Returns false (and consumes `{}`) if it is empty.
+    #[inline(always)]
     pub fn obj_begin(&mut self) -> Result<bool> {
         self.expect(b'{')?;
         if self.next_nonws()? == b'}' {
             self.pos += 1;
             return Ok(false);
         }
+        // next_nonws skipped the whitespace: positioned on the first key's quote
         Ok(true)
     }
 
     /// Read an object key and the following ':'.
+    #[inline(always)]
     pub fn key(&mut self) -> Result<Cow<'a, str>> {
         let k = self.str()?;
         self.expect(b':')?;
+        // position on the value so its delimiter check hits the fast path
+        self.ws();
         Ok(k)
     }
 
     /// After a member value: true if another member follows (consumes ','), false at '}'.
+    #[inline(always)]
     pub fn obj_more(&mut self) -> Result<bool> {
         match self.next_nonws()? {
             b',' => {
                 self.pos += 1;
+                self.ws();
                 Ok(true)
             }
             b'}' => {
@@ -339,6 +391,7 @@ impl<'a> Parser<'a> {
         match self.next_nonws()? {
             b',' => {
                 self.pos += 1;
+                self.ws();
                 Ok(true)
             }
             b']' => {
@@ -395,10 +448,7 @@ impl<'a> Parser<'a> {
                 b'"' => {
                     let s = &buf[start..i];
                     self.pos = i + 1;
-                    return match std::str::from_utf8(s) {
-                        Ok(s) => Ok(Cow::Borrowed(s)),
-                        Err(_) => Ok(Cow::Owned(String::from_utf8_lossy(s).into_owned())),
-                    };
+                    return Ok(self.slice_str(s));
                 }
                 b'\\' => {
                     self.pos = start;
@@ -498,7 +548,13 @@ impl<'a> Parser<'a> {
             i += 1;
         }
         let dstart = i;
-        let mut v: u128 = 0;
+        // fast path: up to 19 digits fit in u64 without overflow checks
+        let mut v64: u64 = 0;
+        while i < buf.len() && i - dstart < 19 && buf[i].is_ascii_digit() {
+            v64 = v64 * 10 + (buf[i] - b'0') as u64;
+            i += 1;
+        }
+        let mut v: u128 = v64 as u128;
         let mut overflow = false;
         while i < buf.len() && buf[i].is_ascii_digit() {
             match v.checked_mul(10).and_then(|x| x.checked_add((buf[i] - b'0') as u128)) {

@@ -7,5 +7,6 @@ pub mod mmap;
 pub mod par;
 pub mod paths;
 pub mod time;
+pub mod trace;
 
 pub use fxhash::{FxHashMap, FxHashSet};
