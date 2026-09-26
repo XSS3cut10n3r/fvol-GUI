@@ -870,19 +870,22 @@ fn report_error(e: &Error, failure: Option<&RenderFailure>, class: &str, out: &m
 
 /// `CommandLine.process_unsatisfied_exceptions` + the exit message.
 fn report_unsatisfied(msg: &str, class: &str, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    // each line is a config path, optionally followed by ": <requirement description>"
     let is_path = |l: &str| !l.is_empty() && !l.contains(char::is_whitespace);
-    let lines: Vec<&str> = msg.lines().collect();
-    let rel: Vec<String> = if !lines.is_empty() && lines.iter().all(|l| is_path(l)) {
-        lines.iter().map(|l| l.to_string()).collect()
+    let lines: Vec<(&str, &str)> = msg.lines().map(|l| l.split_once(": ").unwrap_or((l, ""))).collect();
+    let rel: Vec<(String, String)> = if !lines.is_empty() && lines.iter().all(|(l, _)| is_path(l)) {
+        lines.iter().map(|(l, d)| (l.to_string(), d.to_string())).collect()
     } else {
-        vec!["kernel.layer_name".into(), "kernel.symbol_table_name".into()]
+        vec![("kernel.layer_name".into(), String::new()), ("kernel.symbol_table_name".into(), String::new())]
     };
-    let paths: Vec<String> = rel.iter().map(|r| format!("plugins.{class}.{r}")).collect();
+    let paths: Vec<String> = rel.iter().map(|(r, _)| format!("plugins.{class}.{r}")).collect();
     let mut t = String::from("\n");
-    for p in &paths {
-        t.push_str(&format!("Unsatisfied requirement {p}: \n"));
+    for (p, (_, d)) in paths.iter().zip(&rel) {
+        t.push_str(&format!("Unsatisfied requirement {p}: {d}\n"));
     }
-    if rel.iter().any(|r| r.ends_with("layer_name")) {
+    let rel: Vec<String> = rel.into_iter().map(|(r, _)| r).collect();
+    // TranslationLayerRequirements: `*layer_name`, and the generic plugins' `primary`
+    if rel.iter().any(|r| r.ends_with("layer_name") || r == "primary") {
         t.push_str(
             "\nA translation layer requirement was not fulfilled.  Please verify that:\n\
              \tA file was provided to create this layer (by -f, --single-location or by config)\n\
