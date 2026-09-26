@@ -1160,4 +1160,60 @@ mod tests {
         assert_eq!(py_hex(0x90), "0x90");
         assert_eq!(py_hex(-5), "-0x5");
     }
+
+    /// The minimal verinfo/pefile port against python's `windows.verinfo.VerInfo` reference
+    /// (every process module of the test image: version numbers or "-").
+    #[test]
+    #[ignore]
+    fn verinfo_matches_python_reference() {
+        use crate::context::GlobalOptions;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let reference = std::fs::read_to_string("/home/user/rs-vol/bench/ref/py/windows.verinfo.VerInfo.txt").unwrap();
+        let mut want = std::collections::HashMap::new();
+        for line in reference.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() != 8 {
+                continue;
+            }
+            let (Ok(pid), Some(base)) = (f[0].parse::<i128>(), f[2].strip_prefix("0x").and_then(|b| u64::from_str_radix(b, 16).ok())) else { continue };
+            want.insert((pid, base), f[4..].join("."));
+        }
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let (mut n, mut versions) = (0, 0);
+        for p in crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)) {
+            let p = p.unwrap();
+            let Ok(layer) = p.add_process_layer() else { continue };
+            let pid = p.m("UniqueProcessId").unwrap().int().unwrap();
+            for m in p.load_order_modules() {
+                let Ok(m) = m else { break };
+                let Ok(base) = m.m("DllBase").and_then(|b| b.u64()) else { continue };
+                let got = match get_version_information(&ctx, layer, base) {
+                    Ok((a, b, c, d)) => format!("{a}.{b}.{c}.{d}"),
+                    Err(_) => "-.-.-.-".to_string(),
+                };
+                let w = want.get(&(pid, base)).unwrap_or_else(|| panic!("no reference row for {pid} {base:#x}"));
+                assert_eq!(&got, w, "pid {pid} base {base:#x}");
+                n += 1;
+                versions += (!got.starts_with('-')) as usize;
+            }
+        }
+        println!("{n} modules ({versions} with a version resource) identical to python");
+        assert!(versions > 100);
+    }
+
+    /// `find_version_info` (physical scan) on the test image; prints the results for
+    /// comparison with python's `VerInfo.find_version_info`.
+    #[test]
+    #[ignore]
+    fn find_version_info_on_image() {
+        use crate::context::GlobalOptions;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        for name in ["CONHOST.EXE", "conhost.exe", "cmd.exe", "NOTEPAD.EXE"] {
+            let t = std::time::Instant::now();
+            println!("FINDVER {name} {:?} {:?}", find_version_info(k.phys, name).map_err(|e| e.to_string()), t.elapsed());
+        }
+    }
 }
