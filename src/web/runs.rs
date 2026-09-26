@@ -301,7 +301,9 @@ pub fn explain(e: &Error, run: &Run) -> ErrInfo {
     let detail = e.to_string();
     match e {
         Error::Unsatisfied(s) => {
-            if let (Some(img), Some(w)) = (image_os, want)
+            let banners = session.banners();
+            let banner_os = banners.first().map(|b| if b.starts_with("Darwin") { "mac" } else { "linux" });
+            if let (Some(img), Some(w)) = (image_os.or(banner_os), want)
                 && img != w
             {
                 return ErrInfo {
@@ -312,10 +314,10 @@ pub fn explain(e: &Error, run: &Run) -> ErrInfo {
                     detail,
                 };
             }
-            let symbols = s.contains("symbol_table_name") && !s.contains("layer_name");
+            let symbols = (s.contains("symbol_table_name") && !s.contains("layer_name")) || (banner_os.is_some() && want.is_none_or(|w| Some(w) == banner_os));
             if symbols {
                 let mut hints = Vec::new();
-                match want.or(image_os) {
+                match want.or(image_os).or(banner_os) {
                     Some("windows") => {
                         let pdb = session.ctx.windows_kernel().ok().map(|k| format!("{} {}-{}", k.pdb_name, k.guid, k.age));
                         hints.push(format!(
@@ -326,12 +328,18 @@ pub fn explain(e: &Error, run: &Run) -> ErrInfo {
                         hints.push("If this machine is offline, convert the PDB elsewhere and put the .json.xz under a symbols directory, then restart with -s DIR.".into());
                     }
                     Some("linux") => {
-                        hints.push("Linux symbol tables must match the exact kernel build. Generate one with dwarf2json from the matching vmlinux (with debug info).".into());
-                        hints.push("Put the .json(.xz) under a directory and restart `vol serve` with -s DIR.".into());
+                        if let Some(b) = banners.first() {
+                            hints.push(format!("Kernel banner found in the image: {b}"));
+                        }
+                        hints.push("Linux symbol tables must match that exact kernel build: generate one with dwarf2json from the matching vmlinux with debug info (e.g. the linux-image-…-dbgsym package).".into());
+                        hints.push("Put the .json(.xz) under a directory and open the image again with that symbols directory (or restart `vol serve` with -s DIR).".into());
                     }
                     Some("mac") => {
-                        hints.push("macOS symbol tables must match the exact kernel build; generate one with dwarf2json from the matching Kernel Debug Kit.".into());
-                        hints.push("Put the .json(.xz) under a directory and restart `vol serve` with -s DIR.".into());
+                        if let Some(b) = banners.first() {
+                            hints.push(format!("Kernel banner found in the image: {b}"));
+                        }
+                        hints.push("macOS symbol tables must match that exact kernel build; generate one with dwarf2json from the matching Kernel Debug Kit.".into());
+                        hints.push("Put the .json(.xz) under a directory and open the image again with that symbols directory (or restart `vol serve` with -s DIR).".into());
                     }
                     _ => {}
                 }

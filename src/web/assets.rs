@@ -21,6 +21,7 @@ macro_rules! asset {
 pub static ASSETS: &[Asset] = &[
     asset!("app.css", "text/css; charset=utf-8"),
     asset!("app.js", "text/javascript; charset=utf-8"),
+    asset!("theme.js", "text/javascript; charset=utf-8"),
     asset!("core.js", "text/javascript; charset=utf-8"),
     asset!("table.js", "text/javascript; charset=utf-8"),
     asset!("palette.js", "text/javascript; charset=utf-8"),
@@ -28,6 +29,7 @@ pub static ASSETS: &[Asset] = &[
     asset!("procs.js", "text/javascript; charset=utf-8"),
     asset!("hex.js", "text/javascript; charset=utf-8"),
     asset!("catalog.js", "text/javascript; charset=utf-8"),
+    asset!("result.js", "text/javascript; charset=utf-8"),
     asset!("favicon.svg", "image/svg+xml"),
     asset!("mono-400.woff2", "font/woff2"),
     asset!("mono-700.woff2", "font/woff2"),

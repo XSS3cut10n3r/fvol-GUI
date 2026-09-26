@@ -34,6 +34,45 @@ pub struct Summary {
     pub warm_ms: u64,
     /// why each OS was ruled out (shown when nothing matched)
     pub notes: Vec<String>,
+    /// kernel banners found in the image when no kernel could be set up (missing symbols)
+    pub banners: Vec<String>,
+}
+
+/// Linux / macOS kernel banners in the physical layer, most frequent first (what the analyst
+/// needs to find the right symbol table when none matched).
+pub fn find_banners(phys: crate::objects::LayerRef) -> Vec<String> {
+    use crate::layers::scan::{MultiStringScanner, scan};
+    let pats: [&[u8]; 2] = [b"Linux version ", b"Darwin Kernel Version "];
+    let hits = scan(phys, &MultiStringScanner::new(&pats), None);
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for (off, _) in hits.into_iter().take(4000) {
+        let mut buf = [0u8; 320];
+        phys.read_padded(off, &mut buf);
+        let end = buf.iter().position(|&b| b == 0 || b == b'\n').unwrap_or(buf.len());
+        let s = &buf[..end];
+        // real banners are long, printable and carry a build description
+        if s.len() < 40 || !s.iter().all(|&b| (0x20..0x7f).contains(&b)) || !(s.windows(2).any(|w| w == b" (") || s.windows(4).any(|w| w == b"xnu-")) {
+            continue;
+        }
+        let t = String::from_utf8_lossy(s).trim().to_string();
+        match counts.iter_mut().find(|(b, _)| *b == t) {
+            Some(c) => c.1 += 1,
+            None => counts.push((t, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    // one banner per kernel version (copies in memory are often truncated or have trailing junk)
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for (b, _) in counts {
+        let ver = b.split_whitespace().nth(2).unwrap_or("").to_string();
+        if !seen.contains(&ver) {
+            seen.push(ver);
+            out.push(b);
+        }
+    }
+    out.truncate(3);
+    out
 }
 
 pub struct Session {
@@ -108,6 +147,10 @@ impl Session {
 
     pub fn os(&self) -> Option<&'static str> {
         self.warm.lock().unwrap_or_else(|e| e.into_inner()).1.os
+    }
+
+    pub fn banners(&self) -> Vec<String> {
+        self.warm.lock().unwrap_or_else(|e| e.into_inner()).1.banners.clone()
     }
 
     fn set_phase(&self, p: &'static str, hub: &super::runs::Hub) {
@@ -211,9 +254,19 @@ impl Session {
             }
             Ok(())
         }));
+        if sum.os.is_none()
+            && let Ok(phys) = self.ctx.physical()
+        {
+            self.set_phase("Looking for kernel banners", hub);
+            sum.banners = find_banners(phys);
+        }
         sum.warm_ms = t.elapsed().as_millis() as u64;
         let state = match result {
             Ok(Ok(())) if sum.os.is_some() => Warm::Ready,
+            Ok(Ok(())) if !sum.banners.is_empty() => {
+                let os = if sum.banners[0].starts_with("Darwin") { "macOS" } else { "Linux" };
+                Warm::Failed(format!("This is a {os} image, but no symbol table (ISF) matches its kernel, so its structures can't be read."))
+            }
             Ok(Ok(())) => Warm::Failed("No supported operating system kernel was found in this image.".into()),
             Ok(Err(m)) => Warm::Failed(m),
             Err(_) => Warm::Failed("Internal error while analysing the image (rsvol bug).".into()),
@@ -284,6 +337,11 @@ impl Session {
         w.key("notes").arr();
         for n in &sum.notes {
             w.s(n);
+        }
+        w.end_arr();
+        w.key("banners").arr();
+        for b in &sum.banners {
+            w.s(b);
         }
         w.end_arr();
         w.end_obj();
