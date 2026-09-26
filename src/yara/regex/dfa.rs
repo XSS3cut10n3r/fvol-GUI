@@ -307,6 +307,8 @@ pub struct Searcher {
     prefilter: Option<Prefilter>,
     strategy: Strategy,
     name: &'static str,
+    /// Every match has this length: the start is `end - width` (no reverse scan).
+    fixed_width: Option<usize>,
 }
 
 impl Searcher {
@@ -374,6 +376,10 @@ impl Searcher {
             prefilter,
             strategy,
             name,
+            fixed_width: match h.max_width() {
+                Some(w) if w as u128 == h.min_width(&[]) && w > 0 => Some(w as usize),
+                _ => None,
+            },
         })
     }
 
@@ -409,6 +415,11 @@ impl Searcher {
             }
         }
         let e = self.fwd_unanchored(c, hay, start, must_advance)?;
+        if let Some(w) = self.fixed_width {
+            if e >= start + w {
+                return Some((e - w, e));
+            }
+        }
         let s = rev_search(&self.cls, &self.rev, &mut c.rev, hay, e, start)?;
         Some((s, e))
     }
