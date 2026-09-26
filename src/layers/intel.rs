@@ -405,9 +405,9 @@ impl IntelLayer {
             &raw
         };
         let es = self.p.entry_size as usize;
-        let first = &buf[..es];
-        // table == table[:entry_size] * entry_number  -> invalid
-        !buf.chunks_exact(es).all(|c| c == first)
+        // table == table[:entry_size] * entry_number  -> invalid; i.e. every entry equals the
+        // next one: one (vectorized) compare of the table with itself shifted by an entry
+        buf[es..] != buf[..buf.len() - es]
     }
 
     /// python `_translate_entry(page_address)`: walk the tables; returns (entry, position).
@@ -726,6 +726,36 @@ impl IntelLayer {
         RangeWalk { l: self, off: offset, end, f, cur: (0, 0), swap }.run();
     }
 
+    /// `[addr, addr + len)` split at the top-level page-table entries, with the entry of each
+    /// piece. `mapping_with_targets(addr, len)` is the pieces' runs concatenated, with runs
+    /// that are contiguous across a seam merged. A piece's runs only depend on (entry, start,
+    /// len), so equal pieces (the kernel half every process maps) need to be walked only once.
+    /// None when the range is empty or leaves the translated address space, or when the
+    /// top-level table itself is invalid (nothing is mapped then).
+    pub fn top_level_pieces(&self, addr: u64, len: u64) -> Option<Vec<TopPiece>> {
+        let bits = self.initial_position + 1;
+        let end = addr.checked_add(len)?;
+        if len == 0 || (bits < 64 && end > 1u64 << bits) {
+            return None;
+        }
+        let (size, _) = self.p.levels[0];
+        let base = mask_bits(self.initial_entry, self.p.maxphyaddr - 1, size + self.p.index_shift);
+        if !self.table_valid(base) {
+            return None;
+        }
+        let sub_bits = bits - size;
+        let mut v = Vec::new();
+        let mut a = addr;
+        while a < end {
+            let idx = a >> sub_bits;
+            let piece_end = ((idx + 1) << sub_bits).min(end);
+            let entry = self.read_entry(base + (idx << self.p.index_shift))?;
+            v.push(TopPiece { entry, start: a, len: piece_end - a });
+            a = piece_end;
+        }
+        Some(v)
+    }
+
     /// The 4 KiB page table at physical `base` straight from the mmapped file / a zero-copy
     /// slice (None: read entries one by one).
     #[inline]
@@ -835,6 +865,15 @@ impl IntelLayer {
             None => Ok(()),
         }
     }
+}
+
+/// A piece of a range under one top-level page-table entry ([`IntelLayer::top_level_pieces`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TopPiece {
+    /// the top-level entry
+    pub entry: u64,
+    pub start: u64,
+    pub len: u64,
 }
 
 /// Outcome of visiting (part of) a page-table block in [`RangeWalk`].
@@ -1362,6 +1401,36 @@ mod tests {
         v
     }
 
+    /// `mapping_with_targets` runs.
+    fn runs_whole(l: &IntelLayer, off: u64, len: u64) -> Vec<(Mapping, Target)> {
+        let mut v = Vec::new();
+        l.mapping_with_targets(off, len, &mut |m, t| {
+            v.push((m, t));
+            true
+        });
+        v
+    }
+
+    /// The same from `top_level_pieces`: per-piece runs, merged across the seams.
+    fn runs_by_pieces(l: &IntelLayer, off: u64, len: u64) -> Vec<(Mapping, Target)> {
+        let Some(pieces) = l.top_level_pieces(off, len) else { return runs_whole(l, off, len) };
+        let mut v: Vec<(Mapping, Target)> = Vec::new();
+        for p in pieces {
+            for (m, t) in runs_whole(l, p.start, p.len) {
+                if let Some((pm, pt)) = v.last_mut()
+                    && pm.offset.wrapping_add(pm.len) == m.offset
+                    && pm.mapped.wrapping_add(pm.len) == m.mapped
+                    && *pt == t
+                {
+                    pm.len += m.len;
+                    continue;
+                }
+                v.push((m, t));
+            }
+        }
+        v
+    }
+
     /// A physical layer with holes: `hole(addr)` bytes are unreadable / invalid; `slice` is
     /// offered or not (zero-copy table path vs entry-by-entry reads).
     struct Holey {
@@ -1540,6 +1609,7 @@ mod tests {
                         swapped += want.iter().filter(|c| c.3 != Target::Phys).count();
                         large += want.iter().filter(|c| c.1 > 0x1000).count();
                         partial += want.iter().filter(|c| c.1 & 0xfff != 0 || c.0 & 0xfff != 0).count();
+                        assert_eq!(runs_by_pieces(&l, s, n), runs_whole(&l, s, n), "pieces: round {round} {mode:?} {flavor:?} range {s:#x}+{n:#x}");
                     }
                 }
             }
@@ -1653,6 +1723,9 @@ mod tests {
                 });
                 let t2 = t.elapsed();
                 let mut first_diff = if fast != slow { Some(format!("whole space: {fast:?} vs per-address {slow:?}")) } else { None };
+                if first_diff.is_none() && runs_by_pieces(l, 0, max) != runs_whole(l, 0, max) {
+                    first_diff = Some("top-level pieces".into());
+                }
                 // random sub-ranges starting / ending inside chunks
                 for _ in 0..64 {
                     if sample.is_empty() || first_diff.is_some() {
