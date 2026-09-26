@@ -96,10 +96,13 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
             let r = run(phys_arc);
             symbols::store::keep_decoded_for(None);
             let a = r.map_err(|e| unsatisfied(ctx, &e, LAYER))?;
-            cache_store(&image, &fp, &a);
+            // (the index run() used: memoized per process)
+            let deps = symbols::store::identifier_index(symbols::symbol_path()).choice_deps("mac", &a.banner);
+            cache_store(&image, &fp, &a, deps);
             a
         }
     };
+    crate::util::trace::note(|| format!("mac kernel ISF: {}", am.isf.url()));
     let banner_str: String = am.banner.iter().map(|&b| b as char).collect();
     let layer = IntelLayer::new("layer_name", phys_arc.clone(), am.dtb, PagingMode::Intel32e, PteFlavor::Generic)
         .with_os("mac")
@@ -524,26 +527,25 @@ fn loc_decode(s: &str) -> Option<IsfLocation> {
 fn cache_load(image: &std::path::Path, fp: &str) -> Option<MacAutomagic> {
     use crate::automagic::cache::{get, load};
     let kv = load(image, "mac")?;
-    if get(&kv, "sympath")? != fp {
+    // the banner -> ISF choice (python's identifier cache, the banner's candidate ISFs)
+    if get(&kv, "sympath")? != fp || !symbols::store::choice_deps_hold(&kv) {
         return None;
     }
     let num = |k: &str| get(&kv, k).and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
     Some(MacAutomagic { banner: unhex(get(&kv, "banner")?)?, isf: loc_decode(get(&kv, "isf")?)?, kaslr_shift: num("kaslr")?, dtb: num("dtb")? })
 }
 
-fn cache_store(image: &std::path::Path, fp: &str, a: &MacAutomagic) {
+fn cache_store(image: &std::path::Path, fp: &str, a: &MacAutomagic, deps: Vec<(&'static str, String)>) {
     let Some(isf) = loc_encode(&a.isf) else { return };
-    crate::automagic::cache::store(
-        image,
-        "mac",
-        &[
-            ("sympath", fp.to_string()),
-            ("banner", hex(&a.banner)),
-            ("isf", isf),
-            ("kaslr", format!("{:#x}", a.kaslr_shift)),
-            ("dtb", format!("{:#x}", a.dtb)),
-        ],
-    );
+    let mut kv = vec![
+        ("sympath", fp.to_string()),
+        ("banner", hex(&a.banner)),
+        ("isf", isf),
+        ("kaslr", format!("{:#x}", a.kaslr_shift)),
+        ("dtb", format!("{:#x}", a.dtb)),
+    ];
+    kv.extend(deps);
+    crate::automagic::cache::store(image, "mac", &kv);
 }
 
 #[cfg(test)]

@@ -144,7 +144,7 @@ pub fn read(path: &Path) -> Option<Vec<CacheRow>> {
 /// volatility3/framework/symbols, CACHE_PATH/symbols) from rsvol's search path: the python
 /// install directories stand in for the embedded copies when python is installed.
 pub fn python_symbol_roots(sp: &SymbolPath) -> Vec<Root> {
-    let have_python = super::store::python_install().is_some();
+    let have_python = super::store::python_install_cached().is_some();
     sp.roots
         .iter()
         .filter(|r| !(have_python && matches!(r, Root::Embedded { .. })))
