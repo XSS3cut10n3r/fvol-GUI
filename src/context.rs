@@ -181,11 +181,24 @@ impl Context {
         keep_err(self.mac.get_or_init(|| crate::automagic::mac::init(self).map_err(|e| e.to_string())))
     }
 
+    /// Log an automagic failure detail (python logs these at -v levels) and return the python
+    /// UnsatisfiedException for `paths`.
+    fn unsatisfied(&self, detail: &Error, paths: &[&str]) -> Error {
+        if self.opts.verbosity > 0 {
+            eprintln!("automagic: {detail}");
+        }
+        crate::plugins::unsatisfied(paths)
+    }
+
     fn init_windows(&self) -> Result<WinKernel> {
         let _t = crate::util::trace::span("windows kernel init (total)");
-        let (phys_arc, phys) = self.physical_arc()?;
+        // python: no translation layer -> both the layer and the symbol requirement are
+        // unsatisfied; a layer without kernel symbols -> only the symbol requirement
+        const LAYER: &[&str] = &["kernel.layer_name", "kernel.symbol_table_name"];
+        const SYMS: &[&str] = &["kernel.symbol_table_name"];
+        let (phys_arc, phys) = self.physical_arc().map_err(|e| self.unsatisfied(&e, LAYER))?;
         if !crate::automagic::stacker_enabled(self.opts.stackers.as_deref(), "WindowsIntelStacker") {
-            return Err(Error::Unsatisfied("WindowsIntelStacker disabled by --stackers".into()));
+            return Err(self.unsatisfied(&Error::msg("WindowsIntelStacker disabled by --stackers"), LAYER));
         }
         let image = self.image_path()?;
         let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
@@ -208,7 +221,19 @@ impl Context {
         let am = match cached {
             Some(a) => a,
             None => {
-                let a = crate::automagic::windows::run(phys_arc)?;
+                use crate::automagic::windows::{WinAutomagic, find_dtb, find_kernel};
+                let d = {
+                    let _t = crate::util::trace::span("windows dtb scan");
+                    find_dtb(phys_arc).map_err(|e| self.unsatisfied(&e, LAYER))?.ok_or_else(|| self.unsatisfied(&Error::msg("no Windows DTB found"), LAYER))?
+                };
+                let vl = IntelLayer::new("layer_name", phys_arc.clone(), d.dtb, d.mode, PteFlavor::Windows);
+                let k = {
+                    let _t = crate::util::trace::span("windows pdbscan");
+                    find_kernel(&vl, *phys)
+                        .map_err(|e| self.unsatisfied(&e, SYMS))?
+                        .ok_or_else(|| self.unsatisfied(&Error::msg("No suitable kernels found during pdbscan"), SYMS))?
+                };
+                let a = WinAutomagic { dtb: d.dtb, mode: d.mode, kvo: k.kvo, pdb_name: k.pdb.pdb_name, guid: k.pdb.guid, age: k.pdb.age };
                 crate::automagic::cache::store(
                     &image,
                     "win",
@@ -242,11 +267,11 @@ impl Context {
         let vlayer: LayerRef = layer;
         let loc = {
             let _t = crate::util::trace::span("kernel isf lookup");
-            symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline)?
+            symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline).map_err(|e| self.unsatisfied(&e, SYMS))?
         };
         let table = {
             let _t = crate::util::trace::span("kernel isf load");
-            symbols::load_location(&loc, "symbol_table_name", None, 0)?
+            symbols::load_location(&loc, "symbol_table_name", None, 0).map_err(|e| self.unsatisfied(&e, SYMS))?
         };
         let module = Module::new(vlayer, table, am.kvo);
         Ok(WinKernel {
