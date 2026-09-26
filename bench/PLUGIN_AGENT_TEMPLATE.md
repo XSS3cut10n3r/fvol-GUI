@@ -50,3 +50,9 @@ ending with the line "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anth
 
 FINAL REPLY: branch name; per plugin: OK/DIFF status vs reference (and for DIFF, why), release timing vs vol-rs;
 shared helpers you created (paths + one-line purpose); any core changes; known gaps.
+
+PARALLELISM: if you have lots of work, you may parallelize with 2-3 subagents of your own (3 MAX) via the Agent
+tool — split by plugin/file ownership, each in its own git clone of your branch, you merge. Subagents start with
+zero context: give each a complete brief (paths, file ownership, DESIGN.md incl. "Engineering mindset" and
+"Resource safety", this template's rules, how to verify, the commit trailer). Memory is the constraint: heavy runs via
+bench/scripts/limit.sh, at most one python volatility process per agent.
