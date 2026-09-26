@@ -35,6 +35,7 @@ pub mod xpress;
 pub mod xz;
 pub mod zip;
 pub mod zlib;
+pub mod zlib_exact;
 #[cfg(test)]
 mod bench;
 
