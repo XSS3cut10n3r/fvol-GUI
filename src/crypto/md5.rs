@@ -18,7 +18,10 @@
 //!
 //! That is 5/4/4/5 cycles per step (op(s), add, rotate, add) = 288 cycles per
 //! 64-byte block, 4.5 cycles/byte: the floor for a single message on any core with
-//! 1-cycle ALU ops (OpenSSL's hand-written asm runs at the same ~289).
+//! 1-cycle ALU ops. The block's closing `state += (a, b, c, d)` would add one more
+//! cycle to the chain; the last step instead adds its rotated sum to the
+//! precomputed `state.b + c`. Measured: 288.3 cycles/block (OpenSSL's hand-written
+//! asm: 289.4).
 //!
 //! Getting there needs exact instruction selection, which LLVM does not give: it
 //! reassociates `(a + K + M) + f` into `(a + M + f) + K` (one more add on the
@@ -48,8 +51,9 @@ const K: [u32; 64] = [
 const INIT: [u32; 4] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
 
 /// Expands to a whole block-loop compression function whose 64 steps are
-/// `$step!(F|G|H|I, a, b, c, d, t)` invocations (`t` = `a + K[i] + M[g]`, the
-/// off-chain part), each of which must leave the step's result in `t`.
+/// `$step!(F|G|H|I, a, b, c, d, t, s, bb)` invocations computing
+/// `a = bb + rotl(t + f(b, c, d), s)`, where `t` = `a + K[i] + M[g]` is the
+/// off-chain part and `bb` is normally `b` (the last step passes `sb + b`).
 macro_rules! md5_compress_fn {
     ($(#[$attr:meta])* $name:ident, $step:ident) => {
         $(#[$attr])*
@@ -64,16 +68,16 @@ macro_rules! md5_compress_fn {
                     ($f:ident, $i0:expr, [$g0:expr, $g1:expr, $g2:expr, $g3:expr], [$s0:expr, $s1:expr, $s2:expr, $s3:expr]) => {
                         #[allow(unused_mut)]
                         let mut t = a.wrapping_add(K[$i0]).wrapping_add(m($g0));
-                        $step!($f, a, b, c, d, t, $s0);
+                        $step!($f, a, b, c, d, t, $s0, b);
                         #[allow(unused_mut)]
                         let mut t = d.wrapping_add(K[$i0 + 1]).wrapping_add(m($g1));
-                        $step!($f, d, a, b, c, t, $s1);
+                        $step!($f, d, a, b, c, t, $s1, a);
                         #[allow(unused_mut)]
                         let mut t = c.wrapping_add(K[$i0 + 2]).wrapping_add(m($g2));
-                        $step!($f, c, d, a, b, t, $s2);
+                        $step!($f, c, d, a, b, t, $s2, d);
                         #[allow(unused_mut)]
                         let mut t = b.wrapping_add(K[$i0 + 3]).wrapping_add(m($g3));
-                        $step!($f, b, c, d, a, t, $s3);
+                        $step!($f, b, c, d, a, t, $s3, c);
                     };
                 }
                 round!(F, 0, [0, 1, 2, 3], [7, 12, 17, 22]);
@@ -91,9 +95,23 @@ macro_rules! md5_compress_fn {
                 round!(I, 48, [0, 7, 14, 5], [6, 10, 15, 21]);
                 round!(I, 52, [12, 3, 10, 1], [6, 10, 15, 21]);
                 round!(I, 56, [8, 15, 6, 13], [6, 10, 15, 21]);
-                round!(I, 60, [4, 11, 2, 9], [6, 10, 15, 21]);
+                // Last round by hand: its final step writes b = c + rotl(..), and
+                // sb + b is folded in as (sb + c) + rotl(..), off the chain.
+                #[allow(unused_mut)]
+                let mut t = a.wrapping_add(K[60]).wrapping_add(m(4));
+                $step!(I, a, b, c, d, t, 6, b);
+                #[allow(unused_mut)]
+                let mut t = d.wrapping_add(K[61]).wrapping_add(m(11));
+                $step!(I, d, a, b, c, t, 10, a);
+                #[allow(unused_mut)]
+                let mut t = c.wrapping_add(K[62]).wrapping_add(m(2));
+                $step!(I, c, d, a, b, t, 15, d);
+                #[allow(unused_mut)]
+                let mut t = b.wrapping_add(K[63]).wrapping_add(m(9));
+                let sb_c = sb.wrapping_add(c);
+                $step!(I, b, c, d, a, t, 21, sb_c);
                 sa = sa.wrapping_add(a);
-                sb = sb.wrapping_add(b);
+                sb = b;
                 sc = sc.wrapping_add(c);
                 sd = sd.wrapping_add(d);
             }
@@ -106,18 +124,18 @@ macro_rules! md5_compress_fn {
 /// LLVM cannot move the constant add behind `f`; G's `b & d` is `andn(!d, b)` on a
 /// pinned `!d` so no register copy of `b` lands on the chain.
 macro_rules! step_rust {
-    (F, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr) => {
-        $a = $b.wrapping_add(gpr($t).wrapping_add($d ^ ($b & ($c ^ $d))).rotate_left($s));
+    (F, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr, $bb:expr) => {
+        $a = $bb.wrapping_add(gpr($t).wrapping_add($d ^ ($b & ($c ^ $d))).rotate_left($s));
     };
-    (G, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr) => {
+    (G, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr, $bb:expr) => {
         let nd = gpr(!$d);
-        $a = $b.wrapping_add(gpr($t.wrapping_add($c & nd)).wrapping_add($b & !nd).rotate_left($s));
+        $a = $bb.wrapping_add(gpr($t.wrapping_add($c & nd)).wrapping_add($b & !nd).rotate_left($s));
     };
-    (H, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr) => {
-        $a = $b.wrapping_add(gpr($t).wrapping_add($b ^ ($c ^ $d)).rotate_left($s));
+    (H, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr, $bb:expr) => {
+        $a = $bb.wrapping_add(gpr($t).wrapping_add($b ^ ($c ^ $d)).rotate_left($s));
     };
-    (I, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr) => {
-        $a = $b.wrapping_add(gpr($t).wrapping_add($c ^ ($b | !$d)).rotate_left($s));
+    (I, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr, $bb:expr) => {
+        $a = $bb.wrapping_add(gpr($t).wrapping_add($c ^ ($b | !$d)).rotate_left($s));
     };
 }
 
@@ -125,14 +143,14 @@ macro_rules! step_rust {
 /// x86_64 instructions (`rol`, not BMI2 `rorx`; measured equal).
 #[cfg(target_arch = "x86_64")]
 macro_rules! step_asm {
-    ($f:ident, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr) => {
+    ($f:ident, $a:ident, $b:ident, $c:ident, $d:ident, $t:ident, $s:expr, $bb:expr) => {
         // Safety: pure register arithmetic, no memory or stack access.
         unsafe {
             std::arch::asm!(
                 step_asm!(@ops $f),
-                "add {t:e}, {x:e}", "rol {t:e}, {s}", "add {t:e}, {b:e}",
+                "add {t:e}, {x:e}", "rol {t:e}, {s}", "add {t:e}, {bb:e}",
                 t = inout(reg) $t, b = in(reg) $b, c = in(reg) $c, d = in(reg) $d,
-                x = out(reg) _, s = const $s, options(pure, nomem, nostack),
+                bb = in(reg) $bb, x = out(reg) _, s = const $s, options(pure, nomem, nostack),
             )
         };
         $a = $t;
