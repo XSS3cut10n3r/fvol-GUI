@@ -52,14 +52,14 @@ awk -v files="$*" '
 END {
     n = split(files, F, " ")
     printf "%-44s %7s %8s %8s %6s %8s %8s %6s %5s %5s", "file", "out_MB", "C_MB/s", "rs_MB/s", "wall_x", "C_Mcyc", "rs_Mcyc", "cyc_x", "C_IPC", "rsIPC"
-    if ("old" in seen) printf " %8s %6s", "old_Mcyc", "new/old"
+    if ("old" in seen) printf " %8s %8s %6s", "old_MB/s", "old_Mcyc", "new/old"
     printf "\n"
     for (i = 1; i <= n; i++) {
         f = F[i]; c = "c" SUBSEP f; r = "rust" SUBSEP f; o = "old" SUBSEP f
         name = f; sub(/.*\//, "", name); if (length(name) > 44) name = substr(name, 1, 20) "~" substr(name, length(name) - 22)
         cmb = out[f] / ms[c] / 1e3; rmb = out[f] / ms[r] / 1e3
         printf "%-44s %7.1f %8.1f %8.1f %5.3fx %8.2f %8.2f %5.3fx %5.2f %5.2f", name, out[f] / 1e6, cmb, rmb, rmb / cmb, cy[c] / 1e6, cy[r] / 1e6, cy[c] / cy[r], ins[c] / cy[c], ins[r] / cy[r]
-        if ("old" in seen) printf " %8.2f %5.3fx", cy[o] / 1e6, cy[o] / cy[r]
+        if ("old" in seen) printf " %8.1f %8.2f %5.3fx", out[f] / ms[o] / 1e3, cy[o] / 1e6, cy[o] / cy[r]
         printf "\n"
     }
 }' "$res"
