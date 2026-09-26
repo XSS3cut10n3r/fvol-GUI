@@ -766,7 +766,138 @@ pub struct IdentEntry {
 /// workers extract at once while decompressing, and there a structural index's extra memory
 /// traffic costs more than its faster skipping saves (measured: ~100 ms slower index).
 pub fn extract_identifier(json: &[u8]) -> Option<(String, Vec<u8>)> {
-    extract_identifier_with(&mut crate::util::json::Parser::new(json))
+    match extract_identifier_fast(json) {
+        Some(r) => r,
+        None => extract_identifier_with(&mut crate::util::json::Parser::new(json)),
+    }
+}
+
+unsafe extern "C" {
+    fn memchr(s: *const u8, c: i32, n: usize) -> *const u8;
+}
+
+/// libc `memchr` (vectorized; std does not expose one).
+fn find_byte(hay: &[u8], c: u8) -> Option<usize> {
+    if hay.is_empty() {
+        return None;
+    }
+    // SAFETY: `hay` is a valid slice; memchr reads at most `hay.len()` bytes
+    let p = unsafe { memchr(hay.as_ptr(), c as i32, hay.len()) };
+    (!p.is_null()).then(|| p as usize - hay.as_ptr() as usize)
+}
+
+/// The byte range end of the JSON value starting at `v` (a document without backslashes:
+/// strings end at the next quote), or None.
+fn value_end(json: &[u8], v: usize) -> Option<usize> {
+    match *json.get(v)? {
+        b'"' => Some(v + 1 + find_byte(&json[v + 1..], b'"')? + 1),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            let mut i = v;
+            while i < json.len() {
+                match json[i] {
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                    b'"' => i += 1 + find_byte(&json[i + 1..], b'"')?,
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => {
+            let n = json[v..].iter().position(|&b| matches!(b, b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t')).unwrap_or(json.len() - v);
+            Some(v + n)
+        }
+    }
+}
+
+/// [`extract_identifier`] without walking the whole document: one SIMD pass tracking bracket
+/// depth and spotting the candidate member names ([`crate::util::jsonidx::ident_marks`])
+/// locates the root's `metadata` / `symbols` members and the `symbols` members named
+/// `linux_banner` / `version`; only those values are parsed (the same code as the byte
+/// parser's path). ~4x faster than the byte parser, which skips member by member through the
+/// `symbols` section (half to three quarters of a dwarf2json ISF).
+/// `None` = not decidable this way (a backslash anywhere -- escapes could spell a key --,
+/// unbalanced brackets, the root or a `symbols` value not an object): the byte parser decides.
+fn extract_identifier_fast(json: &[u8]) -> Option<Option<(String, Vec<u8>)>> {
+    let marks = crate::util::jsonidx::ident_marks(json)?;
+    if marks.backslash {
+        return None;
+    }
+    let (d1, d2) = (marks.d1, marks.d2);
+    let ws = |mut i: usize| {
+        while json.get(i).is_some_and(|b| matches!(b, b' ' | b'\n' | b'\r' | b'\t')) {
+            i += 1;
+        }
+        i
+    };
+    let root = ws(if json.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 });
+    if json.get(root) != Some(&b'{') {
+        return None;
+    }
+    // the root's members: depth-1 strings followed by ':'
+    let mut keys: Vec<(usize, &[u8], usize)> = Vec::new();
+    for &p in &d1 {
+        let close = p + 1 + find_byte(&json[p + 1..], b'"')?;
+        let c = ws(close + 1);
+        if json.get(c) == Some(&b':') {
+            keys.push((p, &json[p + 1..close], ws(c + 1)));
+        }
+    }
+    let mut win: Option<(String, String, u64)> = None;
+    let mut linux: Option<String> = None;
+    let mut mac: Option<String> = None;
+    let parse = |v: usize| -> Option<crate::util::json::Json<'_>> {
+        let end = value_end(json, v)?;
+        crate::util::json::Parser::new(&json[v..end]).value().ok()
+    };
+    for (i, &(p, k, v)) in keys.iter().enumerate() {
+        match k {
+            b"metadata" => {
+                let val = parse(v)?;
+                if let Some(pdb) = val.path(&["windows", "pdb"]) {
+                    let guid = pdb.get("GUID").and_then(|g| g.as_str()).unwrap_or("").to_string();
+                    let db = pdb.get("database").and_then(|g| g.as_str()).unwrap_or("").to_string();
+                    let age = pdb.get("age").and_then(|g| g.as_u64()).unwrap_or(0);
+                    win = Some((guid, db, age));
+                }
+            }
+            b"symbols" => {
+                if json.get(v) != Some(&b'{') {
+                    return None;
+                }
+                let end = keys.get(i + 1).map(|n| n.0).unwrap_or(json.len());
+                let lo = d2.partition_point(|&q| q < p);
+                for &q in d2[lo..].iter().take_while(|&&q| q < end) {
+                    let close = q + 1 + find_byte(&json[q + 1..], b'"')?;
+                    let c = ws(close + 1);
+                    if json.get(c) != Some(&b':') {
+                        continue; // a string value, not a member name
+                    }
+                    let w = ws(c + 1);
+                    if json.get(w) != Some(&b'{') {
+                        continue; // the byte parser skips non-object values
+                    }
+                    let val = parse(w)?;
+                    if let Some(cd) = val.get("constant_data").and_then(|c| c.as_str()) {
+                        if &json[q + 1..close] == b"linux_banner" {
+                            linux = Some(cd.to_string());
+                        } else {
+                            mac = Some(cd.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(identifier_from(win, mac, linux))
 }
 
 /// [`extract_identifier`] through any pull parser.
@@ -810,6 +941,11 @@ pub fn extract_identifier_with<'a, P: crate::util::jsonidx::Pull<'a>>(p: &mut P)
     if r.is_err() {
         return None;
     }
+    identifier_from(win, mac, linux)
+}
+
+/// python's identifier processors, in order: windows (metadata.windows.pdb), mac, linux.
+fn identifier_from(win: Option<(String, String, u64)>, mac: Option<String>, linux: Option<String>) -> Option<(String, Vec<u8>)> {
     if let Some((guid, db, age)) = win {
         if !guid.is_empty() && age != 0 && !db.is_empty() {
             return Some(("windows".into(), format!("{db}|{}|{age}", guid.to_uppercase()).into_bytes()));
@@ -1280,6 +1416,121 @@ mod tests {
             );
         }
         println!("SymbolPath::new {t_new:?}");
+    }
+
+    /// The fast extractor agrees with the byte parser on every ISF here and on shipped ones,
+    /// and on damaged copies whenever it decides (when the byte parser fails, the fast path
+    /// may still decide: it only checks bracket balance, like a byte-level skip).
+    #[test]
+    fn fast_identifier_equals_byte_parser() {
+        let byte = |j: &[u8]| extract_identifier_with(&mut crate::util::json::Parser::new(j));
+        let mut docs: Vec<Vec<u8>> = crate::symbols::embedded::FILES.iter().map(|&(rel, _, data)| if rel.ends_with(".xz") { crate::codecs::xz::decompress(data).unwrap() } else { data.to_vec() }).collect();
+        docs.push(br#"{"metadata": {"format": "6.2.0"}, "symbols": {"a": {"address": 1}, "version": {"address": 2, "constant_data": "RGFyd2lu"}, "linux_banner": {"constant_data": "TGludXg="}, "x": "version"}, "user_types": {"version": {"fields": {}}}}"#.to_vec());
+        docs.push(br#"{"symbols": {"linux_banner": {"constant_data": "TGludXg="}}, "metadata": {"windows": {"pdb": {"GUID": "ab", "age": 1, "database": "k.pdb"}}}, "symbols": {"version": 5}}"#.to_vec());
+        docs.push(br#"{"a": ["version", {"linux_banner": {"constant_data": "eA=="}}], "symbols": {"sub": {"version": {"constant_data": "eQ=="}}}}"#.to_vec());
+        let mut n = 0;
+        for d in &docs {
+            if let Some(f) = extract_identifier_fast(d) {
+                assert_eq!(f, byte(d), "{}", String::from_utf8_lossy(&d[..d.len().min(200)]));
+                n += 1;
+            }
+        }
+        assert!(n > 20, "{n}");
+        // damage
+        let base = &docs[docs.len() - 3];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in 0..base.len() {
+            for _ in 0..6 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let mut d = base.clone();
+                d[i] = b"{}[]:,\" \\ab"[(x >> 33) as usize % 11];
+                if let (Some(f), Some(b)) = (extract_identifier_fast(&d), byte(&d)) {
+                    assert_eq!(f, Some(b), "{}", String::from_utf8_lossy(&d));
+                }
+            }
+        }
+    }
+
+    /// Same on the ISFs of this machine (`cargo test --release fast_identifier_on_all_isfs -- --ignored`).
+    #[test]
+    #[ignore]
+    fn fast_identifier_on_all_isfs() {
+        let path = SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
+        let mut buf = Vec::new();
+        let (mut fast, mut n) = (0, 0);
+        for loc in path.all() {
+            let (f, b) = with_json(&loc, &mut buf, |j| (extract_identifier_fast(j), extract_identifier_with(&mut crate::util::json::Parser::new(j)))).unwrap();
+            if let Some(f) = f {
+                assert_eq!(f, b, "{}", loc.url());
+                fast += 1;
+            }
+            n += 1;
+        }
+        println!("{fast}/{n} decided by the fast extractor");
+    }
+
+    /// Where the identifier index's CPU goes, one thread: decompression vs extraction.
+    /// `cargo test --release ident_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ident_cost() {
+        let path = SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
+        let (mut td, mut te, mut bytes) = (0f64, 0f64, 0usize);
+        let mut buf = Vec::new();
+        for loc in path.all() {
+            let IsfLocation::File(p) = &loc else { continue };
+            if !p.to_string_lossy().ends_with(".xz") {
+                continue;
+            }
+            let raw = std::fs::read(p).unwrap();
+            let t = std::time::Instant::now();
+            let n = crate::codecs::xz::decompress_reuse(&raw, &mut buf, false).unwrap();
+            td += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            std::hint::black_box(extract_identifier(&buf[..n]));
+            te += t.elapsed().as_secs_f64();
+            bytes += n;
+        }
+        println!("{:.0} MB decompressed: decode {:.0} ms ({:.0} MB/s), extract {:.0} ms ({:.0} MB/s)", bytes as f64 / 1e6, td * 1e3, bytes as f64 / 1e6 / td, te * 1e3, bytes as f64 / 1e6 / te);
+    }
+
+    /// Components of the fast extractor on one document.
+    /// `RSVOL_BENCH_JSON=x.json cargo test --release fast_ident_parts -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn fast_ident_parts() {
+        use crate::symbols::linux::search::Needle;
+        let data = std::fs::read(std::env::var("RSVOL_BENCH_JSON").unwrap()).unwrap();
+        let best = |f: &mut dyn FnMut()| {
+            let mut b = f64::MAX;
+            for _ in 0..10 {
+                let t = std::time::Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let t_bs = best(&mut || { std::hint::black_box(find_byte(&data, b'\\')); });
+        let mut n = 0;
+        let t_n1 = best(&mut || {
+            n = 0;
+            Needle::new(b"\"linux_banner\"").for_each(&data, |_| {
+                n += 1;
+                true
+            })
+        });
+        let t_n2 = best(&mut || {
+            Needle::new(b"\"version\"").for_each(&data, |_| {
+                n += 1;
+                true
+            })
+        });
+        let t_d = best(&mut || drop(std::hint::black_box(crate::util::jsonidx::ident_marks(&data))));
+        let t_all = best(&mut || drop(std::hint::black_box(extract_identifier_fast(&data))));
+        let t_byte = best(&mut || drop(std::hint::black_box(extract_identifier_with(&mut crate::util::json::Parser::new(&data)))));
+        println!("{:.1} MB: memchr '\\\\' {t_bs:.2} ms, needle linux_banner {t_n1:.2} ms, needle version {t_n2:.2} ms, depth pass {t_d:.2} ms, fast total {t_all:.2} ms, byte parser {t_byte:.2} ms", data.len() as f64 / 1e6);
     }
 
     /// Identifier extraction: indexed walk vs the byte parser (same answers, speed).

@@ -303,6 +303,148 @@ mod x86 {
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx2,pclmulqdq,popcnt,bmi1")]
+    pub(super) unsafe fn ident_marks_avx2(buf: &[u8]) -> Option<IdentMarks> {
+        let q = _mm256_set1_epi8(b'"' as i8);
+        let bsl = _mm256_set1_epi8(b'\\' as i8);
+        let ob = _mm256_set1_epi8(b'{' as i8);
+        let os = _mm256_set1_epi8(b'[' as i8);
+        let cb = _mm256_set1_epi8(b'}' as i8);
+        let cs = _mm256_set1_epi8(b']' as i8);
+        let vv = _mm256_set1_epi8(b'v' as i8);
+        let ll = _mm256_set1_epi8(b'l' as i8);
+        let ones = _mm_set1_epi8(-1);
+        let mut out = IdentMarks::default();
+        let (mut prev_escaped, mut prev_in, mut depth) = (0u64, 0u64, 0i64);
+        let mut any_bs = 0u64;
+        // blocks read 64 + 13 bytes: the last ones go through a padded copy
+        let mut pad = [b' '; 64 + 64];
+        let mut i = 0usize;
+        while i < buf.len() {
+            let p: *const u8 = if buf.len() - i >= 64 + 16 {
+                unsafe { buf.as_ptr().add(i) }
+            } else {
+                let n = (buf.len() - i).min(128);
+                pad[..n].copy_from_slice(&buf[i..i + n]);
+                pad[n..].fill(b' ');
+                pad.as_ptr()
+            };
+            // SAFETY: `p` has at least 64 + 13 readable bytes (input or padded copy)
+            let (qm, bs, o, c, pre) = unsafe {
+                let half = |k: usize| -> (u32, u32, u32, u32, u32) {
+                    let v = _mm256_loadu_si256(p.add(k) as *const __m256i);
+                    let v1 = _mm256_loadu_si256(p.add(k + 1) as *const __m256i);
+                    let v8 = _mm256_loadu_si256(p.add(k + 8) as *const __m256i);
+                    let v13 = _mm256_loadu_si256(p.add(k + 13) as *const __m256i);
+                    let isq = _mm256_cmpeq_epi8(v, q);
+                    let cand = _mm256_and_si256(
+                        isq,
+                        _mm256_or_si256(
+                            _mm256_and_si256(_mm256_cmpeq_epi8(v1, vv), _mm256_cmpeq_epi8(v8, q)),
+                            _mm256_and_si256(_mm256_cmpeq_epi8(v1, ll), _mm256_cmpeq_epi8(v13, q)),
+                        ),
+                    );
+                    (
+                        _mm256_movemask_epi8(isq) as u32,
+                        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, bsl)) as u32,
+                        _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, ob), _mm256_cmpeq_epi8(v, os))) as u32,
+                        _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, cb), _mm256_cmpeq_epi8(v, cs))) as u32,
+                        _mm256_movemask_epi8(cand) as u32,
+                    )
+                };
+                let a = half(0);
+                let b = half(32);
+                let j = |x: u32, y: u32| x as u64 | (y as u64) << 32;
+                (j(a.0, b.0), j(a.1, b.1), j(a.2, b.2), j(a.3, b.3), j(a.4, b.4))
+            };
+            // the padded tail: bytes past the end are spaces, masks beyond it are empty
+            any_bs |= bs;
+            let escaped = if bs == 0 && prev_escaped == 0 {
+                0
+            } else {
+                const EVEN: u64 = 0x5555_5555_5555_5555;
+                let bs = bs & !prev_escaped;
+                let follows = (bs << 1) | prev_escaped;
+                let odd_starts = bs & !EVEN & !follows;
+                let (seq_even, ovf) = odd_starts.overflowing_add(bs);
+                prev_escaped = ovf as u64;
+                (EVEN ^ (seq_even << 1)) & follows
+            };
+            let qu = qm & !escaped;
+            let in_string = _mm_cvtsi128_si64(_mm_clmulepi64_si128(_mm_set_epi64x(0, qu as i64), ones, 0)) as u64 ^ prev_in;
+            prev_in = ((in_string as i64) >> 63) as u64;
+            let outside = !in_string;
+            let (op, cl) = (o & outside, c & outside);
+            let opening = qu & in_string;
+            // verified candidates among the opening quotes
+            let mut cmask = 0u64;
+            let mut pc = pre & opening;
+            while pc != 0 {
+                let t = pc.trailing_zeros() as usize;
+                if i + t < buf.len() && ident_cand_at(buf, i + t) {
+                    cmask |= 1u64 << t;
+                }
+                pc &= pc - 1;
+            }
+            let ccl = cl.count_ones() as i64;
+            if (opening != 0 && (depth - ccl <= 1 || cmask != 0)) || depth - ccl < 0 {
+                let mut ev = op | cl | opening;
+                let mut d = depth;
+                while ev != 0 {
+                    let t = ev.trailing_zeros();
+                    let bit = 1u64 << t;
+                    if op & bit != 0 {
+                        d += 1;
+                    } else if cl & bit != 0 {
+                        d -= 1;
+                        if d < 0 {
+                            return None;
+                        }
+                    } else if d == 1 {
+                        out.d1.push(i + t as usize);
+                    } else if d == 2 && cmask & bit != 0 {
+                        out.d2.push(i + t as usize);
+                    }
+                    ev &= ev - 1;
+                }
+            }
+            depth += op.count_ones() as i64 - ccl;
+            i += 64;
+        }
+        out.backslash = any_bs != 0;
+        (depth == 0 && prev_in == 0).then_some(out)
+    }
+
+    #[target_feature(enable = "avx2,pclmulqdq,popcnt,bmi1")]
+    pub(super) unsafe fn depth_marks_avx2(buf: &[u8], cands: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
+        let q = _mm256_set1_epi8(b'"' as i8);
+        let bsl = _mm256_set1_epi8(b'\\' as i8);
+        let ob = _mm256_set1_epi8(b'{' as i8);
+        let os = _mm256_set1_epi8(b'[' as i8);
+        let cb = _mm256_set1_epi8(b'}' as i8);
+        let cs = _mm256_set1_epi8(b']' as i8);
+        let ones = _mm_set1_epi8(-1);
+        let masks = |b: &[u8; 64]| -> (u64, u64, u64, u64) {
+            // SAFETY: 64 readable bytes; AVX2 detected by the caller
+            unsafe {
+                let m = |v: __m256i| -> (u32, u32, u32, u32) {
+                    (
+                        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, q)) as u32,
+                        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, bsl)) as u32,
+                        _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, ob), _mm256_cmpeq_epi8(v, os))) as u32,
+                        _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, cb), _mm256_cmpeq_epi8(v, cs))) as u32,
+                    )
+                };
+                let a = m(_mm256_loadu_si256(b.as_ptr() as *const __m256i));
+                let c = m(_mm256_loadu_si256(b.as_ptr().add(32) as *const __m256i));
+                let j = |x: u32, y: u32| x as u64 | (y as u64) << 32;
+                (j(a.0, c.0), j(a.1, c.1), j(a.2, c.2), j(a.3, c.3))
+            }
+        };
+        let pxor = |x: u64| -> u64 { _mm_cvtsi128_si64(_mm_clmulepi64_si128(_mm_set_epi64x(0, x as i64), ones, 0)) as u64 };
+        depth_marks_with(buf, cands, masks, pxor)
+    }
+
+    #[target_feature(enable = "avx2,pclmulqdq,popcnt,bmi1")]
     pub(super) unsafe fn index_range_avx2<K: Sink>(buf: &[u8], start: usize, end: usize, out: &mut K, esc: &mut Vec<u32>) -> State {
         // nibble classifier (see the module docs of simdjson): class bits
         //   b0 ','  b1 ':'  b2 '[' '{'  b3 ']' '}'  b4 ' '  b5 '\t' '\n' '\r'
@@ -572,6 +714,163 @@ pub enum Ev {
 #[inline]
 fn memchr_nl(b: &[u8]) -> Option<usize> {
     b.iter().position(|&c| c == b'\n')
+}
+
+// ---------------------------------------------------------------------------------------------
+// depth marks: one SIMD pass tracking bracket depth, no index
+// ---------------------------------------------------------------------------------------------
+
+/// Quote / backslash / open / close masks of a 64-byte block (portable).
+#[inline]
+fn qbo_scalar(b: &[u8; 64]) -> (u64, u64, u64, u64) {
+    let (mut q, mut bs, mut o, mut c) = (0u64, 0u64, 0u64, 0u64);
+    for (i, &x) in b.iter().enumerate() {
+        let bit = 1u64 << i;
+        match x {
+            b'"' => q |= bit,
+            b'\\' => bs |= bit,
+            b'{' | b'[' => o |= bit,
+            b'}' | b']' => c |= bit,
+            _ => {}
+        }
+    }
+    (q, bs, o, c)
+}
+
+/// One pass over a JSON document tracking the bracket depth outside strings, for callers that
+/// need a few keys of a huge document without parsing it (the identifier index): returns the
+/// opening-quote positions of every string at depth 1 (the root object's keys and string
+/// values) and those of `cands` (sorted opening-quote positions, e.g. from a substring search)
+/// that are string starts at depth 2. `None` if a bracket closes below depth 0, the brackets do
+/// not balance, or a string is unterminated. No grammar check beyond that (like a byte-level
+/// skip).
+pub fn depth_marks(buf: &[u8], cands: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("pclmulqdq") {
+            // SAFETY: the features were detected at run time
+            return unsafe { x86::depth_marks_avx2(buf, cands) };
+        }
+    }
+    depth_marks_with(buf, cands, |blk| qbo_scalar(blk), prefix_xor_portable)
+}
+
+/// What the identifier extraction needs from an ISF, from ONE pass (see [`ident_marks`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct IdentMarks {
+    /// opening quotes of the strings at depth 1
+    pub d1: Vec<usize>,
+    /// opening quotes of the strings `"version"` / `"linux_banner"` at depth 2
+    pub d2: Vec<usize>,
+    /// the document contains a backslash
+    pub backslash: bool,
+}
+
+/// [`depth_marks`] fused with the search for the strings `"version"` and `"linux_banner"` and
+/// a backslash check: one read of the document instead of four (the identifier index runs this
+/// on every core right after decompressing, where memory bandwidth is the limit).
+pub fn ident_marks(buf: &[u8]) -> Option<IdentMarks> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("pclmulqdq") {
+            // SAFETY: the features were detected at run time
+            return unsafe { x86::ident_marks_avx2(buf) };
+        }
+    }
+    let mut cands = Vec::new();
+    for pat in [&b"\"linux_banner\""[..], b"\"version\""] {
+        let mut i = 0;
+        while let Some(k) = buf[i..].windows(pat.len()).position(|w| w == pat) {
+            cands.push(i + k);
+            i += k + 1;
+        }
+    }
+    cands.sort_unstable();
+    let (d1, d2) = depth_marks(buf, &cands)?;
+    Some(IdentMarks { d1, d2, backslash: buf.contains(&b'\\') })
+}
+
+/// The exact test behind the candidate prefilter of [`ident_marks`].
+#[inline]
+fn ident_cand_at(buf: &[u8], p: usize) -> bool {
+    let r = &buf[p..];
+    r.starts_with(b"\"version\"") || r.starts_with(b"\"linux_banner\"")
+}
+
+/// The depth-marks loop over any mask source.
+#[inline(always)]
+fn depth_marks_with(buf: &[u8], cands: &[usize], masks: impl Fn(&[u8; 64]) -> (u64, u64, u64, u64), pxor: impl Fn(u64) -> u64) -> Option<(Vec<usize>, Vec<usize>)> {
+    let mut d1 = Vec::new();
+    let mut d2 = Vec::new();
+    let (mut prev_escaped, mut prev_in, mut depth) = (0u64, 0u64, 0i64);
+    let mut ci = 0usize;
+    let mut blk = [b' '; 64];
+    let mut i = 0usize;
+    while i < buf.len() {
+        let b: &[u8; 64] = if buf.len() - i >= 64 {
+            buf[i..i + 64].try_into().unwrap()
+        } else {
+            let n = buf.len() - i;
+            blk[..n].copy_from_slice(&buf[i..]);
+            blk[n..].fill(b' ');
+            &blk
+        };
+        let (q, bs, o, c) = masks(b);
+        let escaped = if bs == 0 && prev_escaped == 0 {
+            0
+        } else {
+            const EVEN: u64 = 0x5555_5555_5555_5555;
+            let bs = bs & !prev_escaped;
+            let follows = (bs << 1) | prev_escaped;
+            let odd_starts = bs & !EVEN & !follows;
+            let (seq_even, ovf) = odd_starts.overflowing_add(bs);
+            prev_escaped = ovf as u64;
+            (EVEN ^ (seq_even << 1)) & follows
+        };
+        let qu = q & !escaped;
+        let in_string = pxor(qu) ^ prev_in;
+        prev_in = ((in_string as i64) >> 63) as u64;
+        let outside = !in_string;
+        let (op, cl) = (o & outside, c & outside);
+        let opening = qu & in_string;
+        let ccl = cl.count_ones() as i64;
+        // candidates in this block
+        let mut cmask = 0u64;
+        while ci < cands.len() && cands[ci] < i + 64 {
+            if cands[ci] >= i {
+                cmask |= 1u64 << (cands[ci] - i);
+            }
+            ci += 1;
+        }
+        let low = depth - ccl <= 1;
+        if (opening != 0 && (low || cmask & opening != 0)) || depth - ccl < 0 {
+            // exact depths inside the block
+            let mut ev = op | cl | opening;
+            let mut d = depth;
+            while ev != 0 {
+                let t = ev.trailing_zeros();
+                let bit = 1u64 << t;
+                if op & bit != 0 {
+                    d += 1;
+                } else if cl & bit != 0 {
+                    d -= 1;
+                    if d < 0 {
+                        return None;
+                    }
+                } else {
+                    if d == 1 {
+                        d1.push(i + t as usize);
+                    } else if d == 2 && cmask & bit != 0 {
+                        d2.push(i + t as usize);
+                    }
+                }
+                ev &= ev - 1;
+            }
+        }
+        depth += op.count_ones() as i64 - ccl;
+        i += 64;
+    }
+    (depth == 0 && prev_in == 0).then_some((d1, d2))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1194,6 +1493,42 @@ mod tests {
             crate::codecs::xz::decompress_reuse(&raw, &mut reuse, false).unwrap();
             let warm = t.elapsed();
             println!("fresh buffer {:.2} ms, pre-faulted {:.2} ms", fresh.as_secs_f64() * 1e3, warm.as_secs_f64() * 1e3);
+        }
+    }
+
+    /// The fused one-pass identifier marks equal the portable composition (substring search +
+    /// depth marks), for every alignment and random documents with escapes and near-misses.
+    #[test]
+    fn ident_marks_equal_portable() {
+        let mut x: u64 = 0x0123_4567_89ab_cdef;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let parts: &[&[u8]] = &[b"{", b"}", b"[", b"]", b",", b":", b" ", b"\n", b"\"version\"", b"\"linux_banner\"", b"\"versio\"", b"\"x\"", b"\"linux_banne\"", b"\"a\\\"b\"", b"\\", b"\"version\": ", b"{\"symbols\": {", b"}}", b"\"l\"", b"\"v\"", b"12"];
+        for round in 0..3000 {
+            let mut doc = Vec::new();
+            for _ in 0..(next() % 60) {
+                doc.extend_from_slice(parts[(next() % parts.len() as u64) as usize]);
+            }
+            let off = round % 9;
+            let mut padded = vec![b'x'; off];
+            padded.extend_from_slice(&doc);
+            let d = &padded[off..];
+            let fused = ident_marks(d);
+            let mut cands = Vec::new();
+            for pat in [&b"\"linux_banner\""[..], b"\"version\""] {
+                let mut i = 0;
+                while let Some(k) = d.get(i..).and_then(|r| r.windows(pat.len()).position(|w| w == pat)) {
+                    cands.push(i + k);
+                    i += k + 1;
+                }
+            }
+            cands.sort_unstable();
+            let portable = depth_marks_with(d, &cands, |b| qbo_scalar(b), prefix_xor_portable).map(|(d1, d2)| IdentMarks { d1, d2, backslash: d.contains(&b'\\') });
+            assert_eq!(fused, portable, "round {round}: {}", String::from_utf8_lossy(d));
         }
     }
 
