@@ -4,6 +4,7 @@ use crate::plugins::Plugin;
 
 pub mod bigpools;
 pub mod callbacks;
+pub mod debugregisters;
 pub mod devicetree;
 pub mod driverirp;
 pub mod drivermodule;
@@ -21,6 +22,7 @@ pub mod poolscanner;
 pub mod pslist;
 pub mod psscan;
 pub mod ssdt;
+pub mod suspended_threads;
 pub mod symlinkscan;
 pub mod thrdscan;
 pub mod thread_pe_symbols;
@@ -32,6 +34,7 @@ pub mod vadinfo;
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&bigpools::BigPools);
     v.push(&callbacks::Callbacks);
+    v.push(&debugregisters::DebugRegisters);
     v.push(&devicetree::DeviceTree);
     v.push(&driverirp::DriverIrp);
     v.push(&drivermodule::DriverModule);
@@ -49,6 +52,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&pslist::PsList);
     v.push(&psscan::PsScan);
     v.push(&ssdt::Ssdt);
+    v.push(&suspended_threads::SuspendedThreads);
     v.push(&symlinkscan::SymlinkScan);
     v.push(&thrdscan::ThrdScan);
     v.push(&threads::Threads);
