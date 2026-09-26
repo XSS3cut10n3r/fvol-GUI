@@ -50,10 +50,52 @@ def mods_src(m):
 
 
 def spec(s, m):
-    f = "".join(c for c in m["f"] if c in "awnfbB")
+    f = "".join(c for c in m["f"] if c in "awnfbBis")
     if m.get("xor") is not None:
         f += "x%d-%d" % m["xor"]
-    return "%s|%s|%s" % (s.hex(), f, (m.get("alpha") or b"").hex())
+    if m.get("at") is not None:
+        f += "o%d" % m["at"]
+    return "%s|%s|%s|%s" % (s.hex(), f, (m.get("alpha") or b"").hex(), m.get("kind", "T"))
+
+
+def string_src(i, s, m):
+    kind = m.get("kind", "T")
+    if kind == "H":
+        return "  $s%d = %s %s\n" % (i, s.decode(), mods_src(m))
+    if kind == "R":
+        fl = ("i" if "i" in m["f"] else "") + ("s" if "s" in m["f"] else "")
+        return "  $s%d = /%s/%s %s\n" % (i, s.decode(), fl, mods_src(m))
+    return '  $s%d = "%s" %s\n' % (i, esc(s), mods_src(m))
+
+
+HEX_TOK = ["41", "42", "61", "00", "62", "??", "4?", "?1", "[1]", "[0-2]", "[2-4]", "(41|42)", "(61 62|00)", "~41", "[1-]"]
+RE_TOK = ["a", "b", "A", "ab", "\\x00", ".", "[ab]", "[^a]", "a+", "b*", "(a|b)", "a{1,3}", "b{2}", ".{0,4}", "\\w", "\\d", "(ab|ba)",
+          "a?", "\\s", "x", "b+?", ".*?", "[a-c]{1,2}"]
+
+
+def rand_hex(rng):
+    toks = ["41" if rng.random() < 0.5 else "61"]
+    for _ in range(rng.randint(0, 5)):
+        toks.append(rng.choice(HEX_TOK))
+    toks.append(rng.choice(["42", "62", "00", "41"]))
+    return ("{ " + " ".join(toks) + " }").encode()
+
+
+def rand_re(rng):
+    return "".join(rng.choice(RE_TOK) for _ in range(rng.randint(1, 5))).encode()
+
+
+def rand_re_mods(rng, kind):
+    f = ""
+    if kind == "R":
+        f += rng.choice(["", "", "a", "w", "aw"])
+        if rng.random() < 0.3:
+            f += "n" if rng.random() < 0.5 else "i"
+        if rng.random() < 0.2:
+            f += "s"
+        if rng.random() < 0.2:
+            f += "f"
+    return {"f": f, "kind": kind}
 
 
 def rand_mods(rng):
@@ -114,10 +156,12 @@ def variants(s, m, rng):
 
 
 def rand_data(rng, strs):
-    n = rng.randrange(0, 2500)
-    pool = bytes(set(b"".join(s for s, _ in strs))) + b"\x00 .aZ9"
+    n = rng.randrange(0, 2500) if rng.random() < 0.97 else rng.randrange(100000, 400000)
+    pool = bytes(set(b"".join(s for s, m in strs if m.get("kind", "T") == "T"))) + b"\x00 .aZ9Abx"
     data = bytearray(rng.choice(pool) if rng.random() < 0.7 else rng.randrange(256) for _ in range(n))
     for s, m in strs:
+        if m.get("kind", "T") != "T":
+            continue
         for v in variants(s, m, rng):
             if rng.random() < 0.5 or len(v) > len(data):
                 continue
@@ -125,14 +169,27 @@ def rand_data(rng, strs):
             data[p:p + len(v)] = v
             if rng.random() < 0.3 and p > 0:
                 data[p - 1] = rng.choice(b"a0 \x00")
+            if m.get("at") is not None and rng.random() < 0.5 and m["at"] + len(v) <= len(data):
+                data[m["at"]:m["at"] + len(v)] = v
+        if len(data) > 200000:
+            for _ in range(50):
+                v = rng.choice(variants(s, m, rng))
+                p = rng.randrange(0, len(data) - len(v) + 1)
+                data[p:p + len(v)] = v
     return bytes(data)
 
 
 def expected(strs, data):
     src = "rule r {\n strings:\n"
     for i, (s, m) in enumerate(strs):
-        src += '  $s%d = "%s" %s\n' % (i, esc(s), mods_src(m))
-    src += " condition:\n  any of them\n}\n"
+        src += string_src(i, s, m)
+    if any(m.get("at") is not None for _, m in strs):
+        conds = []
+        for i, (s, m) in enumerate(strs):
+            conds.append("$s%d at %d" % (i, m["at"]) if m.get("at") is not None else "$s%d" % i)
+        src += " condition:\n  " + " or ".join(conds) + " or true\n}\n"
+    else:
+        src += " condition:\n  any of them\n}\n"
     try:
         r = yara.compile(source=src)
     except Exception as e:
@@ -168,6 +225,7 @@ def main():
     ap.add_argument("--slice-len", type=int, default=4 << 20)
     ap.add_argument("--keep")
     ap.add_argument("--show", type=int, default=5)
+    ap.add_argument("--re-frac", type=float, default=0.25)
     a = ap.parse_args()
     rng = random.Random(a.seed)
     tmp = a.keep or tempfile.mkdtemp(prefix="yarastr")
@@ -176,7 +234,15 @@ def main():
     for ci in range(a.cases):
         strs = []
         for _ in range(rng.randint(1, 5)):
-            strs.append((rand_text(rng), rand_mods(rng)))
+            r = rng.random()
+            if r < a.re_frac / 2:
+                strs.append((rand_hex(rng), rand_re_mods(rng, "H")))
+            elif r < a.re_frac:
+                strs.append((rand_re(rng), rand_re_mods(rng, "R")))
+            else:
+                strs.append((rand_text(rng), rand_mods(rng)))
+            if rng.random() < 0.05:
+                strs[-1][1]["at"] = rng.randrange(0, 40)
         data = rand_data(rng, strs)
         exp, src = expected(strs, data)
         cases.append(("c%d" % ci, strs, data.hex(), exp, src))
@@ -202,7 +268,7 @@ def main():
     for cid, strs, d, exp, src in bad[: a.show]:
         print("=" * 60, cid)
         print(src)
-        if not d.startswith("@"):
+        if not d.startswith("@") and len(d) < 20000:
             print("data:", bytes.fromhex(d))
         print("expected:", exp)
         print("got     :", res.get(cid, "?").split("\t", 1)[-1])

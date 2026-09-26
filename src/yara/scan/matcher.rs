@@ -14,7 +14,7 @@
 
 use super::hashf::HashFilter;
 use super::literal::{self, TextStr, eq_at};
-use super::re_string::ReString;
+use super::re_string::{ReState, ReString};
 use super::teddy::{self, Teddy};
 use super::{MAX_STRING_MATCHES, Match, StringDef, StringKind};
 use crate::yara::aho::AhoCorasick;
@@ -60,14 +60,29 @@ enum Engine {
     Hash { hf: HashFilter, short: Box<Engine> },
 }
 
-/// Reusable scan state (one per thread).
+/// A pending hex/regex atom hit (processed in libyara's Aho-Corasick order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReHit {
+    end: usize,
+    /// `u32::MAX - atom length`: longer atoms first at the same end.
+    rlen: u32,
+    string: u32,
+    /// `u32::MAX - atom index`: identical atoms in descending index order.
+    ratom: u32,
+    pos: usize,
+}
+
+/// Reusable scan state (one per thread; tied to the last matcher it was used with).
 #[derive(Default)]
 pub struct Scratch {
+    matcher: u64,
     disabled: Vec<bool>,
     over: Vec<bool>,
     any_over: bool,
     dbuf: Vec<u8>,
     tmp: Vec<Match>,
+    re_states: Vec<Option<ReState>>,
+    re_hits: Vec<ReHit>,
 }
 
 impl Scratch {
@@ -76,8 +91,11 @@ impl Scratch {
     }
 }
 
+static MATCHER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Compiled matcher for a list of strings (all strings of all rules, global index).
 pub struct Matcher {
+    id: u64,
     kinds: Vec<Kind>,
     /// Text strings searched only at a fixed offset.
     fixed: Vec<(u32, i64)>,
@@ -89,8 +107,11 @@ pub struct Matcher {
     /// Difference-domain patterns (xor strings with large key ranges).
     dpats: Vec<Pat>,
     diff: Engine,
-    /// Hex/regex atoms with no bytes: verify at every offset (string, atom).
+    /// Hex/regex atoms with no bytes: verify at every offset (string, atom), in
+    /// libyara order (descending atom index within a string).
     every: Vec<(u32, u32)>,
+    /// Any hex/regex strings?
+    has_re: bool,
     /// One-byte xor strings with many keys: resolve at every offset.
     every_text: Vec<u32>,
     /// Longest pattern / check span (bounds libyara's discovery-order window).
@@ -126,8 +147,10 @@ fn best_window(pat: &[u8], fold: &[u8]) -> (usize, usize) {
 
 fn build_re(def: &StringDef) -> Result<ReString, String> {
     match &def.kind {
-        StringKind::Hex(src) => ReString::new_hex(src, &def.mods),
-        StringKind::Regex { src, nocase, dotall } => ReString::new_regex(src, *nocase, *dotall, &def.mods),
+        StringKind::Hex(src) => ReString::new_hex(src, &def.mods, def.fixed_offset),
+        StringKind::Regex { src, nocase, dotall } => {
+            ReString::new_regex(src, *nocase, *dotall, &def.mods, def.fixed_offset)
+        }
         StringKind::Text(_) => Err("not a hex/regex string".into()),
     }
 }
@@ -260,6 +283,7 @@ impl Matcher {
     /// combinations (message text is informative only).
     pub fn new(strings: &[StringDef]) -> Result<Matcher, String> {
         let mut m = Matcher {
+            id: MATCHER_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             kinds: Vec::with_capacity(strings.len()),
             fixed: Vec::new(),
             pats: Vec::new(),
@@ -269,6 +293,7 @@ impl Matcher {
             dpats: Vec::new(),
             diff: Engine::None,
             every: Vec::new(),
+            has_re: false,
             every_text: Vec::new(),
             max_span: 1,
         };
@@ -329,12 +354,15 @@ impl Matcher {
                         return Err(format!("{}: invalid modifier for hex/regex string", def.id));
                     }
                     let rs = build_re(def).map_err(|e| format!("{}: {e}", def.id))?;
-                    if rs.atoms().is_empty() {
-                        m.every.push((si, 0));
+                    m.has_re = true;
+                    for (k, a) in rs.atoms().iter().enumerate().rev() {
+                        if a.bytes.is_empty() {
+                            m.every.push((si, k as u32));
+                        }
                     }
                     for (k, a) in rs.atoms().iter().enumerate() {
                         if a.bytes.is_empty() {
-                            m.every.push((si, k as u32));
+                            continue;
                         } else {
                             m.max_span = m.max_span.max(a.bytes.len());
                             let zero = vec![0u8; a.bytes.len()];
@@ -433,6 +461,24 @@ impl Matcher {
         sc.over.clear();
         sc.over.resize(ns, false);
         sc.any_over = false;
+        sc.re_hits.clear();
+        if self.has_re {
+            if sc.matcher != self.id || sc.re_states.len() != ns {
+                sc.re_states = self
+                    .kinds
+                    .iter()
+                    .map(|k| match k {
+                        Kind::Re(rs) => Some(rs.new_state()),
+                        Kind::Text(_) => None,
+                    })
+                    .collect();
+            } else {
+                for st in sc.re_states.iter_mut().flatten() {
+                    st.reset();
+                }
+            }
+        }
+        sc.matcher = self.id;
         let n = data.len();
         if n == 0 {
             return;
@@ -463,15 +509,8 @@ impl Matcher {
                     self.diff.run(&dbuf, 0, to, &mut diff_state, |q, p| self.on_diff(data, b0 + q, p, out, sc));
                 }
             }
-            for &(si, k) in &self.every {
-                if let Kind::Re(rs) = &self.kinds[si as usize] {
-                    for s in b0..b1 {
-                        if sc.disabled[si as usize] {
-                            break;
-                        }
-                        self.re_hit(data, si as usize, rs, k as usize, s, out, sc);
-                    }
-                }
+            if self.has_re {
+                self.flush_re(data, b0, b1, b1 == n, out, sc);
             }
             for &si in &self.every_text {
                 if let Kind::Text(ts) = &self.kinds[si as usize] {
@@ -554,7 +593,13 @@ impl Matcher {
                     self.add_text(si, m, out, sc);
                 }
             }
-            Kind::Re(rs) => self.re_hit(data, si, rs, pat.sub as usize, s, out, sc),
+            Kind::Re(_) => sc.re_hits.push(ReHit {
+                end: s + pat.len as usize,
+                rlen: u32::MAX - pat.len,
+                string: pat.string,
+                ratom: u32::MAX - pat.sub,
+                pos: s,
+            }),
         }
     }
 
@@ -582,18 +627,55 @@ impl Matcher {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Processes the pending hex/regex hits that end at or before `b1` (all when
+    /// `last`) in libyara order, interleaved with the zero-length atoms at every
+    /// position of `[b0, b1)`. Hits of later blocks always end after `b1`.
+    fn flush_re(&self, data: &[u8], b0: usize, b1: usize, last: bool, out: &mut [Vec<Match>], sc: &mut Scratch) {
+        let mut hits = std::mem::take(&mut sc.re_hits);
+        hits.sort_unstable();
+        let ready = if last { hits.len() } else { hits.partition_point(|h| h.end <= b1) };
+        let mut i = 0;
+        if !self.every.is_empty() {
+            for p in b0..b1 {
+                while i < ready && hits[i].end <= p {
+                    let h = hits[i];
+                    self.re_hit(data, h.string as usize, (u32::MAX - h.ratom) as usize, h.pos, out, sc);
+                    i += 1;
+                }
+                for &(si, k) in &self.every {
+                    if !sc.disabled[si as usize] {
+                        self.re_hit(data, si as usize, k as usize, p, out, sc);
+                    }
+                }
+            }
+        }
+        while i < ready {
+            let h = hits[i];
+            self.re_hit(data, h.string as usize, (u32::MAX - h.ratom) as usize, h.pos, out, sc);
+            i += 1;
+        }
+        hits.drain(..ready);
+        sc.re_hits = hits;
+    }
+
     #[inline]
-    fn re_hit(&self, data: &[u8], si: usize, rs: &ReString, atom: usize, pos: usize, out: &mut [Vec<Match>], sc: &mut Scratch) {
+    fn re_hit(&self, data: &[u8], si: usize, atom: usize, pos: usize, out: &mut [Vec<Match>], sc: &mut Scratch) {
+        if sc.disabled[si] {
+            return;
+        }
+        let (Some(Kind::Re(rs)), Some(Some(st))) = (self.kinds.get(si), sc.re_states.get_mut(si)) else {
+            return;
+        };
         let mut tmp = std::mem::take(&mut sc.tmp);
         tmp.clear();
-        rs.verify(data, atom, pos, &mut tmp);
+        rs.verify(st, data, atom, pos, &mut tmp);
         let greedy = rs.greedy();
         for m in tmp.iter() {
             if m.offset >= data.len() || m.len > data.len() - m.offset {
                 continue;
             }
             let v = &mut out[si];
+            // libyara: a full list disables the string (even for a duplicate offset).
             if v.len() >= MAX_STRING_MATCHES {
                 sc.disabled[si] = true;
                 break;

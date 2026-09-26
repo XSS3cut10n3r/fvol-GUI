@@ -185,13 +185,17 @@ fn unhex(s: &str) -> Vec<u8> {
     b.chunks(2).filter(|c| c.len() == 2).map(|c| v(c[0]) << 4 | v(c[1])).collect()
 }
 
-/// `text_hex|mods|alphabet_hex` with mods letters a w n f p b B and `x<lo>-<hi>`.
+/// `src_hex|mods|alphabet_hex|kind` with mods letters a w n f p b B, `x<lo>-<hi>`,
+/// `o<offset>` (fixed offset), regex flags i s; kind T (text, default), H (hex), R (regex).
 fn parse_def(spec: &str, idx: usize) -> StringDef {
     let mut parts = spec.split('|');
     let s = unhex(parts.next().unwrap_or(""));
     let mods_s = parts.next().unwrap_or("");
     let alpha = parts.next().filter(|a| !a.is_empty()).map(unhex);
+    let kind = parts.next().unwrap_or("T");
     let mut mods = Modifiers::default();
+    let mut fixed = None;
+    let (mut re_i, mut re_s) = (false, false);
     let mut it = mods_s.char_indices().peekable();
     while let Some((i, c)) = it.next() {
         match c {
@@ -202,6 +206,16 @@ fn parse_def(spec: &str, idx: usize) -> StringDef {
             'p' => mods.private = true,
             'b' => mods.base64 = Some(alpha.clone()),
             'B' => mods.base64wide = Some(alpha.clone()),
+            'i' => re_i = true,
+            's' => re_s = true,
+            'o' => {
+                let rest = &mods_s[i + 1..];
+                let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '-')).unwrap_or(rest.len());
+                fixed = rest[..end].parse().ok();
+                for _ in 0..end {
+                    it.next();
+                }
+            }
             'x' => {
                 let rest = &mods_s[i + 1..];
                 let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '-')).unwrap_or(rest.len());
@@ -214,7 +228,12 @@ fn parse_def(spec: &str, idx: usize) -> StringDef {
             _ => {}
         }
     }
-    StringDef { id: format!("$s{idx}"), kind: StringKind::Text(s), mods, fixed_offset: None }
+    let kind = match kind {
+        "H" => StringKind::Hex(String::from_utf8_lossy(&s).into_owned()),
+        "R" => StringKind::Regex { src: s, nocase: re_i, dotall: re_s },
+        _ => StringKind::Text(s),
+    };
+    StringDef { id: format!("$s{idx}"), kind, mods, fixed_offset: fixed }
 }
 
 fn load_data(spec: &str) -> Vec<u8> {
