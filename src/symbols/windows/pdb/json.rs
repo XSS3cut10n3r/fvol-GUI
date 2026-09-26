@@ -4,6 +4,8 @@
 //! `json.dumps(obj, indent=2, sort_keys=True)` (with the default `ensure_ascii=True`) produces.
 //! Keys must be supplied already sorted by the caller.
 
+use super::scan::find_json_escape;
+
 pub(crate) struct JsonWriter {
     pub buf: Vec<u8>,
 }
@@ -17,9 +19,15 @@ impl JsonWriter {
 
     #[inline]
     fn newline(&mut self, depth: usize) {
-        self.buf.push(b'\n');
-        for _ in 0..depth {
-            self.buf.extend_from_slice(b"  ");
+        const NL: &[u8; 33] = b"\n                                ";
+        let n = 1 + 2 * depth;
+        if n <= NL.len() {
+            self.buf.extend_from_slice(&NL[..n]);
+        } else {
+            self.buf.push(b'\n');
+            for _ in 0..depth {
+                self.buf.extend_from_slice(b"  ");
+            }
         }
     }
 
@@ -61,19 +69,30 @@ impl JsonWriter {
 
     #[inline]
     pub fn int(&mut self, v: i64) {
+        const DIGITS: &[u8; 200] = b"\
+            0001020304050607080910111213141516171819\
+            2021222324252627282930313233343536373839\
+            4041424344454647484950515253545556575859\
+            6061626364656667686970717273747576777879\
+            8081828384858687888990919293949596979899";
         let mut tmp = [0u8; 20];
         let mut i = tmp.len();
-        let neg = v < 0;
         let mut u = v.unsigned_abs();
-        loop {
-            i -= 1;
-            tmp[i] = b'0' + (u % 10) as u8;
-            u /= 10;
-            if u == 0 {
-                break;
-            }
+        while u >= 100 {
+            let d = (u % 100) as usize * 2;
+            u /= 100;
+            i -= 2;
+            tmp[i..i + 2].copy_from_slice(&DIGITS[d..d + 2]);
         }
-        if neg {
+        if u >= 10 {
+            let d = u as usize * 2;
+            i -= 2;
+            tmp[i..i + 2].copy_from_slice(&DIGITS[d..d + 2]);
+        } else {
+            i -= 1;
+            tmp[i] = b'0' + u as u8;
+        }
+        if v < 0 {
             self.buf.push(b'-');
         }
         self.buf.extend_from_slice(&tmp[i..]);
@@ -117,11 +136,13 @@ impl JsonWriter {
     #[inline]
     pub fn str_latin1(&mut self, s: &[u8]) {
         self.buf.push(b'"');
-        if s.iter().all(|&b| (0x20..=0x7e).contains(&b) && b != b'"' && b != b'\\') {
-            self.buf.extend_from_slice(s);
-        } else {
-            for &b in s {
-                self.escape_char(b as u32);
+        match find_json_escape(s) {
+            None => self.buf.extend_from_slice(s),
+            Some(p) => {
+                self.buf.extend_from_slice(&s[..p]);
+                for &b in &s[p..] {
+                    self.escape_char(b as u32);
+                }
             }
         }
         self.buf.push(b'"');
@@ -129,6 +150,12 @@ impl JsonWriter {
 
     /// A unicode string.
     pub fn str(&mut self, s: &str) {
+        if find_json_escape(s.as_bytes()).is_none() {
+            self.buf.push(b'"');
+            self.buf.extend_from_slice(s.as_bytes());
+            self.buf.push(b'"');
+            return;
+        }
         self.buf.push(b'"');
         for c in s.chars() {
             self.escape_char(c as u32);

@@ -15,7 +15,8 @@
 //!   * the output is streamed into one pre-sized buffer, keys are sorted by sorting indices.
 
 use super::json::JsonWriter;
-use super::msf::{Msf, Stream};
+use super::msf::{Msf, Paged, Stream};
+use super::scan::find_byte;
 use super::{PErr, PResult};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -273,7 +274,7 @@ struct Parser<'x, 'a> {
 
 #[inline]
 fn nul_len(b: &[u8]) -> usize {
-    b.iter().position(|&c| c == 0).unwrap_or(b.len())
+    find_byte(b, 0).unwrap_or(b.len())
 }
 
 /// python `PdbReader.parse_string` on stream `s` at `pos`.
@@ -957,26 +958,12 @@ impl<'x, 'a> Conv<'x, 'a> {
     }
 }
 
-/// Indices of `items` sorted by key (bytes), keeping only the last item of every key
-/// (python dict assignment semantics + `sort_keys=True`).
-fn sorted_last<'n>(n: usize, key: impl Fn(usize) -> &'n [u8]) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..n).collect();
-    idx.sort_by(|&a, &b| key(a).cmp(key(b)).then(a.cmp(&b)));
-    let mut out = Vec::with_capacity(idx.len());
-    for (k, &i) in idx.iter().enumerate() {
-        if k + 1 < idx.len() && key(idx[k + 1]) == key(i) {
-            continue;
-        }
-        out.push(i);
-    }
-    out
-}
-
 // ---- DBI / sections / symbols ----
 
 struct Dbi<'a> {
-    stream: Stream<'a>,
-    sections: Option<Stream<'a>>,
+    stream: Paged<'a>,
+    /// `VirtualAddress` of every section header (None: unreadable, python raises on access).
+    section_vas: Vec<Option<u32>>,
     num_sections: usize,
     omap: Vec<(u32, u32)>,
 }
@@ -984,23 +971,26 @@ struct Dbi<'a> {
 impl<'a> Dbi<'a> {
     /// python `read_dbi_stream`.
     fn read(msf: &Msf<'a>) -> PResult<Dbi<'a>> {
-        let stream = msf.stream(3)?.ok_or_else(|| PErr::Value("No DBI stream available".into()))?;
+        let stream = msf.paged(3).ok_or_else(|| PErr::Value("No DBI stream available".into()))?;
         let s = &stream;
         let u = |o: u64| -> PResult<u64> { Ok(s.u32(s.m(o))? as u64) };
         let dbg = 64 + u(24)? + u(28)? + u(32)? + u(36)? + u(40)? + u(52)?;
         let sn = |o: u64| -> PResult<i64> { Ok(s.i16(s.m(dbg + o))? as i64) };
-        let stream_or_key_error = |n: i64| -> PResult<Stream<'a>> {
-            msf.stream(n)?.ok_or_else(|| key_error(format!("stream{n}")))
-        };
+        let paged_or_key_error =
+            |n: i64| -> PResult<Paged<'a>> { msf.paged(n).ok_or_else(|| key_error(format!("stream{n}"))) };
         let orig = sn(20)?;
         let (omap_from, hdr) = if orig != -1 { (sn(8)?, -1) } else { (-1, sn(10)?) };
-        let mut dbi = Dbi { stream, sections: None, num_sections: 0, omap: Vec::new() };
+        let mut dbi = Dbi { stream, section_vas: Vec::new(), num_sections: 0, omap: Vec::new() };
+        let vas = |sec: &Paged| -> Vec<Option<u32>> {
+            let n = sec.size.div_ceil(40);
+            (0..n).map(|i| sec.u32(sec.m(i * 40 + 12)).ok()).collect()
+        };
         if orig != -1 {
-            let sec = stream_or_key_error(orig)?;
-            dbi.num_sections = sec.size.div_ceil(40) as usize;
-            dbi.sections = Some(sec);
+            let sec = paged_or_key_error(orig)?;
+            dbi.section_vas = vas(&sec);
+            dbi.num_sections = dbi.section_vas.len();
             if omap_from != -1 {
-                let om = stream_or_key_error(omap_from)?;
+                let om = msf.stream(omap_from)?.ok_or_else(|| key_error(format!("stream{omap_from}")))?;
                 let data = om.read(0, om.size)?;
                 let le = |b: &[u8]| b.iter().rev().fold(0u32, |a, &x| (a << 8) | x as u32);
                 dbi.omap = data
@@ -1010,9 +1000,9 @@ impl<'a> Dbi<'a> {
             }
         } else {
             if hdr != -1 {
-                let sec = stream_or_key_error(hdr)?;
-                dbi.num_sections = sec.size.div_ceil(40) as usize;
-                dbi.sections = Some(sec);
+                let sec = paged_or_key_error(hdr)?;
+                dbi.section_vas = vas(&sec);
+                dbi.num_sections = dbi.section_vas.len();
             }
         }
         Ok(dbi)
@@ -1025,11 +1015,13 @@ impl<'a> Dbi<'a> {
     /// `self._sections[i].VirtualAddress` (python list indexing, `i >= -1`).
     fn section_va(&self, i: i64) -> PResult<i64> {
         let i = if i < 0 { i + self.num_sections as i64 } else { i };
-        let sec = self.sections.as_ref().ok_or_else(index_error)?;
         if i < 0 || i as usize >= self.num_sections {
             return Err(index_error());
         }
-        Ok(sec.u32(sec.m(i as u64 * 40 + 12))? as i64)
+        match self.section_vas[i as usize] {
+            Some(va) => Ok(va as i64),
+            None => Err(PErr::Invalid(i as u64 * 40 + 12)),
+        }
     }
 
     /// python `omap_lookup`.
@@ -1065,33 +1057,58 @@ fn py_isnumeric(s: &[u8]) -> bool {
 fn name_strip(name: &[u8]) -> PResult<(usize, usize)> {
     let skip = matches!(name.first(), Some(b'_' | b'@' | 0x7f)) as usize;
     let new = &name[skip..];
-    let mut parts = new.splitn(3, |&c| c == b'@');
-    let a = parts.next().unwrap_or(&[]);
-    if let (Some(bb), None) = (parts.next(), parts.next()) {
-        if py_isnumeric(bb) {
-            let Some(&first) = a.first() else {
-                return Err(PErr::Other("IndexError: string index out of range".into()));
-            };
-            if first != b'?' {
-                return Ok((skip, a.len()));
-            }
-        }
-        return Ok((0, name.len()));
+    let Some(at) = find_byte(new, b'@') else { return Ok((skip, new.len())) };
+    let (a, bb) = (&new[..at], &new[at + 1..]);
+    if find_byte(bb, b'@').is_some() {
+        // three or more parts: keep the stripped name
+        return Ok((skip, new.len()));
     }
-    Ok((skip, new.len()))
+    if py_isnumeric(bb) {
+        let Some(&first) = a.first() else {
+            return Err(PErr::Other("IndexError: string index out of range".into()));
+        };
+        if first != b'?' {
+            return Ok((skip, a.len()));
+        }
+    }
+    Ok((0, name.len()))
 }
 
+/// A public symbol: its full (linkage) name is `arena[off..off + len]`, the stripped name
+/// `arena[off + st..off + st + slen]`.
 struct Sym {
-    name: Name,
+    off: u32,
+    len: u32,
+    st: u32,
+    slen: u32,
     addr: i64,
-    linkage: Option<Name>,
 }
 
-/// python `read_symbol_stream`.
-fn read_symbols(dbi: &Dbi, sym: &Stream) -> PResult<Vec<Sym>> {
+/// Parsed symbols, their names copied into a compact arena (good locality for sorting and
+/// writing), and the output order.
+struct SymTable {
+    arena: Vec<u8>,
+    syms: Vec<Sym>,
+    order: Vec<u32>,
+}
+
+impl SymTable {
+    #[inline]
+    fn stripped(&self, s: &Sym) -> &[u8] {
+        &self.arena[(s.off + s.st) as usize..(s.off + s.st + s.slen) as usize]
+    }
+    #[inline]
+    fn full(&self, s: &Sym) -> &[u8] {
+        &self.arena[s.off as usize..(s.off + s.len) as usize]
+    }
+}
+
+/// python `read_symbol_stream` (+ sorting the resulting dict's keys).
+fn read_symbols(dbi: &Dbi, sym: &Stream) -> PResult<SymTable> {
     let s = sym;
     let n_sections = dbi.num_sections as i64;
-    let mut out = Vec::with_capacity((s.size / 40) as usize);
+    let mut syms = Vec::with_capacity((s.size / 48) as usize);
+    let mut arena = Vec::with_capacity((s.size / 2) as usize);
     let max = s.size;
     let mut off = 0u64;
     while off < max {
@@ -1106,15 +1123,29 @@ fn read_symbols(dbi: &Dbi, sym: &Stream) -> PResult<Vec<Sym>> {
                     address = dbi.omap_lookup(address)?;
                 }
                 let nb = &s.bytes()[name.0 as usize..(name.0 + name.1) as usize];
-                let (st, len) = name_strip(nb)?;
-                let stripped = Name(name.0 + st as u32, len as u32);
-                let linkage = if st == 0 && len == nb.len() { None } else { Some(name) };
-                out.push(Sym { name: stripped, addr: address, linkage });
+                let (st, slen) = name_strip(nb)?;
+                let a = arena.len() as u32;
+                arena.extend_from_slice(nb);
+                syms.push(Sym { off: a, len: nb.len() as u32, st: st as u32, slen: slen as u32, addr: address });
             }
         }
         off += length as u64 + 2;
     }
-    Ok(out)
+    let mut table = SymTable { arena, syms, order: Vec::new() };
+    // compact (start, len) keys: the sort touches 8 bytes per symbol instead of a whole Sym
+    let keys: Vec<(u32, u32)> = table.syms.iter().map(|s| (s.off + s.st, s.slen)).collect();
+    let arena = &table.arena;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(4);
+    table.order = sort_last_par(
+        keys.len(),
+        |i| {
+            let (a, l) = keys[i];
+            &arena[a as usize..(a + l) as usize]
+        },
+        threads,
+    )
+    .ok_or_else(|| PErr::Other("symbol sort thread panicked".into()))?;
+    Ok(table)
 }
 
 // ---- entry point ----
@@ -1125,13 +1156,37 @@ pub(crate) enum DbName<'n> {
     FromIpi,
 }
 
+/// The `metadata` block values.
+struct Meta<'m> {
+    datetime: &'m str,
+    version: &'m str,
+    guid: [u8; 16],
+    age: u32,
+    given: Option<&'m str>,
+    ipi_name: Option<Vec<u8>>,
+    machine: u16,
+}
+
 /// python `PdbReader(ctx, location, database_name).get_json()` followed by
 /// `json.dumps(..., indent=2, sort_keys=True)`.
+///
+/// The symbol stream (independent of the type stream) is parsed and sorted on a second
+/// thread while this one parses and processes the types; everything is then written once,
+/// straight into a single pre-sized output buffer.
 pub(crate) fn convert(pdb: &[u8], database: DbName, datetime: &str, version: &str) -> PResult<Vec<u8>> {
+    let timing = cfg!(test) && std::env::var_os("RSVOL_PDB_TIMING").is_some();
+    let t0 = std::time::Instant::now();
+    let phase = |name: &str| {
+        if timing {
+            eprintln!("  {name:>10}: {:?}", t0.elapsed());
+        }
+    };
     let msf = Msf::open(pdb)?;
+    phase("msf");
 
     // read_pdb_info_stream: DBI first, then the IPI (only without a database name)
     let dbi = Dbi::read(&msf)?;
+    phase("dbi");
     let mut ipi_name: Option<Vec<u8>> = None;
     let given = match database {
         DbName::Given(n) => Some(n),
@@ -1140,18 +1195,61 @@ pub(crate) fn convert(pdb: &[u8], database: DbName, datetime: &str, version: &st
             None
         }
     };
-    let info = msf.stream(1)?.ok_or_else(|| PErr::Value("No PDB Info Stream available".into()))?;
+    let info = msf.paged(1).ok_or_else(|| PErr::Value("No PDB Info Stream available".into()))?;
     let guid_off = info.m(12);
-    let mut g = [0u8; 16];
-    for (i, x) in g.iter_mut().enumerate() {
+    let mut guid = [0u8; 16];
+    for (i, x) in guid.iter_mut().enumerate() {
         *x = info.u8(info.m(guid_off + i as u64))?;
     }
-    let age = dbi.u32(8)?;
-    let machine = dbi.stream.u16(dbi.stream.m(58))?;
-
-    // read_tpi_stream + process_types
+    let meta = Meta {
+        datetime,
+        version,
+        guid,
+        age: dbi.u32(8)?,
+        given,
+        ipi_name,
+        machine: dbi.stream.u16(dbi.stream.m(58))?,
+    };
     let tpi = msf.stream(2)?.ok_or_else(|| PErr::Value("No TPI stream available".into()))?;
-    let Info { types, subs, syn } = read_info_stream(&tpi, "TPI", true)?;
+    phase("ipi+info");
+
+    // read_symbol_stream
+    let sym_work = || -> PResult<SymTable> {
+        let symrec_n = dbi.stream.u16(dbi.stream.m(20))? as i64;
+        let symrec = msf.stream(symrec_n)?.ok_or_else(|| PErr::Value("No SymRec stream available".into()))?;
+        let t = read_symbols(&dbi, &symrec)?;
+        phase("symbols");
+        Ok(t)
+    };
+    let sequential = cfg!(test) && std::env::var_os("RSVOL_PDB_SEQ").is_some();
+    if sequential {
+        return types_and_output(&tpi, &meta, sym_work, &phase);
+    }
+    std::thread::scope(|scope| {
+        let job = std::cell::Cell::new(Some(scope.spawn(sym_work)));
+        let join = || match job.take() {
+            Some(j) => j.join().unwrap_or_else(|_| Err(PErr::Other("symbol thread panicked".into()))),
+            None => Err(PErr::Other("symbol thread already joined".into())),
+        };
+        let r = types_and_output(&tpi, &meta, join, &phase);
+        // always join (an unjoined panicked scoped thread would make `scope` panic)
+        if let Some(j) = job.take() {
+            let _ = j.join();
+        }
+        r
+    })
+}
+
+/// read_tpi_stream + process_types, then the whole JSON document (`get_syms` supplies the
+/// symbols once the types are done: python reads the TPI first, so its errors win).
+fn types_and_output(
+    tpi: &Stream,
+    meta: &Meta,
+    get_syms: impl FnOnce() -> PResult<SymTable>,
+    phase: &dyn Fn(&str),
+) -> PResult<Vec<u8>> {
+    let Info { types, subs, syn } = read_info_stream(tpi, "TPI", true)?;
+    phase("tpi");
     let names = Names { data: tpi.bytes(), syn: &syn };
     let mut refs: FxMap<&[u8], u32> = FxMap::default();
     refs.reserve(types.len() / 4);
@@ -1161,7 +1259,7 @@ pub(crate) fn convert(pdb: &[u8], database: DbName, datetime: &str, version: &st
         }
     }
     let mut conv = Conv {
-        s: &tpi,
+        s: tpi,
         types: &types,
         subs: &subs,
         names,
@@ -1178,171 +1276,319 @@ pub(crate) fn convert(pdb: &[u8], database: DbName, datetime: &str, version: &st
         enums: Vec::new(),
     };
     conv.process()?;
+    phase("process");
+    let syms = get_syms()?;
+    phase("joined");
 
-    // read_symbol_stream
-    let symrec_n = dbi.stream.u16(dbi.stream.m(20))? as i64;
-    let symrec =
-        msf.stream(symrec_n)?.ok_or_else(|| PErr::Value("No SymRec stream available".into()))?;
-    let syms = read_symbols(&dbi, &symrec)?;
-
-    // ---- json.dumps(indent=2, sort_keys=True) ----
-    let est = conv.rendered.buf.len() * 3 + syms.len() * 96 + (1 << 20);
+    // generous size estimate: untouched capacity costs nothing
+    let field_bytes: usize = conv
+        .fields
+        .iter()
+        .map(|f| {
+            let e = &conv.entries[f.entry as usize];
+            (e.end - e.start) as usize + 64 + 6 * (f.name.1 & !SYN) as usize
+        })
+        .sum();
+    let est = (1 << 16)
+        + (conv.consts.len() * 48 + conv.enums.len() * 128)
+            + (syms.syms.len() * 72 + syms.arena.len() * 12)
+            + (conv.user.len() * 128 + field_bytes);
     let mut w = JsonWriter::with_capacity(est);
-    let mut top = w.begin_obj();
+    let mut sb = SortBuf::default();
 
-    // base_types
-    w.key(&mut top, 0, "base_types");
-    {
-        let mut ids: Vec<usize> = (0..BASES.len()).filter(|&i| conv.bases & (1 << i) != 0).collect();
-        ids.sort_by_key(|&i| BASES[i].name);
-        let mut f = w.begin_obj();
-        for i in ids {
-            let d = &BASES[i];
-            w.key(&mut f, 1, d.name);
-            let mut g = w.begin_obj();
-            w.key(&mut g, 2, "endian");
-            w.str("little");
-            w.key(&mut g, 2, "kind");
-            w.str(d.kind);
-            w.key(&mut g, 2, "signed");
-            w.boolean(d.signed);
-            w.key(&mut g, 2, "size");
-            w.int(if i == POINTER as usize { conv.ptr_size.unwrap_or(0) } else { d.size });
-            w.end_obj(g, 2);
-        }
-        w.end_obj(f, 1);
+    w.buf.extend_from_slice(b"{\n  \"base_types\": ");
+    write_base_types(&conv, &mut w);
+    w.buf.extend_from_slice(b",\n  \"enums\": ");
+    write_enums(&conv, &mut w, &mut sb);
+    w.buf.extend_from_slice(b",\n  \"metadata\": ");
+    write_metadata(meta, &mut w);
+    w.buf.extend_from_slice(b",\n  \"symbols\": ");
+    write_symbols(&syms, &mut w);
+    phase("json-syms");
+    w.buf.extend_from_slice(b",\n  \"user_types\": ");
+    write_user_types(&mut conv, &mut w, &mut sb)?;
+    w.buf.extend_from_slice(b"\n}");
+    phase("json");
+    Ok(w.buf)
+}
+
+fn write_base_types(conv: &Conv, w: &mut JsonWriter) {
+    let mut ids: Vec<usize> = (0..BASES.len()).filter(|&i| conv.bases & (1 << i) != 0).collect();
+    ids.sort_by_key(|&i| BASES[i].name);
+    let mut f = w.begin_obj();
+    for i in ids {
+        let d = &BASES[i];
+        w.key(&mut f, 1, d.name);
+        w.buf.extend_from_slice(b"{\n      \"endian\": \"little\",\n      \"kind\": ");
+        w.str(d.kind);
+        w.buf.extend_from_slice(b",\n      \"signed\": ");
+        w.boolean(d.signed);
+        w.buf.extend_from_slice(b",\n      \"size\": ");
+        w.int(if i == POINTER as usize { conv.ptr_size.unwrap_or(0) } else { d.size });
+        w.buf.extend_from_slice(b"\n    }");
     }
+    w.end_obj(f, 1);
+}
 
-    // enums
-    w.key(&mut top, 0, "enums");
-    {
-        let order = sorted_last(conv.enums.len(), |i| conv.names.get(conv.enums[i].name));
-        let mut f = w.begin_obj();
-        for i in order {
-            let e = &conv.enums[i];
-            w.key_latin1(&mut f, 1, conv.names.get(e.name));
-            let mut g = w.begin_obj();
-            w.key(&mut g, 2, "base");
-            match e.base {
-                BaseRef::Prim(p) => w.str(BASES[p as usize].name),
-                BaseRef::Named(n) => w.str_latin1(conv.names.get(n)),
-            }
-            w.key(&mut g, 2, "constants");
-            let consts = &conv.consts[e.consts.0 as usize..e.consts.1 as usize];
-            let order = sorted_last(consts.len(), |k| conv.names.get(consts[k].0));
-            let mut c = w.begin_obj();
-            for k in order {
-                w.key_latin1(&mut c, 3, conv.names.get(consts[k].0));
-                w.int(consts[k].1);
-            }
-            w.end_obj(c, 3);
-            w.key(&mut g, 2, "size");
-            w.int(e.size);
-            w.end_obj(g, 2);
+fn write_enums(conv: &Conv, w: &mut JsonWriter, sb: &mut SortBuf) {
+    sort_last(sb, conv.enums.len(), |i| conv.names.get(conv.enums[i].name));
+    let order = std::mem::take(&mut sb.order);
+    let mut f = w.begin_obj();
+    for &i in &order {
+        let e = &conv.enums[i as usize];
+        w.key_latin1(&mut f, 1, conv.names.get(e.name));
+        w.buf.extend_from_slice(b"{\n      \"base\": ");
+        match e.base {
+            BaseRef::Prim(p) => w.str(BASES[p as usize].name),
+            BaseRef::Named(n) => w.str_latin1(conv.names.get(n)),
         }
-        w.end_obj(f, 1);
+        w.buf.extend_from_slice(b",\n      \"constants\": ");
+        let consts = &conv.consts[e.consts.0 as usize..e.consts.1 as usize];
+        sort_last(sb, consts.len(), |k| conv.names.get(consts[k].0));
+        let mut c = w.begin_obj();
+        for &k in &sb.order {
+            w.key_latin1(&mut c, 3, conv.names.get(consts[k as usize].0));
+            w.int(consts[k as usize].1);
+        }
+        w.end_obj(c, 3);
+        w.buf.extend_from_slice(b",\n      \"size\": ");
+        w.int(e.size);
+        w.buf.extend_from_slice(b"\n    }");
     }
+    w.end_obj(f, 1);
+}
 
-    // metadata
-    w.key(&mut top, 0, "metadata");
-    {
-        let mut f = w.begin_obj();
-        w.key(&mut f, 1, "format");
-        w.str("6.1.0");
-        w.key(&mut f, 1, "producer");
-        let mut p = w.begin_obj();
-        w.key(&mut p, 2, "datetime");
-        w.str(datetime);
-        w.key(&mut p, 2, "name");
-        w.str("volatility3");
-        w.key(&mut p, 2, "version");
-        w.str(version);
-        w.end_obj(p, 2);
-        w.key(&mut f, 1, "windows");
-        let mut win = w.begin_obj();
-        w.key(&mut win, 2, "pdb");
-        let mut pd = w.begin_obj();
-        w.key(&mut pd, 3, "GUID");
-        let mut guid = String::with_capacity(32);
-        for i in [3usize, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15] {
-            guid.push_str(&format!("{:02X}", g[i]));
-        }
-        w.str(&guid);
-        w.key(&mut pd, 3, "age");
-        w.int(age as i64);
-        w.key(&mut pd, 3, "database");
-        match (given, &ipi_name) {
-            (Some(n), _) if !n.is_empty() => w.str(n),
-            (None, Some(n)) if !n.is_empty() => w.str_latin1(n),
-            _ => w.str("unknown.pdb"),
-        }
-        w.key(&mut pd, 3, "machine_type");
-        w.int(machine as i64);
-        w.end_obj(pd, 3);
-        w.end_obj(win, 2);
-        w.end_obj(f, 1);
+fn write_metadata(m: &Meta, w: &mut JsonWriter) {
+    w.buf.extend_from_slice(b"{\n    \"format\": \"6.1.0\",\n    \"producer\": {\n      \"datetime\": ");
+    w.str(m.datetime);
+    w.buf.extend_from_slice(b",\n      \"name\": \"volatility3\",\n      \"version\": ");
+    w.str(m.version);
+    w.buf.extend_from_slice(b"\n    },\n    \"windows\": {\n      \"pdb\": {\n        \"GUID\": \"");
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for i in [3usize, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15] {
+        w.buf.push(HEX[(m.guid[i] >> 4) as usize]);
+        w.buf.push(HEX[(m.guid[i] & 15) as usize]);
     }
-
-    // symbols
-    w.key(&mut top, 0, "symbols");
-    {
-        let sb = symrec.bytes();
-        let get = |n: Name| &sb[n.0 as usize..(n.0 + n.1) as usize];
-        let order = sorted_last(syms.len(), |i| get(syms[i].name));
-        let mut f = w.begin_obj();
-        for i in order {
-            let sy = &syms[i];
-            w.key_latin1(&mut f, 1, get(sy.name));
-            let mut g = w.begin_obj();
-            w.key(&mut g, 2, "address");
-            w.int(sy.addr);
-            if let Some(l) = sy.linkage {
-                w.key(&mut g, 2, "linkage_name");
-                w.str_latin1(get(l));
-            }
-            w.end_obj(g, 2);
-        }
-        w.end_obj(f, 1);
+    w.buf.extend_from_slice(b"\",\n        \"age\": ");
+    w.int(m.age as i64);
+    w.buf.extend_from_slice(b",\n        \"database\": ");
+    match (m.given, &m.ipi_name) {
+        (Some(n), _) if !n.is_empty() => w.str(n),
+        (None, Some(n)) if !n.is_empty() => w.str_latin1(n),
+        _ => w.str("unknown.pdb"),
     }
+    w.buf.extend_from_slice(b",\n        \"machine_type\": ");
+    w.int(m.machine as i64);
+    w.buf.extend_from_slice(b"\n      }\n    }\n  }");
+}
 
-    // user_types
-    w.key(&mut top, 0, "user_types");
-    {
-        let order = sorted_last(conv.user.len(), |i| conv.names.get(conv.user[i].name));
-        let mut f = w.begin_obj();
-        for i in order {
-            let u = &conv.user[i];
-            w.key_latin1(&mut f, 1, conv.names.get(u.name));
-            let mut g = w.begin_obj();
-            w.key(&mut g, 2, "fields");
-            let fields = &conv.fields[u.fields.0 as usize..u.fields.1 as usize];
-            let forder = sorted_last(fields.len(), |k| conv.names.get(fields[k].name));
-            let mut fo = w.begin_obj();
-            for k in forder {
-                let fd = &fields[k];
+fn write_symbols(t: &SymTable, w: &mut JsonWriter) {
+    if t.order.is_empty() {
+        w.buf.extend_from_slice(b"{}");
+        return;
+    }
+    w.buf.push(b'{');
+    for (k, &i) in t.order.iter().enumerate() {
+        let sy = &t.syms[i as usize];
+        w.buf.extend_from_slice(if k == 0 { b"\n    " } else { b",\n    " });
+        w.str_latin1(t.stripped(sy));
+        w.buf.extend_from_slice(b": {\n      \"address\": ");
+        w.int(sy.addr);
+        if sy.st != 0 || sy.slen != sy.len {
+            w.buf.extend_from_slice(b",\n      \"linkage_name\": ");
+            w.str_latin1(t.full(sy));
+        }
+        w.buf.extend_from_slice(b"\n    }");
+    }
+    w.buf.extend_from_slice(b"\n  }");
+}
+
+fn write_user_types(conv: &mut Conv, w: &mut JsonWriter, sb: &mut SortBuf) -> PResult<()> {
+    sort_last(sb, conv.user.len(), |i| conv.names.get(conv.user[i].name));
+    let order = std::mem::take(&mut sb.order);
+    let mut f = w.begin_obj();
+    for &i in &order {
+        let u = &conv.user[i as usize];
+        w.key_latin1(&mut f, 1, conv.names.get(u.name));
+        w.buf.extend_from_slice(b"{\n      \"fields\": ");
+        let fields = &conv.fields[u.fields.0 as usize..u.fields.1 as usize];
+        sort_last(sb, fields.len(), |k| conv.names.get(fields[k].name));
+        if sb.order.is_empty() {
+            w.buf.extend_from_slice(b"{}");
+        } else {
+            w.buf.push(b'{');
+            for (n, &k) in sb.order.iter().enumerate() {
+                let fd = &fields[k as usize];
                 let e = &conv.entries[fd.entry as usize];
                 if e.soft != NO_SOFT {
                     return Err(conv.soft.swap_remove(e.soft as usize));
                 }
-                w.key_latin1(&mut fo, 3, conv.names.get(fd.name));
-                let mut h = w.begin_obj();
-                w.key(&mut h, 4, "offset");
+                w.buf.extend_from_slice(if n == 0 { b"\n        " } else { b",\n        " });
+                w.str_latin1(conv.names.get(fd.name));
+                w.buf.extend_from_slice(b": {\n          \"offset\": ");
                 w.int(fd.offset);
-                w.key(&mut h, 4, "type");
+                w.buf.extend_from_slice(b",\n          \"type\": ");
                 w.buf.extend_from_slice(&conv.rendered.buf[e.start as usize..e.end as usize]);
-                w.end_obj(h, 4);
+                w.buf.extend_from_slice(b"\n        }");
             }
-            w.end_obj(fo, 3);
-            w.key(&mut g, 2, "kind");
-            w.str(if u.union { "union" } else { "struct" });
-            w.key(&mut g, 2, "size");
-            w.int(u.size);
-            w.end_obj(g, 2);
+            w.buf.extend_from_slice(b"\n      }");
         }
-        w.end_obj(f, 1);
+        w.buf.extend_from_slice(if u.union {
+            b",\n      \"kind\": \"union\",\n      \"size\": "
+        } else {
+            b",\n      \"kind\": \"struct\",\n      \"size\": "
+        });
+        w.int(u.size);
+        w.buf.extend_from_slice(b"\n    }");
     }
-    w.end_obj(top, 0);
-    Ok(w.buf)
+    w.end_obj(f, 1);
+    Ok(())
+}
+
+/// Sort scratch space reused across the many small sorts.
+#[derive(Default)]
+struct SortBuf {
+    keys: Vec<u128>,
+    order: Vec<u32>,
+}
+
+/// Fills `sb.order` with the indices `0..n` sorted by `key` (bytes), keeping only the last
+/// index of every key (python dict assignment semantics + `sort_keys=True`).
+fn sort_last<'n>(sb: &mut SortBuf, n: usize, key: impl Fn(usize) -> &'n [u8]) {
+    sort_last_ids(sb, n, None, key)
+}
+
+/// [`sort_last`] over the indices `ids` (increasing) instead of `0..n`.
+fn sort_last_ids<'n>(sb: &mut SortBuf, n: usize, ids: Option<&[u32]>, key: impl Fn(usize) -> &'n [u8]) {
+    // MSD refinement over 8-byte big-endian chunks of the names: every level sorts packed
+    // `(chunk << 64) | index` integers, and only runs sharing a chunk descend to the next
+    // chunk. Names never contain NUL, so zero padding preserves the byte order, and a run
+    // whose names all end within the current chunk consists of identical names: python's
+    // dict keeps the last assignment, i.e. the highest index.
+    #[inline]
+    fn chunk(s: &[u8], depth: usize) -> u64 {
+        let start = depth * 8;
+        if s.len() >= start + 8 {
+            u64::from_be_bytes(s[start..start + 8].try_into().unwrap())
+        } else {
+            let mut b = [0u8; 8];
+            if s.len() > start {
+                b[..s.len() - start].copy_from_slice(&s[start..]);
+            }
+            u64::from_be_bytes(b)
+        }
+    }
+    fn refine<'n>(v: &mut [u128], depth: usize, key: &impl Fn(usize) -> &'n [u8], out: &mut Vec<u32>) {
+        if !v.is_sorted() {
+            v.sort_unstable();
+        }
+        let mut i = 0;
+        while i < v.len() {
+            let c = v[i] >> 64;
+            let mut j = i + 1;
+            while j < v.len() && v[j] >> 64 == c {
+                j += 1;
+            }
+            if j - i == 1 {
+                out.push(v[i] as u64 as u32);
+            } else if v[i..j].iter().all(|&x| key(x as u64 as usize).len() <= (depth + 1) * 8) {
+                out.push(v[j - 1] as u64 as u32);
+            } else if depth >= 64 {
+                // pathological shared prefixes: finish with a comparison sort
+                let run = &mut v[i..j];
+                run.sort_unstable_by(|a, b| key(*a as u64 as usize).cmp(key(*b as u64 as usize)).then(a.cmp(b)));
+                for k in 0..run.len() {
+                    let cur = run[k] as u64 as usize;
+                    if k + 1 < run.len() && key(run[k + 1] as u64 as usize) == key(cur) {
+                        continue;
+                    }
+                    out.push(cur as u32);
+                }
+            } else {
+                for x in &mut v[i..j] {
+                    let idx = *x as u64;
+                    *x = ((chunk(key(idx as usize), depth + 1) as u128) << 64) | idx as u128;
+                }
+                refine(&mut v[i..j], depth + 1, key, out);
+            }
+            i = j;
+        }
+    }
+    let v = &mut sb.keys;
+    v.clear();
+    match ids {
+        Some(ids) => v.extend(ids.iter().map(|&i| ((chunk(key(i as usize), 0) as u128) << 64) | i as u128)),
+        None => v.extend((0..n).map(|i| ((chunk(key(i), 0) as u128) << 64) | i as u128)),
+    }
+    sb.order.clear();
+    refine(v, 0, &key, &mut sb.order);
+}
+
+/// [`sort_last`] for large inputs: indices are bucketed by first byte (a stable counting
+/// pass), contiguous bucket ranges are sorted on up to `threads` threads, and the results
+/// are concatenated in bucket order.
+fn sort_last_par<'n>(n: usize, key: impl Fn(usize) -> &'n [u8] + Sync, threads: usize) -> Option<Vec<u32>> {
+    if n < 16384 || threads <= 1 {
+        let mut sb = SortBuf::default();
+        sort_last(&mut sb, n, &key);
+        return Some(sb.order);
+    }
+    // bucket 0: empty names (they sort first), 1 + b: names starting with byte b
+    let bucket = |i: usize| key(i).first().map_or(0, |&b| b as usize + 1);
+    let mut start = [0usize; 258];
+    for i in 0..n {
+        start[bucket(i) + 1] += 1;
+    }
+    for b in 0..257 {
+        start[b + 1] += start[b];
+    }
+    let mut fill = start;
+    let mut ids = vec![0u32; n];
+    for i in 0..n {
+        let b = bucket(i);
+        ids[fill[b]] = i as u32;
+        fill[b] += 1;
+    }
+    // split into `threads` groups of whole buckets holding ~n/threads ids each
+    let mut cuts = vec![0usize];
+    for b in 1..=257 {
+        let target = n * cuts.len() / threads;
+        if start[b] >= target && cuts.len() < threads && start[b] > *cuts.last().unwrap() {
+            cuts.push(start[b]);
+        }
+    }
+    cuts.push(n);
+    let ids = &ids;
+    let key = &key;
+    let parts: Option<Vec<Vec<u32>>> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = cuts
+            .windows(2)
+            .skip(1)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                scope.spawn(move || {
+                    let mut sb = SortBuf::default();
+                    sort_last_ids(&mut sb, 0, Some(&ids[a..b]), key);
+                    sb.order
+                })
+            })
+            .collect();
+        let mut sb = SortBuf::default();
+        sort_last_ids(&mut sb, 0, Some(&ids[cuts[0]..cuts[1]]), key);
+        let mut parts = vec![sb.order];
+        // join every helper (an unjoined panicked scoped thread would make `scope` panic)
+        let results: Vec<Option<Vec<u32>>> = jobs.into_iter().map(|j| j.join().ok()).collect();
+        for r in results {
+            parts.push(r?);
+        }
+        Some(parts)
+    });
+    let parts = parts?;
+    let mut out = Vec::with_capacity(n);
+    for p in parts {
+        out.extend_from_slice(&p);
+    }
+    Some(out)
 }
 
 /// python `read_ipi_stream`: the last (in first-insertion order) type name ending in ".pdb",
@@ -1397,7 +1643,7 @@ mod tests {
     fn omap_bisect() {
         let dbi = |omap: Vec<(u32, u32)>| Dbi {
             stream: unreachable_stream(),
-            sections: None,
+            section_vas: Vec::new(),
             num_sections: 0,
             omap,
         };
@@ -1411,9 +1657,67 @@ mod tests {
         assert_eq!(d.omap_lookup(0x10).unwrap(), 0x9000 + 0x10 - 0x3000);
     }
 
-    fn unreachable_stream() -> Stream<'static> {
-        // A 1-page stream over a tiny synthetic MSF is overkill here; build it via Msf-free
-        // test hook instead.
-        Stream::test_new(vec![0u8; 16], 16)
+    fn unreachable_stream() -> Paged<'static> {
+        Paged::test_new()
+    }
+
+    /// `RSVOL_PDB=<file.pdb> cargo test --release bench_symbol_stages -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_symbol_stages() {
+        let pdb = std::fs::read(std::env::var("RSVOL_PDB").expect("RSVOL_PDB")).unwrap();
+        let msf = Msf::open(&pdb).unwrap();
+        let dbi = Dbi::read(&msf).unwrap();
+        let n = dbi.stream.u16(dbi.stream.m(20)).unwrap() as i64;
+        let best = |f: &mut dyn FnMut()| {
+            let mut b = std::time::Duration::MAX;
+            for _ in 0..30 {
+                let t = std::time::Instant::now();
+                f();
+                b = b.min(t.elapsed());
+            }
+            b
+        };
+        let t_mat = best(&mut || {
+            std::hint::black_box(msf.stream(n).unwrap());
+        });
+        let symrec = msf.stream(n).unwrap().unwrap();
+        let t_all = best(&mut || {
+            std::hint::black_box(read_symbols(&dbi, &symrec).unwrap());
+        });
+        let table = read_symbols(&dbi, &symrec).unwrap();
+        let keys: Vec<(u32, u32)> = table.syms.iter().map(|s| (s.off + s.st, s.slen)).collect();
+        let arena = &table.arena;
+        let mut sb = SortBuf::default();
+        let t_sort = best(&mut || {
+            sort_last(&mut sb, keys.len(), |i| {
+                let (a, l) = keys[i];
+                &arena[a as usize..(a + l) as usize]
+            })
+        });
+        let seq = sb.order.clone();
+        let mut par = Vec::new();
+        let t_psort = best(&mut || {
+            par = sort_last_par(
+                keys.len(),
+                |i| {
+                    let (a, l) = keys[i];
+                    &arena[a as usize..(a + l) as usize]
+                },
+                4,
+            )
+            .unwrap();
+        });
+        assert_eq!(seq, par);
+        eprintln!("parallel sort (4 threads) {t_psort:?}");
+        let mut w = JsonWriter::with_capacity(8 << 20);
+        let t_write = best(&mut || {
+            w.buf.clear();
+            write_symbols(&table, &mut w);
+        });
+        eprintln!(
+            "materialize {t_mat:?}  parse+sort {t_all:?}  sort {t_sort:?}  write(warm buf) {t_write:?}  ({} syms)",
+            table.syms.len()
+        );
     }
 }

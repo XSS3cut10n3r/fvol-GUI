@@ -135,3 +135,40 @@ fn fuzz_mutations() {
     }
     eprintln!("fuzz: {ok} ok, {err} errors");
 }
+
+/// Machine calibration for the benchmark numbers (raw sort / write throughput).
+#[test]
+#[ignore]
+fn calibrate() {
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let orig: Vec<u128> = (0..43000u128)
+        .map(|i| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            ((rng as u128) << 64) | i
+        })
+        .collect();
+    let mut v = orig.clone();
+    let mut best = std::time::Duration::MAX;
+    for _ in 0..20 {
+        v.copy_from_slice(&orig);
+        let t = std::time::Instant::now();
+        v.sort_unstable();
+        best = best.min(t.elapsed());
+    }
+    eprintln!("sort 43k u128: {best:?}");
+    let mut best = std::time::Duration::MAX;
+    for _ in 0..20 {
+        let t = std::time::Instant::now();
+        let mut b: Vec<u8> = Vec::with_capacity(4 << 20);
+        for i in 0..43000u32 {
+            b.extend_from_slice(b",\n    \"SomeSymbolName\": {\n      \"address\": ");
+            b.extend_from_slice(i.to_string().as_bytes());
+            b.extend_from_slice(b"\n    }");
+        }
+        best = best.min(t.elapsed());
+        std::hint::black_box(&b);
+    }
+    eprintln!("write 43k entries: {best:?}");
+}

@@ -178,6 +178,24 @@ impl<'a> Msf<'a> {
         }
     }
 
+    /// Like [`Msf::stream`] but without materialising the stream: for streams of which only a
+    /// few fields are read (DBI header, section headers).
+    pub(crate) fn paged(&self, index: i64) -> Option<Paged<'a>> {
+        if index < 0 {
+            return None;
+        }
+        match self.streams.get(index as usize) {
+            Some(Some(desc)) => Some(Paged {
+                file: self.file,
+                ps: self.page_size,
+                pages: desc.pages.clone(),
+                size: desc.size,
+                mask: address_mask(desc.size),
+            }),
+            _ => None,
+        }
+    }
+
     /// python `create_stream_from_pages` (the stream must have at least one page).
     fn stream_from_pages(&self, maximum_size: i64, pages: Vec<u32>) -> PResult<Stream<'a>> {
         if pages.is_empty() {
@@ -235,12 +253,70 @@ impl<'a> Msf<'a> {
     }
 }
 
-impl<'a> Stream<'a> {
+/// An MSF stream accessed page by page (no copy), for sparse small reads.
+pub(crate) struct Paged<'a> {
+    file: &'a [u8],
+    ps: u64,
+    pages: Vec<u32>,
+    pub size: u64,
+    mask: u64,
+}
+
+impl<'a> Paged<'a> {
     #[cfg(test)]
-    pub(crate) fn test_new(data: Vec<u8>, size: u64) -> Stream<'static> {
-        Stream { data: Cow::Owned(data), holes: Vec::new(), size, mask: address_mask(size) }
+    pub(crate) fn test_new() -> Paged<'static> {
+        Paged { file: &[], ps: 4096, pages: Vec::new(), size: 0, mask: 0 }
     }
 
+    #[inline(always)]
+    pub(crate) fn m(&self, off: u64) -> u64 {
+        off & self.mask
+    }
+
+    /// python `layer.read(off, len)` into `buf`.
+    pub(crate) fn read_into(&self, off: u64, buf: &mut [u8]) -> PResult<()> {
+        let mut done = 0usize;
+        while done < buf.len() {
+            let pos = off + done as u64;
+            let page = pos / self.ps;
+            let in_page = pos % self.ps;
+            let Some(&p) = self.pages.get(page as usize) else { return Err(PErr::Invalid(pos)) };
+            let chunk = ((self.ps - in_page) as usize).min(buf.len() - done);
+            let foff = p as u64 * self.ps + in_page;
+            match self.file.get(foff as usize..foff as usize + chunk) {
+                Some(src) => buf[done..done + chunk].copy_from_slice(src),
+                None => return Err(PErr::Invalid(pos)),
+            }
+            done += chunk;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn u8(&self, off: u64) -> PResult<u8> {
+        let mut b = [0u8; 1];
+        self.read_into(off, &mut b)?;
+        Ok(b[0])
+    }
+    #[inline]
+    pub(crate) fn u16(&self, off: u64) -> PResult<u16> {
+        let mut b = [0u8; 2];
+        self.read_into(off, &mut b)?;
+        Ok(u16::from_le_bytes(b))
+    }
+    #[inline]
+    pub(crate) fn i16(&self, off: u64) -> PResult<i16> {
+        Ok(self.u16(off)? as i16)
+    }
+    #[inline]
+    pub(crate) fn u32(&self, off: u64) -> PResult<u32> {
+        let mut b = [0u8; 4];
+        self.read_into(off, &mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+}
+
+impl<'a> Stream<'a> {
     /// The whole materialised stream (including last-page slack). Only for slicing ranges
     /// that were already validated with [`Stream::read`].
     #[inline(always)]
