@@ -63,17 +63,26 @@ pub fn table(name: &str) -> Option<TableRef> {
     SPACE.lock().unwrap().as_ref().and_then(|m| m.get(name).copied())
 }
 
-static PATH: std::sync::OnceLock<SymbolPath> = std::sync::OnceLock::new();
+static PATH: std::sync::RwLock<Option<&'static SymbolPath>> = std::sync::RwLock::new(None);
 
 /// Set the process-wide symbol search path (python `volatility3.symbols.__path__`). The
-/// `Context` does this from `-s`; the first call wins.
+/// `Context` does this from `-s`. A different path replaces the previous one (tables loaded
+/// through the old path stay registered; `load_isf` memoizes per path).
 pub fn set_symbol_path(p: SymbolPath) {
-    let _ = PATH.set(p);
+    let mut w = PATH.write().unwrap_or_else(|e| e.into_inner());
+    if w.is_some_and(|c| *c == p) {
+        return;
+    }
+    *w = Some(Box::leak(Box::new(p)));
 }
 
 /// The process-wide symbol search path (default: no `-s` dirs).
 pub fn symbol_path() -> &'static SymbolPath {
-    PATH.get_or_init(|| SymbolPath::new(&[]))
+    if let Some(p) = *PATH.read().unwrap_or_else(|e| e.into_inner()) {
+        return p;
+    }
+    let mut w = PATH.write().unwrap_or_else(|e| e.into_inner());
+    *w.get_or_insert_with(|| Box::leak(Box::new(SymbolPath::new(&[]))))
 }
 
 static LOADED: Mutex<Option<FxHashMap<String, TableRef>>> = Mutex::new(None);
@@ -88,8 +97,10 @@ static LOADED: Mutex<Option<FxHashMap<String, TableRef>>> = Mutex::new(None);
 /// let pe = symbols::load_isf("windows", "pe", None, &[])?;
 /// ```
 pub fn load_isf(sub_path: &str, filename: &str, natives: Option<TableRef>, mapping: &[(&str, &str)]) -> crate::error::Result<TableRef> {
+    let path = symbol_path();
     let key = format!(
-        "{sub_path}/{filename}|{}|{}",
+        "{:p}|{sub_path}/{filename}|{}|{}",
+        path,
         natives.map(|n| n.name()).unwrap_or(""),
         mapping.iter().map(|(a, b)| format!("{a}={b}")).collect::<Vec<_>>().join(",")
     );
@@ -97,7 +108,7 @@ pub fn load_isf(sub_path: &str, filename: &str, natives: Option<TableRef>, mappi
         return Ok(t);
     }
     let opts = BuildOptions { natives: natives.map(|n| n.natives().into_iter().map(|(a, b)| (a, b)).collect()) };
-    let mut t = store::load_named(symbol_path(), sub_path, filename, filename, &opts)?;
+    let mut t = store::load_named(path, sub_path, filename, filename, &opts)?;
     t.set_table_mapping(mapping);
     let base = std::path::Path::new(filename).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| filename.to_string());
     let t = register(t, &base);

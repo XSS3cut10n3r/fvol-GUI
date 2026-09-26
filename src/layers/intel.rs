@@ -236,6 +236,12 @@ impl IntelLayer {
         self
     }
 
+    /// `is_valid` without the TLB fast path (python's exact `_mapping` walk), for tests.
+    #[cfg(test)]
+    pub(crate) fn is_valid_exact(&self, addr: u64, len: u64) -> bool {
+        self.walk(addr, len, false, |_, _, _, _| true).is_ok()
+    }
+
     /// A process address space: same class/config/physical layer, different DTB
     /// (python `_add_process_layer`). Shares the page-table cache.
     pub fn process_layer(&self, dtb: u64, name: &str) -> IntelLayer {
@@ -346,6 +352,14 @@ impl IntelLayer {
                 });
             }
         }
+        // segmented physical layers (ELF cores, LiME): zero-copy when the entry is file-backed
+        if let Some(b) = self.phys.slice(addr, self.p.entry_size as usize) {
+            return Some(if b.len() == 8 {
+                u64::from_le_bytes(b.try_into().ok()?)
+            } else {
+                u32::from_le_bytes(b.try_into().ok()?) as u64
+            });
+        }
         if self.p.entry_size == 8 {
             let mut b = [0u8; 8];
             self.phys.read(addr, &mut b).ok()?;
@@ -375,8 +389,10 @@ impl IntelLayer {
                 Some(end) if end <= len => unsafe { std::slice::from_raw_parts((ptr as *const u8).add(base as usize), 0x1000) },
                 _ => return false,
             }
+        } else if let Some(b) = self.phys.slice(base, 0x1000) {
+            b
         } else {
-            let mut b = vec![0u8; 0x1000];
+            let mut b = [0u8; 0x1000];
             if self.phys.read(base, &mut b).is_err() {
                 return false;
             }
@@ -746,15 +762,30 @@ impl Layer for IntelLayer {
     }
 
     fn is_valid(&self, addr: u64, len: u64) -> bool {
-        if len > 0 && (addr & 0xfff) + len <= 0x1000 && self.page_fast(addr).is_some() {
-            return true;
+        // TLB fast path: every 4 KiB page translating to a fully valid physical page implies
+        // python's answer (all mapped chunks valid); anything else takes the exact walk.
+        if len > 0 && len <= 64 * 0x1000 {
+            if let Some(end) = addr.checked_add(len - 1) {
+                let mut page = addr & !0xfff;
+                while self.page_fast(page).is_some() {
+                    if page >= end & !0xfff {
+                        return true;
+                    }
+                    page += 0x1000;
+                }
+            }
         }
         self.walk(addr, len, false, |_, _, _, _| true).is_ok()
     }
 
     fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
-        // Runs mapped to swap layers are omitted (the trait's `mapped` refers to `lower()`).
+        // Runs mapped to swap layers are omitted (the trait's `mapped` refers to `lower()`);
+        // `mapping_targets` includes them.
         self.mapping_with_targets(addr, len, &mut |m, t| if t == Target::Phys { f(m) } else { true });
+    }
+
+    fn mapping_targets(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping, &dyn Layer) -> bool) {
+        self.mapping_with_targets(addr, len, &mut |m, t| f(m, self.target_layer(t)));
     }
 
     fn lower(&self) -> Option<&Arc<dyn Layer>> {
@@ -904,6 +935,66 @@ mod tests {
         assert_eq!(w.translate_addr(0xffff_0000_0000_0010), Some((0x5010, Target::Phys)));
         // large page beyond the physical end is invalid
         assert!(!w.is_valid(0x200000, 1));
+    }
+
+    fn put32(v: &mut [u8], at: usize, e: u32) {
+        v[at..at + 4].copy_from_slice(&e.to_le_bytes());
+    }
+
+    #[test]
+    fn intel32_pse_and_4k() {
+        // PD at 0x1000 (1024 x 4-byte entries), PT at 0x2000
+        let mut m = vec![0u8; 0x800000];
+        put32(&mut m, 0x1000, 0x2000 | 1); // PDE[0] -> PT
+        put32(&mut m, 0x1004, 0x400000 | 0x81); // PDE[1]: 4 MiB page at phys 0x400000
+        put32(&mut m, 0x2000, 0x3000 | 1); // PTE[0] -> 0x3000
+        put32(&mut m, 0x2004, 0x5000 | 1);
+        m[0x3000] = 0x11;
+        m[0x400123] = 0x22;
+        let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1000, PagingMode::Intel32, PteFlavor::Generic);
+        assert_eq!(l.translate_addr(0x10), Some((0x3010, Target::Phys)));
+        assert_eq!(l.translate_addr(0x400123), Some((0x400123, Target::Phys)));
+        assert_eq!(l.read_u8(0x400123).unwrap(), 0x22);
+        assert_eq!(l.max_address(), 0xFFFF_FFFF);
+        // a 4 MiB page coalesces into one run
+        let ms = l.mappings(0x400000, 0x400000);
+        assert_eq!(ms, vec![Mapping { offset: 0x400000, len: 0x400000, mapped: 0x400000 }]);
+    }
+
+    #[test]
+    fn la57_five_levels() {
+        let mut m = vec![0u8; 0x10000];
+        // PML5 0x1000 -> PML4 0x2000 -> PDPT 0x3000 -> PD 0x4000 -> PT 0x5000 -> page 0x6000
+        for (t, next) in [(0x1000usize, 0x2000u64), (0x2000, 0x3000), (0x3000, 0x4000), (0x4000, 0x5000), (0x5000, 0x6000)] {
+            put(&mut m, t, next | 1);
+            put(&mut m, t + 8, 0x9000 | 1);
+        }
+        m[0x6123] = 0x44;
+        let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1000, PagingMode::La57, PteFlavor::Generic);
+        assert_eq!(l.max_address(), (1 << 57) - 1);
+        assert_eq!(l.translate_addr(0x123), Some((0x6123, Target::Phys)));
+        assert_eq!(l.read_u8(0x123).unwrap(), 0x44);
+        // bit 48 selects PML5 entry 1 (-> 0x9000, a zero table) -> invalid
+        assert!(l.translate_addr(1 << 48).is_none());
+    }
+
+    #[test]
+    fn pae_three_levels() {
+        // PDPT at 0x1020 (32-byte aligned, not page aligned); the 4096-byte "table" read from
+        // it must not be uniform
+        let mut m = vec![0u8; 0x10000];
+        put(&mut m, 0x1020, 0x2000 | 1); // PDPTE[0] -> PD
+        put(&mut m, 0x1028, 0x8000 | 1);
+        put(&mut m, 0x2000, 0x3000 | 1); // PDE[0] -> PT
+        put(&mut m, 0x2008, 0x9000 | 1);
+        put(&mut m, 0x3000, 0x4000 | 1); // PTE[0]
+        put(&mut m, 0x3008, 0x6000 | 1);
+        m[0x4abc] = 0x33;
+        let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1020, PagingMode::Pae, PteFlavor::Generic);
+        assert_eq!(l.translate_addr(0xabc), Some((0x4abc, Target::Phys)));
+        assert_eq!(l.read_u8(0xabc).unwrap(), 0x33);
+        assert!(l.is_pae());
+        assert_eq!(crate::layers::metadata(&l).pae, Some(true));
     }
 
     #[test]

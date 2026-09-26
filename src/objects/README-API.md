@@ -55,6 +55,9 @@ use crate::renderers::{Value, ColType, Column};
 | `intermed.IntermediateSymbolTable.create(ctx, path, "windows", "pe", class_types=...)` | `ctx.load_isf("windows/pe")?` (memoized) |
 | `...create(..., native_types=kernel_natives, table_mapping={"nt_symbols": kernel.symbol_table_name})` | `ctx.load_isf_with("windows/callbacks-x64", Some(k.table), &[("nt_symbols", k.table.name())])?` |
 | `PDBUtility.load_windows_symbol_table(ctx, guid, age, pdb_name, ...)` | `ctx.load_windows_pdb(pdb_name, guid, age)?` |
+| `PDBUtility.symbol_table_from_pdb(ctx, path, layer, "tcpip.pdb", base, size)` | `ctx.symbol_table_from_pdb(layer, "tcpip.pdb", Some(base), Some(size))?` |
+| `PDBUtility.module_from_pdb(...)` | `ctx.module_from_pdb(layer, "ntdll.pdb", Some(base), Some(size))?` → `Module` |
+| `PDBUtility.pdbname_scan(ctx, layer, page_size, names, start, end)` | `crate::automagic::windows::pdbname_scan(layer, &[b"x.pdb"], start, end, \|sig\| { ..; true })` |
 | `versions.is_win10(context, table)` | `crate::symbols::windows::versions::IS_WIN10.check(k.table)` |
 
 ## Objects
@@ -62,7 +65,7 @@ use crate::renderers::{Value, ColType, Column};
 | python | rust |
 |---|---|
 | `proc.UniqueProcessId` (int) | `proc.m("UniqueProcessId")?.int()?` (`i128`, exact python int) / `.u64()?` / `.i64()?` |
-| `proc.Pcb.DirectoryTableBase` | `proc.path("Pcb.DirectoryTableBase")?.u64()?` or `proc.m("Pcb")?.m("DirectoryTableBase")?` |
+| `proc.Pcb.DirectoryTableBase` | `proc.u64_at("Pcb.DirectoryTableBase")?` (= `proc.path(..)?.u64()?`, `proc.m("Pcb")?.m("DirectoryTableBase")?.u64()?`); `int_at` for the exact python int |
 | `ptr.Member` (auto-deref) | `ptr.m("Member")?` (dereferences pointers like python) |
 | `ptr.dereference()` | `ptr.deref()?` ; `ptr.deref_on(layer)?` for `dereference(layer_name)` |
 | `if ptr:` / `bool(x)` | `x.bool()?` (value != 0) |
@@ -81,6 +84,7 @@ use crate::renderers::{Value, ColType, Column};
 | `enum.description` / `.lookup()` | `e.description()?` (Err outside the choices, like python's ValueError) |
 | `enum.is_valid_choice` / `EnumName.CONSTANT` | `e.is_valid_choice()` / `e.enum_value("CONSTANT")?` |
 | bitfields | `obj.m("Flag")?.int()?` (already `(v & ((1<<end)-1)) >> start`) |
+| `container_of(ptr, "task_struct", "tasks")` / `obj.vol.offset - relative_child_offset` | `list_head.container_of("task_struct", "tasks")?` / `obj.container_at(addr, "task_struct", "tasks")?` |
 | `objects.utility.array_to_string(arr)` | `array_to_string(&arr, None)?` |
 | `utility.pointer_to_string(ptr, count)` | `pointer_to_string(&ptr, count)?` |
 | `utility.rol / bswap_64` | `crate::objects::util::{rol, bswap_32, bswap_64}` |
@@ -147,6 +151,59 @@ Pool / object-header helpers live in `crate::symbols::windows::pool`.
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
 
+## Linux (`use crate::symbols::linux::LinuxExt`)
+
+`let k = ctx.linux_kernel()?;` → `&LinuxKernel`, derefs to the kernel `Module` (offset =
+`aslr_shift`). Fields: `layer` (`&IntelLayer` named "layer_name": `Intel32e` from the VMCOREINFO
+stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
+(`symbol_table_name1`, symbol_mask = layer address mask), `kaslr_shift`, `aslr_shift`, `dtb`,
+`banner`, `stacker`. Cached per image + symbol roots + `--stackers`.
+
+| python | rust |
+|---|---|
+| `PsList.list_tasks(ctx, kernel, filter, include_threads)` | `crate::plugins::linux::pslist::list_tasks(k, &filter, threads, &mut \|task\| { ...; Ok(true) })?` (callback; `Ok(false)` stops) |
+| `PsList.create_pid_filter(pids)` / `get_task_fields(task, decorate)` | `pslist::pid_filter(&pids)` / `pslist::get_task_fields(&task, decorate)?` |
+| `list_head.to_list(type, member, forward, sentinel, layer)` | `lh.to_list("task_struct", "tasks", true, true, None)` → lazy `ListIter` of `Result<Obj>` |
+| `for x in obj.list_head_member` / `hlist_head.to_list(type, member)` | `lh.list_of(type, member)` / `hh.hlist_to_list(type, member)` |
+| `task.is_valid()` (task_struct / vm_area_struct / ... ) | `obj.is_valid()` (unported types return true) |
+| `task.add_process_layer()` / `get_address_space_layer()` | same names → `Option<LayerRef>` |
+| `task.is_kernel_thread / is_thread_group_leader / is_user_thread` | same names → `Result<bool>` |
+| `task.get_threads()` / `state` / `get_parent_pid()` | same names |
+| `task.get_create_time()` / `get_boottime(root_ns)` / `get_time_namespace*()` | same names (python's exact float arithmetic, `symbols::linux::timespec`) |
+| `mm.get_vma_iter()` (mmap list < 6.1, maple tree >= 6.1) / `get_slot_iter()` | same names → `Vec<Result<..>>` |
+| `vma.get_protection()` / `get_flags()` / `get_page_offset()` / `is_valid()` | `get_protection()` / `get_flags()` / `get_page_offset()` / `vma_is_valid()` |
+| `path.dentry / .mnt`, `file.get_inode()` | `get_dentry()` / `get_vfsmnt()` / `get_inode()` |
+| `task.cred.uid` (int or kuid_t) | `cred.cred_value("uid")?` |
+| `LinuxUtilities.container_of(addr, type, member, vmlinux)` | `crate::symbols::linux::container_of(addr, type, member, &vmlinux)?` → `Option<Obj>` |
+| `vmlinux = linux.LinuxUtilities.get_module_from_volobj_type(ctx, obj)` | `crate::symbols::linux::vmlinux_of(&obj)?` |
+| `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump}` |
+| `LinuxUtilities.virtual_to_physical_address(a)` | `crate::symbols::linux::virtual_to_physical_address(a)` |
+
+## Mac (`use crate::symbols::mac::MacExt`)
+
+`let k = ctx.mac_kernel()?;` → `&MacKernel`, derefs to the kernel `Module` (offset = python
+`kernel_virtual_offset`, the KASLR shift). Fields: `layer` (`&IntelLayer`, python
+`layer_name`), `vlayer`, `phys`, `table` (symbol_mask 2^48-1), `kaslr_shift`, `dtb`, `banner`,
+`isf`. Automagic results are cached per image + symbol path (warm runs do no scanning).
+
+| python | rust |
+|---|---|
+| `kernel.object_from_symbol("allproc")` | `k.object_from_symbol("allproc")?` |
+| `PsList.list_tasks(ctx, kernel, filter, method)` | `crate::plugins::mac::pslist::list_tasks(k, "tasks", &filter)` (+ `list_tasks_{allproc,tasks,sessions,process_group,pid_hash_table}`) |
+| `PsList.create_pid_filter(pids)` | `pslist::pid_filter(&pids)` |
+| `queue_entry.walk_list(head, member, type_name)` | `q.walk_list(&head, "p_list", "proc", MAX_ELEMENTS)` → `Vec<Result<Obj>>` |
+| `MacUtilities.walk_tailq / walk_list_head / walk_slist(q, next)` | `q.walk_tailq(next, MAX_ELEMENTS)` / `walk_list_head` / `walk_slist` |
+| `proc.get_task()` / `add_process_layer()` / `get_map_iter()` | same names (`add_process_layer()?` → `Option<LayerRef>`) |
+| `fileglob.get_fg_type()` / `vm_map_object.get_map_object()` | same names |
+| `vm_map_entry.get_perms() / get_range_alias() / get_special_path() / get_object() / get_offset()` | same names (`get_perms` also for `sysctl_oid`) |
+| `sysctl_oid.get_ctltype()` / `vnode.full_path()` | same names |
+| `datetime.datetime.fromtimestamp(t)` (naive local time) | `crate::util::time::fromtimestamp_local(t)` → `Result<DateTime, String>` (`Err` = python exception text) |
+| `mac.MacUtilities.virtual_to_physical_address(a)` | `crate::symbols::mac::virtual_to_physical_address(a)` |
+
+A trailing `Err` in a walker's `Vec` marks where python would have raised. Python exceptions
+that are not volatility exceptions (e.g. `ValueError` from `datetime`) crash python's plugin
+with a traceback; the rsvol equivalent is a plugin panic, which the CLI renders the same way.
+
 ## Layers
 
 | python | rust |
@@ -200,4 +257,7 @@ the built-in scanners do. Per-hit validation can run inside the scanner (it runs
   (`~/.cache/rsvol/automagic`). `RSVOL_TRACE=1` prints timing spans; `RSVOL_CACHE=dir` relocates
   the caches (use an empty dir to measure cold runs).
 * Use `crate::util::par::{par_map, par_for, par_map_stream}` for per-process / per-item work
-  that reads lots of memory; results stay in order.
+  that reads lots of memory; results stay in order. Pattern (see `plugins/windows/vadinfo.rs`):
+  compute each process's rows as `Vec<Result<Vec<Value>>>` in parallel, then emit them in python
+  order, stopping at the first `Err` exactly where python would have raised. Keep work that has
+  side effects python would not reach after an error (e.g. `--dump` files) sequential.

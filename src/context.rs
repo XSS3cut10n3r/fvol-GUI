@@ -96,6 +96,15 @@ pub struct Context {
     output_lock: Mutex<()>,
 }
 
+/// Text stored for a failed lazy init: the bare path list for `Unsatisfied` (so the CLI can
+/// parse it back), the display text otherwise.
+fn err_text(e: Error) -> String {
+    match e {
+        Error::Unsatisfied(s) => s,
+        e => e.to_string(),
+    }
+}
+
 fn keep_err<T>(r: &std::result::Result<T, String>) -> Result<&T> {
     r.as_ref().map_err(|e| Error::Unsatisfied(e.clone()))
 }
@@ -150,8 +159,8 @@ impl Context {
     /// `memory_layer` as the owning `Arc` (to build translation layers on) and as `&dyn Layer`.
     pub fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
         keep_err(self.physical.get_or_init(|| {
-            let path = self.image_path().map_err(|e| e.to_string())?;
-            let (l, listing) = crate::automagic::stack_physical(&path, self.opts.stackers.as_deref()).map_err(|e| e.to_string())?;
+            let path = self.image_path().map_err(err_text)?;
+            let (l, listing) = crate::automagic::stack_physical(&path, self.opts.stackers.as_deref()).map_err(err_text)?;
             let _ = self.physical_listing.set(listing);
             let r = leak_layer(l.clone());
             Ok((l, r))
@@ -168,24 +177,37 @@ impl Context {
 
     /// The Windows kernel (runs the Windows automagic on first use; cached per image).
     pub fn windows_kernel(&self) -> Result<&WinKernel> {
-        keep_err(self.win.get_or_init(|| self.init_windows().map_err(|e| e.to_string())))
+        keep_err(self.win.get_or_init(|| self.init_windows().map_err(err_text)))
     }
 
     /// The Linux kernel (runs the Linux automagic on first use; see `automagic::linux`).
     pub fn linux_kernel(&self) -> Result<&crate::automagic::linux::LinuxKernel> {
-        keep_err(self.linux.get_or_init(|| crate::automagic::linux::init(self).map_err(|e| e.to_string())))
+        keep_err(self.linux.get_or_init(|| crate::automagic::linux::init(self).map_err(err_text)))
     }
 
     /// The macOS kernel (runs the Mac automagic on first use; see `automagic::mac`).
     pub fn mac_kernel(&self) -> Result<&crate::automagic::mac::MacKernel> {
-        keep_err(self.mac.get_or_init(|| crate::automagic::mac::init(self).map_err(|e| e.to_string())))
+        keep_err(self.mac.get_or_init(|| crate::automagic::mac::init(self).map_err(err_text)))
+    }
+
+    /// Log an automagic failure detail (python logs these at -v levels) and return the python
+    /// UnsatisfiedException for `paths`.
+    fn unsatisfied(&self, detail: &Error, paths: &[&str]) -> Error {
+        if self.opts.verbosity > 0 {
+            eprintln!("automagic: {detail}");
+        }
+        crate::plugins::unsatisfied(paths)
     }
 
     fn init_windows(&self) -> Result<WinKernel> {
         let _t = crate::util::trace::span("windows kernel init (total)");
-        let (phys_arc, phys) = self.physical_arc()?;
+        // python: no translation layer -> both the layer and the symbol requirement are
+        // unsatisfied; a layer without kernel symbols -> only the symbol requirement
+        const LAYER: &[&str] = &["kernel.layer_name", "kernel.symbol_table_name"];
+        const SYMS: &[&str] = &["kernel.symbol_table_name"];
+        let (phys_arc, phys) = self.physical_arc().map_err(|e| self.unsatisfied(&e, LAYER))?;
         if !crate::automagic::stacker_enabled(self.opts.stackers.as_deref(), "WindowsIntelStacker") {
-            return Err(Error::Unsatisfied("WindowsIntelStacker disabled by --stackers".into()));
+            return Err(self.unsatisfied(&Error::msg("WindowsIntelStacker disabled by --stackers"), LAYER));
         }
         let image = self.image_path()?;
         let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
@@ -208,7 +230,19 @@ impl Context {
         let am = match cached {
             Some(a) => a,
             None => {
-                let a = crate::automagic::windows::run(phys_arc)?;
+                use crate::automagic::windows::{WinAutomagic, find_dtb, find_kernel};
+                let d = {
+                    let _t = crate::util::trace::span("windows dtb scan");
+                    find_dtb(phys_arc).map_err(|e| self.unsatisfied(&e, LAYER))?.ok_or_else(|| self.unsatisfied(&Error::msg("no Windows DTB found"), LAYER))?
+                };
+                let vl = IntelLayer::new("layer_name", phys_arc.clone(), d.dtb, d.mode, PteFlavor::Windows);
+                let k = {
+                    let _t = crate::util::trace::span("windows pdbscan");
+                    find_kernel(&vl, *phys)
+                        .map_err(|e| self.unsatisfied(&e, SYMS))?
+                        .ok_or_else(|| self.unsatisfied(&Error::msg("No suitable kernels found during pdbscan"), SYMS))?
+                };
+                let a = WinAutomagic { dtb: d.dtb, mode: d.mode, kvo: k.kvo, pdb_name: k.pdb.pdb_name, guid: k.pdb.guid, age: k.pdb.age };
                 crate::automagic::cache::store(
                     &image,
                     "win",
@@ -242,11 +276,11 @@ impl Context {
         let vlayer: LayerRef = layer;
         let loc = {
             let _t = crate::util::trace::span("kernel isf lookup");
-            symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline)?
+            symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline).map_err(|e| self.unsatisfied(&e, SYMS))?
         };
         let table = {
             let _t = crate::util::trace::span("kernel isf load");
-            symbols::load_location(&loc, "symbol_table_name", None, 0)?
+            symbols::load_location(&loc, "symbol_table_name", None, 0).map_err(|e| self.unsatisfied(&e, SYMS))?
         };
         let module = Module::new(vlayer, table, am.kvo);
         Ok(WinKernel {
@@ -284,6 +318,34 @@ impl Context {
         symbols::load_location(&loc, &prefix, None, 0)
     }
 
+    /// python `PDBUtility.symbol_table_from_pdb(context, path, layer, pdb_name, offset, size)`:
+    /// find the RSDS record of `pdb_name` (e.g. "tcpip.pdb") inside `[offset, offset+size)` of
+    /// `layer` and load (or download/convert) its ISF.
+    pub fn symbol_table_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<TableRef> {
+        Ok(self.modtable_from_pdb(layer, pdb_name, offset, size)?.1)
+    }
+
+    /// python `PDBUtility.module_from_pdb(...)`: like [`Context::symbol_table_from_pdb`] but
+    /// returns a [`Module`] based at the MZ header found before the RSDS record.
+    pub fn module_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<Module> {
+        let (mz, t) = self.modtable_from_pdb(layer, pdb_name, offset, size)?;
+        let mz = mz.ok_or_else(|| Error::Symbol(format!("No MZ header found for {pdb_name}")))?;
+        Ok(Module::new(layer, t, mz))
+    }
+
+    fn modtable_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<(Option<u64>, TableRef)> {
+        let start = offset.unwrap_or(layer.min_address());
+        let size = size.unwrap_or_else(|| layer.max_address().wrapping_sub(start));
+        let mut first = None;
+        crate::automagic::windows::pdbname_scan(layer, &[pdb_name.as_bytes()], Some(start), Some(start.wrapping_add(size)), |s| {
+            first = Some(s);
+            false
+        });
+        let s = first.ok_or_else(|| Error::Symbol(format!("Did not find GUID of {pdb_name} in module @ {start:#x}!")))?;
+        let t = self.load_windows_pdb(&s.pdb_name, &s.guid, s.age)?;
+        Ok((s.mz_offset, t))
+    }
+
     /// Create a file in the output directory (volatility3 CLIFileHandler semantics: if the
     /// preferred name already exists a counter is appended, see `cli::files::create`).
     /// Returns the open file and the FINAL file name, which is what python's
@@ -296,16 +358,19 @@ impl Context {
 }
 
 fn percent_decode(s: &str) -> String {
+    // python `urllib.parse.unquote`: only `%` + two hex digits is decoded (bytewise, so a
+    // multi-byte char after `%` can never split a str slice), then UTF-8 with replacement
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() + 0 && i + 2 <= b.len() - 1 {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|&c| hex(c)), b.get(i + 2).and_then(|&c| hex(c)))
+        {
+            out.push(h << 4 | l);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
@@ -314,10 +379,365 @@ fn percent_decode(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod percent_tests {
+    #[test]
+    fn percent_decode_like_python() {
+        use super::percent_decode;
+        assert_eq!(percent_decode("/a%20b%2Fc"), "/a b/c");
+        assert_eq!(percent_decode("%+5%zz%4"), "%+5%zz%4");
+        assert_eq!(percent_decode("%é%%41"), "%é%A");
+        assert_eq!(percent_decode("%ff"), "\u{fffd}");
+        assert_eq!(percent_decode("%"), "%");
+    }
+}
+
+#[cfg(test)]
 mod bench {
     use super::*;
     use crate::layers::LayerExt;
     use crate::layers::scan::{BytesScanner, scan};
+
+    /// A physical layer that corrupts ~`rate`% of pages (deterministically) to simulate smear.
+    struct Smear {
+        inner: Arc<dyn Layer>,
+        rate: u64,
+        seed: u64,
+    }
+    impl Smear {
+        fn corrupt(&self, page: u64) -> Option<u64> {
+            let h = crate::util::fxhash::hash_u64(page ^ self.seed);
+            if h % 100 < self.rate { Some(h) } else { None }
+        }
+    }
+    impl Layer for Smear {
+        fn name(&self) -> &str {
+            "smear"
+        }
+        fn max_address(&self) -> u64 {
+            self.inner.max_address()
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            self.inner.read(addr, buf)?;
+            for (i, b) in buf.iter_mut().enumerate() {
+                let a = addr + i as u64;
+                if let Some(h) = self.corrupt(a >> 12) {
+                    *b ^= (crate::util::fxhash::hash_u64(h ^ a) & 0xff) as u8;
+                }
+            }
+            Ok(())
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            self.inner.is_valid(addr, len)
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(crate::layers::Mapping) -> bool) {
+            self.inner.mapping(addr, len, f)
+        }
+        fn lower(&self) -> Option<&Arc<dyn Layer>> {
+            Some(&self.inner)
+        }
+    }
+
+    /// `cargo test --release smear_robustness -- --ignored --nocapture`: walk processes, VADs,
+    /// modules, strings, tokens over a physical layer with corrupted pages -- errors are fine,
+    /// panics are not.
+    #[test]
+    #[ignore]
+    fn smear_robustness() {
+        use crate::symbols::windows::prelude::*;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let (phys, _) = ctx.physical_arc().unwrap();
+        for rate in [1u64, 5, 20, 50] {
+            let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate, seed: 0x5eed });
+            let vl = IntelLayer::new("layer_name", smear, k.dtb, k.layer.mode(), PteFlavor::Windows).with_kernel_virtual_offset(Some(k.base));
+            let vl: &'static IntelLayer = Box::leak(Box::new(vl));
+            let kk = WinKernel { module: Module::new(vl, k.table, k.base), layer: vl, vlayer: vl, phys: k.phys, table: k.table, base: k.base, dtb: k.dtb, pdb_name: String::new(), guid: String::new(), age: 0 };
+            let (mut procs, mut vads, mut mods, mut errs) = (0, 0, 0, 0);
+            for p in crate::plugins::windows::pslist::list_processes(&kk, &|_| Ok(false)) {
+                let Ok(p) = p else {
+                    errs += 1;
+                    continue;
+                };
+                procs += 1;
+                let _ = p.is_valid();
+                let _ = p.image_file_name();
+                let _ = p.get_create_time();
+                let _ = p.get_session_id();
+                let _ = p.get_handle_count();
+                let _ = p.environment_variables();
+                if let Ok(t) = p.m("Token").and_then(|t| t.fast_ref_dereference()).and_then(|t| t.cast("_TOKEN")) {
+                    let _ = t.get_sids();
+                    let _ = t.privileges();
+                }
+                if let Ok(root) = p.get_vad_root() {
+                    for v in root.traverse() {
+                        match v {
+                            Ok(v) => {
+                                vads += 1;
+                                let _ = (v.get_start(), v.get_end(), v.get_file_name(), v.get_commit_charge(), v.get_parent());
+                            }
+                            Err(_) => errs += 1,
+                        }
+                    }
+                }
+                for m in p.load_order_modules() {
+                    match m {
+                        Ok(m) => {
+                            mods += 1;
+                            let _ = m.m("FullDllName").and_then(|n| n.get_string());
+                        }
+                        Err(_) => errs += 1,
+                    }
+                }
+            }
+            for m in crate::plugins::windows::modules::list_modules(&kk) {
+                if let Ok(m) = m {
+                    let _ = m.m("BaseDllName").and_then(|n| n.get_string());
+                }
+            }
+            println!("smear {rate}%: {procs} procs, {vads} vads, {mods} modules, {errs} errors, no panic");
+        }
+    }
+
+    /// The TLB fast path of multi-page `is_valid` answers exactly like python's `_mapping`
+    /// walk: random ranges (1 byte .. 64 pages) around mapped/unmapped boundaries of the
+    /// windows kernel, windows process layers and a linux ELF-core kernel (segmented phys).
+    #[test]
+    #[ignore]
+    fn is_valid_fast_path_is_exact() {
+        let check = |name: &str, l: &IntelLayer, seed: u64| {
+            let runs = l.mappings(0, l.max_address());
+            let mut x = seed | 1;
+            let mut next = || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            };
+            let (mut n, mut valid) = (0u64, 0u64);
+            for _ in 0..200_000 {
+                let m = &runs[next() as usize % runs.len()];
+                // start near either edge of a mapped run, or inside it
+                let base = match next() % 3 {
+                    0 => m.offset.wrapping_sub(next() % 0x3000),
+                    1 => (m.offset + m.len).wrapping_sub(next() % 0x3000),
+                    _ => m.offset + next() % m.len.max(1),
+                };
+                let len = match next() % 4 {
+                    0 => 1 + next() % 16,
+                    1 => 1 + next() % 0x1000,
+                    2 => 1 + next() % 0x10000,
+                    _ => 1 + next() % (64 * 0x1000),
+                };
+                let (fast, exact) = (l.is_valid(base, len), l.is_valid_exact(base, len));
+                assert_eq!(fast, exact, "{name}: is_valid({base:#x}, {len:#x})");
+                n += 1;
+                valid += fast as u64;
+            }
+            println!("{name}: {n} ranges, {valid} valid, identical");
+        };
+        let ctx = Context::new(GlobalOptions { file: Some("/home/user/cbc2/task2/memory-dirty.raw".into()), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        check("windows kernel", k.layer, 1);
+        let procs: Vec<_> = crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)).into_iter().filter_map(|p| p.ok()).collect();
+        for p in procs.iter().take(4) {
+            let dtb = p.m("Pcb").and_then(|pcb| pcb.m("DirectoryTableBase")).and_then(|d| d.u64()).unwrap();
+            let pl = k.layer.process_layer(dtb, "proc");
+            check("windows process", &pl, dtb);
+        }
+        let ctx = Context::new(GlobalOptions {
+            file: Some("/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf".into()),
+            symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let lk = ctx.linux_kernel().unwrap();
+        check("linux ELF kernel", lk.layer, 7);
+    }
+
+    /// The Mac walkers and class helpers on a corrupted physical layer: every list method,
+    /// process layers, map entries, fileglob types and vnode paths must never panic.
+    #[test]
+    #[ignore]
+    fn smear_robustness_mac() {
+        use crate::automagic::mac::MacKernel;
+        use crate::symbols::mac::{MAX_ELEMENTS, MacExt};
+        let img = "/home/user/rs-vol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp".to_string();
+        let ctx = Context::new(GlobalOptions {
+            file: Some(img),
+            symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let k = ctx.mac_kernel().unwrap();
+        let (phys, _) = ctx.physical_arc().unwrap();
+        for (rate, seed) in [0u64, 1, 2, 5, 10, 20, 50].into_iter().flat_map(|r| (1..=6u64).map(move |s| (r, s * 0x9e37_79b9))) {
+            let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate, seed });
+            let vl = IntelLayer::new("layer_name", smear, k.dtb, k.layer.mode(), PteFlavor::Generic)
+                .with_os("mac")
+                .with_kernel_virtual_offset(Some(k.kaslr_shift));
+            let vl: &'static IntelLayer = Box::leak(Box::new(vl));
+            let kk = MacKernel {
+                module: Module::new(vl, k.table, k.kaslr_shift),
+                layer: vl,
+                vlayer: vl,
+                phys: k.phys,
+                table: k.table,
+                kaslr_shift: k.kaslr_shift,
+                dtb: k.dtb,
+                banner: k.banner.clone(),
+                isf: k.isf.clone(),
+            };
+            let (mut procs, mut entries, mut files, mut errs) = (0, 0, 0, 0);
+            for method in crate::plugins::mac::pslist::PSLIST_METHODS {
+                for p in crate::plugins::mac::pslist::list_tasks(&kk, method, &|_| Ok(false)) {
+                    let Ok(p) = p else {
+                        errs += 1;
+                        continue;
+                    };
+                    procs += 1;
+                    let _ = p.m("p_comm").and_then(|c| crate::objects::util::array_to_string(&c, None));
+                    let Ok(task) = p.get_task() else { continue };
+                    let _ = task.m("map");
+                    let _ = p.add_process_layer();
+                    for e in p.get_map_iter().into_iter().take(64) {
+                        match e {
+                            Ok(e) => {
+                                entries += 1;
+                                let _ = (e.get_perms(), e.get_range_alias(), e.get_special_path(), e.get_offset());
+                                if let Ok(o) = e.get_object() {
+                                    let _ = o.get_map_object();
+                                }
+                            }
+                            Err(_) => errs += 1,
+                        }
+                    }
+                    // proc.p_fd.fd_ofiles[0..=fd_lastfile]: fileglob types and vnode paths
+                    let Ok(fd) = p.m("p_fd").and_then(|f| f.deref()) else { continue };
+                    let n = fd.m("fd_lastfile").and_then(|n| n.int()).unwrap_or(0).clamp(0, 64) as u64;
+                    let Ok(first) = fd.m("fd_ofiles").and_then(|f| f.deref()) else { continue };
+                    let arr = first.cast_array(n + 1, first.ty);
+                    for fp in arr.elements() {
+                        let Ok(f) = fp.deref() else { continue };
+                        let Ok(fg) = f.m("f_fglob").and_then(|g| g.deref()) else { continue };
+                        files += 1;
+                        let _ = fg.get_fg_type();
+                        if let Ok(v) = fg.m("fg_data").and_then(|d| d.deref()).and_then(|d| d.cast("vnode")) {
+                            let _ = v.full_path();
+                        }
+                    }
+                }
+            }
+            let _ = kk.object_from_symbol("allproc").map(|a| a.walk_list_head("le_next", MAX_ELEMENTS));
+            println!("mac smear {rate}% seed {seed:#x}: {procs} procs, {entries} map entries, {files} files, {errs} errors, no panic");
+        }
+    }
+
+    /// API proof against python: windows.dlllist.DllList's default output rebuilt from the
+    /// core extension API (get_peb / load_order_modules / UNICODE_STRING / get_load_count on
+    /// process layers), rendered by the real quick renderer and diffed with the reference.
+    #[test]
+    #[ignore]
+    fn dlllist_via_core_api() {
+        use crate::renderers::{ColType, Column, Value};
+        use crate::symbols::windows::WinExt;
+        use crate::util::time::wintime_to_datetime;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let refp = std::env::var("RSVOL_BENCH_REF").unwrap_or_else(|_| "/home/user/rs-vol/bench/ref/py/windows.dlllist.DllList.txt".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let mut out: Vec<u8> = b"Volatility 3 Framework 2.28.2\n".to_vec();
+        {
+            let mut r = crate::renderers::text::create("quick", &mut out, Default::default()).unwrap();
+            r.begin(vec![
+                Column::new("PID", ColType::Int),
+                Column::new("Process", ColType::Str),
+                Column::new("Base", ColType::Hex),
+                Column::new("Size", ColType::Hex),
+                Column::new("Name", ColType::Str),
+                Column::new("Path", ColType::Str),
+                Column::new("LoadCount", ColType::Int),
+                Column::new("LoadTime", ColType::DateTime),
+                Column::new("File output", ColType::Str),
+            ])
+            .unwrap();
+            let kuser = crate::plugins::windows::info::get_kuser_structure(k).unwrap();
+            let (maj, min) = (kuser.m("NtMajorVersion").unwrap().int().unwrap(), kuser.m("NtMinorVersion").unwrap().int().unwrap());
+            let load_time_field = maj > 6 || (maj == 6 && min >= 1);
+            for p in crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)) {
+                let proc = p.unwrap();
+                proc.add_process_layer().unwrap();
+                for e in proc.load_order_modules() {
+                    let e = e.unwrap();
+                    let (mut base_name, mut full_name) = (Value::Unreadable, Value::Unreadable);
+                    if let Ok(b) = e.m("BaseDllName").and_then(|n| n.get_string()) {
+                        base_name = Value::Str(b);
+                        if let Ok(f) = e.m("FullDllName").and_then(|n| n.get_string()) {
+                            full_name = Value::Str(f);
+                        }
+                    }
+                    let load_time = if load_time_field {
+                        e.path("LoadTime.QuadPart").and_then(|q| q.int()).map(wintime_to_datetime).unwrap_or(Value::Unreadable)
+                    } else {
+                        Value::NotApplicable
+                    };
+                    let hexv = |r: crate::error::Result<i128>| r.map(Value::Int).unwrap_or(Value::NotAvailable);
+                    r.row(
+                        0,
+                        vec![
+                            Value::Int(proc.m("UniqueProcessId").unwrap().int().unwrap()),
+                            Value::Str(proc.image_file_name_str().unwrap()),
+                            hexv(e.m("DllBase").and_then(|x| x.int())),
+                            hexv(e.m("SizeOfImage").and_then(|x| x.int())),
+                            base_name,
+                            full_name,
+                            e.get_load_count().map(Value::Int).unwrap_or(Value::NotAvailable),
+                            load_time,
+                            Value::SStr("Disabled"),
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            r.finish().unwrap();
+        }
+        let reference = std::fs::read(&refp).unwrap();
+        if out != reference {
+            let a = String::from_utf8_lossy(&out);
+            let b = String::from_utf8_lossy(&reference);
+            for (i, (x, y)) in a.lines().zip(b.lines()).enumerate() {
+                if x != y {
+                    panic!("line {i} differs:\n ours: {x}\n  ref: {y}");
+                }
+            }
+            panic!("length differs: ours {} lines, ref {} lines", a.lines().count(), b.lines().count());
+        }
+        println!("dlllist via core API: byte-identical ({} bytes)", out.len());
+    }
+
+    /// `cargo test --release module_pdb_lookup -- --ignored --nocapture` (needs the test image
+    /// and tcpip.pdb's ISF in a symbol dir): python `PDBUtility.module_from_pdb` for tcpip.sys.
+    #[test]
+    #[ignore]
+    fn module_pdb_lookup() {
+        use crate::symbols::windows::WinExt;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let m = crate::plugins::windows::modules::list_modules(k)
+            .into_iter()
+            .filter_map(|m| m.ok())
+            .find(|m| m.m("BaseDllName").and_then(|n| n.get_string()).map(|n| n.eq_ignore_ascii_case("tcpip.sys")).unwrap_or(false))
+            .unwrap();
+        let base = m.m("DllBase").unwrap().u64().unwrap();
+        let size = m.m("SizeOfImage").unwrap().u64().unwrap();
+        let t = std::time::Instant::now();
+        let md = ctx.module_from_pdb(k.vlayer, "tcpip.pdb", Some(base), Some(size)).unwrap();
+        println!("tcpip.pdb module at {:#x} (DllBase {base:#x}), table {} from {} in {:.2} ms", md.offset, md.table().name(), md.table().isf_url(), t.elapsed().as_secs_f64() * 1e3);
+        assert_eq!(md.offset, base);
+        assert!(md.table().symbol_count() > 0);
+    }
 
     /// `RSVOL_BENCH_IMG=... cargo test --release translation_bench -- --ignored --nocapture`
     /// (run through bench/scripts/limit.sh): page-walk / mapping / virtual-scan throughput.

@@ -964,6 +964,60 @@ mod tests {
         assert_eq!(t.symbols_at(4096, 0), vec!["sym1"]);
     }
 
+    /// A corrupted cache blob (bit rot, truncation) must load as an error or answer queries
+    /// without panicking: validation is lazy (per user type on first `member()` probe).
+    #[test]
+    fn corrupt_blob_is_safe() {
+        use crate::symbols::table::Blob;
+        let blob = build_blob(ISF.as_bytes(), &BuildOptions::default()).unwrap();
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut loaded = 0;
+        for round in 0..3000 {
+            let mut b = blob.clone();
+            if round % 50 == 0 {
+                let cut = next() as usize % b.len();
+                b.truncate(cut);
+            } else {
+                for _ in 0..1 + round % 8 {
+                    let i = next() as usize % b.len();
+                    b[i] = next() as u8;
+                }
+            }
+            let Ok(t) = SymbolTable::from_blob(Blob::Owned(b), "t", "u") else { continue };
+            loaded += 1;
+            for i in 0..t.user_type_count() as u32 + 2 {
+                let _ = t.user_type_name(i);
+                let _ = t.user_type_size(i);
+                for n in ["a", "p", "x", "y", "arr", "bf", "e", "missing", "zz"] {
+                    if let Some(m) = t.member(i, n) {
+                        let _ = t.type_name(m.ty);
+                        let _ = t.size_of(m.ty);
+                    }
+                }
+                for m in t.members(i) {
+                    let _ = (m.name.len(), t.type_name(m.ty));
+                }
+            }
+            for n in ["_S", "_U", "E", "nope"] {
+                let _ = t.user_type(n);
+                let _ = t.enumeration(n);
+                let _ = t.get_type(n);
+            }
+            for s in ["sym1", "linux_banner", "nope"] {
+                let _ = t.get_symbol(s);
+            }
+            let _ = t.symbols_at(4096, 0);
+            let _ = (t.is_64bit(), t.pdb_info(), t.metadata());
+        }
+        assert!(loaded > 1000, "{loaded}");
+    }
+
     #[test]
     fn versions() {
         assert_eq!(closest_version("6.1.0").unwrap(), (6, 2, 0));
