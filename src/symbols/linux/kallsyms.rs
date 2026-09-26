@@ -1131,16 +1131,37 @@ impl Kallsyms {
     /// Streaming [`get_core_symbols`](Self::get_core_symbols): `f` gets each symbol (or the
     /// `Err` python raises, after which nothing follows) in kallsyms order on the calling thread
     /// while the next ones are expanded on all cores; `f` returns false to stop.
+    pub fn for_each_core_symbol(&self, f: &mut dyn FnMut(Result<KasSymbol>) -> bool) {
+        self.for_each_core_block(
+            &Vec::new,
+            &|v: &mut Vec<Result<KasSymbol>>, r| {
+                let ok = r.is_ok();
+                v.push(r);
+                ok
+            },
+            &mut |v| v.into_iter().all(|r| f(r)),
+        );
+    }
+
+    /// [`for_each_core_symbol`](Self::for_each_core_symbol) with the per-symbol work done where
+    /// the symbol was expanded: the symbols (or the `Err` python raises, after which nothing
+    /// follows) go in kallsyms order through `push` into blocks made by `new_block`, on the
+    /// worker threads; `push` returns false to stop after that symbol (python raised there).
+    /// `emit` gets the blocks in order on the calling thread and returns false to stop.
     ///
     /// The symbols' stream offsets come from one pass over the length bytes; chunks of symbols
     /// are then expanded in parallel. python's `continue` on an unreadable symbol does not
     /// advance the stream offset, so from the first such symbol on the walk continues
     /// sequentially (the chunks before it are exactly what the sequential walk yields).
-    pub fn for_each_core_symbol(&self, f: &mut dyn FnMut(Result<KasSymbol>) -> bool) {
+    pub fn for_each_core_block<B: Send>(&self, new_block: &(dyn Fn() -> B + Sync), push: &(dyn Fn(&mut B, Result<KasSymbol>) -> bool + Sync), emit: &mut dyn FnMut(B) -> bool) {
+        /// symbols per block of the sequential walk
+        const SEQ_BLOCK: usize = 2048;
         let n = match self.num_syms() {
             Ok(n) => n,
             Err(e) => {
-                f(Err(e));
+                let mut b = new_block();
+                push(&mut b, Err(e));
+                emit(b);
                 return;
             }
         };
@@ -1162,31 +1183,29 @@ impl Kallsyms {
             crate::util::par::par_map_stream(
                 chunks,
                 4 * threads,
-                |c| -> (Vec<Result<KasSymbol>>, Option<usize>) {
+                // (block, stopped, first unreadable symbol)
+                |c| -> (B, bool, Option<usize>) {
                     let mut names = PageReader::new(self.layer);
                     let mut tokens = PageReader::new(self.layer);
                     let lo = c * CHUNK;
                     let hi = (lo + CHUNK).min(offsets.len());
-                    let mut v = Vec::with_capacity(hi - lo);
+                    let mut b = new_block();
                     for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
-                        match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
-                            Ok((s, _)) => v.push(Ok(s)),
-                            Err(e) if e.is_invalid_address() => return (v, Some(i)),
-                            Err(e) => {
-                                v.push(Err(e));
-                                break;
-                            }
+                        let r = match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
+                            Ok((s, _)) => Ok(s),
+                            Err(e) if e.is_invalid_address() => return (b, false, Some(i)),
+                            Err(e) => Err(e),
+                        };
+                        if !push(&mut b, r) {
+                            return (b, true, None);
                         }
                     }
-                    (v, None)
+                    (b, false, None)
                 },
-                |_, (v, invalid)| {
-                    for r in v {
-                        let failed = r.is_err();
-                        if !f(r) || failed {
-                            done = true;
-                            return false;
-                        }
+                |_, (b, stopped, invalid)| {
+                    if !emit(b) || stopped {
+                        done = true;
+                        return false;
                     }
                     if let Some(i) = invalid {
                         resume = Some(i);
@@ -1208,20 +1227,32 @@ impl Kallsyms {
         // the length bytes could not all be read)
         let mut names = PageReader::new(self.layer);
         let mut tokens = PageReader::new(self.layer);
+        let mut b = new_block();
+        let mut in_block = 0usize;
         for idx in start..n {
-            match self.get_symbol_at(&mut names, &mut tokens, off, idx) {
+            let r = match self.get_symbol_at(&mut names, &mut tokens, off, idx) {
                 Ok((s, len)) => {
-                    if !f(Ok(s)) {
-                        return;
-                    }
                     off += len + 1;
+                    Ok(s)
                 }
                 Err(e) if e.is_invalid_address() => continue,
-                Err(e) => {
-                    f(Err(e));
+                Err(e) => Err(e),
+            };
+            let failed = r.is_err();
+            if !push(&mut b, r) || failed {
+                emit(b);
+                return;
+            }
+            in_block += 1;
+            if in_block == SEQ_BLOCK {
+                in_block = 0;
+                if !emit(std::mem::replace(&mut b, new_block())) {
                     return;
                 }
             }
+        }
+        if in_block > 0 {
+            emit(b);
         }
     }
 
@@ -1748,6 +1779,83 @@ mod tests_robustness {
             assert_eq!(rows, 0, "num_syms={n}: core enumeration should be skipped, not looped");
             assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
             assert!(t.elapsed() < std::time::Duration::from_secs(5), "num_syms={n}: took too long");
+        }
+    }
+
+    /// A zero-filled image of `size` bytes with a table whose symbol addresses are
+    /// `kallsyms_addresses` at 8192 (so symbol `i` is readable iff `8192 + 8 * i < size`) and
+    /// `_end` set: every symbol has an empty name, address 0 and a size.
+    fn zero_kallsyms(size: usize) -> Module {
+        let isf = ISF.replace(
+            "\"kallsyms_names\":",
+            "\"kallsyms_addresses\": {\"address\": 8192, \"type\": {\"kind\": \"base\", \"name\": \"unsigned long\"}},
+             \"_end\": {\"address\": 1048576, \"type\": {\"kind\": \"base\", \"name\": \"unsigned char\"}},
+             \"kallsyms_names\":",
+        );
+        let blob = build_blob(isf.as_bytes(), &BuildOptions::default()).expect("build_blob");
+        let t: TableRef = Box::leak(Box::new(SymbolTable::from_blob(Blob::Owned(blob), "t", "u").expect("from_blob")));
+        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-blocks-{}-{size}", std::process::id()));
+        std::fs::write(&p, vec![0u8; size]).unwrap();
+        let l = FileLayer::open(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        Module::new(Box::leak(Box::new(l)), t, 0)
+    }
+
+    /// `for_each_core_block` yields exactly `for_each_core_symbol`'s stream, in order, in
+    /// blocks, on the parallel path (several chunks) and on the sequential one (the length
+    /// bytes run past the image), with python's stop at the first failing symbol; `push` and
+    /// `emit` stop it where they return false.
+    #[test]
+    fn core_blocks_match_the_symbol_stream() {
+        // symbols 0..2600 have readable addresses; symbol 2600 raises
+        let vm = zero_kallsyms(8192 + 2600 * 8);
+        let mut kas = Kallsyms::new(&vm).expect("Kallsyms::new");
+        for n in [3000u64, 30_000] {
+            kas.num_syms = Some(n);
+            kas.addrs = OnceLock::new();
+            let mut stream: Vec<Option<KasSymbol>> = Vec::new();
+            kas.for_each_core_symbol(&mut |r| {
+                stream.push(r.ok());
+                true
+            });
+            assert_eq!(stream.len(), 2601, "num_syms={n}");
+            assert!(stream[..2600].iter().all(|s| s.as_ref().is_some_and(|s| s.module_name.as_deref() == Some("kernel"))));
+            assert!(stream[2600].is_none());
+            let mut blocks: Vec<Vec<Option<KasSymbol>>> = Vec::new();
+            kas.for_each_core_block(
+                &Vec::new,
+                &|b: &mut Vec<Option<KasSymbol>>, r| {
+                    let ok = r.is_ok();
+                    b.push(r.ok());
+                    ok
+                },
+                &mut |b| {
+                    blocks.push(b);
+                    true
+                },
+            );
+            assert!(blocks.len() >= 2 && blocks.iter().all(|b| !b.is_empty() && b.len() <= 2048), "num_syms={n}");
+            assert_eq!(blocks.concat(), stream, "num_syms={n}");
+            // emit stops after the first block
+            let mut got = 0;
+            kas.for_each_core_block(&Vec::new, &|b: &mut Vec<bool>, r| {
+                b.push(r.is_ok());
+                true
+            }, &mut |_| {
+                got += 1;
+                false
+            });
+            assert_eq!(got, 1, "num_syms={n}");
+            // push stops after symbol 100
+            let mut seen = Vec::new();
+            kas.for_each_core_block(&Vec::new, &|b: &mut Vec<usize>, _| {
+                b.push(0);
+                b.len() < 101
+            }, &mut |b| {
+                seen.push(b.len());
+                true
+            });
+            assert_eq!(seen, vec![101], "num_syms={n}");
         }
     }
 
