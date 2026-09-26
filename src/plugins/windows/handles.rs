@@ -139,6 +139,9 @@ impl HandleWalker {
                 page = addr >> 12;
                 page_ok = self.layer.is_valid(addr, 1);
                 page_bytes = if page_ok && level == 0 { crate::objects::page_bytes(self.layer, addr & !0xfff, 0x1000) } else { None };
+                if let Some(pb) = page_bytes {
+                    self.prefetch_headers(pb, (addr & 0xfff) as usize, esize as usize);
+                }
             }
             if level > 0 {
                 // table[i] reads the pointer (caught), then the element address is checked
@@ -185,6 +188,23 @@ impl HandleWalker {
         let n = self.ptr_size as usize;
         crate::objects::read_into(self.layer, addr, &mut b[..n])?;
         Ok(u64::from_le_bytes(b) & self.mask)
+    }
+
+    /// Prefetch the `TypeIndex` of every object header the entries of a leaf page (from byte
+    /// `from`) point to: the walk reads each right after decoding its entry, one cache miss
+    /// per handle that would otherwise be paid one after the other.
+    fn prefetch_headers(&self, page: &[u8], from: usize, esize: usize) {
+        let Some(ti) = &self.type_index else { return };
+        if esize == 0 {
+            return;
+        }
+        let mut o = from;
+        while o + esize <= page.len() {
+            if let Some(Some(item)) = self.get_item_from(&page[o..o + esize], 0) {
+                crate::objects::prefetch(self.layer, item.header.addr.wrapping_add(ti.offset));
+            }
+            o += esize;
+        }
     }
 
     /// [`get_item`](Self::get_item) for an entry whose bytes `rec` are all readable (so no
@@ -631,14 +651,17 @@ impl Plugin for Handles {
             Some(o) => scan_processes(ctx, k, &create_offset_filter(k, Some(o as u64), true, false)),
             None => list_processes(k, &pid_filter(&pids)),
         };
+        let _t = crate::util::trace::span("handles: setup");
         let type_map = get_type_map(k)?;
         let cookie = find_cookie(k)?;
         let walker = HandleWalker::new(k)?;
+        drop(_t);
         let Some(namer) = Namer::new(k, &type_map, cookie) else {
             // pre-Windows 7 layouts: processes are independent, walk them in parallel
             return crate::plugins::emit_par_rows(out, procs, |p| proc_rows(&walker, p, &type_map, cookie));
         };
         // 1. walk every handle table (a process per task)
+        let _t = crate::util::trace::span("handles: walk tables");
         let (mut perr, walked): (Vec<Option<Error>>, Vec<Walked>) = {
             let w = crate::util::par::par_map(procs.len(), |i| match &procs[i] {
                 Ok(p) => walk_proc(&walker, p),
@@ -647,6 +670,8 @@ impl Plugin for Handles {
             (procs.into_iter().map(|p| p.err()).collect(), w)
         };
         let (phs, mut errs): (Vec<Option<ProcHandles>>, Vec<(Option<Error>, Option<Error>)>) = walked.into_iter().map(|w| (w.ph, (w.pre, w.tail))).unzip();
+        drop(_t);
+        let _t = crate::util::trace::span("handles: name + emit");
         // 2. name and format the handles in units of UNIT across all processes
         let mut units: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
         for (pi, ph) in phs.iter().enumerate() {

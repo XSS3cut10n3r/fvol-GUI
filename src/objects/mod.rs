@@ -92,6 +92,22 @@ pub fn page_bytes(layer: LayerRef, addr: u64, len: usize) -> Option<&'static [u8
     Some(unsafe { std::slice::from_raw_parts((host as *const u8).add(off), len) })
 }
 
+/// Hint that the byte at `addr` of `layer` will be read soon: a software prefetch of its cache
+/// line in the image mapping (when the page is mapped whole; otherwise nothing). Issuing these
+/// for a batch of objects before reading them overlaps their memory latencies.
+#[inline]
+pub fn prefetch(layer: LayerRef, addr: u64) {
+    if let Some(s) = page_bytes(layer, addr, 1) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: a prefetch hint never faults; the address is inside the mapping anyway
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(s.as_ptr() as *const i8);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = s;
+    }
+}
+
 /// `layer.read(addr, buf)` through the page cache.
 #[inline]
 pub fn read_into(layer: LayerRef, addr: u64, buf: &mut [u8]) -> Result<()> {
