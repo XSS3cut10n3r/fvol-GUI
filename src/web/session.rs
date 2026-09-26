@@ -38,6 +38,14 @@ pub struct Summary {
     pub banners: Vec<String>,
 }
 
+/// Appends a landing fact unless one with the same label (ignoring ASCII case) is already
+/// there: the first wins, so windows.info's own rows ("Kernel Base", "DTB") are not repeated.
+pub fn add_fact(facts: &mut Vec<(String, String)>, label: String, value: String) {
+    if !facts.iter().any(|(k, _)| k.eq_ignore_ascii_case(&label)) {
+        facts.push((label, value));
+    }
+}
+
 /// Linux / macOS kernel banners in the physical layer, most frequent first (what the analyst
 /// needs to find the right symbol table when none matched).
 pub fn find_banners(phys: crate::objects::LayerRef) -> Vec<String> {
@@ -195,8 +203,6 @@ impl Session {
                                 sum.arch = Some(if k.table.is_64bit() { "intel64" } else { "intel" });
                                 self.set_phase("Reading OS details", hub);
                                 sum.facts.push(("Kernel".into(), format!("{} {}-{}", k.pdb_name, k.guid, k.age)));
-                                sum.facts.push(("Kernel base".into(), format!("{:#x}", k.base)));
-                                sum.facts.push(("DTB".into(), format!("{:#x}", k.dtb)));
                                 if let Some(info) = plugins.iter().find(|p| p.name() == "windows.info.Info") {
                                     let mut sink = CollectSink::default();
                                     let cfg = crate::plugins::Config::default();
@@ -209,11 +215,15 @@ impl Session {
                                                 let c1 = sink.columns.get(1).map(|c| c.ty).unwrap_or(crate::renderers::ColType::Str);
                                                 crate::renderers::text::render_cell(&mut a, c0, &row[0], false);
                                                 crate::renderers::text::render_cell(&mut b, c1, &row[1], false);
-                                                sum.facts.push((String::from_utf8_lossy(&a).into_owned(), String::from_utf8_lossy(&b).into_owned()));
+                                                add_fact(&mut sum.facts, String::from_utf8_lossy(&a).into_owned(), String::from_utf8_lossy(&b).into_owned());
                                             }
                                         }
                                     }
                                 }
+                                // windows.info already reports both (as "Kernel Base" and "DTB")
+                                // unless it failed
+                                add_fact(&mut sum.facts, "Kernel Base".into(), format!("{:#x}", k.base));
+                                add_fact(&mut sum.facts, "DTB".into(), format!("{:#x}", k.dtb));
                                 break;
                             }
                             Err(e) => sum.notes.push(format!("Windows: {}", plain_err(&e))),

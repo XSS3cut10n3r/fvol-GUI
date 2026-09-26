@@ -580,3 +580,19 @@ fn slow_clients_hit_a_hard_deadline() {
     assert_eq!(e, HttpError::Timeout);
     assert!(t.elapsed() < Duration::from_millis(600), "{:?}", t.elapsed());
 }
+
+#[test]
+fn landing_facts_are_unique() {
+    use super::session::add_fact;
+    let mut f = vec![("Kernel".to_string(), "ntkrnlmp.pdb X-1".to_string())];
+    // windows.info rows first, then the automagic's own values for the same facts
+    add_fact(&mut f, "Kernel Base".into(), "0xf80000000000".into());
+    add_fact(&mut f, "DTB".into(), "0x1aa000".into());
+    add_fact(&mut f, "Symbols".into(), "file:///x.json.xz".into());
+    add_fact(&mut f, "Kernel Base".into(), "0xf80000000000".into());
+    add_fact(&mut f, "kernel base".into(), "0x1".into());
+    add_fact(&mut f, "DTB".into(), "0x2".into());
+    let labels: Vec<&str> = f.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(labels, ["Kernel", "Kernel Base", "DTB", "Symbols"]);
+    assert_eq!(f[2].1, "0x1aa000");
+}
