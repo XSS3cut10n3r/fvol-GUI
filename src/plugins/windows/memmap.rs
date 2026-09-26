@@ -377,7 +377,7 @@ impl<'f> SparseDump<'f> {
             let m = mem.wrapping_add(pos);
             let n = (len - pos).min(Self::PAGE - (m & (Self::PAGE - 1)));
             let at = foff + pos;
-            match layer.slice(m, n as usize) {
+            match layer.slice_bulk(m, n as usize) {
                 Some(s) => {
                     if !is_zero(s) {
                         self.push(at, s.as_ptr(), s.len())?;

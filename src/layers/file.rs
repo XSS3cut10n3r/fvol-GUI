@@ -1,5 +1,19 @@
 //! The base layer: the input file, memory-mapped read-only (python `layers.physical.FileLayer`).
 //!
+//! The file is mapped twice, for two access patterns:
+//!   * the default mapping ([`FileLayer::data`], [`Layer::slice`], [`Layer::read`]) serves bulk
+//!     readers (scans that are not `pread`, vmscan's page sweep, dumps, container decoders): on a
+//!     cold page cache a fault there reads ahead around the page (the bdi's `read_ahead_kb`,
+//!     4 MiB on btrfs), which is what a sequential reader wants;
+//!   * a second mapping advised `MADV_RANDOM` ([`FileLayer::data_random`],
+//!     [`Layer::slice_random`], [`Layer::read_random`]) serves structure reads: page-table walks
+//!     and object reads of the translation layers. A cold fault there reads only the page (on
+//!     btrfs: its compressed extent), not 4 MiB around it -- measured on a cold 5 GiB image:
+//!     windows.pslist 296 -> ~70 ms, dlllist 2.1 -> 0.24 s, handles 3.6 -> 0.5 s. Warm, both
+//!     behave the same (fault-around maps 64 KiB of cached pages either way). The advice is
+//!     per mapping (VMA), so it never slows the bulk readers of the default mapping (advising
+//!     the one mapping `MADV_RANDOM` made a cold vmscan 4.5x and a cold memmap --dump 4x slower).
+//!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
 use super::{Layer, Mapping, Metadata};
@@ -14,6 +28,9 @@ pub struct FileLayer {
     /// python's layer name once the layer stacker has named it (see [`FileLayer::set_python_name`]).
     py_name: std::sync::OnceLock<String>,
     map: Arc<Mmap>,
+    /// the `MADV_RANDOM` mapping (created on first use, shared by `with_name` copies; None if
+    /// it could not be created: the default mapping serves then)
+    rand: Arc<std::sync::OnceLock<Option<Mmap>>>,
     file: Arc<File>,
     path: PathBuf,
 }
@@ -24,12 +41,19 @@ impl FileLayer {
         let f = File::open(path)?;
         let map = Mmap::map(&f)?;
         let path = crate::util::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        Ok(FileLayer { name: "FileLayer".to_string(), py_name: Default::default(), map: Arc::new(map), file: Arc::new(f), path })
+        Ok(FileLayer { name: "FileLayer".to_string(), py_name: Default::default(), map: Arc::new(map), rand: Default::default(), file: Arc::new(f), path })
     }
 
     /// A cheap copy of this layer (same mapping) with another name.
     pub fn with_name(&self, name: &str) -> FileLayer {
-        FileLayer { name: name.to_string(), py_name: Default::default(), map: self.map.clone(), file: self.file.clone(), path: self.path.clone() }
+        FileLayer {
+            name: name.to_string(),
+            py_name: Default::default(),
+            map: self.map.clone(),
+            rand: self.rand.clone(),
+            file: self.file.clone(),
+            path: self.path.clone(),
+        }
     }
 
     /// Name the (already shared) layer as python's construction magic does (`memory_layer`
@@ -42,6 +66,47 @@ impl FileLayer {
     #[inline(always)]
     pub fn data(&self) -> &[u8] {
         self.map.as_slice()
+    }
+
+    /// The whole file through the random-access mapping (see the module docs): for page-table
+    /// walks and structure reads, never for bulk reads. The same bytes as [`FileLayer::data`].
+    #[inline]
+    pub fn data_random(&self) -> &[u8] {
+        let m = self.rand.get_or_init(|| {
+            if !random_map_enabled() || self.map.is_empty() {
+                return None;
+            }
+            let m = Mmap::map(&self.file).ok()?;
+            if m.len() != self.map.len() {
+                return None; // the file changed size: keep to the one mapping
+            }
+            m.advise(0, m.len(), crate::util::mmap::MADV_RANDOM);
+            Some(m)
+        });
+        match m {
+            Some(m) => m.as_slice(),
+            None => self.data(),
+        }
+    }
+
+    /// Drop this process's page-table entries for `[off, off + len)` in both mappings
+    /// (`MADV_DONTNEED`; the data stays in the page cache and a later access maps it again).
+    /// Called by scan workers right after a big chunk: the entries its structure reads faulted
+    /// in are torn down in parallel instead of serially at exit (mftscan: 24-27 ms of exit
+    /// teardown).
+    pub fn release(&self, off: u64, len: u64) {
+        let (Ok(off), Ok(len)) = (usize::try_from(off), usize::try_from(len)) else { return };
+        self.map.advise(off, len, crate::util::mmap::MADV_DONTNEED);
+        if let Some(Some(m)) = self.rand.get() {
+            m.advise(off, len, crate::util::mmap::MADV_DONTNEED);
+        }
+    }
+
+    /// [`Layer::slice`] through the random-access mapping.
+    #[inline(always)]
+    fn slice_rand(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        let a = usize::try_from(addr).ok()?;
+        self.data_random().get(a..a.checked_add(len)?)
     }
 
     #[inline(always)]
@@ -89,29 +154,20 @@ impl Layer for FileLayer {
 
     #[inline]
     fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        match self.slice(addr, buf.len()) {
-            Some(s) => {
-                buf.copy_from_slice(s);
-                Ok(())
-            }
-            None => {
-                // first failing address (python: max+1 if the start is inside the file)
-                let first_bad = if addr > 0 && addr < self.len() { self.len() } else { addr };
-                Err(Error::invalid(first_bad))
-            }
-        }
+        read_from(self.data(), addr, buf)
     }
 
     fn read_padded(&self, addr: u64, buf: &mut [u8]) {
-        let len = self.len();
-        if addr >= len {
-            buf.fill(0);
-            return;
-        }
-        let avail = ((len - addr) as usize).min(buf.len());
-        let a = addr as usize;
-        buf[..avail].copy_from_slice(&self.data()[a..a + avail]);
-        buf[avail..].fill(0);
+        read_padded_from(self.data(), addr, buf)
+    }
+
+    #[inline]
+    fn read_random(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+        read_from(self.data_random(), addr, buf)
+    }
+
+    fn read_padded_random(&self, addr: u64, buf: &mut [u8]) {
+        read_padded_from(self.data_random(), addr, buf)
     }
 
     #[inline]
@@ -136,6 +192,11 @@ impl Layer for FileLayer {
         self.data().get(a..a.checked_add(len)?)
     }
 
+    #[inline(always)]
+    fn slice_random(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        self.slice_rand(addr, len)
+    }
+
     fn translate(&self, addr: u64) -> Option<(u64, u64)> {
         if addr < self.len() { Some((addr, self.len() - addr)) } else { None }
     }
@@ -151,4 +212,42 @@ impl Layer for FileLayer {
     fn as_file(&self) -> Option<&FileLayer> {
         Some(self)
     }
+}
+
+/// `read` of the file bytes `data` (either mapping).
+#[inline]
+fn read_from(data: &[u8], addr: u64, buf: &mut [u8]) -> Result<()> {
+    let s = usize::try_from(addr).ok().and_then(|a| data.get(a..a.checked_add(buf.len())?));
+    match s {
+        Some(s) => {
+            buf.copy_from_slice(s);
+            Ok(())
+        }
+        None => {
+            // first failing address (python: max+1 if the start is inside the file)
+            let len = data.len() as u64;
+            let first_bad = if addr > 0 && addr < len { len } else { addr };
+            Err(Error::invalid(first_bad))
+        }
+    }
+}
+
+/// `read_padded` of the file bytes `data` (either mapping).
+fn read_padded_from(data: &[u8], addr: u64, buf: &mut [u8]) {
+    let len = data.len() as u64;
+    if addr >= len {
+        buf.fill(0);
+        return;
+    }
+    let avail = ((len - addr) as usize).min(buf.len());
+    let a = addr as usize;
+    buf[..avail].copy_from_slice(&data[a..a + avail]);
+    buf[avail..].fill(0);
+}
+
+/// Whether structure reads use the second, `MADV_RANDOM` mapping (`RSVOL_NO_RANDOM_MAP=1`
+/// turns it off, for A/B measurements).
+fn random_map_enabled() -> bool {
+    static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *E.get_or_init(|| std::env::var_os("RSVOL_NO_RANDOM_MAP").is_none_or(|v| v.is_empty() || v == "0"))
 }

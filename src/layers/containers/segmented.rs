@@ -172,6 +172,9 @@ pub struct SegmentedLayer {
     /// `file`'s mapped bytes (pointer, length), kept alive by `file`: one load instead of
     /// three dependent ones on every raw read.
     file_data: (*const u8, usize),
+    /// the same bytes through the file's random-access mapping (structure reads:
+    /// [`Layer::slice_random`] / [`Layer::read_random`], see [`FileLayer::data_random`])
+    file_rand: (*const u8, usize),
     /// Bytes addressable in the lower layer (python `maximum_address + 1`).
     base_len: u64,
     /// FAST mode table (empty in EXACT mode).
@@ -188,7 +191,7 @@ pub struct SegmentedLayer {
     linear: bool,
 }
 
-// SAFETY: `file_data` points into the read-only mapping owned by `file` (an Arc kept for the
+// SAFETY: `file_data` / `file_rand` point into the read-only mappings owned by `file` (an Arc kept for the
 // layer's lifetime); everything else is Send + Sync.
 unsafe impl Send for SegmentedLayer {}
 unsafe impl Sync for SegmentedLayer {}
@@ -308,12 +311,14 @@ impl SegmentedLayer {
         }
         let cache = if blocks.is_empty() { None } else { Some(BlockCache::new()) };
         let file_data = base.file.as_ref().map_or((std::ptr::null(), 0), |f| (f.data().as_ptr(), f.data().len()));
+        let file_rand = base.file.as_ref().map_or((std::ptr::null(), 0), |f| (f.data_random().as_ptr(), f.data_random().len()));
         SegmentedLayer {
             name,
             py_name: Default::default(),
             lower: base.layer.clone(),
             file: base.file.clone(),
             file_data,
+            file_rand,
             base_len,
             index: RunIndex::build(&runs),
             runs: runs.into_boxed_slice(),
@@ -361,11 +366,13 @@ impl SegmentedLayer {
         find_run(&self.runs, self.index.as_ref(), addr)
     }
 
-    /// The mapped file bytes (empty when the lower layer is not the file).
+    /// The mapped file bytes (empty when the lower layer is not the file): through the default
+    /// mapping, or the random-access one for structure reads (`R`).
     #[inline(always)]
-    fn file_bytes(&self) -> &[u8] {
-        // SAFETY: points into the mapping kept alive by `self.file` (or is null/0)
-        if self.file_data.0.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(self.file_data.0, self.file_data.1) } }
+    fn file_bytes<const R: bool>(&self) -> &[u8] {
+        let (p, n) = if R { self.file_rand } else { self.file_data };
+        // SAFETY: points into a mapping kept alive by `self.file` (or is null/0)
+        if p.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(p, n) } }
     }
 
     // ---------------------------------------------------------------------------- EXACT mode
@@ -444,11 +451,11 @@ impl SegmentedLayer {
     }
 
     #[cold]
-    fn exact_read(&self, segs: &[PySeg], addr: u64, buf: &mut [u8]) -> Result<()> {
+    fn exact_read<const R: bool>(&self, segs: &[PySeg], addr: u64, buf: &mut [u8]) -> Result<()> {
         let mut bad = None;
         let r = self.py_mapping(segs, addr, buf.len() as u64, false, &mut |lo, n, s| {
             let o = (lo - addr) as usize;
-            if let Err(b) = self.copy_run(&s.run(), lo, &mut buf[o..o + n as usize]) {
+            if let Err(b) = self.copy_run::<R>(&s.run(), lo, &mut buf[o..o + n as usize]) {
                 bad = Some(b);
                 return false;
             }
@@ -461,11 +468,11 @@ impl SegmentedLayer {
     }
 
     #[cold]
-    fn exact_read_padded(&self, segs: &[PySeg], addr: u64, buf: &mut [u8]) {
+    fn exact_read_padded<const R: bool>(&self, segs: &[PySeg], addr: u64, buf: &mut [u8]) {
         buf.fill(0);
         let _ = self.py_mapping(segs, addr, buf.len() as u64, true, &mut |lo, n, s| {
             let o = (lo - addr) as usize;
-            self.copy_run_padded(&s.run(), lo, &mut buf[o..o + n as usize]);
+            self.copy_run_padded::<R>(&s.run(), lo, &mut buf[o..o + n as usize]);
             true
         });
     }
@@ -481,12 +488,12 @@ impl SegmentedLayer {
     /// Copy the bytes of run `r` starting at layer address `a` into `out` (which must not
     /// extend past the run). Err carries the first unreadable layer address.
     #[inline(always)]
-    fn copy_run(&self, r: &Run, a: u64, out: &mut [u8]) -> std::result::Result<(), u64> {
+    fn copy_run<const R: bool>(&self, r: &Run, a: u64, out: &mut [u8]) -> std::result::Result<(), u64> {
         match r.src & KIND_MASK {
             KIND_RAW => {
                 let lo = Self::raw_off(r, a).ok_or(a)?;
                 if self.file.is_some() {
-                    let data = self.file_bytes();
+                    let data = self.file_bytes::<R>();
                     if let Ok(l) = usize::try_from(lo)
                         && let Some(end) = l.checked_add(out.len())
                         && end <= data.len()
@@ -496,6 +503,8 @@ impl SegmentedLayer {
                     }
                     let avail = self.base_len.saturating_sub(lo).min(out.len() as u64);
                     Err(a + avail)
+                } else if R {
+                    self.lower.read_random(lo, out).map_err(|_| a)
                 } else {
                     self.lower.read(lo, out).map_err(|_| a)
                 }
@@ -506,18 +515,18 @@ impl SegmentedLayer {
             }
             _ => {
                 let bi = (r.src & VAL_MASK) as usize;
-                self.copy_block(bi, (a - r.start) as usize, out).map_err(|_| a)
+                self.copy_block::<R>(bi, (a - r.start) as usize, out).map_err(|_| a)
             }
         }
     }
 
     /// Like `copy_run` but zero-fills whatever cannot be read.
-    fn copy_run_padded(&self, r: &Run, a: u64, out: &mut [u8]) {
-        if let Err(bad) = self.copy_run(r, a, out) {
+    fn copy_run_padded<const R: bool>(&self, r: &Run, a: u64, out: &mut [u8]) {
+        if let Err(bad) = self.copy_run::<R>(r, a, out) {
             let good = (bad - a) as usize;
             if r.src & KIND_MASK == KIND_RAW && good > 0 {
                 // copy the readable prefix (truncated file)
-                let _ = self.copy_run(r, a, &mut out[..good]);
+                let _ = self.copy_run::<R>(r, a, &mut out[..good]);
             }
             out[good..].fill(0);
         }
@@ -526,7 +535,7 @@ impl SegmentedLayer {
     /// Bytes `[inner, inner + out.len())` of decoded block `bi`. Minimum work: a read of the
     /// whole block decodes straight into the caller's buffer; smaller reads decode only the
     /// prefix they need into the block's cache slot and later reads resume from there.
-    fn copy_block(&self, bi: usize, inner: usize, out: &mut [u8]) -> std::result::Result<(), ()> {
+    fn copy_block<const R: bool>(&self, bi: usize, inner: usize, out: &mut [u8]) -> std::result::Result<(), ()> {
         let (Some(cache), Some(b)) = (self.cache.as_ref(), self.blocks.get(bi)) else {
             return Err(());
         };
@@ -540,10 +549,10 @@ impl SegmentedLayer {
         }
         let owned;
         let comp: &[u8] = match &self.file {
-            Some(f) => f.slice(b.off, b.clen as usize).ok_or(())?,
+            Some(f) => if R { f.slice_random(b.off, b.clen as usize) } else { f.slice(b.off, b.clen as usize) }.ok_or(())?,
             None => {
                 let mut v = vec![0u8; b.clen as usize];
-                self.lower.read(b.off, &mut v).map_err(|_| ())?;
+                if R { self.lower.read_random(b.off, &mut v) } else { self.lower.read(b.off, &mut v) }.map_err(|_| ())?;
                 owned = v;
                 &owned
             }
@@ -618,18 +627,98 @@ impl SegmentedLayer {
     }
 
     #[inline]
-    fn run_slice(&self, r: &Run, addr: u64, len: usize) -> Option<&[u8]> {
+    fn run_slice<const R: bool>(&self, r: &Run, addr: u64, len: usize) -> Option<&[u8]> {
         if len as u64 > r.end - addr {
             return None;
         }
         match r.src & KIND_MASK {
             KIND_RAW => {
                 let lo = usize::try_from(Self::raw_off(r, addr)?).ok()?;
-                self.file_bytes().get(lo..lo.checked_add(len)?)
+                self.file_bytes::<R>().get(lo..lo.checked_add(len)?)
             }
             KIND_FILL if r.src & 0xff == 0 && len <= ZEROS.len() => Some(&ZEROS[..len]),
             _ => None,
         }
+    }
+
+    /// `read` through the default mapping, or the random-access one (`R`).
+    #[inline]
+    fn read_in<const R: bool>(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+        if let Some(segs) = &self.exact {
+            return self.exact_read::<R>(segs, addr, buf);
+        }
+        let mut i = match self.find(addr) {
+            Ok(i) => i,
+            Err(_) => return Err(Error::invalid(addr)),
+        };
+        let n = buf.len();
+        let mut done = 0usize;
+        loop {
+            let r = self.runs[i];
+            let a = addr + done as u64;
+            let take = usize::try_from(r.end - a).unwrap_or(usize::MAX).min(n - done);
+            if let Err(bad) = self.copy_run::<R>(&r, a, &mut buf[done..done + take]) {
+                return Err(Error::invalid(bad));
+            }
+            done += take;
+            if done == n {
+                return Ok(());
+            }
+            i += 1;
+            let next = addr + done as u64;
+            match self.runs.get(i) {
+                Some(r2) if r2.start == next => {}
+                _ => return Err(Error::invalid(next)),
+            }
+        }
+    }
+
+    /// `read_padded` through the default mapping, or the random-access one (`R`).
+    fn read_padded_in<const R: bool>(&self, addr: u64, buf: &mut [u8]) {
+        if let Some(segs) = &self.exact {
+            return self.exact_read_padded::<R>(segs, addr, buf);
+        }
+        let n = buf.len();
+        let mut i = match self.find(addr) {
+            Ok(i) | Err(i) => i,
+        };
+        let mut done = 0usize;
+        while done < n {
+            let Some(a) = addr.checked_add(done as u64) else {
+                buf[done..].fill(0);
+                return;
+            };
+            let Some(r) = self.runs.get(i) else {
+                buf[done..].fill(0);
+                return;
+            };
+            if r.start > a {
+                let gap = usize::try_from(r.start - a).unwrap_or(usize::MAX).min(n - done);
+                buf[done..done + gap].fill(0);
+                done += gap;
+                continue;
+            }
+            if a >= r.end {
+                i += 1;
+                continue;
+            }
+            let take = usize::try_from(r.end - a).unwrap_or(usize::MAX).min(n - done);
+            let r = *r;
+            self.copy_run_padded::<R>(&r, a, &mut buf[done..done + take]);
+            done += take;
+            i += 1;
+        }
+    }
+
+    /// `slice` through the default mapping, or the random-access one (`R`).
+    #[inline]
+    fn slice_in<const R: bool>(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        if let Some(segs) = &self.exact {
+            let s = &segs[self.py_find(segs, addr as u128, false)?];
+            return self.run_slice::<R>(&s.run(), addr, len);
+        }
+        let i = self.find(addr).ok()?;
+        self.run_slice::<R>(&self.runs[i], addr, len)
     }
 
     fn run_translate(&self, r: &Run, addr: u64) -> Option<(u64, u64)> {
@@ -695,69 +784,20 @@ impl Layer for SegmentedLayer {
 
     #[inline]
     fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        if let Some(segs) = &self.exact {
-            return self.exact_read(segs, addr, buf);
-        }
-        let mut i = match self.find(addr) {
-            Ok(i) => i,
-            Err(_) => return Err(Error::invalid(addr)),
-        };
-        let n = buf.len();
-        let mut done = 0usize;
-        loop {
-            let r = self.runs[i];
-            let a = addr + done as u64;
-            let take = usize::try_from(r.end - a).unwrap_or(usize::MAX).min(n - done);
-            if let Err(bad) = self.copy_run(&r, a, &mut buf[done..done + take]) {
-                return Err(Error::invalid(bad));
-            }
-            done += take;
-            if done == n {
-                return Ok(());
-            }
-            i += 1;
-            let next = addr + done as u64;
-            match self.runs.get(i) {
-                Some(r2) if r2.start == next => {}
-                _ => return Err(Error::invalid(next)),
-            }
-        }
+        self.read_in::<false>(addr, buf)
     }
 
     fn read_padded(&self, addr: u64, buf: &mut [u8]) {
-        if let Some(segs) = &self.exact {
-            return self.exact_read_padded(segs, addr, buf);
-        }
-        let n = buf.len();
-        let mut i = match self.find(addr) {
-            Ok(i) | Err(i) => i,
-        };
-        let mut done = 0usize;
-        while done < n {
-            let Some(a) = addr.checked_add(done as u64) else {
-                buf[done..].fill(0);
-                return;
-            };
-            let Some(r) = self.runs.get(i) else {
-                buf[done..].fill(0);
-                return;
-            };
-            if r.start > a {
-                let gap = usize::try_from(r.start - a).unwrap_or(usize::MAX).min(n - done);
-                buf[done..done + gap].fill(0);
-                done += gap;
-                continue;
-            }
-            if a >= r.end {
-                i += 1;
-                continue;
-            }
-            let take = usize::try_from(r.end - a).unwrap_or(usize::MAX).min(n - done);
-            let r = *r;
-            self.copy_run_padded(&r, a, &mut buf[done..done + take]);
-            done += take;
-            i += 1;
-        }
+        self.read_padded_in::<false>(addr, buf)
+    }
+
+    #[inline]
+    fn read_random(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+        self.read_in::<true>(addr, buf)
+    }
+
+    fn read_padded_random(&self, addr: u64, buf: &mut [u8]) {
+        self.read_padded_in::<true>(addr, buf)
     }
 
     fn is_valid(&self, addr: u64, len: u64) -> bool {
@@ -837,12 +877,12 @@ impl Layer for SegmentedLayer {
 
     #[inline]
     fn slice(&self, addr: u64, len: usize) -> Option<&[u8]> {
-        if let Some(segs) = &self.exact {
-            let s = &segs[self.py_find(segs, addr as u128, false)?];
-            return self.run_slice(&s.run(), addr, len);
-        }
-        let i = self.find(addr).ok()?;
-        self.run_slice(&self.runs[i], addr, len)
+        self.slice_in::<false>(addr, len)
+    }
+
+    #[inline]
+    fn slice_random(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        self.slice_in::<true>(addr, len)
     }
 
     fn translate(&self, addr: u64) -> Option<(u64, u64)> {

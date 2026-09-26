@@ -18,6 +18,13 @@
 //! Speed: page-table validity is cached per table (shared by all process layers built from the
 //! same kernel layer), PTEs are read straight from the mmapped file when the physical layer is
 //! a raw file, and a small thread-local TLB caches 4 KiB translations.
+//!
+//! Cold page cache: page tables and the structures plugins read through a translation layer
+//! are scattered over the image, so every physical read made here (the walk, `read`,
+//! `read_padded`, `slice`) goes through the physical layer's random-access path
+//! ([`Layer::slice_random`] / [`Layer::read_random`]: the file's `MADV_RANDOM` mapping, one page
+//! per cold fault instead of a 4 MiB read-around). Only [`Layer::slice_bulk`], for the dumpers
+//! that stream whole address spaces, keeps to the default mapping.
 
 use super::{Layer, Mapping, Metadata};
 use crate::error::{Error, Result};
@@ -178,7 +185,8 @@ thread_local! {
 pub struct IntelLayer {
     name: String,
     phys: Arc<dyn Layer>,
-    /// raw pointer/len of the mmapped file when `phys` is a raw file layer (kept alive by `phys`)
+    /// raw pointer/len of the file's random-access mapping ([`super::FileLayer::data_random`])
+    /// when `phys` is a raw file layer (kept alive by `phys`)
     phys_raw: Option<(usize, u64)>,
     swap: Vec<Arc<dyn Layer>>,
     dtb: u64,
@@ -209,7 +217,7 @@ impl IntelLayer {
         let p = params(mode, flavor);
         let initial_position = p.maxvirtaddr.min(p.bits_per_register) - 1;
         let initial_entry = mask_bits(dtb, initial_position, 0) | 1;
-        let phys_raw = phys.as_file().map(|f| (f.data().as_ptr() as usize, f.len()));
+        let phys_raw = phys.as_file().map(|f| (f.data_random().as_ptr() as usize, f.len()));
         let id = NEXT_LAYER_ID.fetch_add(1, Ordering::Relaxed);
         IntelLayer {
             name: name.to_string(),
@@ -369,7 +377,7 @@ impl IntelLayer {
             }
         }
         // segmented physical layers (ELF cores, LiME): zero-copy when the entry is file-backed
-        if let Some(b) = self.phys.slice(addr, self.p.entry_size as usize) {
+        if let Some(b) = self.phys.slice_random(addr, self.p.entry_size as usize) {
             return Some(if b.len() == 8 {
                 u64::from_le_bytes(b.try_into().ok()?)
             } else {
@@ -378,11 +386,11 @@ impl IntelLayer {
         }
         if self.p.entry_size == 8 {
             let mut b = [0u8; 8];
-            self.phys.read(addr, &mut b).ok()?;
+            self.phys.read_random(addr, &mut b).ok()?;
             Some(u64::from_le_bytes(b))
         } else {
             let mut b = [0u8; 4];
-            self.phys.read(addr, &mut b).ok()?;
+            self.phys.read_random(addr, &mut b).ok()?;
             Some(u32::from_le_bytes(b) as u64)
         }
     }
@@ -405,11 +413,11 @@ impl IntelLayer {
                 Some(end) if end <= len => unsafe { std::slice::from_raw_parts((ptr as *const u8).add(base as usize), 0x1000) },
                 _ => return false,
             }
-        } else if let Some(b) = self.phys.slice(base, 0x1000) {
+        } else if let Some(b) = self.phys.slice_random(base, 0x1000) {
             b
         } else {
             let mut b = [0u8; 0x1000];
-            if self.phys.read(base, &mut b).is_err() {
+            if self.phys.read_random(base, &mut b).is_err() {
                 return false;
             }
             raw = b;
@@ -777,7 +785,7 @@ impl IntelLayer {
                 _ => None,
             };
         }
-        self.phys.slice(base, 0x1000)
+        self.phys.slice_random(base, 0x1000)
     }
 
     /// python `mapping()` including swap targets: coalesced runs `(offset, len, mapped, target)`.
@@ -834,7 +842,7 @@ impl IntelLayer {
                     }
                     return Ok(());
                 }
-                return self.phys.read(pa, buf).or_else(|e| {
+                return self.phys.read_random(pa, buf).or_else(|e| {
                     if pad {
                         buf.fill(0);
                         Ok(())
@@ -858,16 +866,16 @@ impl IntelLayer {
                     }
                     Ok(())
                 } else if pad {
-                    self.phys.read_padded(mapped, dst);
+                    self.phys.read_padded_random(mapped, dst);
                     Ok(())
                 } else {
-                    self.phys.read(mapped, dst)
+                    self.phys.read_random(mapped, dst)
                 }
             } else if pad {
-                self.target_layer(t).read_padded(mapped, dst);
+                self.target_layer(t).read_padded_random(mapped, dst);
                 Ok(())
             } else {
-                self.target_layer(t).read(mapped, dst)
+                self.target_layer(t).read_random(mapped, dst)
             };
             if let Err(e) = r {
                 err = Some(e);
@@ -1120,8 +1128,26 @@ impl Layer for IntelLayer {
         Some(&self.phys)
     }
 
+    /// A structure read (random-access mapping, see the module docs).
     #[inline]
     fn slice(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        if len == 0 || (addr & 0xfff) as usize + len > 0x1000 {
+            return None;
+        }
+        let page = self.page_fast(addr)?;
+        let pa = page + (addr & 0xfff);
+        if let Some((ptr, _)) = self.phys_raw {
+            // SAFETY: `page_fast` only returns pages that lie wholly inside the file
+            return Some(unsafe { std::slice::from_raw_parts((ptr as *const u8).add(pa as usize), len) });
+        }
+        self.phys.slice_random(pa, len)
+    }
+
+    /// For dumps streaming whole address spaces: the default mapping, whose read-around suits
+    /// them (measured on a cold cache: memmap --dump 6-7 s this way, 33-41 s through the
+    /// random-access mapping).
+    #[inline]
+    fn slice_bulk(&self, addr: u64, len: usize) -> Option<&[u8]> {
         if len == 0 || (addr & 0xfff) as usize + len > 0x1000 {
             return None;
         }

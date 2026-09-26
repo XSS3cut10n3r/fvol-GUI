@@ -570,7 +570,7 @@ impl PageWriter {
             let m = mem.wrapping_add(pos);
             let n = (size - pos).min(PAGE - (m & (PAGE - 1)));
             let at = foff.wrapping_add(pos);
-            match layer.slice(m, n as usize) {
+            match layer.slice_bulk(m, n as usize) {
                 Some(s) => self.push(at, s)?,
                 None => {
                     let mut b = vec![0u8; n as usize];
