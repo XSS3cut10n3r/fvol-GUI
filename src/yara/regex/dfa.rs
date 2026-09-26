@@ -311,6 +311,42 @@ pub struct Searcher {
     fixed_width: Option<usize>,
 }
 
+/// Top-level concatenation with captures unwrapped and repeats split into their
+/// mandatory copies plus an optional remainder (`x{2,5}` -> `x x x{0,3}`), for the
+/// inner-literal analysis only (same language; the searching NFAs use the original).
+fn flatten_concat(h: &Hir) -> Vec<Hir> {
+    fn go(h: &Hir, out: &mut Vec<Hir>, budget: &mut usize) {
+        if *budget == 0 {
+            out.push(h.clone());
+            return;
+        }
+        *budget -= 1;
+        match h {
+            Hir::Concat(v) => v.iter().for_each(|x| go(x, out, budget)),
+            Hir::Capture { sub, .. } => go(sub, out, budget),
+            Hir::Repeat { min, max, greedy, sub } if *min >= 1 && *min <= 8 => {
+                for _ in 0..*min {
+                    go(sub, out, budget);
+                }
+                match max {
+                    Some(m) if *m == *min => {}
+                    _ => out.push(Hir::Repeat {
+                        min: 0,
+                        max: max.map(|m| m - *min),
+                        greedy: *greedy,
+                        sub: sub.clone(),
+                    }),
+                }
+            }
+            _ => out.push(h.clone()),
+        }
+    }
+    let mut out = Vec::new();
+    let mut budget = 256usize;
+    go(h, &mut out, &mut budget);
+    out
+}
+
 impl Searcher {
     pub fn new(h: &Hir) -> Option<Searcher> {
         let fnfa = Nfa::new(h, false)?;
@@ -328,7 +364,9 @@ impl Searcher {
         // Inner literal strategy for top-level concatenations.
         let mut strategy = Strategy::Core;
         let mut inner_nfa = None;
-        if let Hir::Concat(v) = h {
+        let flat = flatten_concat(h);
+        if flat.len() > 1 {
+            let v = &flat[..];
             let mut best: Option<(u64, usize, Vec<ByteSet>)> = None;
             for i in 1..v.len().min(12) {
                 let rest = Hir::Concat(v[i..].to_vec());
