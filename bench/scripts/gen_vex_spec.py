@@ -484,7 +484,7 @@ def emit(table):
                         else:
                             merged[(W, r)] = mm_
         groups = defaultdict(set)
-        for (W, L, r), ents in cls.items():
+        for (W, L, r), ents in sorted(cls.items(), key=lambda kv: (kv[0][0], str(kv[0][1]), kv[0][2])):
             if (W, r) in merged and (L in (0, 1, 2) or (L == 3 and ents == cls.get((W, 2, r)))):
                 for e in merged[(W, r)]:
                     groups[e].add((W, "012" if L != 3 else "3", r))
@@ -519,6 +519,10 @@ def emit(table):
                 fl = list(flags)
                 if mn in ("vcmpps", "vcmppd", "vcmpss", "vcmpsd"):
                     fl.append("cmp32")
+                if re.fullmatch(r"vpcmpu?[bwdq]", mn):
+                    fl.append("vpcmp")
+                if re.fullmatch(r"vpcomu?[bwdq]", mn):
+                    fl.append("vpcom")
                 if k == "xop" and mm == 10:
                     # XOP map 0xA (bextr / lwpins / lwpval) takes a 32-bit immediate
                     toks = tuple("i:d" if t == "i:b" else t for t in toks)

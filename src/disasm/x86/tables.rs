@@ -179,6 +179,8 @@ pub(crate) const F_NOBM: u64 = 1 << 34; // EVEX.b must be 0 (memory form)
 pub(crate) const F_BCST_QB: u64 = 1 << 35; // {1toN} by qword, printed "byte ptr", disp8 unscaled
 pub(crate) const F_NOPFX: u64 = 1 << 36; // (computed) entry has no mandatory-prefix constraint
 pub(crate) const F_BCST_HALF: u64 = 1 << 37; // {1toN}: N = vector bytes / (2 * element size)
+pub(crate) const F_VPCMP: u64 = 1 << 38; // AVX-512 vpcmp{b,w,d,q,u*} predicate aliases (imm 0-7 but 3, 7)
+pub(crate) const F_VPCOM: u64 = 1 << 39; // XOP vpcom* predicate aliases (imm 0-7)
 
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Entry {
@@ -203,6 +205,8 @@ pub(crate) struct Tables {
     pub entries: Vec<Entry>,
     pub roots: Vec<[u32; 256]>,
     pub nodes: Vec<u32>,
+    /// Predicate alias mnemonic ids (Entry::alias + imm), 0 = no alias.
+    pub aliases: Vec<u16>,
 }
 
 pub(crate) const LEAF: u32 = 1 << 31;
@@ -537,6 +541,8 @@ fn parse_flag(tok: &str) -> Result<u64, String> {
         "nobm" => F_NOBM,
         "bqb" => F_BCST_QB,
         "bh" => F_BCST_HALF,
+        "vpcmp" => F_VPCMP,
+        "vpcom" => F_VPCOM,
         "bd" => F_BCST_D,
         "bq" => F_BCST_Q,
         "bw" => F_BCST_W,
@@ -562,6 +568,7 @@ struct Builder {
     entries: Vec<Entry>,
     raws: Vec<Vec<Raw>>, // per map*256 + opcode
     errors: Vec<String>,
+    aliases: Vec<u16>,
 }
 
 impl Builder {
@@ -651,20 +658,27 @@ impl Builder {
         if map == MAP_3DN {
             e.flags |= F_3DN | F_MODRM;
         }
-        if e.flags & (F_CMP8 | F_CMP32) != 0 {
-            // "cmpps" -> cmpeqps.. ; "vcmpps" -> vcmpeqps..
-            let (pre, suf) = mn.split_at(mn.len() - 2);
-            let n = if e.flags & F_CMP8 != 0 { 8 } else { 32 };
-            let mut first = 0;
-            for (k, p) in CMP_PREDS.iter().take(n).enumerate() {
-                let name: &'static str = Box::leak(format!("{pre}{p}{suf}").into_boxed_str());
-                let id = self.mnem(name);
-                if k == 0 {
-                    first = id;
-                } else if id != first + k as u16 {
-                    // must be consecutive: re-push a copy
-                    return Err("cmp alias ids not consecutive".into());
-                }
+        if e.flags & (F_CMP8 | F_CMP32 | F_VPCMP | F_VPCOM) != 0 {
+            // "cmpps" -> cmpeqps.. ; "vcmpps" -> vcmpeqps.. ; "vpcmpd" -> vpcmpeqd ; "vpcomb" -> vpcomltb
+            const VPCMP: [&str; 8] = ["eq", "lt", "le", "#3", "neq", "nlt", "nle", "#7"];
+            const VPCOM: [&str; 8] = ["lt", "le", "gt", "ge", "eq", "neq", "false", "true"];
+            let (pre, suf, preds): (&str, &str, &[&str]) = if e.flags & F_VPCMP != 0 {
+                (&mn[..5], &mn[5..], &VPCMP)
+            } else if e.flags & F_VPCOM != 0 {
+                (&mn[..5], &mn[5..], &VPCOM)
+            } else {
+                let (a, b) = mn.split_at(mn.len() - 2);
+                (a, b, if e.flags & F_CMP8 != 0 { &CMP_PREDS[..8] } else { &CMP_PREDS[..] })
+            };
+            let first = self.aliases.len() as u16;
+            for p in preds.iter() {
+                let id = if p.starts_with('#') {
+                    0
+                } else {
+                    let name: &'static str = Box::leak(format!("{pre}{p}{suf}").into_boxed_str());
+                    self.mnem(name)
+                };
+                self.aliases.push(id);
             }
             e.alias = first;
         }
@@ -728,6 +742,7 @@ fn build() -> Tables {
         entries: vec![Entry::default()],
         raws: (0..NMAPS * 256).map(|_| Vec::new()).collect(),
         errors: vec![],
+        aliases: vec![0],
     };
     for (si, spec) in [super::spec_legacy::SPEC, super::spec_sse::SPEC, super::spec_vex::SPEC, super::spec_evex::SPEC]
         .iter()
@@ -761,6 +776,6 @@ fn build() -> Tables {
         eprintln!("x86 spec errors:\n{}", b.errors.join("\n"));
     }
     let _ = regs::NREGS;
-    Tables { mnems: b.mnems, entries: b.entries, roots, nodes }
+    Tables { mnems: b.mnems, entries: b.entries, roots, nodes, aliases: b.aliases }
 }
 

@@ -703,15 +703,22 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         }
     }
     let has_mem = st.has_modrm && st.modrm >> 6 != 3;
-    if flags & (F_CMP8 | F_CMP32) != 0 && out.op_count > 0 {
+    if flags & (F_CMP8 | F_CMP32 | F_VPCMP | F_VPCOM) != 0 && out.op_count > 0 {
         let last = out.op_count as usize - 1;
         if let Operand::Imm(v) = out.operands[last] {
-            let lim = if flags & F_CMP8 != 0 { 8 } else { 32 };
+            let lim = if flags & F_CMP32 != 0 { 32 } else { 8 };
             // EVEX: capstone aliases masked compares by imm & 0x1f
-            let v = if st.vex == VEX_EVEX && (st.evex_aaa != 0 || (st.evex_b && has_mem)) { v & 0x1F } else { v };
+            let v = if st.vex == VEX_EVEX && flags & F_CMP32 != 0 && (st.evex_aaa != 0 || (st.evex_b && has_mem)) {
+                v & 0x1F
+            } else {
+                v
+            };
             if (v as u64) < lim {
-                out.mnem = e.alias + v as u16;
-                out.op_count -= 1;
+                let a = t.aliases[e.alias as usize + v as usize];
+                if a != 0 {
+                    out.mnem = a;
+                    out.op_count -= 1;
+                }
             }
         }
     }
@@ -735,7 +742,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 pp = P_REPNE;
             } else if flags & F_BND != 0 {
                 pp = P_BND;
-            } else if flags & F_XA != 0 && xacq == 0xF2 && has_mem {
+            } else if flags & F_XA != 0 && xacq != 0 && has_mem {
                 pp = P_XACQ;
             }
         }
@@ -746,7 +753,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 pp = P_REPE;
             } else if flags & F_REPZ != 0 {
                 pp = P_REPZ;
-            } else if flags & F_XA != 0 && xacq == 0xF3 && has_mem {
+            } else if flags & F_XA != 0 && xacq != 0 && has_mem {
                 pp = P_XREL;
             }
         }

@@ -202,8 +202,8 @@ e1 10 f2 w1 m : vmovsd r:x, M:/q ; k nobm novvvv z
 e1 11 f2 w1 r : vmovsd R:x, v:x, r:x ; k nobr z
 e1 11 f2 w1 m : vmovsd M:/q, r:x ; k nobm novvvv noz
 e1 12 f2 w1 l0 : vmovddup r:x, m:x/q ; k nobm nobr novvvv z
-e1 12 f2 w1 l2|l3 : vmovddup r:zmm, m:zmm ; k nobm nobr novvvv z
 e1 12 f2 w1 l1 : vmovddup r:ymm, m:ymm ; k nobm nobr novvvv z
+e1 12 f2 w1 l2|l3 : vmovddup r:zmm, m:zmm ; k nobm nobr novvvv z
 e1 2a f2 mode32 : vcvtsi2sd r:x, v:x, rc, m:d ; er nobm nok noz
 e1 2c f2 mode32 : vcvttsd2si r:d, m:x/q, rc ; nobm nok novvvv noz sae
 e1 2d f2 mode32 : vcvtsd2si r:d, m:x/q, rc ; er nobm nok novvvv noz
@@ -332,8 +332,8 @@ e2 55 66 w1 : vpopcntq r:X, m:X ; bq k nobr novvvv z
 e2 58 66 w0 : vpbroadcastd r:X, m:x/d ; k nobm nobr novvvv z
 e2 59 66 w0 : vbroadcasti32x2 r:X, m:x/q ; k nobm nobr novvvv z
 e2 59 66 w1 : vpbroadcastq r:X, m:x/q ; k nobm nobr novvvv z
-e2 5a 66 mode32 l2|l3 m : vbroadcasti32x4 r:zmm, M:/x ; k nobm novvvv z
 e2 5a 66 mode32 l1 m : vbroadcasti32x4 r:ymm, M:/x ; k nobm novvvv z
+e2 5a 66 mode32 l2|l3 m : vbroadcasti32x4 r:zmm, M:/x ; k nobm novvvv z
 e2 5b 66 mode32 l2|l3 m : vbroadcasti32x8 r:zmm, M:/ymm ; k nobm novvvv z
 e2 62 66 w0 r : vpexpandb r:X, R:X ; k nobr novvvv z
 e2 62 66 w0 m : vpexpandb r:X, M:/X ; k n1 nobm novvvv z
@@ -589,10 +589,10 @@ e3 1b 66 mode32 l2|l3 r : vextractf32x8 R:ymm, r:zmm, i:b ; k nobr novvvv z
 e3 1b 66 mode32 l2|l3 m : vextractf32x8 M:/ymm, r:zmm, i:b ; k nobm novvvv noz
 e3 1d 66 w0 r : vcvtps2ph R:Xh, r:X, rc, i:b ; k novvvv sae z
 e3 1d 66 w0 m : vcvtps2ph M:/Xh, r:X, i:b ; k nobm novvvv noz
-e3 1e 66 w0 : vpcmpud r:k, v:X, m:X, i:b ; bd k nobr noz
-e3 1e 66 w1 : vpcmpuq r:k, v:X, m:X, i:b ; bq k nobr noz
-e3 1f 66 w0 : vpcmpd r:k, v:X, m:X, i:b ; bd k nobr noz
-e3 1f 66 w1 : vpcmpq r:k, v:X, m:X, i:b ; bq k nobr noz
+e3 1e 66 w0 : vpcmpud r:k, v:X, m:X, i:b ; bd k nobr noz vpcmp
+e3 1e 66 w1 : vpcmpuq r:k, v:X, m:X, i:b ; bq k nobr noz vpcmp
+e3 1f 66 w0 : vpcmpd r:k, v:X, m:X, i:b ; bd k nobr noz vpcmp
+e3 1f 66 w1 : vpcmpq r:k, v:X, m:X, i:b ; bq k nobr noz vpcmp
 e3 20 66 l0 : vpinsrb r:x, v:x, m:d/b, i:b ; nobm nobr nok noz
 e3 21 66 w0 l0 : vinsertps r:x, v:x, m:x/d, i:b ; nobm nobr nok noz
 e3 22 66 w0 l0 : vpinsrd r:x, v:x, m:d, i:b ; nobm nobr nok noz
@@ -614,10 +614,10 @@ e3 39 66 mode32 l2|l3 m : vextracti32x4 M:/x, r:zmm, i:b ; k nobm novvvv noz
 e3 3a 66 mode32 l2|l3 : vinserti32x8 r:zmm, v:zmm, m:ymm, i:b ; k nobm nobr z
 e3 3b 66 mode32 l2|l3 r : vextracti32x8 R:ymm, r:zmm, i:b ; k nobr novvvv z
 e3 3b 66 mode32 l2|l3 m : vextracti32x8 M:/ymm, r:zmm, i:b ; k nobm novvvv noz
-e3 3e 66 w0 : vpcmpub r:k, v:X, m:X, i:b ; k nobm nobr noz
-e3 3e 66 w1 : vpcmpuw r:k, v:X, m:X, i:b ; k nobm nobr noz
-e3 3f 66 w0 : vpcmpb r:k, v:X, m:X, i:b ; k nobm nobr noz
-e3 3f 66 w1 : vpcmpw r:k, v:X, m:X, i:b ; k nobm nobr noz
+e3 3e 66 w0 : vpcmpub r:k, v:X, m:X, i:b ; k nobm nobr noz vpcmp
+e3 3e 66 w1 : vpcmpuw r:k, v:X, m:X, i:b ; k nobm nobr noz vpcmp
+e3 3f 66 w0 : vpcmpb r:k, v:X, m:X, i:b ; k nobm nobr noz vpcmp
+e3 3f 66 w1 : vpcmpw r:k, v:X, m:X, i:b ; k nobm nobr noz vpcmp
 e3 42 66 w0 : vdbpsadbw r:X, v:X, m:X, i:b ; k nobm nobr z
 e3 43 66 mode32 l1 : vshufi32x4 r:ymm, v:ymm, m:ymm, i:b ; bd k nobr z
 e3 43 66 mode32 l2|l3 : vshufi32x4 r:zmm, v:zmm, m:zmm, i:b ; bd k nobr z
@@ -739,8 +739,8 @@ e3 3b 66 mode64 w0 l2|l3 r : vextracti32x8 R:ymm, r:zmm, i:b ; k nobr novvvv z
 e3 3b 66 mode64 w0 l2|l3 m : vextracti32x8 M:/ymm, r:zmm, i:b ; k nobm novvvv noz
 e3 3b 66 mode64 w1 l2|l3 r : vextracti64x4 R:ymm, r:zmm, i:b ; k nobr novvvv z
 e3 3b 66 mode64 w1 l2|l3 m : vextracti64x4 M:/ymm, r:zmm, i:b ; k nobm novvvv noz
-e3 43 66 mode64 w0 l2|l3 : vshufi32x4 r:zmm, v:zmm, m:zmm, i:b ; bd k nobr z
 e3 43 66 mode64 w0 l1 : vshufi32x4 r:ymm, v:ymm, m:ymm, i:b ; bd k nobr z
-e3 43 66 mode64 w1 l2|l3 : vshufi64x2 r:zmm, v:zmm, m:zmm, i:b ; bq k nobr z
+e3 43 66 mode64 w0 l2|l3 : vshufi32x4 r:zmm, v:zmm, m:zmm, i:b ; bd k nobr z
 e3 43 66 mode64 w1 l1 : vshufi64x2 r:ymm, v:ymm, m:ymm, i:b ; bq k nobr z
+e3 43 66 mode64 w1 l2|l3 : vshufi64x2 r:zmm, v:zmm, m:zmm, i:b ; bq k nobr z
 "#;

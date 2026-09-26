@@ -627,6 +627,8 @@ pub(crate) const SPEC: &str = r#"
 38 f0 f2 : crc32 r:y, m:b
 38 f1 f2|6f2 : crc32 r:y, m:v
 38 f8 66 m : movdir64b r:A, M:/zmm
+38 f8 np mode64 m a32 w1 : movdir64b r:A, M:/zmm
+38 f8 66 mode64 m a32 w1 : movdir64b r:q, M:/zmm
 38 f9 m : movdiri M:y, r:y
 38 f6 66 : adcx r:y, m:y
 38 f6 f3 : adox r:y, m:y

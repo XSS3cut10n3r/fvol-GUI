@@ -188,10 +188,10 @@ def write_ref(path, entries):
 
 # ----------------------------------------------------------------------------- corpora
 
-def gather_real(pe_dirs, quick):
+def gather_real(pe_dirs, quick, lib_seed=1234, real_mb=48):
     jobs = {32: [], 64: []}
     budget = {32: 0, 64: 0}
-    limit = (4 << 20) if quick else (48 << 20)
+    limit = (4 << 20) if quick else (real_mb << 20)
     files = []
     for d in pe_dirs:
         for root, _, names in os.walk(d):
@@ -203,7 +203,7 @@ def gather_real(pe_dirs, quick):
             names = sorted(os.listdir(lib))
         except OSError:
             continue
-        rnd = random.Random(1234)
+        rnd = random.Random(lib_seed)
         rnd.shuffle(names)
         for nm in names:
             if ".so" in nm:
@@ -230,11 +230,14 @@ def gather_real(pe_dirs, quick):
     return jobs
 
 
-def gen_sweep_windows(bits, rnd):
-    """Targeted opcode-space windows (first instruction only)."""
+def gen_sweep_windows(bits, rnd, small_tail=False):
+    """Targeted opcode-space windows (first instruction only). With small_tail the bytes after
+    the opcode are biased towards small values (predicate immediates, short displacements)."""
     W = []
 
     def tail(n=15):
+        if small_tail:
+            return bytes(rnd.getrandbits(5) if rnd.getrandbits(1) else rnd.getrandbits(8) for _ in range(n))
         return bytes(rnd.getrandbits(8) for _ in range(n))
 
     def add(prefix, rest):
@@ -350,6 +353,10 @@ def main_gen(argv):
     seed = 20240601
     jobs = min(8, os.cpu_count() or 1)
     rand_mb = 16
+    lib_seed = 1234
+    real_mb = 48
+    no_pe = False
+    small_tail = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -367,14 +374,22 @@ def main_gen(argv):
             jobs = int(argv[i + 1]); i += 1
         elif a == "--rand-mb":
             rand_mb = int(argv[i + 1]); i += 1
+        elif a == "--lib-seed":
+            lib_seed = int(argv[i + 1]); i += 1
+        elif a == "--real-mb":
+            real_mb = int(argv[i + 1]); i += 1
+        elif a == "--no-pe":
+            no_pe = True
+        elif a == "--small-tail":
+            small_tail = True
         i += 1
-    if not pe_dirs:
+    if not pe_dirs and not no_pe:
         pe_dirs = [d for d in DEFAULT_PE if os.path.isdir(d)]
     os.makedirs(out, exist_ok=True)
     rnd = random.Random(seed)
     with Pool(jobs) as pool:
         if only is None or "real" in only:
-            jobs = gather_real(pe_dirs, quick)
+            jobs = gather_real(pe_dirs, quick, lib_seed, real_mb)
             for bits in (64, 32):
                 print(f"real{bits}: {len(jobs[bits])} chunks", file=sys.stderr)
                 tot = merge(pool.imap_unordered(sweep, jobs[bits], chunksize=1))
@@ -392,7 +407,7 @@ def main_gen(argv):
                 write_ref(os.path.join(out, f"rand{bits}.ref"), ents)
         if only is None or "sweep" in only:
             for bits in (64, 32):
-                W = gen_sweep_windows(bits, rnd)
+                W = gen_sweep_windows(bits, rnd, small_tail)
                 W = list(dict.fromkeys(W))
                 if quick:
                     W = W[::16]
