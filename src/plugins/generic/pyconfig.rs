@@ -67,14 +67,28 @@ pub fn container_tree(ctx: &Context, prefix: &str, extra: bool) -> Result<Items>
             for &k in &kids {
                 out.push((format!("{prefix}.{}", listing[k].name), s(listing[k].name.clone())));
             }
-            if e.class == "Elf64Layer" {
-                let url = crate::symbols::symbol_path().find("linux", "elf").first().map(|l| l.url()).unwrap_or_default();
+            // layers whose constructor creates a symbol table on their own config path
+            // (`IntermediateSymbolTable.create(context, config_path, ...)`: the last one wins)
+            let own_isf = match e.class {
+                // XenCoreDumpLayer: elf, xen, then Elf64Layer.__init__'s elf again
+                "Elf64Layer" | "XenCoreDumpLayer" => Some(("linux", "elf")),
+                "QemuSuspendLayer" => Some(("generic", "qemu")),
+                "WindowsCrashDump32Layer" | "WindowsCrashDump64Layer" => Some(("windows", "crash_common")),
+                _ => None,
+            };
+            if let Some((sub, name)) = own_isf {
+                let url = crate::symbols::symbol_path().find(sub, name).first().map(|l| l.url()).unwrap_or_default();
                 out.push((format!("{prefix}.isf_url"), s(url)));
                 out.push((format!("{prefix}.symbol_mask"), Json::Int(0)));
             }
         }
         for &k in &kids {
             rec(listing, k, &format!("{prefix}.{}", listing[k].name), extra, location, out);
+        }
+        // the layer's VersionRequirement, recorded when python validates its requirements
+        // (after the stacker's base_layer subtree)
+        if extra && e.class == "QemuSuspendLayer" {
+            out.push((format!("{prefix}.regex_scanner.regex_scanner"), Json::Bool(true)));
         }
     }
     if !listing.is_empty() {
