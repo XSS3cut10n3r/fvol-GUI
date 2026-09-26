@@ -149,6 +149,7 @@ fn codecs_bench_file() {
 }
 
 /// Sampling profile ("perf record" without perf): decodes CODECS_BENCH_FILE CODECS_RUNS times
+/// (or encodes it with CODECS_BENCH_CODEC at level CODECS_ENC_LEVEL when that is set)
 /// while sampling the instruction pointer every CODECS_PROFILE_PERIOD events of
 /// CODECS_PROFILE_EVENT (0 = cycles, 5 = branch misses) and writes "vaddr count" lines
 /// (addresses relative to the executable's load base, for addr2line) to CODECS_PROFILE_OUT.
@@ -172,7 +173,10 @@ fn codecs_profile_file() {
     let mut hist: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
     for _ in 0..runs {
         s.start();
-        let r = decode(&codec, &data).unwrap().unwrap();
+        let r = match std::env::var("CODECS_ENC_LEVEL").ok().and_then(|s| s.parse::<u32>().ok()) {
+            Some(level) => encode(&codec, level, &data).expect("unknown codec"),
+            None => decode(&codec, &data).unwrap().unwrap(),
+        };
         s.stop();
         s.drain(&mut hist);
         drop(r);
@@ -222,7 +226,9 @@ mod perf {
         // perf_event_attr, PERF_ATTR_SIZE_VER0 (64 bytes).
         let mut attr = [0u64; 8];
         // Hybrid CPUs: PERF_TYPE_HARDWARE with the P-core PMU type in config bits 32..63.
-        let pmu = std::fs::read_to_string("/sys/bus/event_source/devices/cpu_core/type")
+        // RSVOL_PERF_PMU=cpu_atom when pinned to an E-core of a hybrid CPU.
+        let pmu_name = std::env::var("RSVOL_PERF_PMU").unwrap_or_else(|_| "cpu_core".into());
+        let pmu = std::fs::read_to_string(format!("/sys/bus/event_source/devices/{pmu_name}/type"))
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
@@ -434,4 +440,247 @@ fn codecs_breakdown() {
             "alloc+touch {touch:?} crc64 {crc:?} ({c:x}) scan {scan:?} decode(fresh) {dec:?} decode(prefaulted) {dec2:?}"
         );
     }
+}
+
+/// Streams a file through a streaming encoder into another file (bounded memory: the input
+/// is read in `CODECS_ENC_WRITE`-byte pieces, default 64 KiB) and prints wall time,
+/// throughput and the process's peak RSS:
+///
+/// ```text
+/// CODECS_ENC_FILE=in CODECS_ENC_OUT=out.gz CODECS_ENC_CODEC=gzip [CODECS_ENC_LEVEL=9] \
+///   cargo test --release codecs_enc_stream_file -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn codecs_enc_stream_file() {
+    use std::io::{Read, Write};
+    let (Ok(file), Ok(outp), Ok(codec)) =
+        (std::env::var("CODECS_ENC_FILE"), std::env::var("CODECS_ENC_OUT"), std::env::var("CODECS_ENC_CODEC"))
+    else {
+        eprintln!("set CODECS_ENC_FILE, CODECS_ENC_OUT and CODECS_ENC_CODEC");
+        return;
+    };
+    let level: u32 = std::env::var("CODECS_ENC_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(9);
+    let ws: usize = std::env::var("CODECS_ENC_WRITE").ok().and_then(|s| s.parse().ok()).unwrap_or(65536);
+    let mut inp = std::fs::File::open(&file).unwrap();
+    let out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&outp).unwrap());
+    let mut buf = vec![0u8; ws];
+    let t = Instant::now();
+    let mut total = 0u64;
+    let mut feed = |w: &mut dyn Write| loop {
+        let n = inp.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        w.write_all(&buf[..n]).unwrap();
+    };
+    match codec.as_str() {
+        "gzip" => {
+            let mut e = super::gzip_enc::GzipEncoder::new(out, super::gzip_enc::GzipOptions::python(level, 0));
+            feed(&mut e);
+            e.finish().unwrap().flush().unwrap();
+        }
+        "bz2" => {
+            let mut e = super::bzip2_enc::Bzip2Encoder::new(out, level);
+            feed(&mut e);
+            e.finish().unwrap().flush().unwrap();
+        }
+        "xz" => {
+            let mut e = super::xz_enc::XzEncoder::new(out, level);
+            feed(&mut e);
+            e.finish().unwrap().flush().unwrap();
+        }
+        _ => panic!("unknown streaming codec {codec}"),
+    }
+    let dt = t.elapsed().as_secs_f64();
+    let hwm = std::fs::read_to_string("/proc/self/status")
+        .unwrap_or_default()
+        .lines()
+        .find(|l| l.starts_with("VmHWM"))
+        .map(|l| l.split_whitespace().nth(1).unwrap_or("0").to_string())
+        .unwrap_or_default();
+    let osz = std::fs::metadata(&outp).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "rust-stream {codec} {level} {file} {total} {osz} {:.3} {:.1} threads={} peak_rss_kb={hwm}",
+        dt * 1e3,
+        total as f64 / dt / 1e6,
+        crate::util::par::threads()
+    );
+}
+
+/// Encoder under test: `codec` is deflate | zlib | gzip | bz2 | xz.
+fn encode(codec: &str, level: u32, data: &[u8]) -> Option<Vec<u8>> {
+    Some(match codec {
+        "deflate" => super::deflate_enc::deflate_compress(data, level),
+        "zlib" => super::deflate_enc::zlib_compress(data, level),
+        "gzip" => super::gzip_enc::gzip_compress(data, &super::gzip_enc::GzipOptions::python(level, 0)),
+        "bz2" => super::bzip2_enc::bzip2_compress(data, level),
+        "xz" => {
+            // CODECS_XZ_BLOCK overrides the block size (bytes).
+            let mut o = super::xz_enc::XzOptions::preset(level);
+            if let Some(b) = std::env::var("CODECS_XZ_BLOCK").ok().and_then(|v| v.parse().ok()) {
+                o.block_size = b;
+            }
+            let mut e = super::xz_enc::XzEncoder::with_options(Vec::new(), o);
+            std::io::Write::write_all(&mut e, data).unwrap();
+            e.finish().unwrap()
+        }
+        _ => return None,
+    })
+}
+
+/// Compression throughput of one file (the Rust side of `bench/refbench/codecs_enc_run.sh`):
+///
+/// ```text
+/// CODECS_ENC_FILE=f CODECS_ENC_CODEC=deflate CODECS_ENC_LEVEL=6 [CODECS_RUNS=3] [RSVOL_THREADS=1] \
+///   cargo test --release codecs_enc_bench_file -- --ignored --nocapture
+/// ```
+/// Prints `rust <codec> <level> <file> <in_bytes> <out_bytes> <best_ms> <MB/s> <threads>` (MB/s
+/// of input). The first result is round-tripped through our decoder.
+#[test]
+#[ignore]
+fn codecs_enc_bench_file() {
+    let (Ok(file), Ok(codec)) = (std::env::var("CODECS_ENC_FILE"), std::env::var("CODECS_ENC_CODEC")) else {
+        eprintln!("set CODECS_ENC_FILE and CODECS_ENC_CODEC");
+        return;
+    };
+    let level: u32 = std::env::var("CODECS_ENC_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+    let runs: usize = std::env::var("CODECS_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+    let data = std::fs::read(&file).unwrap();
+    let mut best = f64::MAX;
+    let mut out_len = 0;
+    let counters = perf::Counters::open();
+    let mut best_cyc = 0u64;
+    let mut best_counts = [0u64; 3];
+    for r in 0..runs {
+        if let Some(c) = counters.as_ref() {
+            c.start();
+        }
+        let t = Instant::now();
+        let c = encode(&codec, level, &data).expect("unknown codec");
+        let dt = t.elapsed().as_secs_f64();
+        if let Some(c) = counters.as_ref() {
+            let v = c.stop();
+            if best_cyc == 0 || v[0] < best_cyc {
+                best_cyc = v[0];
+                best_counts = v;
+            }
+        }
+        best = best.min(dt);
+        out_len = c.len();
+        if r == 0 {
+            let dec_codec = match codec.as_str() {
+                "bz2" | "xz" | "gzip" | "zlib" => codec.as_str(),
+                _ => "deflate",
+            };
+            let d = decode(dec_codec, &c).unwrap().expect("our decoder rejected the output");
+            assert!(d == data, "{file}: roundtrip mismatch");
+        }
+    }
+    #[cfg(deflate_stats)]
+    {
+        let v: Vec<u64> = super::deflate_enc::STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+        let n = data.len() as f64 * runs as f64;
+        eprintln!(
+            "stats per byte: finds {:.3} cands {:.3} (per find {:.2}) inserts {:.3} lits {:.3} matches {:.3} avg_len {:.1} blocks {}",
+            v[0] as f64 / n, v[1] as f64 / n, v[1] as f64 / v[0].max(1) as f64, v[2] as f64 / n, v[3] as f64 / n,
+            v[4] as f64 / n, v[5] as f64 / v[4].max(1) as f64, v[6] / runs as u64
+        );
+    }
+    // Last fields: user-mode cycles, instructions and branch misses of the calling thread in
+    // the fastest run (single-thread runs only; 0 without perf counters).
+    println!(
+        "rust {codec} {level} {file} {} {out_len} {:.3} {:.1} {} {best_cyc} {} {}",
+        data.len(),
+        best * 1e3,
+        data.len() as f64 / best / 1e6,
+        crate::util::par::threads(),
+        best_counts[1],
+        best_counts[2]
+    );
+}
+
+/// zlib_exact profile: compresses ZX_FILE (ZX_PARAMS "level,wbits,memlevel,strategy",
+/// ZX_ROWLEN = bytes per deflate(Z_NO_FLUSH) call, 0 = one Z_FINISH call) CODECS_RUNS times,
+/// prints user cycles / instructions / branch misses of the best run and, with
+/// CODECS_PROFILE_OUT set, writes an IP sample histogram like `codecs_profile_file`.
+#[test]
+#[ignore]
+fn zlib_exact_profile() {
+    use super::zlib_exact::{Deflater, Z_FINISH, Z_NO_FLUSH};
+    let Ok(file) = std::env::var("ZX_FILE") else {
+        eprintln!("set ZX_FILE");
+        return;
+    };
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+    let p: Vec<i32> =
+        std::env::var("ZX_PARAMS").unwrap_or_else(|_| "6,15,8,0".into()).split(',').map(|s| s.parse().unwrap()).collect();
+    let rowlen = env("ZX_ROWLEN", 0) as usize;
+    let runs = env("CODECS_RUNS", 3);
+    let data = std::fs::read(&file).unwrap();
+    let run = |out: &mut Vec<u8>| {
+        let mut d = Deflater::new(p[0], p[1], p[2], p[3]).unwrap();
+        if rowlen > 0 {
+            for row in data.chunks(rowlen) {
+                d.deflate_vec(row, out, Z_NO_FLUSH);
+            }
+            d.deflate_vec(&[], out, Z_FINISH);
+        } else {
+            d.deflate_vec(&data, out, Z_FINISH);
+        }
+    };
+    let mut out = Vec::with_capacity(data.len() + 4096);
+    if let Some(c) = perf::Counters::open() {
+        let mut best = [u64::MAX; 3];
+        for _ in 0..runs {
+            out.clear();
+            c.start();
+            run(&mut out);
+            let v = c.stop();
+            if v[0] < best[0] {
+                best = v;
+            }
+        }
+        println!(
+            "zlib_exact {file}: {} bytes -> {}: {:.2} cycles/B, {:.2} instr/B, {:.3} br-miss/B",
+            data.len(),
+            out.len(),
+            best[0] as f64 / data.len() as f64,
+            best[1] as f64 / data.len() as f64,
+            best[2] as f64 / data.len() as f64
+        );
+    }
+    let Ok(outp) = std::env::var("CODECS_PROFILE_OUT") else { return };
+    let event = env("CODECS_PROFILE_EVENT", 0);
+    let period = env("CODECS_PROFILE_PERIOD", if event == 0 { 20011 } else { 211 });
+    let mut s = perf::Sampler::open(event, period).expect("perf_event_open (sampling) failed");
+    let mut hist: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    for _ in 0..runs {
+        out.clear();
+        s.start();
+        run(&mut out);
+        s.stop();
+        s.drain(&mut hist);
+    }
+    let exe = std::fs::read_link("/proc/self/exe").unwrap();
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    let base = maps
+        .lines()
+        .filter(|l| l.ends_with(&*exe.to_string_lossy()))
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let range = it.next()?;
+            let _perms = it.next()?;
+            let off = u64::from_str_radix(it.next()?, 16).ok()?;
+            let start = u64::from_str_radix(range.split('-').next()?, 16).ok()?;
+            (off == 0).then_some(start)
+        })
+        .min()
+        .unwrap();
+    let mut v: Vec<(u64, u64)> = hist.into_iter().map(|(ip, n)| (ip.wrapping_sub(base), n)).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    let text: String = v.iter().map(|(a, n)| format!("{a:#x} {n}\n")).collect();
+    std::fs::write(&outp, text).unwrap();
+    println!("profile: {} samples -> {outp} (exe {})", v.iter().map(|x| x.1).sum::<u64>(), exe.display());
 }

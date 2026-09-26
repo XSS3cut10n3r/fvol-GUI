@@ -258,7 +258,7 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `LinuxUtilities.files_descriptors_for_process(ctx, table, task, files_only)` | `utilities::files_descriptors_for_process(&task, files_only)` → `Vec<Result<(fd, filp, path)>>` |
 | `LinuxUtilities.walk_internal_list(...)` / `convert_fourcc_code(c)` | `utilities::{walk_internal_list, convert_fourcc_code}` |
 | `fs_struct.get_root_dentry() / get_root_mnt()`, `files_struct.get_fds() / get_max_fds()` | `FsExt` same names |
-| `qstr.name_as_str()`, `dentry.path() / is_root() / is_subdir() / d_ancestor() / get_subdirs()` | `FsExt`: `name_as_str`, `dentry_path`, `is_root`, `is_subdir`, `d_ancestor`, `get_subdirs` |
+| `qstr.name_as_str()`, `dentry.path() / is_root() / is_subdir() / d_ancestor() / get_subdirs()` | `FsExt`: `name_as_str`, `dentry_path`, `is_root`, `is_subdir`, `d_ancestor`, `get_subdirs` (→ `SubdirIter`: `d_children` hlist on >= 6.8) |
 | `inode.is_dir/is_reg/.. / get_inode_type() / get_*_time() / get_file_mode() / get_pages() / get_contents()` | `FsExt` same names (times → `Value`); `dentry.get_inode()` via `LinuxExt::get_inode` (dispatch) |
 | `super_block.major / minor / uuid / get_type() / get_flags_access() / get_flags_opts()` | `FsExt`: `major()`, `minor()`, `uuid()`, `sb_get_type()`, `get_flags_access()`, `get_flags_opts()` |
 | `mount.*` / `vfsmount.*` (get_mnt_sb/root/flags/parent/mountpoint, has_parent, get_vfsmnt_*/get_dentry_*, is_shared/slave/unbindable, get_devname, get_dominating_id, next_peer, is_equal) | `FsExt` same names (dispatch on the struct name) |
@@ -274,6 +274,14 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `kallsyms.Kallsyms(ctx, layer, module)` + `lookup_address / lookup_name / get_*_symbols` | `symbols::linux::kallsyms::Kallsyms::get(vm)?` (built once, cached, thread-safe) + same names → `KasSymbol` |
 | `ModuleExtract.extract_module(ctx, kernel, module)` | `symbols::linux::module_extract::extract_module(vm, &module)?` → `Option<Vec<u8>>` |
 | `linux_constants.KSYM_NAME_LEN / MODULE_* / NM_TYPES_DESC` | `symbols::linux::constants` |
+| `Lsof.list_fds(ctx, kernel, filter, files_only)` / `FDInternal.to_user()` | `plugins::linux::lsof::{list_fds, for_each_fd_user, fd_user}` (parallel per task, python order) |
+| `MountInfo.get_mountinfo(mnt, task)` / `_get_tasks_mountpoints(tasks, by_pids)` / `get_superblocks(ctx, kernel)` | `plugins::linux::mountinfo::{get_mountinfo, tasks_mountpoints, get_superblocks}` |
+| `Files.get_inodes(ctx, kernel, follow_symlinks)` / `InodeInternal.to_user()` | `plugins::linux::pagecache::{get_inodes (streaming), collect_inodes, inode_user_row}` |
+| `InodePages.write_inode_content_to_stream(...)` | `pagecache::inode_page_writes(&inode, page_size)` → `Vec<PageWrite { offset, paddr, len }>` (python's writes; page-cache exceptions end the list) |
+| `sockstat.SockHandlers(ctx, kernel, task).process_sock(sock)` / `Sockstat.list_sockets` | `plugins::linux::sockstat::{SockHandlers::new(vm, &task)?.process_sock(&sk)?, list_sockets, NetDevMaps}` |
+| `ip.Addr/Link` net device enumeration (`net_namespace_list` x `dev_base_head`) | `plugins::linux::ip::net_devices(k)` |
+| python `tarfile.open(mode="w|..")` + `TarInfo`/`addfile` (PAX format, float mtime) | `crate::util::pytar::PyTarWriter` (`add_dir`, `add_symlink`, `begin_file` + `write_content`/`write_zeros`, `close`) |
+| `gzip.GzipFile(fileobj, "wb", 9)` / `zlib.compress` | `crate::codecs::gzip_enc::{GzipEncoder (streaming, parallel), GzipOptions::python(level, mtime), gzip_compress}`, `codecs::deflate_enc` |
 | `tainting.Tainting.get_taints_parsed / get_taints_as_plain_string(ctx, kernel, taints, is_module)`, `linux_constants.TAINT_FLAGS` | `symbols::linux::tainting::{Tainting::new(k)?.get_taints_parsed(taints, is_module)?, TAINT_FLAGS}` (build `Tainting` once per run) |
 | `Modules.get_kset_modules` keeping the `module_kobject.mod` pointer objects | `modules::get_kset_modules_ptrs(k)?` → `(name, pointer Obj, value)` |
 | many `Modules.module_lookup_by_address` calls (e.g. a table of handlers) | `modules::module_lookup_by_addresses(k, &mods, &addrs)` (one symbol-table pass for all kernel addresses; stops at the first `Err`) |

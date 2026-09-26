@@ -57,3 +57,10 @@ L3 linux fs/net (after L1's extensions land).
 - vmscan: 94 ms vs vol-rs 3 ms (vol-rs has no VMCS layouts installed and skips the scan). Needs a per-image
   scan-index cache or a cheaper page-stride scan to win. Consider a general per-image scan-result cache
   (all scanners' signatures recorded in one pass, keyed path+size+mtime) in the perf phase.
+
+## MILESTONE (2026-09-26): full parity
+All plugins ported. Byte-identical to python volatility3 2.28.2 on every reference: Windows main image 98/98,
+Windows 1809 98/98, Linux 62/62 on each of 4 images (6.8 + 5.15, ELF + LiME), macOS 10.9 27/27.
+(isfinfo references refreshed: they depend on the live symbol-dir contents; ours == a fresh python run.)
+448 unit tests. Remaining: perf passes (scan cache, cold start, output pipeline/range walker), final
+benchmarks (ubuntu-vm), docs.
