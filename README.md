@@ -91,9 +91,10 @@ filters.
 
 ## Building
 
-You need a Rust toolchain of version 1.95 or newer; the project uses edition 2024 and standard
-library APIs stabilized in 1.95. The published benchmarks were built with rustc 1.98.1. Linux on
-x86-64 is the tested platform.
+You need a Rust toolchain of version 1.95 or newer, the `rust-version` in `Cargo.toml`: the
+project uses edition 2024 and `std::hint::cold_path`, which was stabilized in 1.95. Stable 1.95.0
+builds it and passes the tests and parity gates. The published benchmarks were built with rustc
+1.98.1. Linux on x86-64 is the tested platform.
 
 ```bash
 cargo build --release          # target/release/vol, for benchmarks and daily use
@@ -123,10 +124,12 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
 RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static" cargo build --release
 ```
 
-The main SIMD code paths, which cover scanning, JSON parsing and crypto, detect CPU features at
-run time, so a generic build still uses AVX2, AES-NI and SHA-NI where they exist. A few codec and
-search routines are compiled in only when the target enables the feature, so a generic build is
-slightly slower there. Output is identical either way.
+The SIMD code paths, which cover scanning, JSON parsing, crypto, the snappy, Xpress and bzip2
+decoders and the Linux kernel searches, detect CPU features at run time, so a generic build still
+uses AVX2, SSSE3, BMI2, AES-NI and SHA-NI where they exist. Two small helpers, the match length of
+the zlib-exact compressor and the hex digits of the disassembler, use AVX2 or BMI2 only when the
+build enables them, because a run-time check there would cost more than it saves. Output is
+identical either way.
 
 ## No dependencies
 
@@ -138,8 +141,9 @@ a capstone-compatible x86 disassembler, a regex engine with python `re` semantic
 engine, a PDB to ISF converter, and readers for JSON, zip and SQLite files.
 
 The only external program rsvol runs is `curl`, and only where python volatility3 goes to the
-network: downloading PDB files from the Microsoft symbol server, and fetching remote ISF lists and
-files named with `-u/--remote-isf-url`. `--offline` disables both.
+network: downloading PDB files from the Microsoft symbol server, images given to `-f` or
+`--single-location` as `http://`, `https://` or `ftp://` URLs, and remote ISF lists and files
+named with `-u/--remote-isf-url`. `--offline` disables all of them.
 
 ## Web UI
 
@@ -181,8 +185,16 @@ files downloaded by either tool are shared.
 | Kernel discovery results           | `~/.cache/rsvol/automagic/`                     | Warm runs skip the DTB, KDBG and banner scans              |
 | Raw scan hits                      | `~/.cache/rsvol/scan/`, capped at 256 MiB       | Scanning plugins replay hits instead of rereading memory   |
 | `isfinfo --live` results           | `~/.cache/rsvol/isfinfo.cache`                  | Warm `isfinfo` runs parse no files                         |
-| Remote ISF downloads               | `~/.cache/rsvol/remote/`                        | Files fetched for `-u` are downloaded once                 |
+| Downloads                          | `~/.cache/rsvol/data_<SHA512>.cache`            | Remote images and `-u` files are downloaded once           |
 | Converted Windows PDBs             | `~/.cache/volatility3/symbols/windows/`         | Shared with python volatility3                             |
+
+A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
+directory where the file can be created, as python does: normally
+`~/.cache/volatility3/symbols`, but a writable `-s` directory or python volatility3 installation
+comes first.
+
+Downloads are named like python's, `data_` and the SHA-512 of the URL, and like python's they are
+never checked for changes on the server.
 
 When python volatility3 has run on this machine, rsvol reads its identifier cache (never writes
 it; `--cache-path` selects it as for python) instead of reading every symbol file on the search
@@ -192,10 +204,11 @@ milliseconds instead of hundreds. When several ISFs carry the same banner, for e
 next to `x.json.xz`, rsvol loads the one python would load. Set `RSVOL_NO_PY_IDENT_SEED=1` to
 build the index from the symbol files alone.
 
-To empty the caches, run any plugin with `--clear-cache` or delete the directory. `--clear-cache`
-removes the symbol tables, the identifier index, the kernel discovery results and the scan
-results. It keeps downloaded files and the `isfinfo` cache, and never deletes anything in
-python's cache directory.
+To empty the caches, run any plugin with `--clear-cache` or delete the directory. Like python's
+`--clear-cache`, which deletes every `*.cache` file in its cache directory, downloads included,
+rsvol's deletes every `*.cache` file in `~/.cache/rsvol`: downloads, the identifier index and the
+`isfinfo` cache. It also removes the symbol tables, the kernel discovery results and the scan
+results. It deletes nothing outside `~/.cache/rsvol`, so converted PDBs and python's own cache stay.
 
 ```bash
 vol --clear-cache -f <IMAGE> windows.info.Info
@@ -281,11 +294,8 @@ gates.
   unless `RSVOL_THREADS` says otherwise.
 - **YARA.** Rules that `import` a module such as `pe` fail with "modules are not supported", and
   `--yara-compiled-file` is not supported. Plain rules, strings and conditions work.
-- **Downloaded PDB symbols** are stored as plain `<GUID>-<age>.json`, where python writes
-  `<GUID>-<age>.json.xz`. Both tools read both. The file URL shown by `windows.info.Info` names
-  whichever file exists.
-- **Remote images.** The image must be a local file, given as a path or a `file://` URL. python can
-  also open `http://` and `https://` locations.
+- **Compressed images.** python decompresses an image whose name ends in `.gz`, `.bz2` or `.xz`
+  while reading it; rsvol reads the file as it is.
 - **Corrupt circular lists.** Where python would loop forever on a smeared structure, such as a
   cyclic subsection list in `windows.dumpfiles.DumpFiles`, rsvol stops with an error.
 - **`isfinfo.IsfInfo`** leaves the `hash` column empty for rows it adds to python's identifier

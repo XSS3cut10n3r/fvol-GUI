@@ -6,10 +6,14 @@
 //! Search order (python `volatility3.symbols.__path__`):
 //!   1. `-s/--symbol-dirs` directories,
 //!   2. `<directory of the rsvol binary>/symbols` (like a frozen python executable),
-//!   3. the ISFs shipped with volatility3 (embedded in the binary: `volatility3/symbols/**`
-//!      then `volatility3/framework/symbols/**`),
+//!   3. the ISFs shipped with volatility3 (python's own `volatility3/symbols` and
+//!      `volatility3/framework/symbols` directories when an installation is found, the copies
+//!      embedded in the binary otherwise),
 //!   4. python's download cache `~/.cache/volatility3/symbols` (so existing downloads are
-//!      reused; new PDB conversions are written there too).
+//!      reused).
+//!
+//! A downloaded PDB is converted to `windows/<pdb>/<GUID>-<age>.json.xz` in the first of
+//! these directories where the file can be created, like python's `download_pdb_isf`.
 //!
 //! Every loaded table is cached as a flat blob in `~/.cache/rsvol/isf/<key>.isfb`
 //! (key = source URL + size + mtime + natives), so a warm load is one mmap.
@@ -36,7 +40,7 @@ pub enum IsfLocation {
     Embedded { rel: &'static str, top: bool, data: &'static [u8] },
     /// A location from a remote identifier list (python `-u/--remote-isf-url`), kept verbatim:
     /// `file://...` is read in place, anything else (http/https/ftp) is downloaded once and
-    /// cached in `~/.cache/rsvol/remote` (python: `CACHE_PATH/data_<sha512>.cache`).
+    /// cached as `~/.cache/rsvol/data_<sha512>.cache` (python: `CACHE_PATH/data_<sha512>.cache`).
     Url(String),
 }
 
@@ -88,32 +92,17 @@ impl IsfLocation {
 }
 
 /// The local file behind a URL: the path of a `file://` URL, else the download cache file
-/// (fetched with curl on first use, like python's `ResourceAccessor` cache it never expires).
+/// `data_<sha512>.cache` (fetched with curl on first use; like python's `ResourceAccessor`
+/// cache it never expires, `--clear-cache` removes it).
 pub fn url_local_path(url: &str) -> Result<PathBuf> {
     if let Some(p) = paths::file_uri_to_path(url) {
         return Ok(p);
     }
-    if !["http://", "https://", "ftp://"].iter().any(|s| url.starts_with(s)) {
+    if !crate::util::download::is_remote(url) {
         return Err(Error::msg(format!("URL does not reference an openable file: {url}")));
     }
-    // named by a fully mixing hash of the URL; the URL itself is kept next to the download
-    // and compared, so a hash collision re-downloads instead of serving another URL's file
-    let base = paths::rsvol_cache_dir().join("remote").join(format!("{:016x}-{}", crate::layers::scancache::key_hash(url.as_bytes()), url.len()));
-    let cache = base.with_extension("cache");
-    let tag = base.with_extension("url");
-    if cache.is_file() && std::fs::read(&tag).is_ok_and(|t| t == url.as_bytes()) {
-        return Ok(cache);
-    }
-    let out = std::process::Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location", "--globoff", "--connect-timeout", "30", "--output", "-", "--", url])
-        .output()
-        .map_err(|e| Error::msg(format!("cannot run curl: {e}")))?;
-    if !out.status.success() {
-        return Err(Error::msg(format!("download of {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
-    }
-    paths::write_atomic(&cache, &out.stdout)?;
-    paths::write_atomic(&tag, url.as_bytes())?;
-    Ok(cache)
+    // remote lists are ignored in offline mode (see `set_remote_isf_url`)
+    crate::util::download::fetch(url, false)
 }
 
 /// python `RemoteIdentifierFormat(url).process({}, os)` for every `constants.OS_CATEGORIES`
@@ -204,7 +193,7 @@ pub enum Root {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolPath {
     pub roots: Vec<Root>,
-    /// Where downloaded / converted PDB ISFs are written (python's cache symbols dir).
+    /// python's cache symbols dir (the last root; part of some cache keys).
     pub download_dir: PathBuf,
 }
 
@@ -1691,9 +1680,14 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
     if let Some(l) = idx.find(ident.as_bytes(), "windows") {
         return Ok(l);
     }
-    // download + convert (pdb agent)
-    let out = super::windows::pdb::download_and_convert(pdb_name, &guid.to_uppercase(), age, &path.download_dir, offline)?;
-    Ok(IsfLocation::File(out))
+    // download + convert into the first writable directory of the search path, like python's
+    // `download_pdb_isf` over `symbols.__path__` (the embedded roots are not directories)
+    let dirs: Vec<PathBuf> = path.roots.iter().filter_map(|r| if let Root::Dir(d) = r { Some(d.clone()) } else { None }).collect();
+    let (out, json) = super::windows::pdb::download_and_convert(pdb_name, &guid.to_uppercase(), age, &dirs, offline)?;
+    let loc = IsfLocation::File(out);
+    // the load that follows builds the table from this JSON instead of decompressing the file
+    keep_decoded(&loc, json);
+    Ok(loc)
 }
 
 #[cfg(test)]

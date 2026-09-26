@@ -2164,6 +2164,10 @@ unsafe fn rd64u(p: *const u8) -> u64 {
 /// are known equal, byte 2 is not compared, the result is the index of the first difference
 /// in 3..=258, or 258.
 ///
+/// AVX2 only when the build enables it: this helper is inlined into the match loop, where a
+/// run-time dispatch would cost a call per candidate, and portable builds measured the same
+/// with the 8-byte word loop as with a 16-byte SSE2 loop (most matches end in the first step).
+///
 /// # Safety
 /// `a` and `b` must have 259 readable bytes.
 #[inline(always)]

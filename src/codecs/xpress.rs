@@ -1,6 +1,7 @@
 //! Microsoft Xpress decompression ([MS-XCA]): "Plain LZ77" (COMPRESSION_FORMAT_XPRESS) and
-//! "LZ77+Huffman" (COMPRESSION_FORMAT_XPRESS_HUFF), as used by Windows hibernation files,
-//! the memory-manager store, prefetch (MAM) files, WIM/WOF, ...
+//! "LZ77+Huffman" (COMPRESSION_FORMAT_XPRESS_HUFF), the formats of the memory-manager store,
+//! prefetch (MAM) files and WIM/WOF (Windows hibernation files use them too, but rsvol, like
+//! volatility3 2.28.2, has no hibernation layer).
 //!
 //! Part of rsvol, a port of Volatility 3 (Volatility Software License 1.0).
 //!
@@ -690,7 +691,7 @@ static LIT_SRC: [u8; 256 + 32] = {
 };
 
 /// `PATTERN[off][k][i] = (16k + i) % off`: pshufb masks replicating an `off`-byte period.
-#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[cfg(target_arch = "x86_64")]
 static PATTERN: [[[u8; 16]; 2]; 17] = {
     let mut t = [[[0u8; 16]; 2]; 17];
     let mut off = 1;
@@ -706,49 +707,70 @@ static PATTERN: [[[u8; 16]; 2]; 17] = {
 };
 
 /// Write 32 bytes at `d` continuing the `off`-periodic pattern that ends at `d`
-/// (`1 <= off <= 16`): an overlapping match of length <= 32 plus slop.
+/// (`1 <= off <= 16`): an overlapping match of length <= 32 plus slop. `SSSE3`: use
+/// [`pattern32_ssse3`] (true only inside the SSSE3 builds of `huff_run_fast`).
 #[inline(always)]
-unsafe fn pattern32(d: *mut u8, off: usize) {
+unsafe fn pattern32<const SSSE3: bool>(d: *mut u8, off: usize) {
     // SAFETY (whole body): caller guarantees off valid bytes before d and 32 writable at d
     unsafe {
-        #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
-        {
-            use std::arch::x86_64::*;
-            let v = _mm_loadu_si128(d.sub(off) as *const __m128i);
-            let m = &PATTERN[off];
-            let a = _mm_shuffle_epi8(v, _mm_loadu_si128(m[0].as_ptr() as *const __m128i));
-            let b = _mm_shuffle_epi8(v, _mm_loadu_si128(m[1].as_ptr() as *const __m128i));
-            _mm_storeu_si128(d as *mut __m128i, a);
-            _mm_storeu_si128(d.add(16) as *mut __m128i, b);
+        #[cfg(target_arch = "x86_64")]
+        if SSSE3 {
+            pattern32_ssse3(d, off);
+            return;
         }
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
-        {
-            for i in 0..32 {
-                *d.add(i) = *d.add(i).sub(off);
-            }
+        for i in 0..32 {
+            *d.add(i) = *d.add(i).sub(off);
         }
     }
 }
 
-/// Refill load: four 16-bit words at `p` as one big-endian bit string (w0 in the top bits).
+/// [`pattern32`] with pshufb.
 ///
 /// # Safety
-/// 8 bytes must be readable at `p`.
+/// SSSE3 must be available; as [`pattern32`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+#[inline]
+unsafe fn pattern32_ssse3(d: *mut u8, off: usize) {
+    use std::arch::x86_64::*;
+    // SAFETY: caller guarantees off valid bytes before d and 32 writable at d
+    unsafe {
+        let v = _mm_loadu_si128(d.sub(off) as *const __m128i);
+        let m = &PATTERN[off];
+        let a = _mm_shuffle_epi8(v, _mm_loadu_si128(m[0].as_ptr() as *const __m128i));
+        let b = _mm_shuffle_epi8(v, _mm_loadu_si128(m[1].as_ptr() as *const __m128i));
+        _mm_storeu_si128(d as *mut __m128i, a);
+        _mm_storeu_si128(d.add(16) as *mut __m128i, b);
+    }
+}
+
+/// Refill load: four 16-bit words at `p` as one big-endian bit string (w0 in the top bits).
+/// `SSSE3`: one pshufb ([`load_lanes_ssse3`]).
+///
+/// # Safety
+/// 8 bytes must be readable at `p`; `SSSE3` only on a CPU with SSSE3.
 #[inline(always)]
-unsafe fn load_lanes(p: *const u8) -> u64 {
-    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
-    // SAFETY: caller guarantees 8 readable bytes
-    unsafe {
-        use std::arch::x86_64::*;
-        let v = _mm_loadl_epi64(p as *const __m128i);
-        let m = _mm_set_epi8(-1, -1, -1, -1, -1, -1, -1, -1, 1, 0, 3, 2, 5, 4, 7, 6);
-        _mm_cvtsi128_si64(_mm_shuffle_epi8(v, m)) as u64
+unsafe fn load_lanes<const SSSE3: bool>(p: *const u8) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if SSSE3 {
+        // SAFETY: caller guarantees 8 readable bytes and SSSE3
+        return unsafe { load_lanes_ssse3(p) };
     }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
     // SAFETY: caller guarantees 8 readable bytes
-    unsafe {
-        word_lanes(u64::from_le((p as *const u64).read_unaligned()))
-    }
+    word_lanes(u64::from_le(unsafe { (p as *const u64).read_unaligned() }))
+}
+
+/// # Safety
+/// SSSE3 must be available; 8 bytes readable at `p`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+#[inline]
+unsafe fn load_lanes_ssse3(p: *const u8) -> u64 {
+    use std::arch::x86_64::*;
+    // SAFETY: caller guarantees 8 readable bytes
+    let v = unsafe { _mm_loadl_epi64(p as *const __m128i) };
+    let m = _mm_set_epi8(-1, -1, -1, -1, -1, -1, -1, -1, 1, 0, 3, 2, 5, 4, 7, 6);
+    _mm_cvtsi128_si64(_mm_shuffle_epi8(v, m)) as u64
 }
 
 /// The bulk decoder. Every symbol takes the same branch-free path: the table entry gives the
@@ -758,8 +780,41 @@ unsafe fn load_lanes(p: *const u8) -> u64 {
 /// and the output 32 bytes of slack and at least 256 bytes have been produced; length
 /// extensions, long codes, overlapping and invalid matches leave the common path, and errors
 /// are produced by the same code as the checked loop.
+///
+/// The build is chosen at run time, so portable builds keep the fast paths: pshufb pattern
+/// copies and refills with SSSE3, plus BMI1/BMI2/LZCNT variable shifts and bit scans (5% on
+/// this loop) where the CPU has them.
 #[inline(never)]
 fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitReader, op: &mut usize, block_end: usize) -> Result<(), XpressError> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::is_x86_feature_detected as has;
+        if has!("ssse3") && has!("bmi1") && has!("bmi2") && has!("lzcnt") {
+            // SAFETY: the features are available.
+            return unsafe { huff_run_fast_bmi(input, out, table, rd, op, block_end) };
+        }
+        if has!("ssse3") {
+            // SAFETY: SSSE3 is available.
+            return unsafe { huff_run_fast_ssse3(input, out, table, rd, op, block_end) };
+        }
+    }
+    huff_run_fast_impl::<false>(input, out, table, rd, op, block_end)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3,bmi1,bmi2,lzcnt")]
+unsafe fn huff_run_fast_bmi(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitReader, op: &mut usize, block_end: usize) -> Result<(), XpressError> {
+    huff_run_fast_impl::<true>(input, out, table, rd, op, block_end)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn huff_run_fast_ssse3(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitReader, op: &mut usize, block_end: usize) -> Result<(), XpressError> {
+    huff_run_fast_impl::<true>(input, out, table, rd, op, block_end)
+}
+
+#[inline(always)]
+fn huff_run_fast_impl<const SSSE3: bool>(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitReader, op: &mut usize, block_end: usize) -> Result<(), XpressError> {
     if input.len() < 24 || out.len() < 32 || *op < 256 {
         return Ok(());
     }
@@ -809,7 +864,7 @@ fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitRe
         () => {{
             // SAFETY: ptr + 8 <= input.len(): ptr <= ip_end at the top of an iteration and
             // at most three refills (<= 18 bytes) happen before the next check
-            buf |= unsafe { load_lanes(sp.add(ptr)) }.wrapping_shr(cnt as u32);
+            buf |= unsafe { load_lanes::<SSSE3>(sp.add(ptr)) }.wrapping_shr(cnt as u32);
             let c2 = cnt | 48;
             ptr += ((c2 ^ cnt) >> 3) as usize;
             cnt = c2;
@@ -836,7 +891,7 @@ fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitRe
                     buf = buf.wrapping_shl(e as u32);
                     cnt = cnt.wrapping_sub(e);
                     // SAFETY: off <= o valid bytes before o, 32 writable at o (o < o_end)
-                    unsafe { pattern32(dp.add(o), off) };
+                    unsafe { pattern32::<SSSE3>(dp.add(o), off) };
                     o += len;
                     continue $next;
                 }

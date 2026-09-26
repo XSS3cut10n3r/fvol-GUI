@@ -421,8 +421,28 @@ impl Scratch {
         Ok((info.crc, info.n))
     }
 
-    /// Huffman + MTF/RUNA-RUNB decoding of one block into `ll8`.
+    /// Huffman + MTF/RUNA-RUNB decoding of one block into `ll8`: the AVX2 build of
+    /// [`Scratch::entropy_impl`] when the CPU has AVX2 (detected at run time, so portable
+    /// builds keep it), the scalar one otherwise.
     fn entropy(&mut self, br: &mut BitReader, max_block: usize) -> std::result::Result<BlockInfo, Fail> {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 is available.
+            return unsafe { self.entropy_avx2(br, max_block) };
+        }
+        self.entropy_impl::<false>(br, max_block)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn entropy_avx2(&mut self, br: &mut BitReader, max_block: usize) -> std::result::Result<BlockInfo, Fail> {
+        self.entropy_impl::<true>(br, max_block)
+    }
+
+    /// [`Scratch::entropy`]; `AVX2`: move-to-front with [`mtf_move_avx2`] (only instantiated
+    /// inside [`Scratch::entropy_avx2`]).
+    #[inline(always)]
+    fn entropy_impl<const AVX2: bool>(&mut self, br: &mut BitReader, max_block: usize) -> std::result::Result<BlockInfo, Fail> {
         let crc = br.bits(32);
         if br.bit() {
             return Err(br.fail(Error::Msg("bzip2: randomised blocks are not supported".into())));
@@ -583,7 +603,7 @@ impl Scratch {
                     break 'block;
                 }
                 // sym < eob: MTF index 1..n_in_use-1.
-                let v = mtf_move(&mut mtf, (sym - 1) as usize);
+                let v = mtf_move::<AVX2>(&mut mtf, (sym - 1) as usize);
                 if pos >= max_block {
                     bail!("block overflow");
                 }
@@ -635,20 +655,31 @@ impl Scratch {
 #[repr(C, align(32))]
 struct MtfList([u8; 256]);
 
-/// Moves `mtf[idx]` (idx >= 1) to the front; returns it.
-///
-/// AVX2: every 32-byte chunk at or below `idx` becomes the chunk shifted up by one byte
-/// (carrying in the previous chunk's last byte, or `v` for chunk 0), blended with the
-/// original above `idx`. Indices below 32 touch one chunk; larger ones process all eight
-/// chunks without branches (random data has uniformly spread indices, so a data-dependent
-/// loop length would mispredict on nearly every symbol).
-#[cfg(target_feature = "avx2")]
+/// Moves `mtf[idx]` (idx >= 1) to the front; returns it. `AVX2` selects [`mtf_move_avx2`]
+/// (true only inside `Scratch::entropy_avx2`, i.e. on a CPU with AVX2).
 #[inline(always)]
-fn mtf_move(mtf: &mut MtfList, idx: usize) -> u8 {
+fn mtf_move<const AVX2: bool>(mtf: &mut MtfList, idx: usize) -> u8 {
+    #[cfg(target_arch = "x86_64")]
+    if AVX2 {
+        // SAFETY: AVX2 was detected before entering the AVX2 build of the decoder.
+        return unsafe { mtf_move_avx2(mtf, idx) };
+    }
+    mtf_move_scalar(mtf, idx)
+}
+
+/// [`mtf_move`] with AVX2: every 32-byte chunk at or below `idx` becomes the chunk shifted
+/// up by one byte (carrying in the previous chunk's last byte, or `v` for chunk 0), blended
+/// with the original above `idx`. Indices below 32 touch one chunk; larger ones process all
+/// eight chunks without branches (random data has uniformly spread indices, so a
+/// data-dependent loop length would mispredict on nearly every symbol).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn mtf_move_avx2(mtf: &mut MtfList, idx: usize) -> u8 {
     use std::arch::x86_64::*;
     let idx = idx & 255;
     let v = mtf.0[idx];
-    // SAFETY: AVX2 is enabled at compile time; all accesses are within the aligned 256 bytes.
+    // SAFETY: the caller checked AVX2; all accesses are within the aligned 256 bytes.
     unsafe {
         let p = mtf.0.as_mut_ptr() as *mut __m256i;
         // Byte j of chunk c is position 32c + j; biased by 0x80 for a signed compare.
@@ -688,9 +719,8 @@ fn mtf_move(mtf: &mut MtfList, idx: usize) -> u8 {
 }
 
 /// Moves `mtf[idx]` (idx >= 1) to the front; returns it.
-#[cfg(not(target_feature = "avx2"))]
 #[inline(always)]
-fn mtf_move(mtf: &mut MtfList, idx: usize) -> u8 {
+fn mtf_move_scalar(mtf: &mut MtfList, idx: usize) -> u8 {
     let mtf = &mut mtf.0;
     let v = mtf[idx & 255];
     if idx < 16 {
@@ -1474,6 +1504,33 @@ pub fn decompress_threads(data: &[u8], threads: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AVX2 move-to-front (when the CPU has it) equals the scalar one.
+    #[test]
+    fn mtf_avx2_equals_scalar() {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            let (mut a, mut b) = (MtfList([0u8; 256]), MtfList([0u8; 256]));
+            for i in 0..256 {
+                a.0[i] = (i as u8).wrapping_mul(97);
+                b.0[i] = a.0[i];
+            }
+            let mut x: u32 = 12345;
+            for n in 0..20000 {
+                x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                // mostly small indices, like real data, and every value up to 255
+                let idx = 1 + if n % 3 == 0 { (x >> 16) as usize % 255 } else { (x >> 16) as usize % 20 };
+                // SAFETY: AVX2 checked above
+                let va = unsafe { mtf_move_avx2(&mut a, idx) };
+                let vb = mtf_move_scalar(&mut b, idx);
+                assert_eq!((va, a.0), (vb, b.0), "step {n} idx {idx}");
+            }
+        }
+        let mut m = MtfList([0u8; 256]);
+        m.0[..4].copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(mtf_move::<false>(&mut m, 2), 3);
+        assert_eq!(&m.0[..4], &[3, 1, 2, 4]);
+    }
 
     // ---------------------------------------------------------------------------------
     // Minimal bzip2 encoder (tests only): RLE1, BWT by prefix doubling, MTF + RUNA/RUNB,

@@ -405,9 +405,10 @@ pub fn find_mz_before(
 }
 
 /// One result of `PDBUtility.pdbname_scan`.
+// on the struct: rustc 1.95 ignores the allow on the field inside the derived impls
+#[allow(non_snake_case)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdbScanResult {
-    #[allow(non_snake_case)]
     pub GUID: String,
     pub age: u32,
     pub pdb_name: String,

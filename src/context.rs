@@ -22,7 +22,7 @@ use crate::layers::{IntelLayer, Layer, PagingMode, PteFlavor};
 use crate::objects::{LayerRef, Module, leak_layer};
 use crate::symbols::{self, SymbolPath, TableRef};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Global (non plugin-specific) CLI options.
@@ -88,6 +88,8 @@ type Lazy<T> = OnceLock<std::result::Result<T, String>>;
 
 pub struct Context {
     pub opts: GlobalOptions,
+    /// the local file of a remote (http/https/ftp) location, downloaded on first use
+    remote_image: Lazy<PathBuf>,
     physical: Lazy<(Arc<dyn Layer>, LayerRef)>,
     physical_listing: OnceLock<Vec<crate::automagic::StackEntry>>,
     win: Lazy<WinKernel>,
@@ -113,13 +115,9 @@ impl Context {
     /// Cheap: records options and sets the symbol search path. Nothing is opened or scanned.
     pub fn new(opts: GlobalOptions) -> Result<Context> {
         if opts.clear_cache {
-            // python --clear-cache wipes its identifier cache and cached data; ours are the
-            // identifier index, the automagic results, the binary symbol tables and the scan cache
-            let dir = crate::util::paths::rsvol_cache_dir();
-            let _ = std::fs::remove_file(dir.join("identifiers.cache"));
-            let _ = std::fs::remove_dir_all(dir.join("automagic"));
-            let _ = std::fs::remove_dir_all(dir.join("isf"));
-            let _ = std::fs::remove_dir_all(crate::layers::scancache::cache_root());
+            // python --clear-cache deletes every *.cache in its cache directory (downloads too)
+            // and its identifier cache; the same for ours (python's is only treated as empty)
+            crate::util::paths::clear_cache_dir(&crate::util::paths::rsvol_cache_dir());
         }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         symbols::set_remote_isf_url(opts.remote_isf_url.clone(), opts.offline);
@@ -130,6 +128,7 @@ impl Context {
         );
         Ok(Context {
             opts,
+            remote_image: OnceLock::new(),
             physical: OnceLock::new(),
             physical_listing: OnceLock::new(),
             win: OnceLock::new(),
@@ -144,7 +143,10 @@ impl Context {
         symbols::symbol_path()
     }
 
-    /// Path of the input image (`-f` or a `file://` `--single-location`).
+    /// Path of the input image (`-f` or a `file://` `--single-location`). A `http://`,
+    /// `https://` or `ftp://` location is downloaded once into the rsvol cache (python
+    /// `ResourceAccessor`: `data_<sha512>.cache`, reused until `--clear-cache`) and that
+    /// file is the image.
     pub fn image_path(&self) -> Result<PathBuf> {
         if let Some(f) = &self.opts.file {
             return Ok(PathBuf::from(f));
@@ -152,6 +154,17 @@ impl Context {
         if let Some(loc) = &self.opts.single_location {
             if let Some(p) = loc.strip_prefix("file://") {
                 return Ok(PathBuf::from(crate::util::paths::unquote(p)));
+            }
+            if crate::util::download::is_remote(loc) {
+                let r = self.remote_image.get_or_init(|| {
+                    let _t = crate::util::trace::span("image download");
+                    crate::util::download::fetch(loc, self.opts.offline).map_err(|e| {
+                        // python logs the stacking exception at warning level
+                        eprintln!("WARNING  volatility3.framework.plugins: Automagic exception occurred: {e}");
+                        e.to_string()
+                    })
+                });
+                return r.clone().map_err(Error::Msg);
             }
             return Ok(PathBuf::from(loc));
         }
@@ -295,8 +308,12 @@ impl Context {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
-                let p = s.strip_prefix("file://").map(crate::util::paths::unquote).unwrap_or_else(|| s.clone());
-                crate::layers::FileLayer::open(Path::new(&p)).ok().map(|f| Arc::new(f.with_name(&format!("swap_layers{i}"))) as Arc<dyn Layer>)
+                let p = match s.strip_prefix("file://") {
+                    Some(p) => PathBuf::from(crate::util::paths::unquote(p)),
+                    None if crate::util::download::is_remote(s) => crate::util::download::fetch(s, self.opts.offline).ok()?,
+                    None => PathBuf::from(s),
+                };
+                crate::layers::FileLayer::open(&p).ok().map(|f| Arc::new(f.with_name(&format!("swap_layers{i}"))) as Arc<dyn Layer>)
             })
             .collect();
         let layer = IntelLayer::new("layer_name", phys_arc.clone(), am.dtb, am.mode, PteFlavor::Windows)

@@ -25,6 +25,35 @@ pub fn rsvol_cache_dir() -> PathBuf {
     xdg_cache_home().join("rsvol")
 }
 
+/// `--clear-cache` (python `framework.clear_cache()`: every `*.cache` file in `CACHE_PATH`,
+/// downloads included, then `identifier.cache`) for rsvol's cache directory `dir`: every
+/// `*.cache` file in it (identifier index, `isfinfo` summaries, downloads `data_*.cache`) and
+/// the directories of the per-image and per-table caches (`automagic`, `isf`, `scan`, and
+/// `remote`, where older versions kept downloads). Only these entries directly inside `dir`
+/// are removed, and symbolic links are removed, never followed. python's own cache
+/// directory is left alone. Returns the number of entries removed.
+pub fn clear_cache_dir(dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(ft) = e.file_type() else { continue };
+        // like python's glob("*.cache"), hidden names do not match
+        let file = !ft.is_dir() && !name.starts_with('.') && name.ends_with(".cache");
+        let subdir = matches!(name, "automagic" | "isf" | "scan" | "remote");
+        let removed = if ft.is_dir() && subdir {
+            std::fs::remove_dir_all(e.path())
+        } else if file || subdir {
+            std::fs::remove_file(e.path())
+        } else {
+            continue;
+        };
+        n += removed.is_ok() as usize;
+    }
+    n
+}
+
 /// python volatility3's cache directory (`constants.CACHE_PATH`, `~/.cache/volatility3`) or the
 /// `--cache-path` override.
 pub fn vol3_cache_dir(cache_path: Option<&str>) -> PathBuf {
@@ -160,5 +189,31 @@ mod tests {
         assert_eq!(unquote("%\u{e9}%%41"), "%\u{e9}%A");
         assert_eq!(unquote("%ff"), "\u{fffd}");
         assert_eq!(unquote("%"), "%");
+    }
+
+    #[test]
+    fn clear_cache_like_python() {
+        let base = std::env::temp_dir().join(format!("rsvol-clear-{}", std::process::id()));
+        let (dir, outside) = (base.join("rsvol"), base.join("outside"));
+        let _ = std::fs::remove_dir_all(&base);
+        for d in ["automagic", "isf", "remote", "keepdir", "dir.cache"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join("f"), b"x").unwrap();
+        }
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("t.cache"), b"x").unwrap();
+        for f in ["identifiers.cache", "isfinfo.cache", "data_ab.cache", ".hidden.cache", "notes.txt"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, dir.join("scan")).unwrap();
+        std::os::unix::fs::symlink(outside.join("t.cache"), dir.join("link.cache")).unwrap();
+        assert_eq!(clear_cache_dir(&dir), 8);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, [".hidden.cache", "dir.cache", "keepdir", "notes.txt"]);
+        // links were removed, not followed
+        assert!(outside.join("t.cache").is_file());
+        assert_eq!(clear_cache_dir(&base.join("missing")), 0);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

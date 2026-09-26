@@ -44,8 +44,8 @@ session, not only the process that used the memory. These rules are mandatory:
   benchmarks, and tests or tools that touch the multi-GB images. It starts the command in its own
   systemd scope with a hard memory cap, 8G by default, and allows 4 such jobs at a time.
 - Run at most one python volatility3 process per agent. The reference generators in
-  `bench/scripts/py_refs*.sh` start several in parallel, bounded by `limit.sh`; set `PAR=1` when
-  other agents are working.
+  `bench/scripts/py_refs*.sh` and `py_args_refs.sh` run 2 in parallel by default, bounded by
+  `limit.sh`; set `PAR=1` when other agents are working, or a higher `PAR` on an idle machine.
 - Never read a memory image into a `Vec`. Map it or read ranges.
 - `/tmp` is in RAM. Put anything over about 50 MB in `/home/user/rs-vol/testdata/scratch/`.
 
@@ -233,7 +233,7 @@ For quick measurements during development:
 
 | Question                                      | Command                                                   |
 | --------------------------------------------- | --------------------------------------------------------- |
-| Faster than vol-rs on every plugin?           | `OURS=<BIN> bench/scripts/bench_vs_volrs.sh [-n <RUNS>] [<LIST>]` |
+| Faster than vol-rs on every plugin?           | `bench/scripts/bench_vs_volrs.sh [-b <BIN>] [-n <RUNS>] [<LIST>]` |
 | Cold and warm start                           | `bench/scripts/coldbench.py`                              |
 | Fixed cost of a CLI invocation                | `bench/scripts/cli_startup.sh <BIN> [<N>]`                |
 | Library throughput vs the C references        | `bench/scripts/refbench.sh`                               |
