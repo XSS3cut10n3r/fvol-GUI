@@ -45,6 +45,24 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// `std::env::current_exe()` (a readlink of /proc/self/exe), resolved once per process.
+pub fn current_exe() -> Option<&'static Path> {
+    static EXE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| std::env::current_exe().ok()).as_deref()
+}
+
+/// `std::fs::canonicalize(path)` (a readlink per path component), memoized per process: the
+/// image is resolved by the file layer and again for the automagic cache key.
+pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    static MEMO: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    if let Some((_, c)) = MEMO.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == path) {
+        return Ok(c.clone());
+    }
+    let c = std::fs::canonicalize(path)?;
+    MEMO.lock().unwrap_or_else(|e| e.into_inner()).push((path.to_path_buf(), c.clone()));
+    Ok(c)
+}
+
 /// `(size, mtime_ns)` of a file, used as cache keys.
 pub fn file_stamp(path: &Path) -> Option<(u64, i128)> {
     use std::os::unix::fs::MetadataExt;

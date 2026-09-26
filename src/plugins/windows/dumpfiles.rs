@@ -707,7 +707,7 @@ fn dump_jobs(ctx: &Context, k: &WinKernel, jobs: &[Job]) -> Result<(usize, Vec<(
                 return Ok(files[i].1.clone());
             }
             let path = format!("{dir}/{}", names[i]);
-            let (f, name) = match std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
+            let (f, name) = match crate::cli::files::open_new(&path) {
                 Ok(f) => (f, names[i].clone()),
                 // someone else created it meanwhile: python would pick the next free `-N` name
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {

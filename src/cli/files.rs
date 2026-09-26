@@ -4,11 +4,25 @@
 //! The file is created as `<output_dir>/<preferred_name>`; when that name is taken a counter is
 //! inserted before the extension (`name-1.ext`, `name-2.ext`, ...), exactly like python's
 //! `_get_final_filename`. Creation uses O_EXCL so concurrent writers never clobber each other.
+//!
+//! Permissions: python's `CLIDirectFileHandler` writes to a `tempfile.mkstemp()` file (created
+//! with mode 0o600, minus the umask) and renames it into place, so dumped files end up 0o600
+//! (with any usual umask). [`open_new`] creates files the same way.
 
 use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+
+/// python `tempfile.mkstemp`'s file mode (the process umask still applies, as in python).
+pub const OUTPUT_FILE_MODE: u32 = 0o600;
+
+/// Create a new output file at `path` (O_EXCL, read + write) with python's permissions
+/// ([`OUTPUT_FILE_MODE`] minus the umask).
+pub fn open_new(path: impl AsRef<Path>) -> std::io::Result<File> {
+    OpenOptions::new().write(true).read(true).create_new(true).mode(OUTPUT_FILE_MODE).open(path)
+}
 
 /// python `os.path.splitext` (posix)
 pub fn splitext(p: &str) -> (&str, &str) {
@@ -48,7 +62,7 @@ pub fn create(output_dir: &str, preferred_name: &str) -> Result<(File, String)> 
         if Path::new(&candidate).exists() {
             continue;
         }
-        match OpenOptions::new().write(true).read(true).create_new(true).open(&candidate) {
+        match open_new(&candidate) {
             Ok(f) => {
                 let name = candidate.rsplit('/').next().unwrap_or(&candidate).to_string();
                 return Ok((f, name));
@@ -81,6 +95,9 @@ mod tests {
         let (_, b) = create(d, "x.dmp").unwrap();
         let (_, c) = create(d, "x.dmp").unwrap();
         assert_eq!((a.as_str(), b.as_str(), c.as_str()), ("x.dmp", "x-1.dmp", "x-2.dmp"));
+        // python's mkstemp mode: never group/other accessible, whatever the umask
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.join("x.dmp")).unwrap().permissions().mode() & 0o177, 0);
         assert!(create(d, "a/b").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }

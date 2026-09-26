@@ -4,6 +4,8 @@
 //! Foundation) and is licensed under the Volatility Software License 1.0.
 
 #![allow(clippy::too_many_arguments)]
+// The process entry point is the C `main` below (see there); test builds use libtest's.
+#![cfg_attr(not(test), no_main)]
 
 pub mod automagic;
 pub mod cli;
@@ -18,11 +20,47 @@ pub mod plugins;
 pub mod renderers;
 pub mod symbols;
 pub mod util;
+pub mod web;
 pub mod yara;
 
 /// The banner volatility3 prints as the first line of output.
 pub const VERSION_BANNER: &str = "Volatility 3 Framework 2.28.2";
 
-fn main() {
-    std::process::exit(cli::main());
+#[cfg(not(test))]
+unsafe extern "C" {
+    fn signal(sig: i32, handler: usize) -> usize;
+    fn poll(fds: *mut [i32; 2], nfds: u64, timeout: i32) -> i32;
+    fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+}
+
+/// The C entry point (`#![no_main]`). std's `lang_start` runtime setup is ~4% of a warm
+/// `windows.pslist` run: its stack-overflow handler finds the main thread's stack with
+/// `pthread_getattr_np`, which parses /proc/self/maps with sscanf (~110k instructions, 8
+/// syscalls), and installs an alternate signal stack (mmap + mprotect + sigaltstack).
+/// Only the parts with observable effects are kept: closed standard fds are reopened on
+/// /dev/null and SIGPIPE is ignored (writes to a closed pipe fail with EPIPE), exactly as std
+/// does. Arguments still come from glibc's `.init_array` hook, and `process::exit` flushes
+/// stdout like a return from a Rust `main`. A stack overflow now ends in a plain SIGSEGV
+/// instead of std's message + SIGABRT; an escaping panic still exits with status 101.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+    // std::sys::pal::unix::init: sanitize_standard_fds + reset_sigpipe
+    const POLLNVAL: i32 = 0x20;
+    const O_RDWR: i32 = 2;
+    const SIGPIPE: i32 = 13;
+    const SIG_IGN: usize = 1;
+    let mut fds = [[0i32, 0], [1, 0], [2, 0]]; // struct pollfd { fd, events | revents << 16 }
+    unsafe {
+        if poll(fds.as_mut_ptr(), 3, 0) >= 0 {
+            for pfd in fds {
+                if (pfd[1] >> 16) & POLLNVAL != 0 && open(c"/dev/null".as_ptr(), O_RDWR, 0) < 0 {
+                    std::process::abort();
+                }
+            }
+        }
+        signal(SIGPIPE, SIG_IGN);
+    }
+    let code = std::panic::catch_unwind(cli::main).unwrap_or(101);
+    std::process::exit(code)
 }

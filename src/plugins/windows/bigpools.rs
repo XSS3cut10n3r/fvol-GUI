@@ -5,10 +5,11 @@
 
 use crate::context::{Context, WinKernel};
 use crate::error::Result;
+use crate::layers::LayerExt;
 use crate::objects::{Field, Obj};
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
-use crate::symbols::windows::pool::PoolExt;
+use crate::symbols::windows::pool::{PoolExt, big_page_key_str};
 use crate::symbols::windows::versions;
 use crate::symbols::{Ty, TableRef};
 
@@ -44,6 +45,37 @@ pub fn list_big_pools_each(ctx: &Context, k: &WinKernel, tags: Option<&[String]>
     let sp = crate::objects::Space::on(k.vlayer, t);
     let key = Field::new(t, "_POOL_TRACKER_BIG_PAGES", "Key")?;
     let va = Field::new(t, "_POOL_TRACKER_BIG_PAGES", "Va")?;
+    // Fast path: the whole table in one read (python reads entry by entry; same result when
+    // everything is readable, otherwise the per-entry path below reproduces where it raises).
+    let key_u32 = matches!(key.ty, Ty::Int(p) if p.size == 4 && !p.signed);
+    let va_u64 = matches!(va.ty, Ty::Int(p) if p.size == 8 && !p.signed);
+    let bulk = match count.checked_mul(esize) {
+        Some(n) if key_u32 && va_u64 && key.offset + 4 <= esize && va.offset + 8 <= esize && n <= 256 << 20 => k.vlayer.read_vec(table_ptr, n as usize).ok(),
+        _ => None,
+    };
+    if let Some(b) = bulk {
+        let (ko, vo) = (key.offset as usize, va.offset as usize);
+        for (i, e) in b.chunks_exact(esize as usize).enumerate() {
+            let kv = u32::from_le_bytes(e[ko..ko + 4].try_into().unwrap());
+            // is_valid(): Key > 0
+            if kv == 0 {
+                continue;
+            }
+            if let Some(tags) = tags {
+                let k = big_page_key_str(kv);
+                if !tags.iter().any(|t| *t == k) {
+                    continue;
+                }
+            }
+            if !show_free && e[vo] & 1 == 1 {
+                continue;
+            }
+            if !f(Obj::new(sp, ty, table_ptr.wrapping_add((i as u64).wrapping_mul(esize))))? {
+                break;
+            }
+        }
+        return Ok(());
+    }
     for i in 0..count {
         let entry = Obj::new(sp, ty, table_ptr.wrapping_add(i.wrapping_mul(esize)));
         // is_valid(): Key > 0

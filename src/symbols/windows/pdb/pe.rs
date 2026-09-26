@@ -28,7 +28,7 @@ fn rd32(b: &[u8], off: usize) -> Option<u32> {
 
 /// The GUID string of an RSDS record (`guid` = the 16 bytes after "RSDS"), in the mixed
 /// endian order used by both pefile's `Signature_String` and `PdbSignatureScanner`.
-fn guid_string(g: &[u8]) -> String {
+pub fn guid_string(g: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut s = String::with_capacity(32);
     for i in [3usize, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15] {
@@ -284,9 +284,10 @@ pub struct RsdsMatch {
     pub pdb_name: Vec<u8>,
 }
 
-/// Finds the next "RSDS" at or after `from`.
+/// Finds the next "RSDS" at or after `from` (SSE2 'R'/'S' prefilter: ~3x glibc `memmem` on
+/// memory images).
 #[inline]
-fn find_rsds(data: &[u8], from: usize) -> Option<usize> {
+pub fn find_rsds(data: &[u8], from: usize) -> Option<usize> {
     let mut i = from;
     #[cfg(target_arch = "x86_64")]
     {
@@ -328,33 +329,45 @@ pub fn rsds_scan(data: &[u8], data_offset: u64, chunk_size: usize, pdb_names: &[
     if pdb_names.is_empty() {
         return out; // python: the empty group matches but `b"" in []` is False
     }
-    let mut pos = 0usize;
-    while let Some(p) = find_rsds(data, pos) {
-        if p >= chunk_size {
+    rsds_search(pdb_names, data, 0, chunk_size.min(data.len()), |p, k| {
+        out.push(RsdsMatch {
+            offset: data_offset + p as u64,
+            guid: guid_string(&data[p + 4..p + 20]),
+            age: u32::from_le_bytes([data[p + 20], data[p + 21], data[p + 22], data[p + 23]]),
+            pdb_name: pdb_names[k as usize].to_vec(),
+        })
+    });
+    out
+}
+
+/// The matcher behind `PdbSignatureScanner`: python's regex `RSDS.{20}(name1|name2|...)\x00`,
+/// non-overlapping and leftmost, alternatives tried in list order. Calls `f(position, name
+/// index)` for the matches starting in `[from, limit)` and returns where the search would
+/// resume after the last match ending past `limit` (else `limit`), so streaming scanners
+/// (`automagic::windows::RsdsScanner`) can search a chunk piece by piece.
+pub fn rsds_search<N: AsRef<[u8]>>(names: &[N], data: &[u8], from: usize, limit: usize, mut f: impl FnMut(usize, u32)) -> usize {
+    let mut next = limit;
+    let mut pos = from;
+    while pos < limit {
+        let Some(p) = find_rsds(data, pos) else { break };
+        if p >= limit {
             break;
         }
         let name_at = p + 24;
-        let hit = if name_at <= data.len() {
-            let rest = &data[name_at..];
-            pdb_names.iter().find(|n| rest.len() > n.len() && rest.starts_with(n) && rest[n.len()] == 0)
-        } else {
-            None
-        };
+        let hit = names.iter().position(|n| {
+            let n = n.as_ref();
+            data.len() > name_at + n.len() && &data[name_at..name_at + n.len()] == n && data[name_at + n.len()] == 0
+        });
         match hit {
-            Some(n) => {
-                let g = &data[p + 4..p + 20];
-                out.push(RsdsMatch {
-                    offset: data_offset + p as u64,
-                    guid: guid_string(g),
-                    age: u32::from_le_bytes([data[p + 20], data[p + 21], data[p + 22], data[p + 23]]),
-                    pdb_name: n.to_vec(),
-                });
-                pos = name_at + n.len() + 1;
+            Some(k) => {
+                f(p, k as u32);
+                pos = name_at + names[k].as_ref().len() + 1;
+                next = next.max(pos);
             }
             None => pos = p + 1,
         }
     }
-    out
+    next
 }
 
 /// The backwards page walk of `PDBUtility.pdbname_scan` looking for the "MZ" of the image

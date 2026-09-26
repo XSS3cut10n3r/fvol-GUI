@@ -370,6 +370,12 @@ pub trait PoolExt {
     fn get_number_of_bytes(&self) -> Result<Value>;
 }
 
+/// python `POOL_TRACKER_BIG_PAGES.get_key()` of a `Key` value: its 4 little-endian bytes,
+/// printable ones only.
+pub fn big_page_key_str(key: u32) -> String {
+    key.to_le_bytes().iter().filter(|&&x| 32 < x && x < 127).map(|&x| x as char).collect()
+}
+
 /// Error marking python's `ValueError` in `NameInfo`.
 const NAME_INFO_ZERO: &str = "Could not find _OBJECT_HEADER_NAME_INFO";
 
@@ -468,8 +474,7 @@ impl PoolExt for Obj {
     }
 
     fn get_key(&self) -> Result<String> {
-        let key = self.m("Key")?.int()? as u32;
-        Ok(key.to_le_bytes().iter().filter(|&&x| 32 < x && x < 127).map(|&x| x as char).collect())
+        Ok(big_page_key_str(self.m("Key")?.int()? as u32))
     }
 
     fn get_pool_type(&self) -> Result<Value> {

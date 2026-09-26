@@ -956,9 +956,10 @@ fn timeline_events(ctx: &Context, cfg: &Config) -> Result<Vec<TimelineEvent>> {
             ev.push(TimelineEvent { description: format!("ScheduledTasks: task action {action_desc} with trigger {trigger_desc} ran successfully"), kind: TimeKind::Accessed, time: row[6].clone() });
         }
         if let Value::DateTime(_) = row[4] {
-            let td = match &row[8] {
-                Value::Str(s) => s.clone(),
-                _ => "<UNKNOWN>".to_string(),
+            // python: `task.trigger_description or '<UNKNOWN>'` (absent values are truthy)
+            let td = match value_str(&row[8]) {
+                s if s.is_empty() => "<UNKNOWN>".to_string(),
+                s => s,
             };
             ev.push(TimelineEvent { description: format!("ScheduledTasks: Creation Time for task {} with trigger {}", value_str(&row[14]), td), kind: TimeKind::Created, time: row[4].clone() });
         }
@@ -966,10 +967,13 @@ fn timeline_events(ctx: &Context, cfg: &Config) -> Result<Vec<TimelineEvent>> {
     Ok(ev)
 }
 
+/// python `str(value)` (f-string interpolation) of a row value; absent values use their
+/// `__str__`: "N/A" for NotApplicable / NotAvailable, "-" for Unreadable / Unparsable.
 fn value_str(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
         Value::SStr(s) => s.to_string(),
+        Value::NotApplicable | Value::NotAvailable => "N/A".to_string(),
         _ => "-".to_string(),
     }
 }

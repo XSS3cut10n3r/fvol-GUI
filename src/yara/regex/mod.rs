@@ -29,7 +29,7 @@ mod difftest;
 mod perftest;
 
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 pub const FLAG_IGNORECASE: u32 = 2;
 pub const FLAG_LOCALE: u32 = 4;
@@ -120,11 +120,36 @@ pub struct Regex {
     flags: u32,
     groups: u32,
     names: Vec<(String, u32)>,
-    bt: backtrack::Prog,
+    /// The backtracking program: built at compile time for the backtracking engine,
+    /// on first use (`captures_at`) for the DFA / literal engines.
+    bt: std::sync::OnceLock<backtrack::Prog>,
     engine: Engine,
     /// Lower bound of any match length in bytes (sre's INFO min-width check).
     min_len: usize,
-    pool: Mutex<Vec<Box<Scratch>>>,
+    /// Scratch space, one pool per shard; a thread always uses the same shard, so
+    /// threads sharing a Regex rarely contend for a lock (a single Mutex made concurrent
+    /// `search` calls slower with every added thread). Created on first use.
+    pool: OnceLock<Box<[PoolShard]>>,
+}
+
+const POOL_SHARDS: usize = 16;
+/// Scratch spaces kept per shard.
+const POOL_KEEP: usize = 4;
+
+/// One pool shard, alone on its cache lines (adjacent locks would bounce one line
+/// between the cores).
+#[repr(align(128))]
+#[allow(clippy::vec_box)] // scratch spaces move in and out of the pool: keep them boxed
+struct PoolShard(Mutex<Vec<Box<Scratch>>>);
+
+/// This thread's pool shard (threads are assigned round-robin).
+fn pool_shard() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static SHARD: usize = NEXT.fetch_add(1, Ordering::Relaxed) % POOL_SHARDS;
+    }
+    SHARD.with(|s| *s)
 }
 
 struct Scratch {
@@ -144,12 +169,7 @@ impl Regex {
         let parsed = parse::parse(pattern, flags)?;
         let lowered = hir::lower(parsed)?;
         let props = hir::props(&lowered.hir, &lowered.group_widths);
-        let mut bt = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
         let min_len = lowered.hir.min_width(&lowered.group_widths).min(usize::MAX as u128) as usize;
-        bt.min_len = min_len;
-        if lowered.hir.min_width(&lowered.group_widths) > 0 {
-            bt.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
-        }
         let fixed = fixed_sequence(&lowered.hir).and_then(|seq| literal::SeqFinder::new(&seq).map(|f| (f, seq)));
         let engine = if let Some((finder, seq)) = fixed {
             Engine::Fixed { finder, seq }
@@ -161,6 +181,20 @@ impl Regex {
         } else {
             Engine::Backtrack
         };
+        // The DFA / literal engines only need the backtracker for `captures_at`: build it
+        // then. (Prog::new cannot fail for them: the NFA or the fixed sequence was built
+        // from the same HIR with the same nesting limit and far fewer than MAX_INSTS
+        // states.) The backtracker searches unanchored only as the main engine;
+        // `captures_at` runs it anchored at a known start, without the prefilter.
+        let bt = std::sync::OnceLock::new();
+        if matches!(engine, Engine::Backtrack) {
+            let mut prog = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+            prog.min_len = min_len;
+            if min_len > 0 {
+                prog.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
+            }
+            let _ = bt.set(prog);
+        }
         Ok(Regex {
             pattern: pattern.into(),
             flags,
@@ -169,7 +203,7 @@ impl Regex {
             bt,
             engine,
             min_len,
-            pool: Mutex::new(Vec::new()),
+            pool: OnceLock::new(),
         })
     }
 
@@ -191,10 +225,10 @@ impl Regex {
             flags,
             groups: lowered.groups,
             names: lowered.names,
-            bt,
+            bt: std::sync::OnceLock::from(bt),
             engine: Engine::Backtrack,
             min_len,
-            pool: Mutex::new(Vec::new()),
+            pool: OnceLock::new(),
         })
     }
 
@@ -212,6 +246,15 @@ impl Regex {
     #[doc(hidden)]
     pub fn new_backtrack_only(pattern: &[u8], flags: u32) -> Result<Regex, Error> {
         let mut r = Regex::new(pattern, flags)?;
+        if !matches!(r.engine, Engine::Backtrack) {
+            let lowered = hir::lower(parse::parse(pattern, flags)?)?;
+            let mut prog = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+            prog.min_len = r.min_len;
+            if r.min_len > 0 {
+                prog.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
+            }
+            r.bt = std::sync::OnceLock::from(prog);
+        }
         r.engine = Engine::Backtrack;
         Ok(r)
     }
@@ -242,8 +285,25 @@ impl Regex {
         }
     }
 
+    /// The backtracking program (built on first use for the DFA / literal engines; None
+    /// only if that build failed, which the compile-time checks rule out).
+    fn bt(&self) -> Option<&backtrack::Prog> {
+        if let Some(p) = self.bt.get() {
+            return Some(p);
+        }
+        let lowered = hir::lower(parse::parse(&self.pattern, self.flags).ok()?).ok()?;
+        let mut prog = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths).ok()?;
+        prog.min_len = self.min_len;
+        Some(self.bt.get_or_init(|| prog))
+    }
+
+    fn pool(&self) -> &PoolShard {
+        let shards = self.pool.get_or_init(|| (0..POOL_SHARDS).map(|_| PoolShard(Mutex::new(Vec::new()))).collect());
+        &shards[pool_shard()]
+    }
+
     fn scratch(&self) -> Box<Scratch> {
-        let got = match self.pool.lock() {
+        let got = match self.pool().0.lock() {
             Ok(mut p) => p.pop(),
             Err(_) => None,
         };
@@ -265,11 +325,26 @@ impl Regex {
     }
 
     fn put_scratch(&self, s: Box<Scratch>) {
-        if let Ok(mut p) = self.pool.lock() {
-            if p.len() < 64 {
-                p.push(s);
-            }
+        if let Ok(mut p) = self.pool().0.lock()
+            && p.len() < POOL_KEEP
+        {
+            p.push(s);
         }
+    }
+
+    /// The literal engine (needs no scratch space).
+    #[inline]
+    fn find_fixed(&self, finder: &literal::SeqFinder, seq: &[hir::ByteSet], hay: &[u8], start: usize, anchored: bool) -> Option<(usize, usize)> {
+        if start > hay.len() || hay.len() - start < self.min_len {
+            return None;
+        }
+        let n = seq.len();
+        if anchored {
+            let ok = start + n <= hay.len() && seq.iter().zip(&hay[start..start + n]).all(|(s, &b)| s.contains(b));
+            return if ok { Some((start, start + n)) } else { None };
+        }
+        let p = finder.find(hay, start)?;
+        Some((p, p + n))
     }
 
     fn find_with(&self, sc: &mut Scratch, hay: &[u8], start: usize, anchored: bool, must_advance: bool) -> Option<(usize, usize)> {
@@ -277,18 +352,10 @@ impl Regex {
             return None;
         }
         match (&self.engine, sc.dfa.as_mut()) {
-            (Engine::Fixed { finder, seq }, _) => {
-                let n = seq.len();
-                if anchored {
-                    let ok = start + n <= hay.len() && seq.iter().zip(&hay[start..start + n]).all(|(s, &b)| s.contains(b));
-                    return if ok { Some((start, start + n)) } else { None };
-                }
-                let p = finder.find(hay, start)?;
-                Some((p, p + n))
-            }
+            (Engine::Fixed { finder, seq }, _) => self.find_fixed(finder, seq, hay, start, anchored),
             (Engine::Dfa(s), Some(c)) => s.find(c, hay, start, anchored, must_advance),
             _ => {
-                let search = backtrack::Search { prog: &self.bt, hay };
+                let search = backtrack::Search { prog: self.bt()?, hay };
                 search.find(&mut sc.bt, start, anchored, must_advance)
             }
         }
@@ -296,6 +363,9 @@ impl Regex {
 
     /// python `pattern.search(hay, pos)`: leftmost match at or after `pos`.
     pub fn search(&self, hay: &[u8], pos: usize) -> Option<(usize, usize)> {
+        if let Engine::Fixed { finder, seq } = &self.engine {
+            return self.find_fixed(finder, seq, hay, pos.min(hay.len()), false);
+        }
         let mut sc = self.scratch();
         let r = self.find_with(&mut sc, hay, pos.min(hay.len()), false, false);
         self.put_scratch(sc);
@@ -309,6 +379,9 @@ impl Regex {
 
     /// python `pattern.match(hay, pos)`: match anchored at `pos`.
     pub fn match_at(&self, hay: &[u8], pos: usize) -> Option<(usize, usize)> {
+        if let Engine::Fixed { finder, seq } = &self.engine {
+            return self.find_fixed(finder, seq, hay, pos.min(hay.len()), true);
+        }
         let mut sc = self.scratch();
         let r = self.find_with(&mut sc, hay, pos.min(hay.len()), true, false);
         self.put_scratch(sc);
@@ -321,7 +394,11 @@ impl Regex {
 
     /// python `re.finditer`: non-overlapping (start, end) spans.
     pub fn find_iter<'r, 'h>(&'r self, hay: &'h [u8]) -> FindIter<'r, 'h> {
-        FindIter { re: self, hay, pos: 0, must_advance: false, done: false, scratch: Some(self.scratch()) }
+        let scratch = match self.engine {
+            Engine::Fixed { .. } => None,
+            _ => Some(self.scratch()),
+        };
+        FindIter { re: self, hay, pos: 0, must_advance: false, done: false, scratch }
     }
 
     /// Group spans of the match at `start` (python `m.span(i)` for every group; None
@@ -329,7 +406,11 @@ impl Regex {
     pub fn captures_at(&self, hay: &[u8], pos: usize) -> Option<Vec<Option<(usize, usize)>>> {
         let (s, _) = self.search(hay, pos)?;
         let mut sc = self.scratch();
-        let search = backtrack::Search { prog: &self.bt, hay };
+        let Some(prog) = self.bt() else {
+            self.put_scratch(sc);
+            return None;
+        };
+        let search = backtrack::Search { prog, hay };
         let r = search.find(&mut sc.bt, s, true, false).map(|_| {
             let slots = search.slots(&sc.bt);
             (0..self.groups as usize)
@@ -362,8 +443,12 @@ impl Iterator for FindIter<'_, '_> {
         if self.done {
             return None;
         }
-        let sc = self.scratch.as_mut()?;
-        match self.re.find_with(sc, self.hay, self.pos, false, self.must_advance) {
+        let found = match (&self.re.engine, self.scratch.as_mut()) {
+            (Engine::Fixed { finder, seq }, _) => self.re.find_fixed(finder, seq, self.hay, self.pos, false),
+            (_, Some(sc)) => self.re.find_with(sc, self.hay, self.pos, false, self.must_advance),
+            (_, None) => None,
+        };
+        match found {
             Some((s, e)) if s < self.pos || e < s || (self.must_advance && e == self.pos) => {
                 // Defensive: an engine must never go backwards or repeat an empty
                 // match; stop rather than loop forever.

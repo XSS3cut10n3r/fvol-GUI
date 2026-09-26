@@ -21,7 +21,7 @@ impl FileLayer {
     pub fn open(path: &Path) -> Result<FileLayer> {
         let f = File::open(path)?;
         let map = Mmap::map(&f)?;
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = crate::util::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         Ok(FileLayer { name: "FileLayer".to_string(), map: Arc::new(map), file: Arc::new(f), path })
     }
 

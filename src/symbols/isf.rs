@@ -13,7 +13,7 @@
 use super::table::*;
 use crate::error::{Error, Result};
 use crate::util::fxhash::{FxHashMap, hash_bytes};
-use crate::util::json::{Json, Kind, Parser};
+use crate::util::json::{Json, Kind, Parser, dict_dedupe, dict_dedupe_hashed};
 use std::borrow::Cow;
 
 /// A native type definition (python NativeTable entry).
@@ -87,6 +87,10 @@ struct Parsed<'a> {
     symbols: Vec<SymDef<'a>>,
     descs: Vec<Desc<'a>>,
     has: [bool; 5],
+    /// `hash_bytes` of the enum / user type / symbol names (from the duplicate-key check)
+    enum_hashes: Vec<u64>,
+    user_hashes: Vec<u64>,
+    sym_hashes: Vec<u64>,
 }
 
 fn parse_desc<'a>(p: &mut Parser<'a>, descs: &mut Vec<Desc<'a>>) -> Result<u32> {
@@ -124,7 +128,11 @@ fn parse<'a>(buf: &'a [u8]) -> Result<Parsed<'a>> {
                 out.metadata = Some(p.value()?);
             }
             "base_types" => {
+                // python dicts: a repeated key keeps its first position and its last value (a
+                // repeated section replaces the earlier one)
                 out.has[1] = true;
+                out.bases.clear();
+                let bases = &mut out.bases;
                 p.object(|p, name| {
                     let mut b = BaseDef::default();
                     p.object(|p, k| {
@@ -138,32 +146,41 @@ fn parse<'a>(buf: &'a [u8]) -> Result<Parsed<'a>> {
                         }
                         Ok(())
                     })?;
-                    out.bases.push((name, b));
+                    bases.push((name, b));
                     Ok(())
                 })?;
+                dict_dedupe(bases, |b| &b.0);
             }
             "enums" => {
                 out.has[2] = true;
+                out.enums.clear();
+                let enums = &mut out.enums;
                 p.object(|p, name| {
                     let mut e = EnumDef { name, base: Cow::Borrowed(""), constants: Vec::new() };
                     p.object(|p, k| {
                         match k.as_ref() {
                             "base" => e.base = p.str()?,
-                            "constants" => p.object(|p, cn| {
-                                let v = p.int()?;
-                                e.constants.push((cn, v));
-                                Ok(())
-                            })?,
+                            "constants" => {
+                                e.constants.clear();
+                                p.object(|p, cn| {
+                                    let v = p.int()?;
+                                    e.constants.push((cn, v));
+                                    Ok(())
+                                })?;
+                                dict_dedupe(&mut e.constants, |c| &c.0);
+                            }
                             _ => p.skip()?,
                         }
                         Ok(())
                     })?;
-                    out.enums.push(e);
+                    enums.push(e);
                     Ok(())
                 })?;
+                dict_dedupe_hashed(enums, |e| &e.name, Some(&mut out.enum_hashes));
             }
             "user_types" => {
                 out.has[3] = true;
+                out.users.clear();
                 let descs = &mut out.descs;
                 let users = &mut out.users;
                 p.object(|p, name| {
@@ -180,6 +197,7 @@ fn parse<'a>(buf: &'a [u8]) -> Result<Parsed<'a>> {
                                     p.skip()?;
                                     return Ok(());
                                 }
+                                u.fields.clear();
                                 p.object(|p, fname| {
                                     let mut f = FieldDef { name: fname, offset: 0, anonymous: false, ty: None };
                                     p.object(|p, k| {
@@ -193,7 +211,8 @@ fn parse<'a>(buf: &'a [u8]) -> Result<Parsed<'a>> {
                                     })?;
                                     u.fields.push(f);
                                     Ok(())
-                                })?
+                                })?;
+                                dict_dedupe(&mut u.fields, |f| &f.name)
                             }
                             _ => p.skip()?,
                         }
@@ -203,9 +222,11 @@ fn parse<'a>(buf: &'a [u8]) -> Result<Parsed<'a>> {
                     users.push(u);
                     Ok(())
                 })?;
+                dict_dedupe_hashed(users, |u| &u.name, Some(&mut out.user_hashes));
             }
             "symbols" => {
                 out.has[4] = true;
+                out.symbols.clear();
                 let descs = &mut out.descs;
                 let syms = &mut out.symbols;
                 p.object(|p, name| {
@@ -232,6 +253,7 @@ fn parse<'a>(buf: &'a [u8]) -> Result<Parsed<'a>> {
                     syms.push(s);
                     Ok(())
                 })?;
+                dict_dedupe_hashed(syms, |s| &s.name, Some(&mut out.sym_hashes));
             }
             _ => p.skip()?,
         }
@@ -748,7 +770,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
         let mut mcount_total = 0u32;
         for (u, members) in parsed_ref.users.iter().zip(&members_per_type) {
             let (no, nl) = w.raw(u.name.as_bytes());
-            type_hashes.push(hash_bytes(u.name.as_bytes()));
+            type_hashes.push(parsed_ref.user_hashes.get(type_hashes.len()).copied().unwrap_or_else(|| hash_bytes(u.name.as_bytes())));
             let kind = match &*u.kind {
                 "union" => 1u32,
                 "class" => 2,
@@ -791,7 +813,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
         let mut ccount = 0u32;
         for (e, p) in parsed_ref.enums.iter().zip(&enum_prims) {
             let (no, nl) = w.raw(e.name.as_bytes());
-            hashes.push(hash_bytes(e.name.as_bytes()));
+            hashes.push(parsed_ref.enum_hashes.get(hashes.len()).copied().unwrap_or_else(|| hash_bytes(e.name.as_bytes())));
             put32(&mut es, no);
             put32(&mut es, nl);
             put32(&mut es, p.pack());
@@ -818,7 +840,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
         let mut hashes = Vec::with_capacity(parsed_ref.symbols.len());
         for (s, t) in parsed_ref.symbols.iter().zip(&sym_ty) {
             let (no, nl) = w.raw(s.name.as_bytes());
-            hashes.push(hash_bytes(s.name.as_bytes()));
+            hashes.push(parsed_ref.sym_hashes.get(hashes.len()).copied().unwrap_or_else(|| hash_bytes(s.name.as_bytes())));
             put32(&mut ss, no);
             put32(&mut ss, nl);
             put64(&mut ss, s.address as u64);
@@ -1018,6 +1040,67 @@ mod tests {
             let _ = (t.is_64bit(), t.pdb_info(), t.metadata());
         }
         assert!(loaded > 1000, "{loaded}");
+    }
+
+    /// python's `json.loads` builds dicts: a repeated key keeps the position of its first
+    /// occurrence and the value of its last one (windows/mbr.json repeats enum constants).
+    /// Checked at every level of the ISF, plus a repeated top-level section.
+    #[test]
+    fn duplicate_keys_like_python_dicts() {
+        let many: String = (0..20).map(|i| format!(r#""c{i}": {i}, "#)).collect();
+        let isf = format!(
+            r#"{{
+          "metadata": {{"format": "4.1.0", "format": "6.2.0"}},
+          "base_types": {{
+            "long": {{"kind": "int", "size": 2, "signed": true, "endian": "little"}},
+            "pointer": {{"kind": "int", "size": 8, "signed": false, "endian": "little"}},
+            "long": {{"kind": "int", "size": 4, "signed": true, "endian": "little"}}
+          }},
+          "enums": {{
+            "E": {{"base": "long", "size": 4, "constants": {{"H": 132, "N": 134, "N": 135, "H": 160, "X": 7, "H": 161}}}},
+            "Big": {{"base": "long", "size": 4, "constants": {{{many}"c3": 99, "c0": -1}}}},
+            "E": {{"base": "long", "size": 4, "constants": {{"H": 1, "N": 2}}, "constants": {{"Z": 5, "H": 161}}}}
+          }},
+          "user_types": {{
+            "_A": {{"kind": "struct", "size": 8, "fields": {{
+                "a": {{"offset": 0, "type": {{"kind": "base", "name": "long"}}}},
+                "b": {{"offset": 4, "type": {{"kind": "base", "name": "long"}}}},
+                "a": {{"offset": 2, "type": {{"kind": "base", "name": "long"}}}}
+            }}}},
+            "_B": {{"kind": "struct", "size": 4, "fields": {{}}}},
+            "_A": {{"kind": "struct", "size": 16, "fields": {{
+                "x": {{"offset": 0, "type": {{"kind": "base", "name": "long"}}}},
+                "a": {{"offset": 8, "type": {{"kind": "base", "name": "long"}}}},
+                "x": {{"offset": 12, "type": {{"kind": "base", "name": "long"}}}}
+            }}}}
+          }},
+          "symbols": {{"s1": {{"address": 1}}, "s2": {{"address": 2}}, "s1": {{"address": 3}}}},
+          "symbols": {{"s3": {{"address": 4}}, "s1": {{"address": 5}}, "s3": {{"address": 6}}}}
+        }}"#
+        );
+        let t = load_table(isf.as_bytes(), "dups", "file:///dups", &BuildOptions::default()).unwrap();
+        assert_eq!(t.format(), (6, 2, 0));
+        assert_eq!(t.size_of(t.get_type("long").unwrap()), 4);
+        let e = t.enumeration("E").unwrap();
+        assert_eq!(t.enum_constants(e).collect::<Vec<_>>(), [("Z", 5), ("H", 161)]);
+        let b = t.enumeration("Big").unwrap();
+        let big: Vec<(&str, i64)> = t.enum_constants(b).collect();
+        assert_eq!(big.len(), 20);
+        assert_eq!((big[0], big[3], big[19]), (("c0", -1), ("c3", 99), ("c19", 19)));
+        assert_eq!(t.enum_lookup(b, 3), None);
+        assert_eq!(t.user_type_names().collect::<Vec<_>>(), ["_A", "_B"]);
+        let a = t.user_type("_A").unwrap();
+        assert_eq!(t.user_type_size(a), 16);
+        assert_eq!(t.members(a).map(|m| (m.name, m.offset)).collect::<Vec<_>>(), [("x", 12), ("a", 8)]);
+        assert_eq!(t.symbols().map(|s| (s.name, s.address)).collect::<Vec<_>>(), [("s3", 6), ("s1", 5)]);
+
+        // the bundled windows/mbr.json (python: "Hibernation" = 161 at the position of its first
+        // key (132), "NTFS Volume Set" = 135)
+        let mbr = load_table(include_bytes!("../../data/isf/windows/mbr.json"), "mbr", "file:///mbr", &BuildOptions::default()).unwrap();
+        let pt = mbr.enumeration("PartitionTypes").unwrap();
+        let consts: Vec<(&str, i64)> = mbr.enum_constants(pt).collect();
+        assert_eq!(consts.iter().filter(|c| c.0 == "Hibernation" || c.0 == "NTFS Volume Set").copied().collect::<Vec<_>>(), [("Hibernation", 161), ("NTFS Volume Set", 135)]);
+        assert_eq!(mbr.enum_lookup(pt, 132), None);
     }
 
     #[test]

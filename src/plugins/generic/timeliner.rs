@@ -395,7 +395,10 @@ fn run_all(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Vec<Outcome> {
             .map(|p| {
                 let p = *p;
                 s.spawn(move || {
-                    let cfg = crate::plugins::default_config(p);
+                    let mut cfg = crate::plugins::default_config(p);
+                    // python picks the stackers by the CLI plugin's category: "timeliner"
+                    // excludes no OS stacker (see mftscan::ANY_OS_STACKER)
+                    cfg.set(crate::plugins::windows::mftscan::ANY_OS_STACKER, ConfigValue::Bool(true));
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.timeline_events(ctx, &cfg)))
                         .unwrap_or_else(|_| Some((Vec::new(), Some(Error::msg("plugin panicked")))))
                 })

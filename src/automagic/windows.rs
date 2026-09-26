@@ -5,8 +5,9 @@
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
 use crate::error::{Error, Result};
-use crate::layers::scan::{BytesScanner, MultiStringScanner, Scanner, find, scan, scan_each};
+use crate::layers::scan::{BytesScanner, MultiStringScanner, Scanner, scan, scan_each};
 use crate::layers::{IntelLayer, Layer, LayerExt, PagingMode, PteFlavor, metadata};
+use crate::symbols::windows::pdb::{find_mz_before, guid_string, rsds_search};
 use std::sync::Arc;
 
 // ------------------------------------------------------------------------------------------
@@ -277,38 +278,6 @@ pub struct PdbSignatureScanner {
     pub names: Vec<Vec<u8>>,
 }
 
-/// python's RSDS regex, non-overlapping and leftmost; alternatives tried in list order. Calls
-/// `f(position, name index)` for matches starting in `[from, limit)` and returns where the
-/// search would resume after the last match ending past `limit` (else `limit`).
-fn rsds_search(names: &[Vec<u8>], data: &[u8], from: usize, limit: usize, mut f: impl FnMut(usize, u32)) -> usize {
-    let mut next = limit;
-    let mut pos = from;
-    while pos < limit {
-        let Some(i) = find(&data[pos..], b"RSDS") else { break };
-        let p = pos + i;
-        if p >= limit {
-            break;
-        }
-        let name_at = p + 24;
-        let hit = names.iter().position(|n| data.len() > name_at + n.len() && &data[name_at..name_at + n.len()] == n.as_slice() && data[name_at + n.len()] == 0);
-        match hit {
-            Some(k) => {
-                f(p, k as u32);
-                pos = name_at + names[k].len() + 1;
-                next = next.max(pos);
-            }
-            None => pos = p + 1,
-        }
-    }
-    next
-}
-
-/// python's GUID string of an RSDS record (`data` = the 16 GUID bytes).
-fn rsds_guid(b: &[u8]) -> String {
-    const ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
-    ORDER.iter().map(|&k| format!("{:02X}", b[k])).collect()
-}
-
 impl Scanner for PdbSignatureScanner {
     type Hit = (String, u32, String, u64);
     fn overlap(&self) -> u64 {
@@ -319,7 +288,7 @@ impl Scanner for PdbSignatureScanner {
         rsds_search(&self.names, data, 0, cs, |p, k| {
             let b = &data[p + 4..p + 24];
             let age = u32::from_le_bytes(b[16..20].try_into().unwrap());
-            hits.push((rsds_guid(&b[..16]), age, String::from_utf8_lossy(&self.names[k as usize]).into_owned(), data_offset + p as u64));
+            hits.push((guid_string(&b[..16]), age, String::from_utf8_lossy(&self.names[k as usize]).into_owned(), data_offset + p as u64));
         });
     }
 }
@@ -371,30 +340,11 @@ pub fn pdbname_scan(layer: &dyn Layer, names: &[&[u8]], start: Option<u64>, end:
     scan_each(layer, &scanner, Some(&[(start, end.wrapping_sub(start))]), |(sig_off, k)| {
         let mut rec = [0u8; 20];
         layer.read_padded(sig_off.wrapping_add(4), &mut rec);
-        let guid = rsds_guid(&rec[..16]);
+        let guid = guid_string(&rec[..16]);
         let age = u32::from_le_bytes(rec[16..20].try_into().unwrap());
         let pdb_name = String::from_utf8_lossy(names[k as usize]).into_owned();
         let sig_pfn = sig_off / page_size;
-        let mut mz = None;
-        let mut invalid = 0;
-        let mut i = sig_pfn;
-        while i > min_pfn {
-            if invalid > 100 {
-                break;
-            }
-            if !layer.is_valid(i * page_size, 2) {
-                invalid += 1;
-                i -= 1;
-                continue;
-            }
-            if let Ok(d) = layer.read_vec(i * page_size, 2) {
-                if d == b"MZ" {
-                    mz = Some(i * page_size);
-                    break;
-                }
-            }
-            i -= 1;
-        }
+        let mz = find_mz_before(layer, sig_off, page_size, min_pfn, 100);
         min_pfn = sig_pfn;
         f(PdbSig { guid, age, pdb_name, signature_offset: sig_off, mz_offset: mz })
     });
@@ -750,7 +700,7 @@ mod tests {
                 scan_each(layer, &RsdsScanner { names: names.clone() }, None, |(o, n)| {
                     let mut rec = [0u8; 20];
                     layer.read_padded(o + 4, &mut rec);
-                    b.push((o, String::from_utf8_lossy(&names[n as usize]).into_owned(), rsds_guid(&rec[..16]), u32::from_le_bytes(rec[16..20].try_into().unwrap())));
+                    b.push((o, String::from_utf8_lossy(&names[n as usize]).into_owned(), guid_string(&rec[..16]), u32::from_le_bytes(rec[16..20].try_into().unwrap())));
                     true
                 });
                 let tb = t.elapsed();

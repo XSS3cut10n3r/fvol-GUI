@@ -233,6 +233,136 @@ fn yara_rules_bench_driver() {
     }
 }
 
+/// Scan-API overheads and multi-thread scaling (developer probe, ignored test):
+///   RSVOL_BENCH_YARA_CASES=a.yar,b.yar [RSVOL_BENCH_REGEX_CASES=cases.tsv] \
+///   cargo test --profile release yara_scaling_probe -- --ignored --nocapture
+/// * per-call cost of `Rules::scan` / `Regex::find_iter` on small buffers (vadyarascan
+///   calls once per VAD): ns per call for 4 KiB and 64 KiB pieces of the window;
+/// * throughput with T threads scanning disjoint 16 MiB chunks of the window (the
+///   layer scanner's chunking), T = 1, 2, 4, 8, 16.
+#[test]
+#[ignore]
+fn yara_scaling_probe() {
+    let w = bench_window();
+    let hay = w.bytes();
+    type Job = Box<dyn Fn(&[u8]) -> usize + Sync>;
+    let mut jobs: Vec<(String, Job)> = Vec::new();
+    if let Ok(files) = std::env::var("RSVOL_BENCH_YARA_CASES") {
+        for path in files.split(',').filter(|p| !p.is_empty()) {
+            let src = std::fs::read_to_string(path).expect("read rule file");
+            let rules = Rules::compile(&src).expect("compile");
+            let name = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            jobs.push((format!("yara {name}"), Box::new(move |d: &[u8]| rules.scan(d).len())));
+        }
+    }
+    if let Ok(cases) = std::env::var("RSVOL_BENCH_REGEX_CASES") {
+        let data = std::fs::read(&cases).expect("read regex cases");
+        for line in data.split(|&b| b == b'\n').filter(|l| !l.is_empty() && l[0] != b'#') {
+            let Some(tab) = line.iter().position(|&b| b == b'\t') else { continue };
+            let re = Regex::new(&line[tab + 1..], 0).expect("regex");
+            jobs.push((format!("regex {}", String::from_utf8_lossy(&line[..tab])), Box::new(move |d: &[u8]| re.find_iter(d).count())));
+        }
+    }
+    for (name, f) in &jobs {
+        let mut per_call = Vec::new();
+        for piece in [4096usize, 65536] {
+            let n = (hay.len() / piece).min(16384);
+            let (best, _) = secs_best(3, || (0..n).map(|i| f(&hay[i * piece..(i + 1) * piece])).sum::<usize>());
+            per_call.push(format!("{}K: {:.0} ns/call ({:.0} MB/s)", piece >> 10, best * 1e9 / n as f64, (n * piece) as f64 / 1e6 / best));
+        }
+        let mut scaling = Vec::new();
+        for threads in [1usize, 2, 4, 8, 16] {
+            let chunk = 16 << 20;
+            let nchunks = hay.len().div_ceil(chunk);
+            let (best, _) = secs_best(3, || {
+                let next = AtomicU64::new(0);
+                std::thread::scope(|s| {
+                    for _ in 0..threads {
+                        s.spawn(|| {
+                            let mut acc = 0usize;
+                            loop {
+                                let c = next.fetch_add(1, Ordering::Relaxed) as usize;
+                                if c >= nchunks {
+                                    break;
+                                }
+                                acc += f(&hay[c * chunk..((c + 1) * chunk).min(hay.len())]);
+                            }
+                            black_box(acc)
+                        });
+                    }
+                });
+            });
+            scaling.push(format!("{threads}T {:.1}", hay.len() as f64 / 1e9 / best));
+        }
+        println!("{name:<16} {}  | GB/s {}", per_call.join("  "), scaling.join("  "));
+    }
+    // Shared-Regex contention: T threads calling `search` on 64-byte strings (scratch
+    // space comes from the regex's pool on every call).
+    if std::env::var("RSVOL_BENCH_REGEX_CASES").is_ok() {
+        let re = Regex::new(br"https?://[a-zA-Z0-9./?=_%:-]+", 0).expect("regex");
+        let calls = 200_000usize;
+        let mut row = Vec::new();
+        for threads in [1usize, 2, 4, 8, 16] {
+            let (best, _) = secs_best(3, || {
+                std::thread::scope(|s| {
+                    for t in 0..threads {
+                        let re = &re;
+                        s.spawn(move || {
+                            let mut acc = 0usize;
+                            for i in 0..calls {
+                                let off = ((i * 64 + t * 4096) % (hay.len() - 64)) & !63;
+                                acc += re.search(&hay[off..off + 64], 0).is_some() as usize;
+                            }
+                            black_box(acc)
+                        });
+                    }
+                });
+            });
+            row.push(format!("{threads}T {:.1}", (threads * calls) as f64 / 1e6 / best));
+        }
+        println!("regex search() on 64-byte strings, Mcalls/s: {}", row.join("  "));
+    }
+}
+
+/// Where YARA scan time goes (developer probe, ignored test):
+///   RSVOL_BENCH_YARA_CASES=a.yar,... cargo test --profile release yara_verify_probe -- --ignored --nocapture
+/// Per rule file: full scan, scan with hex/regex verification skipped, time inside
+/// `ReString::verify`, and the candidate statistics of the matcher.
+#[test]
+#[ignore]
+fn yara_verify_probe() {
+    use super::scan::Matcher;
+    use super::scan::matcher::{SKIP_VERIFY, TIME_VERIFY, VERIFY_CALLS, VERIFY_NS};
+    let Ok(files) = std::env::var("RSVOL_BENCH_YARA_CASES") else { return };
+    let w = bench_window();
+    let hay = w.bytes();
+    for path in files.split(',').filter(|p| !p.is_empty()) {
+        let src = std::fs::read_to_string(path).expect("read rule file");
+        let rules = Rules::compile(&src).expect("compile");
+        let m = Matcher::new(rules.string_defs()).expect("matcher");
+        let mut out = Vec::new();
+        let (full, _) = secs_best(3, || m.scan(hay, &mut out));
+        let n: Vec<usize> = out.iter().map(|v| v.len()).collect();
+        SKIP_VERIFY.store(true, Ordering::Relaxed);
+        let (skip, _) = secs_best(3, || m.scan(hay, &mut out));
+        SKIP_VERIFY.store(false, Ordering::Relaxed);
+        TIME_VERIFY.store(true, Ordering::Relaxed);
+        VERIFY_NS.store(0, Ordering::Relaxed);
+        m.scan(hay, &mut out);
+        let vns = VERIFY_NS.swap(0, Ordering::Relaxed);
+        let calls = VERIFY_CALLS.swap(0, Ordering::Relaxed);
+        TIME_VERIFY.store(false, Ordering::Relaxed);
+        println!(
+            "{path}: full {:.1} ms ({:.0} MB/s), verify skipped {:.1} ms, in verify {:.1} ms ({calls} calls); matches per string {n:?}",
+            full * 1e3,
+            hay.len() as f64 / 1e6 / full,
+            skip * 1e3,
+            vns as f64 * 1e-6
+        );
+        println!("{}", m.candidate_stats(hay));
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // YARA differential driver (bench/scripts/yara_diff.py)
 // ---------------------------------------------------------------------------------------
