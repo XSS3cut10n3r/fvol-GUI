@@ -254,7 +254,7 @@ fn encode_process(layer: LayerRef, enc: &RowEncoder, shared: &Shared, mut out: V
             None => {
                 for (m, _) in middle {
                     emit(&mut out, &mut n, &mut file_offset, m, None);
-                }
+                    }
                 pending = Some((last, last_t, None));
             }
         }
@@ -263,6 +263,64 @@ fn encode_process(layer: LayerRef, enc: &RowEncoder, shared: &Shared, mut out: V
         emit(&mut out, &mut n, &mut file_offset, &pm, ptmpl);
     }
     (out, n)
+}
+
+/// One process's rows using all cores: its top-level pieces are walked in parallel, their
+/// runs coalesced across the seams (like `mapping()`), then blocks of rows are formatted in
+/// parallel and handed to the renderer in order.
+fn encode_single(il: &IntelLayer, pieces: &[TopPiece], enc: &RowEncoder, out: &mut dyn RowSink) -> Result<()> {
+    let runs: Vec<Vec<(Mapping, Target)>> = crate::util::par::par_map(pieces.len(), |i| {
+        let mut v = Vec::new();
+        il.mapping_with_targets(pieces[i].start, pieces[i].len, &mut |m, t| {
+            v.push((m, t));
+            true
+        });
+        v
+    });
+    let mut rows: Vec<Mapping> = Vec::with_capacity(runs.iter().map(|r| r.len()).sum());
+    let mut last_t = None;
+    for (m, t) in runs.into_iter().flatten() {
+        if let (Some(p), Some(pt)) = (rows.last_mut(), last_t)
+            && p.offset.wrapping_add(p.len) == m.offset
+            && p.mapped.wrapping_add(p.len) == m.mapped
+            && pt == t
+        {
+            p.len += m.len;
+            continue;
+        }
+        rows.push(m);
+        last_t = Some(t);
+    }
+    const BLOCK: usize = 1 << 14;
+    // "Offset in File" of every block's first row
+    let mut starts = Vec::with_capacity(rows.len().div_ceil(BLOCK));
+    let mut file_offset = 0u64;
+    for (i, m) in rows.iter().enumerate() {
+        if i % BLOCK == 0 {
+            starts.push(file_offset);
+        }
+        file_offset = file_offset.wrapping_add(m.len);
+    }
+    let mut result = Ok(());
+    crate::util::par::par_map_stream(
+        starts.len(),
+        0,
+        |b| {
+            let part = &rows[b * BLOCK..((b + 1) * BLOCK).min(rows.len())];
+            let mut buf = Vec::with_capacity(part.len() * 48);
+            let mut fo = starts[b];
+            for m in part {
+                enc.row(&mut buf, &row_values(m, fo));
+                fo = fo.wrapping_add(m.len);
+            }
+            (buf, part.len())
+        },
+        |_, (buf, n)| {
+            result = out.rows_encoded_owned(buf, n).map(|_| ());
+            result.is_ok()
+        },
+    );
+    result
 }
 
 #[repr(C)]
@@ -462,8 +520,23 @@ impl Plugin for Memmap {
         let enc = if dump { None } else { out.encoder() };
         let shared = if enc.is_some() { shared_pieces(&layers) } else { Shared::default() };
         let pool: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
-        let mut result: Result<()> = Ok(());
         let mut procs = procs.into_iter();
+        if let (1, Some(enc)) = (layers.len(), &enc) {
+            // one process: format it here, streaming through a small buffer
+            procs.next().unwrap()?;
+            if let Some(e) = errs[0].take() {
+                return Err(e);
+            }
+            let Some((_, layer)) = layers[0] else { return Ok(()) };
+            if let Some(il) = layer.as_intel()
+                && let Some(pieces) = il.top_level_pieces(0, layer.max_address())
+            {
+                return encode_single(il, &pieces, enc, out);
+            }
+            let (block, n) = encode_process(layer, enc, &shared, Vec::new());
+            return out.rows_encoded_owned(block, n).map(|_| ());
+        }
+        let mut result: Result<()> = Ok(());
         crate::util::par::par_map_stream(
             layers.len(),
             4,
