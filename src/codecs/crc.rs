@@ -38,7 +38,7 @@ pub fn crc32_bzip2(data: &[u8]) -> u32 {
 
 /// Continue a CRC-32/BZIP2.
 pub fn crc32_bzip2_update(crc: u32, data: &[u8]) -> u32 {
-    !crc32_msb_tables(!crc, data)
+    !crc32_msb_raw(!crc, data)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -331,6 +331,70 @@ fn crc32_raw(crc: u32, data: &[u8]) -> u32 {
     crc32_tables(crc, data)
 }
 
+// MSB-first (non-reflected) folding: byte-reversing each 16-byte block turns it into a
+// 128-bit integer whose bit k is the coefficient of x^k (normal order). Then
+// A * x^D = H * x^(64+D) + L * x^D == clmul(H, x^(64+D) mod P) ^ clmul(L, x^D mod P) exactly
+// (no reflection shift), and the final 128-bit remainder is finished with the tables.
+const CRC32_MSB_K512: (u64, u64) = (xpow_mod_crc32(512), xpow_mod_crc32(64 + 512));
+const CRC32_MSB_K128: (u64, u64) = (xpow_mod_crc32(128), xpow_mod_crc32(64 + 128));
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "pclmulqdq,sse2,ssse3")]
+unsafe fn clmul_fold_msb(init: u32, data: &[u8]) -> ([u8; 16], usize) {
+    use std::arch::x86_64::*;
+    debug_assert!(data.len() >= 64);
+    // SAFETY (whole fn): every load reads 16 bytes at an offset `o` with o + 16 <= data.len().
+    unsafe {
+        let p = data.as_ptr();
+        let rev = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        let load = |o: usize| _mm_shuffle_epi8(_mm_loadu_si128(p.add(o) as *const __m128i), rev);
+        // lane 0 (low) multiplies L, lane 1 (high) multiplies H.
+        let kf4 = _mm_set_epi64x(CRC32_MSB_K512.1 as i64, CRC32_MSB_K512.0 as i64);
+        let kf1 = _mm_set_epi64x(CRC32_MSB_K128.1 as i64, CRC32_MSB_K128.0 as i64);
+        macro_rules! fold {
+            ($x:expr, $k:expr) => {
+                _mm_xor_si128(_mm_clmulepi64_si128($x, $k, 0x00), _mm_clmulepi64_si128($x, $k, 0x11))
+            };
+        }
+        let mut x0 = _mm_xor_si128(load(0), _mm_set_epi32(init as i32, 0, 0, 0));
+        let mut x1 = load(16);
+        let mut x2 = load(32);
+        let mut x3 = load(48);
+        let mut off = 64;
+        let n = data.len();
+        while off + 64 <= n {
+            x0 = _mm_xor_si128(fold!(x0, kf4), load(off));
+            x1 = _mm_xor_si128(fold!(x1, kf4), load(off + 16));
+            x2 = _mm_xor_si128(fold!(x2, kf4), load(off + 32));
+            x3 = _mm_xor_si128(fold!(x3, kf4), load(off + 48));
+            off += 64;
+        }
+        let mut x = _mm_xor_si128(fold!(x0, kf1), x1);
+        x = _mm_xor_si128(fold!(x, kf1), x2);
+        x = _mm_xor_si128(fold!(x, kf1), x3);
+        while off + 16 <= n {
+            x = _mm_xor_si128(fold!(x, kf1), load(off));
+            off += 16;
+        }
+        let mut out = [0u8; 16];
+        _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, _mm_shuffle_epi8(x, rev));
+        (out, off)
+    }
+}
+
+fn crc32_msb_raw(crc: u32, data: &[u8]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if data.len() >= CLMUL_MIN_LEN && have_clmul() && std::arch::is_x86_feature_detected!("ssse3") {
+            // SAFETY: CPU support checked above; len >= 64.
+            let (rem, used) = unsafe { clmul_fold_msb(crc, data) };
+            let r = crc32_msb_tables(0, &rem);
+            return crc32_msb_tables(r, &data[used..]);
+        }
+    }
+    crc32_msb_tables(crc, data)
+}
+
 fn crc64_raw(crc: u64, data: &[u8]) -> u64 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -391,6 +455,17 @@ mod tests {
         assert_eq!(crc64(b""), 0);
     }
 
+    fn crc32_msb_bitwise(data: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for &b in data {
+            c ^= (b as u32) << 24;
+            for _ in 0..8 {
+                c = if c & 0x8000_0000 != 0 { (c << 1) ^ CRC32_POLY_NORMAL } else { c << 1 };
+            }
+        }
+        !c
+    }
+
     #[test]
     fn codecs_crc_matches_bitwise_all_lengths() {
         let data = pseudo_random(4096 + 77, 0x1234_5678_9abc_def1);
@@ -398,6 +473,7 @@ mod tests {
             let d = &data[..len];
             assert_eq!(crc32(d), crc32_bitwise(d), "crc32 len {len}");
             assert_eq!(crc64(d), crc64_bitwise(d), "crc64 len {len}");
+            assert_eq!(crc32_bzip2(d), crc32_msb_bitwise(d), "crc32/bzip2 len {len}");
             assert_eq!(crc32_tables(!0, d), !crc32_bitwise(d));
             assert_eq!(crc64_tables(!0, d), !crc64_bitwise(d));
         }
