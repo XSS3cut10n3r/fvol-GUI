@@ -6,7 +6,9 @@
 //!
 //! Workloads: text (decode + write_mnemonic + write_op_str into reused Strings), line (the
 //! format_capstone renderer line into a reused buffer), detail (decode with structured operands),
-//! len (length-only `insn_len`). Each corpus section is swept linearly, skipping one byte after an
+//! cdetail (decode + capstone's detail view: `detail_operands` + `implicit_regs`, the work
+//! capstone's CS_OPT_DETAIL does; its check equals capstone's detail check), len (length-only
+//! `insn_len`). Each corpus section is swept linearly, skipping one byte after an
 //! undecodable instruction. The `check` column must equal capstone's for text / line / len.
 
 #[allow(dead_code)]
@@ -133,6 +135,31 @@ fn run_detail(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
 }
 
 #[inline(never)]
+fn run_cdetail(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
+    let mut r = Res::default();
+    let mut insn = Insn::default();
+    for c in chunks {
+        let buf = &data[c.off..c.off + c.len];
+        r.bytes += c.len as u64;
+        let mut pos = 0usize;
+        while pos < buf.len() {
+            let addr = c.addr.wrapping_add(pos as u64);
+            if x86::decode_into(&buf[pos..], addr, mode, &mut insn) {
+                let ops = insn.detail_operands();
+                let (rd, wr) = insn.implicit_regs();
+                r.check += (ops.len() + rd.len() + wr.len()) as u64;
+                r.insns += 1;
+                pos += insn.size as usize;
+            } else {
+                r.bad += 1;
+                pos += 1;
+            }
+        }
+    }
+    r
+}
+
+#[inline(never)]
 fn run_len(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
     let mut r = Res::default();
     for c in chunks {
@@ -166,8 +193,13 @@ fn main() {
         "{:<6} {:<7} {:>10} {:>10} {:>10} {:>9} {:>12} {:>9} check",
         "side", "work", "mode", "insns", "bytes", "best_s", "insn/s", "MB/s"
     );
-    let works: [(&str, fn(&[u8], &[Chunk], Mode) -> Res); 4] =
-        [("text", run_text), ("line", run_line), ("detail", run_detail), ("len", run_len)];
+    let works: [(&str, fn(&[u8], &[Chunk], Mode) -> Res); 5] = [
+        ("text", run_text),
+        ("line", run_line),
+        ("detail", run_detail),
+        ("cdetail", run_cdetail),
+        ("len", run_len),
+    ];
     for bits in [32u32, 64] {
         let Some((data, chunks)) = load(&dir, bits) else {
             eprintln!("cannot read corpus real{bits} in {dir}");

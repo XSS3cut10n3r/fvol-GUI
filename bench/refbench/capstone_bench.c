@@ -10,7 +10,9 @@
  *   text    cs_disasm_iter, detail off: mnemonic + op_str text (lengths summed as a checksum)
  *   line    text + the volatility renderer line "\n{addr:#x}:\t{mnemonic}\t{op_str}" appended to
  *           a reused buffer (format_capstone equivalent)
- *   detail  cs_disasm_iter with CS_OPT_DETAIL on (structured operands)
+ *   detail  cs_disasm_iter with CS_OPT_DETAIL on (structured operands with access flags,
+ *           implicit registers); compare with the Rust "detail" (native structured operands)
+ *           and "cdetail" (the same capstone detail view: detail_operands + implicit_regs)
  *   len     cheapest capstone path: detail off, only insn->size used
  *
  * Build/run: bench/refbench/capstone_bench.sh  (gcc -O3 -march=native ... -lcapstone)
@@ -114,7 +116,9 @@ static result_t run(csh h, int w, const uint8_t *data, const chunk_t *ch, size_t
                     break;
                 }
                 case W_DETAIL:
-                    r.check += insn->detail->x86.op_count + insn->size;
+                    /* operands + implicit registers: equals the Rust "cdetail" check */
+                    r.check += insn->detail->x86.op_count + insn->detail->regs_read_count +
+                               insn->detail->regs_write_count;
                     break;
                 default:
                     r.check += insn->size;
