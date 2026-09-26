@@ -38,7 +38,7 @@ Running: W1 scanners+kernel objects, W2a process, W2b PE/files, W3 registry, W4 
 L1 linux ext+process, M1 mac. Pending: W5 malware+services (after disasm + yara land), L2 linux kernel,
 L3 linux fs/net (after L1's extensions land).
 - snappy/xpress: DONE (snappy 2.4x system libsnappy / 1.22x -march=native build, xpress-huffman 1.65x wimlib, lz77 4.1x).
-- regex: URL pattern 0.91-0.94x PCRE2-JIT (everything else >= 1x or at the ~20 GB/s page-cache floor).
+- regex/yara: DONE. 1.28-20x best of PCRE2-JIT/RE2 on every refbench case, compile faster than PCRE2-JIT, 5.7-16x libyara.
 - codecs: xz single-block 0.97-0.99x liblzma (cold ISF path only; binary ISF cache hides it).
 - core: level-by-level page-table range walker (memmap all-procs 42M rows = 19 s, strings, statistics use per-page translate).
 - statistics requires kernel symbols; python only needs the memory layer.
