@@ -55,6 +55,9 @@ use crate::renderers::{Value, ColType, Column};
 | `intermed.IntermediateSymbolTable.create(ctx, path, "windows", "pe", class_types=...)` | `ctx.load_isf("windows/pe")?` (memoized) |
 | `...create(..., native_types=kernel_natives, table_mapping={"nt_symbols": kernel.symbol_table_name})` | `ctx.load_isf_with("windows/callbacks-x64", Some(k.table), &[("nt_symbols", k.table.name())])?` |
 | `PDBUtility.load_windows_symbol_table(ctx, guid, age, pdb_name, ...)` | `ctx.load_windows_pdb(pdb_name, guid, age)?` |
+| `PDBUtility.symbol_table_from_pdb(ctx, path, layer, "tcpip.pdb", base, size)` | `ctx.symbol_table_from_pdb(layer, "tcpip.pdb", Some(base), Some(size))?` |
+| `PDBUtility.module_from_pdb(...)` | `ctx.module_from_pdb(layer, "ntdll.pdb", Some(base), Some(size))?` → `Module` |
+| `PDBUtility.pdbname_scan(ctx, layer, page_size, names, start, end)` | `crate::automagic::windows::pdbname_scan(layer, &[b"x.pdb"], start, end, \|sig\| { ..; true })` |
 | `versions.is_win10(context, table)` | `crate::symbols::windows::versions::IS_WIN10.check(k.table)` |
 
 ## Objects
@@ -62,7 +65,7 @@ use crate::renderers::{Value, ColType, Column};
 | python | rust |
 |---|---|
 | `proc.UniqueProcessId` (int) | `proc.m("UniqueProcessId")?.int()?` (`i128`, exact python int) / `.u64()?` / `.i64()?` |
-| `proc.Pcb.DirectoryTableBase` | `proc.path("Pcb.DirectoryTableBase")?.u64()?` or `proc.m("Pcb")?.m("DirectoryTableBase")?` |
+| `proc.Pcb.DirectoryTableBase` | `proc.u64_at("Pcb.DirectoryTableBase")?` (= `proc.path(..)?.u64()?`, `proc.m("Pcb")?.m("DirectoryTableBase")?.u64()?`); `int_at` for the exact python int |
 | `ptr.Member` (auto-deref) | `ptr.m("Member")?` (dereferences pointers like python) |
 | `ptr.dereference()` | `ptr.deref()?` ; `ptr.deref_on(layer)?` for `dereference(layer_name)` |
 | `if ptr:` / `bool(x)` | `x.bool()?` (value != 0) |
@@ -81,6 +84,7 @@ use crate::renderers::{Value, ColType, Column};
 | `enum.description` / `.lookup()` | `e.description()?` (Err outside the choices, like python's ValueError) |
 | `enum.is_valid_choice` / `EnumName.CONSTANT` | `e.is_valid_choice()` / `e.enum_value("CONSTANT")?` |
 | bitfields | `obj.m("Flag")?.int()?` (already `(v & ((1<<end)-1)) >> start`) |
+| `container_of(ptr, "task_struct", "tasks")` / `obj.vol.offset - relative_child_offset` | `list_head.container_of("task_struct", "tasks")?` / `obj.container_at(addr, "task_struct", "tasks")?` |
 | `objects.utility.array_to_string(arr)` | `array_to_string(&arr, None)?` |
 | `utility.pointer_to_string(ptr, count)` | `pointer_to_string(&ptr, count)?` |
 | `utility.rol / bswap_64` | `crate::objects::util::{rol, bswap_32, bswap_64}` |

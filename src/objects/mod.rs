@@ -240,6 +240,17 @@ impl Obj {
         Ok(o)
     }
 
+    /// Shorthand for `self.path(path)?.int()?` (python `obj.A.B` used as an int).
+    #[inline]
+    pub fn int_at(&self, path: &str) -> Result<i128> {
+        self.path(path)?.int()
+    }
+    /// Shorthand for `self.path(path)?.u64()?`.
+    #[inline]
+    pub fn u64_at(&self, path: &str) -> Result<u64> {
+        self.path(path)?.u64()
+    }
+
     /// python `has_member(name)` (pointers: whether the target type has it).
     pub fn has_member(&self, name: &str) -> bool {
         match self.ty {
@@ -345,6 +356,22 @@ impl Obj {
         };
         Ok(self.cast_ty(Ty::Pointer { prim, target: self.sp.table.intern(target) }))
     }
+    /// `container_of`: the `type_name` object whose `member` lives at this object's address
+    /// (python `linux.LinuxUtilities.container_of` / `obj.vol.offset - relative_child_offset`).
+    pub fn container_of(&self, type_name: &str, member: &str) -> Result<Obj> {
+        let (sp, ty) = resolve_named(self.sp, type_name)?;
+        let off = match ty {
+            Ty::Struct(ut) => sp.table.member(ut, member).map(|m| m.offset).ok_or_else(|| Error::Symbol(format!("AttributeError: {type_name} has no attribute: {member}")))?,
+            _ => return Err(Error::Symbol(format!("{type_name} is not a struct"))),
+        };
+        Ok(Obj::new(sp, ty, self.addr.wrapping_sub(off)))
+    }
+    /// `container_of` for a pointer value (e.g. a `list_head.next`): the `type_name` object whose
+    /// `member` is at `addr` in this object's space.
+    pub fn container_at(&self, addr: u64, type_name: &str, member: &str) -> Result<Obj> {
+        self.at_addr(addr).container_of(type_name, member)
+    }
+
     /// Move this object to another space (python `context.object(type, layer_name=..., offset=obj.vol.offset)`).
     pub fn in_space(&self, sp: &'static Space) -> Obj {
         Obj::new(sp, self.ty, self.addr)
