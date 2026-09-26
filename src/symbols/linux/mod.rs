@@ -19,8 +19,12 @@
 //!   * [`vmcoreinfo`]: python's `VMCoreInfo` (search + parse; for `linux.vmcoreinfo`).
 //!   * [`timespec`]: python's `Timespec64Concrete` with python's exact float semantics.
 
+pub mod constants;
 pub mod elf;
 pub mod ext;
+pub mod kallsyms;
+pub mod module;
+pub mod modules;
 pub mod search;
 pub mod timespec;
 pub mod vmcoreinfo;
