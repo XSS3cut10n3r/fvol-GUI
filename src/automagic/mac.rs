@@ -290,10 +290,11 @@ pub fn find_aslr(phys: &dyn Layer, table: TableRef, compare_banner: &[u8], compa
 
 /// [`scan_each`] over the whole layer (python default sections and chunking, hits in python
 /// order, `f` returns false to stop) for scans that usually stop at an early hit, like banner
-/// scans: the chunks are scanned in growing batches (1, 2, 4, ... up to 4x the thread count)
+/// scans: the chunks are scanned in growing batches (2, 4, 8, ... up to 4x the thread count)
 /// instead of with `scan_each`'s fixed look-ahead of 2x threads 16 MiB chunks. A banner in
-/// chunk 4 then costs ~7 chunks of work in 3 short rounds rather than a memory-bandwidth-bound
-/// wave of ~40 chunks; a full scan pays a handful of batch barriers (a few percent).
+/// chunk 4 then costs 6 chunks of work in 2 short rounds rather than a memory-bandwidth-bound
+/// wave of ~40 chunks (4 chunks already saturate the memory bus); a full scan pays a handful
+/// of batch barriers (a few percent).
 ///
 /// Each batch is scanned with a section starting exactly at its first chunk, so the batch's
 /// chunks are python's chunks; the section ends where python's last chunk of the batch ends,
@@ -314,7 +315,7 @@ where
     // python default section: (min_address, max_address - min_address)
     let section_end = layer.max_address();
     let max_batch = crate::util::par::threads() * 4;
-    let (mut i0, mut batch) = (0usize, 1usize);
+    let (mut i0, mut batch) = (0usize, 2usize);
     while i0 < n {
         let i1 = (i0 + batch).min(n);
         let start = chunks[i0].0;
@@ -594,6 +595,29 @@ mod tests {
             let s = t.elapsed().as_secs_f64();
             eprintln!("[{round}] MultiStringScanner (trie):     {} hits, {:.3}s, {:.2} GB/s", hits2.len(), s, gb / s);
             assert_eq!(hits, hits2);
+            let t = std::time::Instant::now();
+            let mut hits4 = Vec::new();
+            scan_each_progressive(phys.as_ref(), &BannerScanner::new(pats.clone()), |h| h.0, |h| {
+                hits4.push(h);
+                true
+            });
+            let s = t.elapsed().as_secs_f64();
+            eprintln!("[{round}] BannerScanner progressive:     {} hits, {:.3}s, {:.2} GB/s", hits4.len(), s, gb / s);
+            assert_eq!(hits, hits4);
+            let t = std::time::Instant::now();
+            let mut first = None;
+            scan_each_progressive(phys.as_ref(), &BannerScanner::new(pats.clone()), |h| h.0, |h| {
+                first = Some(h);
+                false
+            });
+            eprintln!("[{round}] progressive first hit {:x?}: {:.3}ms", first, t.elapsed().as_secs_f64() * 1e3);
+            let t = std::time::Instant::now();
+            let mut first = None;
+            scan_each(phys.as_ref(), &BannerScanner::new(pats.clone()), None, |h| {
+                first = Some(h);
+                false
+            });
+            eprintln!("[{round}] scan_each first hit {:x?}: {:.3}ms", first, t.elapsed().as_secs_f64() * 1e3);
             let t = std::time::Instant::now();
             let sc = FnScanner::new(|data: &[u8], off: u64, hits: &mut Vec<u64>| darwin_scan(data, off, DEFAULT_CHUNK_SIZE, hits));
             let hits3 = crate::layers::scan::scan(phys.as_ref(), &sc, None);
