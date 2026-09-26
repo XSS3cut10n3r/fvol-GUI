@@ -1,14 +1,25 @@
 //! bzip2 decoder (multiple streams, CRC verification).
 //!
-//! Per block: Huffman + MTF/RUNA-RUNB decoding into the BWT vector (`tt`, the byte in the
-//! low 8 bits), inverse BWT through the `tt` linked list (index in the high 24 bits), then
-//! the initial run-length decoding. Randomised blocks (a bzip2 0.9.0 feature no encoder has
-//! produced since 0.9.5) are rejected.
+//! Semantics follow python's `bz2.decompress`: every concatenated stream is decoded, invalid
+//! data after a complete stream is ignored, running out of data before an end-of-stream
+//! marker is an error. Randomised blocks (a bzip2 0.9.0 feature no encoder has produced since
+//! 0.9.5) are rejected.
 //!
-//! Throughput: Huffman decoding is table-driven (MSB-first 64-bit bit buffer, 10-bit
-//! primary tables). The inverse BWT is a chain of dependent loads over up to 3.6 MB, so it is
-//! latency-bound; multi-block streams therefore hand finished blocks to worker threads for
-//! the inverse BWT / RLE / CRC while the calling thread keeps entropy-decoding.
+//! Per block:
+//! 1. Entropy decoding: table-driven Huffman (MSB-first 64-bit bit buffer, 10-bit primary
+//!    tables) and MTF / RUNA-RUNB decoding into `ll8`, the BWT's last column (one byte per
+//!    symbol).
+//! 2. Scatter: `tt[j] = (psi(j) << 8) | F[j]`, where F is the sorted (first) column and psi
+//!    the inverse LF mapping. Storing F[j], which is just the bucket's byte, instead of L[j]
+//!    turns libbz2's read-modify-write `tt[cftab[L[i]]++] |= i << 8` into a pure store; the
+//!    output sequence F[orig], F[psi(orig)], F[psi(psi(orig))], ... is the same.
+//! 3. Inverse BWT: following psi is a chain of dependent loads over up to 3.6 MB, i.e. purely
+//!    latency-bound. The permutation is cut into segments at marked entries (bit 31) and
+//!    `LANES` independent walkers follow different segments at the same time (memory-level
+//!    parallelism), each writing into its own column; the segments are then stitched together
+//!    in chain order. Periodic blocks (psi with several cycles) repeat the cycle through
+//!    `orig`, exactly like following the chain n times.
+//! 4. RLE1 decoding (SSE2 scan for 4-byte runs) straight into the output, then the block CRC.
 
 use super::crc::crc32_bzip2;
 use crate::error::{Error, Result};
@@ -20,9 +31,28 @@ const MAX_ALPHA: usize = 258;
 const MAX_SELECTORS: usize = 18002;
 const MAX_CODE_LEN: u32 = 20;
 const LOOKUP_BITS: u32 = 10;
+/// Largest block (level 9): indices fit in 20 bits, so a `tt` entry is
+/// `mark(1) | unused(3) | index(20) | byte(8)`.
+const MAX_BLOCK: usize = 900_000;
+/// Slack after buffers written with over-writing 16-byte stores.
+const PAD: usize = 64;
+/// Segment start marker in `tt` entries.
+const MARK: u32 = 1 << 31;
+/// Concurrent inverse-BWT walkers.
+const LANES: usize = 8;
+/// Column stride of the walkers' output (one column per lane).
+const COL: usize = MAX_BLOCK + PAD;
+/// Blocks shorter than this use a single walker.
+const LANES_MIN: usize = 16 * 1024;
+/// Average segment length (the permutation is cut into n / SEG_LEN segments).
+const SEG_LEN: usize = 1024;
 
 fn corrupt(what: &str) -> Error {
     Error::Msg(format!("bzip2: corrupt data ({what})"))
+}
+
+fn alloc_error() -> Error {
+    Error::Msg("bzip2: out of memory".into())
 }
 
 /// Why decoding a stream failed (python ignores corrupt data after the first stream but
@@ -39,6 +69,7 @@ impl From<Error> for Fail {
 }
 
 /// MSB-first bit reader.
+#[derive(Clone, Copy)]
 struct BitReader<'a> {
     data: &'a [u8],
     /// Valid bits are the top `count` bits of `buf`; bits below are the true next input bits
@@ -54,20 +85,27 @@ impl<'a> BitReader<'a> {
         BitReader { data, buf: 0, count: 0, ip }
     }
 
+    /// Tops the buffer up to at least 56 valid bits (zeros past the end of the input).
     #[inline(always)]
     fn refill(&mut self) {
         if self.ip + 8 <= self.data.len() {
-            let w = u64::from_be_bytes(self.data[self.ip..self.ip + 8].try_into().unwrap());
+            // SAFETY: ip + 8 <= len.
+            let w = u64::from_be_bytes(unsafe { (self.data.as_ptr().add(self.ip) as *const [u8; 8]).read_unaligned() });
             self.buf |= w >> self.count;
             self.ip += ((63 - self.count) >> 3) as usize;
             self.count |= 56;
         } else {
-            while self.count <= 56 {
-                let b = self.data.get(self.ip).copied().unwrap_or(0);
-                self.buf |= (b as u64) << (56 - self.count);
-                self.ip += 1;
-                self.count += 8;
-            }
+            self.refill_tail();
+        }
+    }
+
+    #[inline(never)]
+    fn refill_tail(&mut self) {
+        while self.count <= 56 {
+            let b = self.data.get(self.ip).copied().unwrap_or(0);
+            self.buf |= (b as u64) << (56 - self.count);
+            self.ip += 1;
+            self.count += 8;
         }
     }
 
@@ -80,6 +118,12 @@ impl<'a> BitReader<'a> {
     #[inline(always)]
     fn overrun(&self) -> bool {
         self.position_bits() > self.data.len() * 8
+    }
+
+    /// Classifies an error: anything detected after reading past the end of the input is
+    /// truncation (libbz2 would still be waiting for more data).
+    fn fail(&self, e: Error) -> Fail {
+        if self.overrun() { Fail::Truncated } else { Fail::Corrupt(e) }
     }
 
     #[inline(always)]
@@ -122,15 +166,15 @@ struct HuffTable {
 }
 
 impl HuffTable {
-    fn new() -> Box<HuffTable> {
-        Box::new(HuffTable {
+    fn new() -> HuffTable {
+        HuffTable {
             lookup: [0; 1 << LOOKUP_BITS],
             first: [0; 21],
             count: [0; 21],
             offset: [0; 21],
             sorted: [0; MAX_ALPHA],
             max_len: 0,
-        })
+        }
     }
 
     fn build(&mut self, lens: &[u8]) -> Result<()> {
@@ -173,55 +217,115 @@ impl HuffTable {
         Ok(())
     }
 
-    #[inline(always)]
-    fn decode(&self, br: &mut BitReader) -> Result<u32> {
-        if br.count < 32 {
-            br.refill();
-        }
-        let e = self.lookup[(br.buf >> (64 - LOOKUP_BITS)) as usize];
-        let l = (e & 31) as u32;
-        if l != 0 {
-            br.buf <<= l;
-            br.count -= l;
-            return Ok((e >> 5) as u32);
-        }
+    /// Decodes a code longer than LOOKUP_BITS (the buffer holds at least MAX_CODE_LEN bits).
+    #[inline(never)]
+    fn decode_long(&self, br: &mut BitReader) -> Option<u32> {
         for l in LOOKUP_BITS + 1..=self.max_len {
             let v = (br.buf >> (64 - l)) as u32;
             let d = v.wrapping_sub(self.first[l as usize]);
             if d < self.count[l as usize] {
                 br.buf <<= l;
                 br.count -= l;
-                return Ok(self.sorted[(self.offset[l as usize] + d) as usize] as u32);
+                return Some(self.sorted[(self.offset[l as usize] + d) as usize] as u32);
             }
         }
-        Err(corrupt("invalid Huffman code"))
+        None
     }
 }
 
-/// A block after entropy decoding: the pre-BWT byte vector and its parameters.
-struct RawBlock {
-    tt: Vec<u32>,
+/// Entropy-decoded block parameters (the symbols themselves are in `Scratch::ll8`).
+struct BlockInfo {
+    n: usize,
     orig_ptr: usize,
-    counts: [u32; 256],
     crc: u32,
+    counts: [u32; 256],
 }
 
-/// Reusable decoder state for entropy decoding.
-struct BlockDecoder {
-    tables: Vec<Box<HuffTable>>,
+/// Segment bookkeeping of the multi-lane inverse BWT.
+struct Segs {
+    /// Per segment: lane, first and end round in that lane's column, following segment.
+    lane: Vec<u8>,
+    r0: Vec<u32>,
+    r1: Vec<u32>,
+    next: Vec<u32>,
+    /// Segment each lane is walking.
+    cur: [u32; LANES],
+    unassigned: usize,
+    active: usize,
+    nseg: usize,
+    step: usize,
+    orig: usize,
+    n: usize,
+}
+
+impl Segs {
+    /// Index of the first entry of segment `j`.
+    #[inline(always)]
+    fn start(&self, j: usize) -> usize {
+        let s = self.orig + j * self.step;
+        if s >= self.n { s - self.n } else { s }
+    }
+}
+
+/// Reusable per-decoder buffers.
+struct Scratch {
+    tables: Vec<HuffTable>,
     selectors: Vec<u8>,
+    /// MTF output (BWT last column); capacity MAX_BLOCK + PAD.
+    ll8: Vec<u8>,
+    /// Inverse BWT vector (+1 sentinel entry); capacity MAX_BLOCK + 1.
+    tt: Vec<u32>,
+    /// Lane columns; capacity LANES * COL (only the walked prefix is ever touched).
+    cols: Vec<u8>,
+    /// Pre-RLE1 bytes in output order; capacity MAX_BLOCK + PAD.
+    pre: Vec<u8>,
+    segs: Segs,
 }
 
-impl BlockDecoder {
-    fn new() -> Self {
-        BlockDecoder { tables: (0..MAX_GROUPS).map(|_| HuffTable::new()).collect(), selectors: Vec::new() }
+fn try_vec<T>(cap: usize) -> Result<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(cap).map_err(|_| alloc_error())?;
+    Ok(v)
+}
+
+impl Scratch {
+    fn new() -> Result<Scratch> {
+        Ok(Scratch {
+            tables: (0..MAX_GROUPS).map(|_| HuffTable::new()).collect(),
+            selectors: Vec::with_capacity(MAX_SELECTORS),
+            ll8: try_vec(MAX_BLOCK + PAD)?,
+            tt: try_vec(MAX_BLOCK + 1)?,
+            cols: Vec::new(),
+            pre: try_vec(MAX_BLOCK + PAD)?,
+            segs: Segs {
+                lane: Vec::new(),
+                r0: Vec::new(),
+                r1: Vec::new(),
+                next: Vec::new(),
+                cur: [0; LANES],
+                unassigned: 0,
+                active: 0,
+                nseg: 0,
+                step: 1,
+                orig: 0,
+                n: 0,
+            },
+        })
     }
 
-    /// Decodes one block (after its magic) into `tt`.
-    fn decode(&mut self, br: &mut BitReader, max_block: usize, mut tt: Vec<u32>) -> std::result::Result<RawBlock, Fail> {
+    /// Decodes one block (after its magic), appending its output to `out`; returns the
+    /// block CRC.
+    fn block(&mut self, br: &mut BitReader, max_block: usize, out: &mut Vec<u8>) -> std::result::Result<u32, Fail> {
+        let info = self.entropy(br, max_block)?;
+        self.finish(&info, out)?;
+        Ok(info.crc)
+    }
+
+    /// Huffman + MTF/RUNA-RUNB decoding of one block into `ll8`.
+    fn entropy(&mut self, br: &mut BitReader, max_block: usize) -> std::result::Result<BlockInfo, Fail> {
         let crc = br.bits(32);
         if br.bit() {
-            return Err(Fail::Corrupt(Error::Msg("bzip2: randomised blocks are not supported".into())));
+            return Err(br.fail(Error::Msg("bzip2: randomised blocks are not supported".into())));
         }
         let orig_ptr = br.bits(24) as usize;
         // Symbol map.
@@ -239,22 +343,19 @@ impl BlockDecoder {
                 }
             }
         }
-        if br.overrun() {
-            return Err(Fail::Truncated);
-        }
         if n_in_use == 0 {
-            return Err(corrupt("no symbols in use").into());
+            return Err(br.fail(corrupt("no symbols in use")));
         }
         let alpha = n_in_use + 2;
         let n_groups = br.bits(3) as usize;
         if !(2..=MAX_GROUPS).contains(&n_groups) {
-            return Err(corrupt("number of Huffman groups").into());
+            return Err(br.fail(corrupt("number of Huffman groups")));
         }
         let n_selectors = br.bits(15) as usize;
         if n_selectors == 0 {
-            return Err(corrupt("no selectors").into());
+            return Err(br.fail(corrupt("no selectors")));
         }
-        // Selectors (MTF coded, unary).
+        // Selectors (MTF coded, unary). Values at MTF positions < n_groups stay < n_groups.
         let mut mtf_groups = [0u8, 1, 2, 3, 4, 5];
         self.selectors.clear();
         for i in 0..n_selectors {
@@ -262,11 +363,8 @@ impl BlockDecoder {
             while br.bit() {
                 j += 1;
                 if j >= n_groups {
-                    return Err(corrupt("selector out of range").into());
+                    return Err(br.fail(corrupt("selector out of range")));
                 }
-            }
-            if br.overrun() {
-                return Err(Fail::Truncated);
             }
             if i < MAX_SELECTORS {
                 let v = mtf_groups[j];
@@ -275,6 +373,9 @@ impl BlockDecoder {
                 self.selectors.push(v);
             }
         }
+        if br.overrun() {
+            return Err(Fail::Truncated);
+        }
         // Coding tables (delta-coded lengths).
         let mut lens = [0u8; MAX_ALPHA];
         for t in 0..n_groups {
@@ -282,7 +383,7 @@ impl BlockDecoder {
             for l in lens.iter_mut().take(alpha) {
                 loop {
                     if !(1..=MAX_CODE_LEN as i32).contains(&curr) {
-                        return Err(corrupt("code length").into());
+                        return Err(br.fail(corrupt("code length")));
                     }
                     if !br.bit() {
                         break;
@@ -298,154 +399,392 @@ impl BlockDecoder {
             if br.overrun() {
                 return Err(Fail::Truncated);
             }
-            self.tables[t].build(&lens[..alpha])?;
+            if let Err(e) = self.tables[t].build(&lens[..alpha]) {
+                return Err(br.fail(e));
+            }
         }
 
-        // MTF / RUNA-RUNB decoding.
+        // MTF / RUNA-RUNB decoding. The MTF list holds the byte values themselves.
         let eob = (n_in_use + 1) as u32;
         let mut mtf = [0u8; 256];
-        for (i, m) in mtf.iter_mut().enumerate() {
-            *m = i as u8;
-        }
+        mtf[..n_in_use].copy_from_slice(&seq_to_unseq[..n_in_use]);
         let mut counts = [0u32; 256];
-        tt.clear();
-        tt.reserve(max_block);
-        let mut group_left = 0usize;
+        let ll = self.ll8.as_mut_ptr();
+        debug_assert!(self.ll8.capacity() >= MAX_BLOCK + PAD && max_block <= MAX_BLOCK);
+        let mut pos = 0usize;
         let mut sel = 0usize;
-        let mut table: &HuffTable = &self.tables[0];
         let mut run = 0usize;
         let mut run_bit = 0u32;
-        loop {
-            if group_left == 0 {
-                let s = *self.selectors.get(sel).ok_or_else(|| corrupt("ran out of selectors"))?;
-                if s as usize >= n_groups {
-                    return Err(corrupt("selector").into());
-                }
-                table = &self.tables[s as usize];
-                sel += 1;
-                group_left = 50;
-            }
-            group_left -= 1;
-            let sym = table.decode(br)?;
-            if sym <= 1 {
-                // RUNA / RUNB: bijective base-2 run length of the front symbol.
-                if run_bit > 21 {
-                    return Err(corrupt("run too long").into());
-                }
-                run += ((sym + 1) as usize) << run_bit;
-                run_bit += 1;
-                continue;
-            }
-            if run > 0 {
-                if tt.len() + run > max_block {
-                    return Err(corrupt("block overflow").into());
-                }
-                let b = seq_to_unseq[mtf[0] as usize];
-                counts[b as usize] += run as u32;
-                tt.resize(tt.len() + run, b as u32);
-                run = 0;
-                run_bit = 0;
-            }
-            if sym == eob {
-                break;
-            }
-            if br.overrun() {
-                return Err(Fail::Truncated);
-            }
-            let idx = (sym - 1) as usize;
-            if idx >= n_in_use {
-                return Err(corrupt("MTF index").into());
-            }
-            let v = mtf[idx];
-            mtf.copy_within(0..idx, 1);
-            mtf[0] = v;
-            let b = seq_to_unseq[v as usize];
-            if tt.len() >= max_block {
-                return Err(corrupt("block overflow").into());
-            }
-            counts[b as usize] += 1;
-            tt.push(b as u32);
+        let mut b = *br;
+        macro_rules! bail {
+            ($what:expr) => {{
+                *br = b;
+                return Err(br.fail(corrupt($what)));
+            }};
         }
+        'block: loop {
+            let Some(&s) = self.selectors.get(sel) else { bail!("ran out of selectors") };
+            sel += 1;
+            let tbl = &self.tables[s as usize];
+            for _ in 0..50 {
+                if b.count < MAX_CODE_LEN {
+                    b.refill();
+                }
+                let e = tbl.lookup[(b.buf >> (64 - LOOKUP_BITS)) as usize];
+                let l = (e & 31) as u32;
+                let sym = if l != 0 {
+                    b.buf <<= l;
+                    b.count -= l;
+                    (e >> 5) as u32
+                } else {
+                    match tbl.decode_long(&mut b) {
+                        Some(s) => s,
+                        None => bail!("invalid Huffman code"),
+                    }
+                };
+                if sym <= 1 {
+                    // RUNA / RUNB: bijective base-2 run length of the front symbol.
+                    if run_bit > 21 {
+                        bail!("run too long");
+                    }
+                    run += ((sym + 1) as usize) << run_bit;
+                    run_bit += 1;
+                    continue;
+                }
+                if run > 0 {
+                    if pos + run > max_block {
+                        bail!("block overflow");
+                    }
+                    let v = mtf[0];
+                    counts[v as usize] += run as u32;
+                    // SAFETY: pos + run <= MAX_BLOCK; the fill over-writes < 16 bytes into PAD.
+                    unsafe { fill16(ll.add(pos), v, run) };
+                    pos += run;
+                    run = 0;
+                    run_bit = 0;
+                }
+                if sym == eob {
+                    break 'block;
+                }
+                // sym < eob: MTF index 1..n_in_use-1.
+                let v = mtf_move(&mut mtf, (sym - 1) as usize);
+                if pos >= max_block {
+                    bail!("block overflow");
+                }
+                counts[v as usize] += 1;
+                // SAFETY: pos < max_block <= capacity.
+                unsafe { *ll.add(pos) = v };
+                pos += 1;
+            }
+        }
+        *br = b;
         if br.overrun() {
             return Err(Fail::Truncated);
         }
-        if orig_ptr >= tt.len() {
+        if orig_ptr >= pos {
             return Err(corrupt("original pointer out of range").into());
         }
-        Ok(RawBlock { tt, orig_ptr, counts, crc })
+        Ok(BlockInfo { n: pos, orig_ptr, crc, counts })
+    }
+
+    /// Inverse BWT + RLE1 of the block in `ll8`, appended to `out`; checks the block CRC.
+    fn finish(&mut self, info: &BlockInfo, out: &mut Vec<u8>) -> Result<()> {
+        let n = info.n;
+        debug_assert!(n >= 1 && n <= MAX_BLOCK && info.orig_ptr < n);
+        // SAFETY: ll8 holds n decoded bytes whose histogram is `counts` (so every tt slot
+        // below n is written exactly once with an index < n); buffer capacities are fixed at
+        // construction (tt: MAX_BLOCK + 1, pre: MAX_BLOCK + PAD).
+        unsafe {
+            scatter(self.ll8.as_ptr(), n, &info.counts, self.tt.as_mut_ptr());
+            if n < LANES_MIN {
+                walk_single(self.tt.as_ptr(), n, info.orig_ptr, self.pre.as_mut_ptr());
+            } else {
+                if self.cols.capacity() < LANES * COL {
+                    self.cols.try_reserve_exact(LANES * COL).map_err(|_| alloc_error())?;
+                }
+                walk_lanes(self.tt.as_mut_ptr(), n, info.orig_ptr, self.cols.as_mut_ptr(), self.pre.as_mut_ptr(), &mut self.segs)?;
+            }
+            let start = out.len();
+            unrle(std::slice::from_raw_parts(self.pre.as_ptr(), n), out)?;
+            if crc32_bzip2(&out[start..]) != info.crc {
+                return Err(corrupt("block CRC mismatch"));
+            }
+        }
+        Ok(())
     }
 }
 
-/// Inverse BWT + run-length decoding of one block, appended to `out`. Returns the CRC.
-fn finish_block(blk: &mut RawBlock, out: &mut Vec<u8>) -> Result<()> {
-    let n = blk.tt.len();
-    let tt = &mut blk.tt[..];
-    // cftab: start of each byte value's bucket.
+/// Moves `mtf[idx]` (idx >= 1) to the front; returns it.
+#[inline(always)]
+fn mtf_move(mtf: &mut [u8; 256], idx: usize) -> u8 {
+    let v = mtf[idx & 255];
+    if idx < 16 {
+        let w = u128::from_le_bytes(mtf[..16].try_into().unwrap());
+        let below = (1u128 << (8 * idx)) - 1; // bytes < idx
+        let above = !((below << 8) | 0xFF); // bytes > idx
+        let nw = (w & above) | ((w & below) << 8) | v as u128;
+        mtf[..16].copy_from_slice(&nw.to_le_bytes());
+    } else {
+        let idx = idx & 255;
+        mtf.copy_within(0..idx, 1);
+        mtf[0] = v;
+    }
+    v
+}
+
+/// Writes `c` copies of `x` at `p`, possibly over-writing up to 15 bytes past `p + c`.
+///
+/// # Safety
+/// `p .. p + c + 15` must be writable.
+#[inline(always)]
+unsafe fn fill16(p: *mut u8, x: u8, c: usize) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::*;
+        let v = _mm_set1_epi8(x as i8);
+        let mut k = 0;
+        while k < c {
+            _mm_storeu_si128(p.add(k) as *mut __m128i, v);
+            k += 16;
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    unsafe {
+        std::ptr::write_bytes(p, x, c);
+    }
+}
+
+/// `tt[cf[L[i]]++] = (i << 8) | L[i]` for i in 0..n, where cf starts at the bucket starts.
+///
+/// # Safety
+/// `ll8[..n]` readable with histogram `counts`; `tt[..n]` writable.
+unsafe fn scatter(ll8: *const u8, n: usize, counts: &[u32; 256], tt: *mut u32) {
     let mut cf = [0u32; 256];
     let mut sum = 0u32;
-    for (c, &k) in cf.iter_mut().zip(blk.counts.iter()) {
+    for (c, &k) in cf.iter_mut().zip(counts.iter()) {
         *c = sum;
         sum += k;
     }
-    for i in 0..n {
-        let b = (tt[i] & 0xFF) as usize;
-        let d = cf[b] as usize;
-        // SAFETY-free: d < n because the counts sum to n.
-        tt[d] |= (i as u32) << 8;
-        cf[b] += 1;
+    debug_assert_eq!(sum as usize, n);
+    unsafe {
+        for i in 0..n {
+            let b = *ll8.add(i);
+            let d = *cf.get_unchecked(b as usize);
+            *tt.add(d as usize) = ((i as u32) << 8) | b as u32;
+            *cf.get_unchecked_mut(b as usize) = d + 1;
+        }
     }
-    let start = out.len();
-    out.reserve(n + 256);
-    let mut t = tt[blk.orig_ptr] >> 8;
-    let mut prev: u32 = 256; // not a byte
-    let mut same = 0u32;
-    let mut k = 0usize;
-    while k < n {
-        let e = tt[(t as usize).min(n - 1)];
-        t = e >> 8;
-        let ch = e & 0xFF;
-        k += 1;
-        if same == 4 {
-            // Run-length byte: `ch` more copies of `prev`.
-            out.resize(out.len() + ch as usize, prev as u8);
-            same = 0;
-            prev = 256;
-            continue;
+}
+
+/// Single-walker inverse BWT (short blocks).
+///
+/// # Safety
+/// `tt[..n]` is the scatter output (indices < n); `pre[..n]` writable.
+unsafe fn walk_single(tt: *const u32, n: usize, orig: usize, pre: *mut u8) {
+    let mut t = orig;
+    for k in 0..n {
+        unsafe {
+            let e = *tt.add(t);
+            *pre.add(k) = e as u8;
+            t = (e >> 8) as usize;
         }
-        if ch == prev {
-            same += 1;
-        } else {
-            prev = ch;
-            same = 1;
-        }
-        if out.len() == out.capacity() {
-            out.reserve(n - k + 256);
-        }
-        out.push(ch as u8);
     }
-    if crc32_bzip2(&out[start..]) != blk.crc {
-        return Err(corrupt("block CRC mismatch"));
+}
+
+/// A lane reached a marked entry at index `t`: closes its segment and hands it the next
+/// unassigned one (or parks it on the self-looping sentinel entry `tt[n]`). Returns the
+/// lane's new current entry.
+#[cold]
+#[inline(never)]
+unsafe fn seg_end(s: &mut Segs, tt: *const u32, w: usize, t: usize, r: usize) -> u32 {
+    let k = s.cur[w] as usize;
+    s.r1[k] = (r + 1) as u32;
+    let d = if t >= s.orig { t - s.orig } else { t + s.n - s.orig };
+    s.next[k] = (d / s.step) as u32;
+    if s.unassigned < s.nseg {
+        let j = s.unassigned;
+        s.unassigned += 1;
+        s.cur[w] = j as u32;
+        s.lane[j] = w as u8;
+        s.r0[j] = (r + 1) as u32;
+        unsafe { *tt.add(s.start(j)) & !MARK }
+    } else {
+        s.active -= 1;
+        (s.n as u32) << 8
+    }
+}
+
+/// Multi-lane inverse BWT into `pre[..n]`.
+///
+/// # Safety
+/// `tt[..n]` is the scatter output (indices < n) with room for `tt[n]`; `cols` has
+/// capacity LANES * COL; `pre[..n]` writable; n >= LANES_MIN.
+unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *mut u8, s: &mut Segs) -> Result<()> {
+    let nseg = (n / SEG_LEN).max(LANES);
+    s.nseg = nseg;
+    s.step = n / nseg;
+    s.orig = orig;
+    s.n = n;
+    for v in [&mut s.r0, &mut s.r1, &mut s.next] {
+        v.clear();
+        v.resize(nseg, 0);
+    }
+    s.lane.clear();
+    s.lane.resize(nseg, 0);
+    unsafe {
+        // Segment starts are distinct: j * step < n for j < nseg.
+        for j in 0..nseg {
+            *tt.add(s.start(j)) |= MARK;
+        }
+        *tt.add(n) = (n as u32) << 8;
+        let mut e = [0u32; LANES];
+        for (w, x) in e.iter_mut().enumerate() {
+            *x = *tt.add(s.start(w)) & !MARK;
+            s.cur[w] = w as u32;
+            s.lane[w] = w as u8;
+        }
+        s.unassigned = LANES;
+        s.active = LANES;
+        let mut r = 0usize;
+        loop {
+            // Rounds <= total steps <= n < COL, but never trust that with raw writes.
+            if r >= COL {
+                return Err(corrupt("inverse BWT"));
+            }
+            let p = cols.add(r);
+            for w in 0..LANES {
+                let x = e[w];
+                *p.add(w * COL) = x as u8;
+                let t = (x >> 8) as usize;
+                let ne = *tt.add(t);
+                e[w] = if ne & MARK == 0 { ne } else { seg_end(s, tt, w, t, r) };
+            }
+            r += 1;
+            if s.active == 0 {
+                break;
+            }
+        }
+        // Stitch the segments in chain order, starting with the one at `orig`.
+        let mut k = 0usize;
+        let mut total = 0usize;
+        while total < n {
+            let r0 = s.r0[k] as usize;
+            let len = (s.r1[k] as usize - r0).min(n - total);
+            std::ptr::copy_nonoverlapping(cols.add(s.lane[k] as usize * COL + r0), pre.add(total), len);
+            total += len;
+            k = s.next[k] as usize;
+        }
     }
     Ok(())
 }
 
-/// Decodes one stream starting at byte `off`; returns the byte offset after it.
-fn decode_stream(data: &[u8], off: usize, out: &mut Vec<u8>) -> std::result::Result<usize, Fail> {
-    let h = data.get(off..off + 4).ok_or(Fail::Truncated)?;
-    if &h[..3] != b"BZh" || !(b'1'..=b'9').contains(&h[3]) {
-        return Err(corrupt("bad stream header").into());
+/// Grows `out` so that `extra` more bytes fit.
+fn reserve(out: &mut Vec<u8>, extra: usize) -> Result<()> {
+    out.try_reserve(extra).map_err(|_| alloc_error())
+}
+
+/// Undoes the initial run-length encoding (4 equal bytes + count byte) of `src`, appending
+/// to `out`.
+fn unrle(src: &[u8], out: &mut Vec<u8>) -> Result<()> {
+    let n = src.len();
+    reserve(out, n + PAD)?;
+    let s = src.as_ptr();
+    // SAFETY: `room` tracks the spare capacity after `op`; the invariant
+    // room >= (n - i) + PAD holds at the top of each iteration, so the 16-byte stores and
+    // fills (which over-write < 16 bytes) stay inside the allocation. Reads stay below n.
+    unsafe {
+        let mut op = out.as_mut_ptr().add(out.len());
+        let mut room = out.capacity() - out.len();
+        let mut i = 0usize;
+        loop {
+            // Find the next run start j >= i (src[j..j+4] all equal), copying src[i..j].
+            let j = loop {
+                #[cfg(target_arch = "x86_64")]
+                if i + 19 <= n {
+                    use std::arch::x86_64::*;
+                    let a = _mm_loadu_si128(s.add(i) as *const __m128i);
+                    let b = _mm_loadu_si128(s.add(i + 1) as *const __m128i);
+                    let c = _mm_loadu_si128(s.add(i + 2) as *const __m128i);
+                    let d = _mm_loadu_si128(s.add(i + 3) as *const __m128i);
+                    _mm_storeu_si128(op as *mut __m128i, a);
+                    let m = _mm_movemask_epi8(_mm_and_si128(
+                        _mm_and_si128(_mm_cmpeq_epi8(a, b), _mm_cmpeq_epi8(a, c)),
+                        _mm_cmpeq_epi8(a, d),
+                    )) as u32;
+                    if m == 0 {
+                        i += 16;
+                        op = op.add(16);
+                        room -= 16;
+                        continue;
+                    }
+                    let z = m.trailing_zeros() as usize;
+                    op = op.add(z);
+                    room -= z;
+                    break i + z;
+                }
+                if i + 4 > n {
+                    let rest = n - i;
+                    std::ptr::copy_nonoverlapping(s.add(i), op, rest);
+                    let len = out.capacity() - room + rest;
+                    out.set_len(len);
+                    return Ok(());
+                }
+                let x = *s.add(i);
+                if *s.add(i + 1) == x && *s.add(i + 2) == x && *s.add(i + 3) == x {
+                    break i;
+                }
+                *op = x;
+                op = op.add(1);
+                room -= 1;
+                i += 1;
+            };
+            let x = *s.add(j);
+            (op as *mut [u8; 4]).write_unaligned([x; 4]);
+            op = op.add(4);
+            room -= 4;
+            if j + 4 >= n {
+                // A run at the very end of the block has no count byte.
+                let len = out.capacity() - room;
+                out.set_len(len);
+                return Ok(());
+            }
+            let c = *s.add(j + 4) as usize;
+            let rest = n - (j + 5);
+            if room < c + rest + PAD {
+                let len = out.capacity() - room;
+                out.set_len(len);
+                reserve(out, c + rest + PAD)?;
+                op = out.as_mut_ptr().add(len);
+                room = out.capacity() - len;
+            }
+            fill16(op, x, c);
+            op = op.add(c);
+            room -= c;
+            i = j + 5;
+        }
     }
-    let max_block = (h[3] - b'0') as usize * 100_000;
+}
+
+/// Decodes one stream starting at byte `off`; returns the byte offset after it.
+fn decode_stream(data: &[u8], off: usize, sc: &mut Scratch, out: &mut Vec<u8>) -> std::result::Result<usize, Fail> {
+    // Header "BZh1".."BZh9"; a mismatch in the available bytes is corrupt, a short but
+    // matching prefix is truncation (libbz2 checks byte by byte).
+    let avail = &data[off.min(data.len())..];
+    for (k, &b) in avail.iter().take(4).enumerate() {
+        let ok = if k < 3 { b == b"BZh"[k] } else { (b'1'..=b'9').contains(&b) };
+        if !ok {
+            return Err(corrupt("bad stream header").into());
+        }
+    }
+    if avail.len() < 4 {
+        return Err(Fail::Truncated);
+    }
+    let max_block = (avail[3] - b'0') as usize * 100_000;
     let mut br = BitReader::new(data, off + 4);
-    let mut dec = BlockDecoder::new();
     let mut combined = 0u32;
-    let mut tt: Vec<u32> = Vec::new();
     loop {
         let hi = br.bits(24) as u64;
         let magic = (hi << 24) | br.bits(24) as u64;
-        if br.overrun() {
-            return Err(Fail::Truncated);
-        }
         if magic == END_MAGIC {
             let crc = br.bits(32);
             if br.overrun() {
@@ -457,24 +796,25 @@ fn decode_stream(data: &[u8], off: usize, out: &mut Vec<u8>) -> std::result::Res
             return Ok(br.byte_align());
         }
         if magic != BLOCK_MAGIC {
-            return Err(corrupt("bad block magic").into());
+            return Err(br.fail(corrupt("bad block magic")));
         }
-        let mut blk = dec.decode(&mut br, max_block, std::mem::take(&mut tt))?;
-        combined = combined.rotate_left(1) ^ blk.crc;
-        finish_block(&mut blk, out)?;
-        tt = blk.tt;
+        let crc = sc.block(&mut br, max_block, out)?;
+        combined = combined.rotate_left(1) ^ crc;
     }
 }
 
 /// Decompresses a bzip2 file (all concatenated streams). Like python's `bz2.decompress`,
 /// invalid data after the first complete stream is ignored.
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len().saturating_mul(5).min(1 << 30));
+    let mut out = Vec::new();
+    // Size hint only (a failed reservation just means growing later).
+    let _ = out.try_reserve(data.len().saturating_mul(5).min(1 << 30));
+    let mut sc = Scratch::new()?;
     let mut off = 0usize;
     let mut streams = 0;
     while off < data.len() {
         let mark = out.len();
-        match decode_stream(data, off, &mut out) {
+        match decode_stream(data, off, &mut sc, &mut out) {
             Ok(next) => {
                 off = next;
                 streams += 1;
