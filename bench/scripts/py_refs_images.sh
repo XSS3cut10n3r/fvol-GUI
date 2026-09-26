@@ -4,26 +4,31 @@
 #   plugin list: -l LIST, else the manifest's optional 6th column, else bench/{win,linux,mac}_noarg.txt
 #   PAR=2       python processes at once (each capped at 8G by limit.sh)
 #   TIMEOUT=3600 per-plugin timeout (seconds)
+#   PYCACHE=testdata/scratch/pycache-refs  private python --cache-path (see below; PYCACHE=default = shared cache)
 # Per image: <ref_dir>/<plugin>.txt (stdout), .err (stderr), dump/<plugin>/ (files written by -o;
 # empty dirs pruned) and times.tsv (plugin, rc, seconds). Plugins whose .txt already exists are skipped.
 # A warm-up run (windows.info / banners) goes first, alone, so the kernel ISF is downloaded and the
 # identifier cache refreshed before parallel runs (concurrent PDB downloads can clobber each other).
-# Retry pass: python's shared identifier cache (~/.cache/volatility3/identifier.cache) is pruned by every
-# python run that uses different -s dirs, so with other python jobs around a plugin can transiently fail
-# with "Unable to validate the plugin requirements" / "could not be downloaded". Such failures are re-run
-# (RETRIES times, default 2); what still fails after that is a genuine python failure.
+# Private cache: python's identifier cache (~/.cache/volatility3/identifier.cache) is pruned by every python
+# run to the ISFs under *its* -s dirs, so concurrent python jobs of other agents make plugins fail with
+# "Unable to validate the plugin requirements" / re-download ISFs, and make timeliner silently drop the
+# rows of sub-plugins that failed. References therefore run with their own --cache-path (downloads still
+# land in the first -s dir; ~/.cache/volatility3/symbols stays on python's symbol path).
+# Retry pass: rc!=0 runs whose .err shows such a symbol/cache failure are re-run (RETRIES times, default 2).
 ROOT=/home/user/rs-vol
 MANIFEST=${MANIFEST:-$ROOT/bench/images.tsv}
 LISTOVR=
 if [ "$1" = "-l" ]; then LISTOVR=$2; shift 2; fi
 [ $# -gt 0 ] || { echo "usage: $0 [-l LIST] NAME...|all" >&2; exit 2; }
 export VOL=$ROOT/volatility3/vol.py PY=$ROOT/bench/venv/bin/python TIMEOUT=${TIMEOUT:-3600}
+PYCACHE=${PYCACHE:-$ROOT/testdata/scratch/pycache-refs}
+if [ "$PYCACHE" = default ]; then export CACHEARGS=; else mkdir -p "$PYCACHE"; export CACHEARGS="--cache-path $PYCACHE"; fi
 run() { # plugin  (env: IMG OUT SYMARGS)
   p=$1
   [ -s "$OUT/$p.txt" ] && return
   d=$OUT/dump/$p; mkdir -p "$d"
   s=$(date +%s.%N)
-  $ROOT/bench/scripts/limit.sh -m 8G timeout $TIMEOUT nice -n 10 "$PY" "$VOL" -q $SYMARGS -o "$d" -f "$IMG" "$p" > "$OUT/$p.tmp" 2> "$OUT/$p.err"
+  $ROOT/bench/scripts/limit.sh -m 8G timeout $TIMEOUT nice -n 10 "$PY" "$VOL" -q $CACHEARGS $SYMARGS -o "$d" -f "$IMG" "$p" > "$OUT/$p.tmp" 2> "$OUT/$p.err"
   rc=$?
   e=$(date +%s.%N)
   mv "$OUT/$p.tmp" "$OUT/$p.txt"

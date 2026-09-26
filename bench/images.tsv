@@ -40,5 +40,6 @@ deb12-6.1-686-raw	linux	/home/user/rs-vol/testdata/images/linux/rsvol-deb12-6.1.
 deb12-6.1-686-lime	linux	/home/user/rs-vol/testdata/images/linux/rsvol-deb12-6.1.0-50-686.lime	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/deb12-6.1-686-lime	linux_fmt_noarg.txt
 noble-6.17-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.17.0-42.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/noble-6.17-elf
 noble-6.17-qemu	linux	/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.17.0-42.qemu	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/noble-6.17-qemu	linux_fmt_noarg.txt
+resolute-7.0-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-resolute-7.0.0-31.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/resolute-7.0-elf
 mac-10.9.2	mac	/home/user/rs-vol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/mac/rsvol-mac-mavericks-10.9.2
 mac-10.12.6	mac	/home/user/rs-vol/testdata/images/mac/securinets2019-contact_me-macos-10.12.6.raw	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/mac/mac-10.12.6
