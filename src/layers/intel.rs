@@ -707,11 +707,43 @@ impl IntelLayer {
         Ok(())
     }
 
+    /// `walk(offset, length, ignore_errors = true, f)` -- the same chunks in the same order --
+    /// but visiting the page tables level by level: every table is read once, a faulting or
+    /// skipped entry drops its whole block, and each leaf entry fully inside the range is one
+    /// chunk. Blocks that start before the current offset or end past the range end (the
+    /// partial first page, a large page cut by the range end, ...) take `walk`'s per-address
+    /// step instead, so its skip arithmetic applies to them unchanged.
+    fn walk_ranges<F>(&self, offset: u64, length: u64, f: F)
+    where
+        F: FnMut(u64, u64, u64, Target) -> bool,
+    {
+        if length == 0 {
+            let _ = self.walk(offset, 0, true, f);
+            return;
+        }
+        let end = (offset as u128 + length as u128).min(1u128 << 64);
+        let swap = self.flavor == PteFlavor::Windows && !self.swap.is_empty();
+        RangeWalk { l: self, off: offset, end, f, cur: (0, 0), swap }.run();
+    }
+
+    /// The 4 KiB page table at physical `base` straight from the mmapped file / a zero-copy
+    /// slice (None: read entries one by one).
+    #[inline]
+    fn table_slice(&self, base: u64) -> Option<&[u8]> {
+        if let Some((ptr, len)) = self.phys_raw {
+            return match base.checked_add(0x1000) {
+                Some(end) if end <= len => Some(unsafe { std::slice::from_raw_parts((ptr as *const u8).add(base as usize), 0x1000) }),
+                _ => None,
+            };
+        }
+        self.phys.slice(base, 0x1000)
+    }
+
     /// python `mapping()` including swap targets: coalesced runs `(offset, len, mapped, target)`.
     pub fn mapping_with_targets(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping, Target) -> bool) {
         let mut stash: Option<(Mapping, Target)> = None;
         let mut stopped = false;
-        let _ = self.walk(addr, len, true, |off, size, mapped, t| {
+        self.walk_ranges(addr, len, |off, size, mapped, t| {
             if let Some((ref mut m, st)) = stash {
                 if m.offset.wrapping_add(m.len) == off && m.mapped.wrapping_add(m.len) == mapped && st == t {
                     m.len += size;
@@ -802,6 +834,179 @@ impl IntelLayer {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+}
+
+/// Outcome of visiting (part of) a page-table block in [`RangeWalk`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flow {
+    /// the block is done; carry on with the next one
+    Next,
+    /// the range is done, or `f` asked to stop
+    Stop,
+    /// the block at the current offset can't be taken wholesale: one per-address step
+    Partial,
+}
+
+/// State of one [`IntelLayer::walk_ranges`] walk.
+struct RangeWalk<'a, F> {
+    l: &'a IntelLayer,
+    /// everything below `off` is done
+    off: u64,
+    /// exclusive end of the range (at most 2^64; 0 once the walk is over)
+    end: u128,
+    f: F,
+    /// `translate_cursor` state for the per-address steps
+    cur: (u64, u64),
+    /// invalid entries may map to a swap layer (Windows flavour with swap layers attached)
+    swap: bool,
+}
+
+impl<F: FnMut(u64, u64, u64, Target) -> bool> RangeWalk<'_, F> {
+    fn run(&mut self) {
+        while (self.off as u128) < self.end {
+            if self.fast() == Flow::Stop || (self.off as u128) >= self.end {
+                return;
+            }
+            if !self.step() {
+                return;
+            }
+        }
+    }
+
+    /// Whole blocks from the root, epoch by epoch (addresses above the virtual address width
+    /// alias the ones below it, like python's index masking).
+    fn fast(&mut self) -> Flow {
+        let l = self.l;
+        let bits = l.initial_position + 1;
+        loop {
+            if (self.off as u128) >= self.end {
+                return Flow::Stop;
+            }
+            let vbase = self.off & !((1u64 << bits) - 1);
+            match self.table(l.initial_entry, 0, l.initial_position, vbase) {
+                Flow::Next => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// Everything up to `to` (exclusive, <= 2^64) is done.
+    #[inline(always)]
+    fn advance(&mut self, to: u128) -> Flow {
+        if to >= self.end {
+            self.end = 0;
+            return Flow::Stop;
+        }
+        self.off = to as u64;
+        Flow::Next
+    }
+
+    /// One iteration of `walk`'s per-address loop at `off`. False when the walk is over.
+    fn step(&mut self) -> bool {
+        let l = self.l;
+        let offset = self.off;
+        let length = self.end - offset as u128;
+        let skip_mask: u64;
+        match l.translate_cursor(offset, &mut self.cur) {
+            Ok((chunk_offset, bits, t)) => {
+                let page_size = 1u128 << bits;
+                let chunk_size = (page_size - (offset as u128 & (page_size - 1))).min(length) as u64;
+                if l.target_valid(t, chunk_offset, chunk_size) {
+                    if !(self.f)(offset, chunk_size, chunk_offset, t) {
+                        return false;
+                    }
+                    return self.advance(offset as u128 + chunk_size as u128) == Flow::Next;
+                }
+                skip_mask = chunk_size - 1;
+            }
+            Err(fault) => {
+                skip_mask = if fault.invalid_bits >= 64 { u64::MAX } else { (1u64 << fault.invalid_bits) - 1 };
+            }
+        }
+        let length_diff = skip_mask as u128 + 1 - (offset & skip_mask) as u128;
+        self.advance(offset as u128 + length_diff) == Flow::Next
+    }
+
+    /// The table that `entry` points to, covering `[vbase, vbase + 2^(pos+1))`; `off` lies in
+    /// that block.
+    fn table(&mut self, entry: u64, level: usize, pos: u32, vbase: u64) -> Flow {
+        let l = self.l;
+        if !l.entry_valid(entry) {
+            return self.fault(entry, pos + 1, vbase);
+        }
+        let (size, large) = l.p.levels[level];
+        let base = mask_bits(entry, l.p.maxphyaddr - 1, size + l.p.index_shift);
+        if !l.table_valid(base) {
+            return self.fault(entry, pos + 1, vbase);
+        }
+        let raw = l.table_slice(base);
+        let shift = l.p.index_shift;
+        let npos = pos - size;
+        let sub_bits = npos + 1;
+        let last = level + 1 == l.p.levels.len();
+        let first = ((self.off - vbase) >> sub_bits) as usize;
+        for idx in first..(1usize << size) {
+            let at = idx << shift;
+            let e = match raw {
+                Some(t) if shift == 3 => u64::from_le_bytes(t[at..at + 8].try_into().unwrap()),
+                Some(t) => u32::from_le_bytes(t[at..at + 4].try_into().unwrap()) as u64,
+                None => match l.read_entry(base + at as u64) {
+                    Some(e) => e,
+                    None => return self.fault(entry, pos + 1, vbase),
+                },
+            };
+            let sub = vbase + ((idx as u64) << sub_bits);
+            let flow = if last {
+                self.leaf(e, sub_bits, sub)
+            } else if large && e & (1 << 7) != 0 {
+                self.leaf(if e & (1 << 12) != 0 { e - (1 << 12) } else { e }, sub_bits, sub)
+            } else {
+                self.table(e, level + 1, npos, sub)
+            };
+            if flow != Flow::Next {
+                return flow;
+            }
+        }
+        Flow::Next
+    }
+
+    /// A final entry (PTE or large page) mapping `[vbase, vbase + 2^bits)`.
+    #[inline(always)]
+    fn leaf(&mut self, e: u64, bits: u32, vbase: u64) -> Flow {
+        let l = self.l;
+        if !l.entry_valid(e) {
+            return self.fault(e, bits, vbase);
+        }
+        let block_end = vbase as u128 + (1u128 << bits);
+        if vbase < self.off || block_end > self.end {
+            return Flow::Partial;
+        }
+        let phys = l.pte_pfn(e) << 12;
+        let size = 1u64 << bits;
+        if l.target_valid(Target::Phys, phys, size) && !(self.f)(vbase, size, phys, Target::Phys) {
+            return Flow::Stop;
+        }
+        self.advance(block_end)
+    }
+
+    /// A faulting entry (`invalid_bits == bits`) for the block at `vbase`: skipped, or a swap
+    /// chunk (python `_translate_swap`).
+    #[inline(always)]
+    fn fault(&mut self, entry: u64, bits: u32, vbase: u64) -> Flow {
+        let block_end = vbase as u128 + (1u128 << bits);
+        if self.swap && entry != 0 {
+            if let Ok((swap_offset, _, t)) = self.l.translate_swap(Fault { invalid_bits: bits, entry, swap_offset: None }) {
+                if vbase < self.off || block_end > self.end {
+                    return Flow::Partial;
+                }
+                let size = 1u64 << bits;
+                if self.l.target_valid(t, swap_offset, size) && !(self.f)(vbase, size, swap_offset, t) {
+                    return Flow::Stop;
+                }
+            }
+        }
+        self.advance(block_end)
     }
 }
 
@@ -1133,5 +1338,352 @@ mod tests {
         let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1000, PagingMode::Intel32e, PteFlavor::Generic);
         assert!(l.translate_addr(0).is_none());
         assert!(l.mappings(0, 1 << 47).is_empty());
+    }
+
+    type Chunk = (u64, u64, u64, Target);
+
+    /// Chunks of the per-address walk (python `_mapping`, the reference).
+    pub(crate) fn chunks_per_address(l: &IntelLayer, off: u64, len: u64) -> Vec<Chunk> {
+        let mut v = Vec::new();
+        let _ = l.walk(off, len, true, |o, s, m, t| {
+            v.push((o, s, m, t));
+            true
+        });
+        v
+    }
+
+    /// Chunks of the level-by-level walk.
+    pub(crate) fn chunks_ranges(l: &IntelLayer, off: u64, len: u64) -> Vec<Chunk> {
+        let mut v = Vec::new();
+        l.walk_ranges(off, len, |o, s, m, t| {
+            v.push((o, s, m, t));
+            true
+        });
+        v
+    }
+
+    /// A physical layer with holes: `hole(addr)` bytes are unreadable / invalid; `slice` is
+    /// offered or not (zero-copy table path vs entry-by-entry reads).
+    struct Holey {
+        m: Vec<u8>,
+        holes: bool,
+        slices: bool,
+    }
+    impl Holey {
+        fn hole(&self, a: u64) -> bool {
+            // the upper half of every 7th page, and all of every 11th page
+            let p = a >> 12;
+            self.holes && ((p % 7 == 3 && a & 0x800 != 0) || p % 11 == 5)
+        }
+    }
+    impl Layer for Holey {
+        fn name(&self) -> &str {
+            "holey"
+        }
+        fn max_address(&self) -> u64 {
+            self.m.len() as u64 - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            if !self.is_valid(addr, buf.len() as u64) {
+                return Err(Error::invalid(addr));
+            }
+            buf.copy_from_slice(&self.m[addr as usize..addr as usize + buf.len()]);
+            Ok(())
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            let Some(end) = addr.checked_add(len) else { return false };
+            if end > self.m.len() as u64 {
+                return false;
+            }
+            if !self.holes {
+                return true;
+            }
+            let mut a = addr & !0x7ff;
+            while a < end.max(addr + 1) {
+                if self.hole(a.max(addr)) {
+                    return false;
+                }
+                a += 0x800;
+            }
+            true
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
+            f(Mapping { offset: addr, len, mapped: addr });
+        }
+        fn slice(&self, addr: u64, len: usize) -> Option<&[u8]> {
+            if self.slices && self.is_valid(addr, len as u64) { Some(&self.m[addr as usize..addr as usize + len]) } else { None }
+        }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// Random sparse page tables: `ntables` 4 KiB tables at pages 1.., a few entries each
+    /// (pointers to other tables incl. themselves, 4 KiB / large frames in and out of range,
+    /// transition / prototype / swap-looking / PROT_NONE entries), plus a uniform table.
+    fn random_memory(rng: &mut Rng, es: usize, ntables: u64, npages: u64) -> Vec<u8> {
+        let mut m = vec![0u8; (npages << 12) as usize];
+        for p in npages - 16..npages {
+            for b in 0..4096u64 {
+                m[((p << 12) + b) as usize] = (p * 31 + b) as u8;
+            }
+        }
+        let uniform = ntables; // page `ntables` is a uniform (invalid) table
+        for i in 0..(4096 / es) {
+            let at = ((uniform << 12) as usize) + i * es;
+            m[at..at + es].copy_from_slice(&0x3003u64.to_le_bytes()[..es]);
+        }
+        for t in 1..ntables {
+            let n = 1 + rng.below(6);
+            for _ in 0..n {
+                let idx = if rng.below(3) == 0 { rng.below(4) } else { rng.below((4096 / es) as u64) };
+                let target_page = 1 + rng.below(ntables + 1);
+                let frame = match rng.below(6) {
+                    0 => npages - 16 + rng.below(16), // data pages
+                    1 => rng.below(npages * 2),       // may be out of range
+                    2 => rng.below(1 << 20),          // far away
+                    3 => rng.below(2) << 9,           // 2 MiB aligned (large pages in range)
+                    4 => rng.below(2) << 10,          // 4 MiB aligned
+                    _ => target_page,
+                };
+                let e: u64 = match rng.below(12) {
+                    0..=3 => (target_page << 12) | 1 | (rng.below(2) << 6),
+                    4 => (frame << 12) | 0x81 | (rng.below(2) << 12),  // large (PAT maybe)
+                    5 => (frame << 12) | 1,
+                    6 => (frame << 12) | (1 << 11),                   // transition
+                    7 => (frame << 12) | (1 << 11) | (1 << 10),       // prototype
+                    8 => (rng.below(64) << 32) | 0x80 | (rng.below(5) << 1), // swap-looking (x64 / PAE)
+                    9 => (rng.below(1024) << 12) | 0x80 | (rng.below(5) << 1), // swap-looking (32-bit)
+                    10 => !((frame << 12) | 0xfff) | 0x100,          // PROT_NONE, inverted pfn
+                    _ => rng.next(),
+                };
+                let at = ((t << 12) as usize) + (idx as usize) * es;
+                m[at..at + es].copy_from_slice(&e.to_le_bytes()[..es]);
+            }
+        }
+        m
+    }
+
+    /// The level-by-level walk yields exactly the per-address walk's chunks, for every paging
+    /// mode / PTE flavour, holey and plain physical layers, swap layers, whole address spaces
+    /// and random (unaligned, wrapping, huge) ranges.
+    #[test]
+    fn walk_ranges_matches_per_address_walk() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let (mut checked, mut swapped, mut large, mut partial) = (0usize, 0usize, 0usize, 0usize);
+        for round in 0..48 {
+            for mode in [PagingMode::Intel32, PagingMode::Pae, PagingMode::Intel32e, PagingMode::La57] {
+                let es = if mode == PagingMode::Intel32 { 4 } else { 8 };
+                let ntables = 24;
+                let npages = 1100;
+                let mem = random_memory(&mut rng, es, ntables, npages);
+                let holes = round % 2 == 1;
+                let slices = round % 3 != 0;
+                let phys: Arc<dyn Layer> = Arc::new(Holey { m: mem, holes, slices });
+                let swap: Arc<dyn Layer> = Arc::new(Holey { m: vec![0x5a; 1 << 22], holes: true, slices: true });
+                let dtb = if mode == PagingMode::Pae { (1 << 12) + 32 * rng.below(4) } else { 1 << 12 };
+                for flavor in [PteFlavor::Generic, PteFlavor::Windows, PteFlavor::Linux] {
+                    let mut l = IntelLayer::new("t", phys.clone(), dtb, mode, flavor);
+                    if flavor == PteFlavor::Windows && round % 4 < 2 {
+                        l = l.with_swap(vec![swap.clone(), swap.clone(), swap.clone()]);
+                    }
+                    let max = l.max_address();
+                    let mut ranges = vec![(0u64, max), (0, max.wrapping_add(1).max(max)), (1 << 12, 1 << 20)];
+                    for _ in 0..24 {
+                        let start = match rng.below(5) {
+                            0 => rng.below(max),
+                            1 => rng.below(max) & !0xfff,
+                            2 => rng.next(),
+                            3 => u64::MAX - rng.below(1 << 24),
+                            _ => rng.below(1 << 24),
+                        };
+                        let len = match rng.below(5) {
+                            0 => rng.below(1 << 14),
+                            1 => rng.below(1 << 24),
+                            2 => rng.next(),
+                            3 => (rng.below(64) + 1) << 12,
+                            _ => rng.below(max),
+                        };
+                        // at most ~3 laps of the (aliasing) address space
+                        ranges.push((start, len.min(max.saturating_mul(3))));
+                    }
+                    // ranges starting / ending inside mapped chunks (partial pages, cut large pages)
+                    let all = chunks_per_address(&l, 0, max);
+                    for _ in 0..24 {
+                        if all.is_empty() {
+                            break;
+                        }
+                        let c = all[rng.below(all.len() as u64) as usize];
+                        let s = c.0 + rng.below(c.1.max(1));
+                        let n = match rng.below(3) {
+                            0 => rng.below(c.1.max(1)),
+                            1 => rng.below(1 << 22),
+                            _ => all[rng.below(all.len() as u64) as usize].0.wrapping_sub(s).min(max),
+                        };
+                        ranges.push((s, n));
+                    }
+                    for (s, n) in ranges {
+                        let want = chunks_per_address(&l, s, n);
+                        let got = chunks_ranges(&l, s, n);
+                        assert_eq!(got, want, "round {round} {mode:?} {flavor:?} holes={holes} range {s:#x}+{n:#x}");
+                        checked += want.len();
+                        swapped += want.iter().filter(|c| c.3 != Target::Phys).count();
+                        large += want.iter().filter(|c| c.1 > 0x1000).count();
+                        partial += want.iter().filter(|c| c.1 & 0xfff != 0 || c.0 & 0xfff != 0).count();
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000 && swapped > 100 && large > 100 && partial > 100, "{checked} {swapped} {large} {partial}");
+    }
+
+    /// The kernel layer and every process layer of an image.
+    fn image_layers(image: &str) -> (Vec<(String, &'static IntelLayer)>, &'static crate::context::Context) {
+        use crate::context::{Context, GlobalOptions};
+        let opts = GlobalOptions {
+            file: Some(image.to_string()),
+            symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+            ..Default::default()
+        };
+        let ctx: &'static Context = Box::leak(Box::new(Context::new(opts).unwrap()));
+        let mut v: Vec<(String, &'static IntelLayer)> = Vec::new();
+        if let Ok(k) = ctx.windows_kernel() {
+            use crate::symbols::windows::WinExt;
+            v.push(("kernel".into(), k.layer));
+            let filter = crate::plugins::windows::pslist::pid_filter(&[]);
+            for p in crate::plugins::windows::pslist::list_processes(k, &filter).into_iter().flatten() {
+                if let (Ok(pid), Ok(l)) = (p.m("UniqueProcessId").and_then(|x| x.int()), p.add_process_layer()) {
+                    v.push((format!("pid {pid}"), l.as_intel().unwrap()));
+                }
+            }
+        } else if let Ok(k) = ctx.linux_kernel() {
+            use crate::symbols::linux::ext::LinuxExt;
+            v.push(("kernel".into(), k.layer));
+            let _ = crate::plugins::linux::pslist::list_tasks(k, &|_| Ok(false), false, &mut |t| {
+                if let (Ok(pid), Ok(Some(l))) = (t.m("pid").and_then(|x| x.int()), t.add_process_layer()) {
+                    v.push((format!("pid {pid}"), l.as_intel().unwrap()));
+                }
+                Ok(true)
+            });
+        } else {
+            use crate::symbols::mac::MacExt;
+            let k = ctx.mac_kernel().unwrap();
+            v.push(("kernel".into(), k.layer));
+            for p in crate::plugins::mac::pslist::list_tasks_allproc(k, &|_| Ok(false)).into_iter().flatten() {
+                if let (Ok(pid), Ok(Some(l))) = (p.m("p_pid").and_then(|x| x.int()), p.add_process_layer()) {
+                    v.push((format!("pid {pid}"), l.as_intel().unwrap()));
+                }
+            }
+        }
+        // one layer per distinct page table root
+        let mut seen = std::collections::HashSet::new();
+        v.retain(|(_, l)| seen.insert(l.page_map_offset()));
+        (v, ctx)
+    }
+
+    /// Whole-address-space (and random sub-range) equivalence of the level-by-level walk with
+    /// the per-address walk on the real test images, for the kernel and every process:
+    ///   bench/scripts/cargo.sh test --profile fast walk_ranges_images -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn walk_ranges_images() {
+        let images = [
+            "/home/user/cbc2/task2/memory-dirty.raw",
+            "/home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw",
+            "/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf",
+            "/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.lime",
+            "/home/user/rs-vol/testdata/images/linux/rsvol-jammy-5.15.0-191.elf",
+            "/home/user/rs-vol/testdata/images/linux/rsvol-jammy-5.15.0-191.lime",
+            "/home/user/rs-vol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp",
+        ];
+        for image in images {
+            let t0 = std::time::Instant::now();
+            let (layers, _ctx) = image_layers(image);
+            let results = crate::util::par::par_map_bounded(layers.len(), 6, |i| {
+                let (name, l) = &layers[i];
+                let max = l.max_address();
+                let mut rng = Rng(0x1234_5678 ^ (i as u64 + 1) * 0x9e37_79b9);
+                // (count, hash) of the chunk stream + a reservoir sample of chunks
+                let digest = |walk: &dyn Fn(&mut dyn FnMut(Chunk))| {
+                    let (mut n, mut h) = (0usize, 0u64);
+                    walk(&mut |c: Chunk| {
+                        n += 1;
+                        h = (h ^ crate::util::fxhash::hash_u64(c.0 ^ c.1.rotate_left(17) ^ c.2.rotate_left(34) ^ matches!(c.3, Target::Phys) as u64)).rotate_left(5).wrapping_mul(0x100000001b3);
+                    });
+                    (n, h)
+                };
+                let t = std::time::Instant::now();
+                let mut sample: Vec<Chunk> = Vec::new();
+                let mut seen = 0u64;
+                let fast = digest(&|g| {
+                    l.walk_ranges(0, max, |o, s, m, tg| {
+                        g((o, s, m, tg));
+                        true
+                    })
+                });
+                let t1 = t.elapsed();
+                l.walk_ranges(0, max, |o, s, m, tg| {
+                    seen += 1;
+                    if sample.len() < 256 {
+                        sample.push((o, s, m, tg));
+                    } else {
+                        let j = rng.below(seen);
+                        if j < 256 {
+                            sample[j as usize] = (o, s, m, tg);
+                        }
+                    }
+                    true
+                });
+                let t = std::time::Instant::now();
+                let slow = digest(&|g| {
+                    let _ = l.walk(0, max, true, |o, s, m, tg| {
+                        g((o, s, m, tg));
+                        true
+                    });
+                });
+                let t2 = t.elapsed();
+                let mut first_diff = if fast != slow { Some(format!("whole space: {fast:?} vs per-address {slow:?}")) } else { None };
+                // random sub-ranges starting / ending inside chunks
+                for _ in 0..64 {
+                    if sample.is_empty() || first_diff.is_some() {
+                        break;
+                    }
+                    let c = sample[rng.below(sample.len() as u64) as usize];
+                    let s = c.0 + rng.below(c.1.max(1));
+                    let e = sample[rng.below(sample.len() as u64) as usize];
+                    let n = match rng.below(3) {
+                        0 => rng.below(1 << 24),
+                        1 => e.0.wrapping_add(rng.below(e.1.max(1))).wrapping_sub(s).min(1 << 36),
+                        _ => rng.below(1 << 40),
+                    };
+                    let (a, b) = (chunks_ranges(l, s, n), chunks_per_address(l, s, n));
+                    if a != b {
+                        first_diff = Some(format!("range {s:#x}+{n:#x}: {} vs {} chunks", a.len(), b.len()));
+                    }
+                }
+                (name.clone(), fast.0, t1, t2, first_diff)
+            });
+            let total: usize = results.iter().map(|r| r.1).sum();
+            let (fast, slow) = results.iter().fold((0.0, 0.0), |(a, b), r| (a + r.2.as_secs_f64(), b + r.3.as_secs_f64()));
+            eprintln!(
+                "{image}: {} layers, {total} chunks, walk_ranges {:.3}s vs per-address {:.3}s (cpu), {:.1}s",
+                results.len(),
+                fast,
+                slow,
+                t0.elapsed().as_secs_f64()
+            );
+            let bad: Vec<String> = results.iter().filter_map(|r| r.4.as_ref().map(|d| format!("{} {}", r.0, d))).collect();
+            assert!(bad.is_empty(), "{image}: {}", bad.join("\n"));
+        }
     }
 }
