@@ -110,7 +110,15 @@ as `RSVOL_BENCH_IMG`. Run one with
    ```
 
    Kernel, layers and symbol tables come from the `Context` when you ask for them; python's
-   hidden requirements, such as the kernel module, are not declared.
+   hidden requirements, such as the kernel module, are not declared. python's complete
+   requirement lists, hidden ones included, are data in `src/plugins/pyreqs.tsv`, from which
+   `--save-config` and `timeliner --record-config` write python's configuration. Regenerate it
+   when python gains a plugin; unit tests check that every registered plugin is in it and that
+   the options you declare have python's kinds and defaults:
+
+   ```bash
+   bench/scripts/limit.sh -m 4G bench/venv/bin/python bench/scripts/py_plugin_reqs.py > src/plugins/pyreqs.tsv
+   ```
 
 4. **Register it** with one line in the group's `register()` in `src/plugins/<os>/mod.rs`, and a
    `pub mod` line. A deprecated python alias, such as `windows.malfind.Malfind` for
@@ -174,7 +182,15 @@ bench/scripts/compare.sh -b $PWD/target/fast/vol linux.pslist.PsList
 
 Plugins whose python output order is random from run to run are listed in
 `bench/nondeterministic.txt`; `compare.sh` accepts them when the sorted outputs match and prints
-`OK~`.
+`OK~`. The `Symbols` line of `windows.info.Info` names the kernel ISF python's identifier cache
+lists last, which depends on the cache's history when the same ISF is in several symbol
+directories; when only that line differs from the reference, `compare.sh` checks it against a
+live python run (`NO_LIVE_SYMBOLS=1` turns that off).
+
+To check `--save-config` for many plugins at once, `bench/scripts/py_save_configs.py` runs
+python's command line for each case of a list (one plugin and its options per line) and stops
+each plugin right after python wrote the configuration, so only kernel discovery is paid for.
+Compare its `<case>.json` files with rsvol's `--save-config` output for the same cases.
 
 ## Run the parity gates
 
