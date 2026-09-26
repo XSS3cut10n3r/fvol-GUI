@@ -291,27 +291,36 @@ same contents. If you modify an image in place and restore its timestamp, clear 
 
 ## Verification
 
-Parity is tested by diffing rsvol's stdout and dumped files against python volatility3 2.28.2,
-running on CPython 3.14.7 with capstone, yara-python and pycryptodome installed. The reference
-outputs cover seven images:
+Parity is tested by diffing rsvol's stdout, exit status and dumped files against python volatility3
+2.28.2, running on CPython 3.14.7 with capstone, yara-python and pycryptodome installed. Every plugin
+that runs without arguments is compared on every image listed in [bench/images.tsv](bench/images.tsv);
+at the last full gate **all 1,975 plugin/image pairs on 31 images were byte-identical** (0 diffs):
 
-| Image                                         | Format          | Plugins compared |
-| --------------------------------------------- | --------------- | ---------------: |
-| Windows 11 x64, build 22000, 5 GiB            | raw             | 98               |
-| Windows 10 x64, build 17763, 2 GiB            | raw             | 98               |
-| Ubuntu 24.04, kernel 6.8, 3 GiB               | ELF core, LiME  | 62 each          |
-| Ubuntu 22.04, kernel 5.15, 3 GiB              | ELF core, LiME  | 62 each          |
-| macOS 10.9.2                                  | raw             | 27               |
+| OS | Images (format) |
+| -- | --------------- |
+| Windows x64 | Windows 11 22000 (raw, 5 GiB, 98 plugins); Windows 11 24H2 26100 (full crash dump); Windows 10 19041 (bitmap crash dump); Windows 10 17763 (raw); Server 2012 R2 9600 (raw); Windows 7 SP1 (raw, synthesized full crash dump) |
+| Windows x86 | Windows 7 SP1 PAE (raw, synthesized bitmap crash dump); Server 2008 SP1 PAE (raw); Vista SP2 (32-bit crash dump); Server 2003 (raw); XP SP3 (32-bit crash dump); XP SP2 (raw) |
+| Linux x64 | kernels 3.2 (Debian 7), 4.15 (Ubuntu 18.04: ELF core, VMware .vmem/.vmss, AVML), 5.15 (ELF, LiME), 6.8 (ELF, LiME), 6.17 (ELF, QEMU savevm), 7.0 (ELF) |
+| Linux x86 | 4.15 PAE (ELF core, LiME), 6.1 i686 (raw, LiME) |
+| macOS | 10.9.2 Mavericks, 10.12.6 Sierra (raw) |
 
-Every plugin that runs without arguments is compared on every image, plus a set of argument and
-renderer cases. At the full-parity milestone recorded in [bench/PACKAGES.md](bench/PACKAGES.md),
-all of them were byte-identical. Where python itself fails, as `linux.kallsyms.Kallsyms` does
-with a `TypeError` on these kernels, rsvol prints the same partial output and exits with the same
-status. The unit tests include fixtures generated with python for the argument parser, the
-`--help` output and the renderers. Separate differential harnesses compare the YARA engine with
-yara-python, the disassembler with capstone, the PE parser with pefile, and the codecs and crypto
-with the reference C libraries. See [docs/development.md](docs/development.md) for how to run the
-gates.
+Where python itself fails (for example `linux.kallsyms.Kallsyms` raising `TypeError`, x86-only
+restrictions of the GUI plugins, or python bugs such as its 8-byte `Elf32_Sym` fields), rsvol
+prints the same partial output and exits with the same status. On top of the no-argument gates:
+
+- an option x renderer sweep ([bench/scripts/sweep.py](bench/scripts/sweep.py)): every plugin's
+  options (`--pid`, `--dump`, offsets, filters, invalid values), all renderers, `--save-config`/`-c`
+  round trips, on 15 of the images, ~4,000 cases;
+- fuzzing with corrupted images ([bench/scripts/fuzz_images.py](bench/scripts/fuzz_images.py)):
+  17,000+ plugin runs on 211 mutants, no panics; hangs/OOMs that python would also suffer are
+  bounded;
+- differential harnesses for the libraries: YARA engine vs yara-python, regex vs python `re`,
+  disassembler vs capstone, PE parser vs pefile, PDB converter vs python's pdbconv, codecs and
+  crypto vs the reference C libraries;
+- unit tests (535) including python-generated fixtures for argparse, `--help` and the renderers.
+
+See [docs/development.md](docs/development.md) for how to run the gates
+(`bench/scripts/check_all.sh`, `check_win_images.sh`, `check_nix.sh`).
 
 ## Known differences from python volatility3
 
