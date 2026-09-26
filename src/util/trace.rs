@@ -23,8 +23,16 @@ pub struct Span {
 impl Drop for Span {
     fn drop(&mut self) {
         let d = self.start.elapsed();
-        eprintln!("[trace] {}: {:.3}ms", self.name, d.as_secs_f64() * 1000.0);
+        emit(format_args!("[trace] {}: {:.3}ms\n", self.name, d.as_secs_f64() * 1000.0));
     }
+}
+
+/// Write a trace line to stderr. Errors are ignored (like python's logging): a closed stderr
+/// (`2>&1 | head`) must not turn a diagnostic into a panic, let alone one inside a span's
+/// drop while another panic unwinds (which aborts the process).
+fn emit(args: std::fmt::Arguments) {
+    use std::io::Write;
+    let _ = std::io::stderr().write_fmt(args);
 }
 
 /// Start a span (None when tracing is disabled).
@@ -37,6 +45,6 @@ pub fn span(name: &'static str) -> Option<Span> {
 #[inline]
 pub fn note(msg: impl FnOnce() -> String) {
     if enabled() {
-        eprintln!("[trace] {}", msg());
+        emit(format_args!("[trace] {}\n", msg()));
     }
 }
