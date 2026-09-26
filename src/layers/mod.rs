@@ -16,6 +16,7 @@
 //!   * `slice` is an optional zero-copy fast path: return the bytes directly when the whole
 //!     range is backed by one contiguous span of the mmapped file.
 
+pub mod containers;
 pub mod file;
 
 use crate::error::{Error, Result};
