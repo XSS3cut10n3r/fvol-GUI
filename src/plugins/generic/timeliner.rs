@@ -545,8 +545,8 @@ mod tests {
         for (pi, (class, n)) in plan.iter().enumerate() {
             m.classes.push(class);
             for i in 0..*n {
-                for k in [TimeKind::Created, TimeKind::Modified, TimeKind::Accessed] {
-                    let dt = DateTime { secs: 1_700_000_000 + ((i * 7919 + pi) % 100_000) as i64, micros: 0, utc: true };
+                for (ki, k) in [TimeKind::Created, TimeKind::Modified, TimeKind::Accessed].into_iter().enumerate() {
+                    let dt = DateTime { secs: 1_700_000_000 + ((i * 7919 + pi) % 100_000) as i64 + ki as i64 * 13, micros: 0, utc: true };
                     m.add_event(pi as u16, TimelineEvent { description: format!("{class} entry {i} some/path/name.ext"), kind: k, time: Value::DateTime(dt) });
                 }
             }

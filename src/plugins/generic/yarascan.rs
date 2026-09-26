@@ -76,15 +76,18 @@ pub fn layer_data_value(layer: &dyn Layer, offset: u64, length: u64) -> Value {
     let end = offset.wrapping_add(length);
     let mut errors = Vec::new();
     if layer.lower().is_some() && end > start {
-        // python passes `end_offset` as the LENGTH; only the first few runs are ever consumed
+        // python walks `layer.mapping(start, end_offset)` (the END passed as the length) but
+        // only pulls the next run while `i > offset + sublength` for some i < end: the runs
+        // inside [start, end) give the same answer (a run cut at `end` is never left early).
         let mut runs: Vec<(u64, u64)> = Vec::new();
-        layer.mapping(start, end, &mut |m| {
+        layer.mapping(start, length, &mut |m| {
             runs.push((m.offset, m.len));
-            m.offset <= end
+            true
         });
         let mut it = runs.into_iter();
-        // python: `next(mapping)` on an empty mapping raises StopIteration (uncaught)
-        let mut cur = it.next().unwrap_or_else(|| panic!("StopIteration"));
+        // no run inside [start, end): python's first run starts beyond `end` (every byte is an
+        // error byte)
+        let mut cur = it.next().unwrap_or((end, 0));
         for i in start..end {
             let (o, l) = cur;
             if i < o {
