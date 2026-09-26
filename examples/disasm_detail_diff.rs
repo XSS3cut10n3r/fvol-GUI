@@ -44,8 +44,8 @@ const DEFAULT_DIR: &str = "/home/user/rs-vol/testdata/scratch/disasm/ref";
 
 const NCAT: usize = 14;
 const CATS: [&str; NCAT] = [
-    "opcode", "zero", "ops", "opsacc", "implR", "implW", "accR", "accW", "accset", "w_eax", "w_r10", "riprel",
-    "text", "accset_t",
+    "opcode", "zero", "ops", "opsacc", "implR", "implW", "accR", "accW", "accset", "w_eax",
+    "w_r10", "riprel", "text", "accset_t",
 ];
 
 fn ops_string(insn: &Insn, with_acc: bool) -> String {
@@ -255,7 +255,10 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
                     g.0 += 1;
                     g.1 += count;
                     if g.2.is_empty() {
-                        g.2 = format!("{} {} [{}]  {} {}\n        ours {}\n        cs   {}", p[1], p[3], p[4], p[15], p[16], o, t);
+                        g.2 = format!(
+                            "{} {} [{}]  {} {}\n        ours {}\n        cs   {}",
+                            p[1], p[3], p[4], p[15], p[16], o, t
+                        );
                     }
                 }
             }
@@ -279,10 +282,14 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
             );
         }
         let mut gv: Vec<_> = groups.into_iter().collect();
-        gv.sort_by(|a, b| (a.0.0, std::cmp::Reverse(a.1.0)).cmp(&(b.0.0, std::cmp::Reverse(b.1.0))));
+        gv.sort_by(|a, b| {
+            (a.0.0, std::cmp::Reverse(a.1.0)).cmp(&(b.0.0, std::cmp::Reverse(b.1.0)))
+        });
         let mut shown_per_cat = [0usize; NCAT];
         for ((c, mn), (u, w, ex)) in gv {
-            if shown_per_cat[c] >= show || cats.as_ref().is_some_and(|v| !v.iter().any(|x| x == CATS[c])) {
+            if shown_per_cat[c] >= show
+                || cats.as_ref().is_some_and(|v| !v.iter().any(|x| x == CATS[c]))
+            {
                 continue;
             }
             shown_per_cat[c] += 1;
@@ -336,7 +343,12 @@ fn bench(path: &str) {
         }
         (best, acc)
     };
-    for (what, name) in [(0u8, "decode"), (1, "decode+regs_access"), (2, "decode+detail_operands"), (3, "decode+regs_written_contains")] {
+    for (what, name) in [
+        (0u8, "decode"),
+        (1, "decode+regs_access"),
+        (2, "decode+detail_operands"),
+        (3, "decode+regs_written_contains"),
+    ] {
         let (ns, acc) = run(what);
         println!("{:>30}: {:6.1} ns/insn  ({} insns, checksum {acc})", name, ns, slots.len());
     }
@@ -467,7 +479,8 @@ impl Learner {
                     }
                 }
                 None => {
-                    let mut v: Vec<(&String, u64)> = total.iter().map(|(k, l)| (k, l.values().sum())).collect();
+                    let mut v: Vec<(&String, u64)> =
+                        total.iter().map(|(k, l)| (k, l.values().sum())).collect();
                     v.sort_by(|a, b| b.1.cmp(&a.1));
                     self.conflicts.push(format!("# CONFLICT {mn} {:?}: {:?}", conds, v));
                 }
@@ -545,7 +558,15 @@ fn learn(dir: &str, only: Option<Vec<String>>) {
             let list = |s: &str, nat: bool| {
                 s.split(',')
                     .filter(|x| !x.is_empty())
-                    .map(|x| if nat { symbolize(x, m64) } else if x == "eflags" || x == "rflags" { "flags".into() } else { x.to_string() })
+                    .map(|x| {
+                        if nat {
+                            symbolize(x, m64)
+                        } else if x == "eflags" || x == "rflags" {
+                            "flags".into()
+                        } else {
+                            x.to_string()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(",")
             };
@@ -581,7 +602,12 @@ fn learn(dir: &str, only: Option<Vec<String>>) {
     for s in &lines {
         println!("{s}");
     }
-    eprintln!("learn: {} rules for {} mnemonics, {} conflicts", lines.len(), mns.len(), l.conflicts.len());
+    eprintln!(
+        "learn: {} rules for {} mnemonics, {} conflicts",
+        lines.len(),
+        mns.len(),
+        l.conflicts.len()
+    );
 }
 
 fn main() {

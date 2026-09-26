@@ -169,21 +169,36 @@ pub(crate) fn op_code(o: &DetailOp) -> u16 {
 }
 
 fn reg_class(r: Reg) -> u8 {
+    // last id of each contiguous register class (see regs.rs)
+    const GPR8_END: u8 = regs::AX - 1;
+    const GPR16_END: u8 = regs::EAX - 1;
+    const GPR32_END: u8 = regs::RAX - 1;
+    const GPR64_END: u8 = regs::RAX + 15;
+    const SEG_END: u8 = regs::ES + 5;
+    const CR_END: u8 = regs::CR0 + 15;
+    const DR_END: u8 = regs::DR0 + 15;
+    const ST_END: u8 = regs::ST0 + 7;
+    const MM_END: u8 = regs::MM0 + 7;
+    const XMM_END: u8 = regs::XMM0 + 31;
+    const YMM_END: u8 = regs::YMM0 + 31;
+    const ZMM_END: u8 = regs::ZMM0 + 31;
+    const K_END: u8 = regs::K0 + 7;
+    const BND_END: u8 = regs::BND0 + 3;
     match r.0 {
-        1..=20 => 1,
-        21..=36 => 2,
-        37..=52 => 4,
-        53..=68 => 8,
-        regs::ES..=77 => b's',
-        regs::CR0..=93 => b'c',
-        regs::DR0..=109 => b'd',
-        regs::ST0..=117 => b'f',
-        regs::MM0..=125 => b'q',
-        regs::XMM0..=157 => b'x',
-        regs::YMM0..=189 => b'y',
-        regs::ZMM0..=221 => b'z',
-        regs::K0..=229 => b'k',
-        regs::BND0..=233 => b'b',
+        regs::AL..=GPR8_END => 1,
+        regs::AX..=GPR16_END => 2,
+        regs::EAX..=GPR32_END => 4,
+        regs::RAX..=GPR64_END => 8,
+        regs::ES..=SEG_END => b's',
+        regs::CR0..=CR_END => b'c',
+        regs::DR0..=DR_END => b'd',
+        regs::ST0..=ST_END => b'f',
+        regs::MM0..=MM_END => b'q',
+        regs::XMM0..=XMM_END => b'x',
+        regs::YMM0..=YMM_END => b'y',
+        regs::ZMM0..=ZMM_END => b'z',
+        regs::K0..=K_END => b'k',
+        regs::BND0..=BND_END => b'b',
         _ => b'p',
     }
 }
@@ -282,7 +297,13 @@ fn opc_key(insn: &Insn, p: &Prefixes) -> u32 {
 
 fn opc_token(key: u32) -> String {
     let b = [(key >> 20) as u8, (key >> 12) as u8, (key >> 4) as u8];
-    let n = if b[2] != 0 { 3 } else if b[1] != 0 { 2 } else { 1 };
+    let n = if b[2] != 0 {
+        3
+    } else if b[1] != 0 {
+        2
+    } else {
+        1
+    };
     let mut s: String = b[..n].iter().map(|x| format!("{x:02x}")).collect();
     if key & 15 != 8 {
         s.push('/');
@@ -293,7 +314,7 @@ fn opc_token(key: u32) -> String {
 
 fn parse_opc(t: &str) -> Option<u32> {
     let (hex, reg) = match t.split_once('/') {
-        Some((h, r)) => (h, r.parse::<u32>().ok()?),
+        Some((h, r)) => (h, r.parse::<u32>().ok().filter(|&v| v < 8)?),
         None => (t, 8),
     };
     if hex.len() % 2 != 0 || hex.is_empty() || hex.len() > 6 {
@@ -301,18 +322,18 @@ fn parse_opc(t: &str) -> Option<u32> {
     }
     let mut b = [0u8; 3];
     for i in 0..hex.len() / 2 {
-        b[i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+        b[i] = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
     Some(((b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32) << 4 | reg)
 }
 
 /// Rule features of an instruction in the spec's text form (for the learner in
-/// `examples/disasm_detail_diff.rs`): (coarse sig, full sig, mode, prefix, asz, opcode).
+/// `examples/disasm_detail_diff.rs`): [kinds, full signature, mode, printed prefix, address size,
+/// opcode, prefix context] (`k:`, `s:`, `m32/m64`, `p:`, `a..`, `o:`, `c:` in the spec).
 #[doc(hidden)]
 pub fn learn_features(insn: &Insn) -> [String; 7] {
     let p = detail::prefixes(insn);
     let ops = detail::cs_operands(insn, &p);
-
     let full: Vec<String> = ops.iter().map(|o| op_token(op_code(o))).collect();
     let coarse: String = full.iter().map(|t| &t[..1]).collect();
     [
@@ -379,7 +400,10 @@ pub fn uncovered_mnemonics() -> Vec<&'static str> {
 
 // register tokens beyond the `Reg` ids: native-size GPRs / instruction pointer
 const T_NATIVE: u8 = 240; // 240 + n: rax..rdi (64-bit) / eax..edi (32-bit)
+const T_NATIVE_END: u8 = T_NATIVE + 7;
 const T_IP: u8 = 248;
+// the symbolic tokens must not collide with register ids
+const _: () = assert!(regs::NREGS <= T_NATIVE as usize);
 
 #[derive(Clone, Copy, Default)]
 struct Rule {
@@ -584,7 +608,7 @@ fn resolve(tok: u8, mode: Mode) -> Reg {
     let m64 = mode == Mode::X86_64;
     match tok {
         T_IP => Reg(if m64 { regs::RIP } else { regs::EIP }),
-        T_NATIVE..=247 => Reg(if m64 { regs::RAX } else { regs::EAX } + (tok - T_NATIVE)),
+        T_NATIVE..=T_NATIVE_END => Reg(if m64 { regs::RAX } else { regs::EAX } + (tok - T_NATIVE)),
         _ => Reg(tok),
     }
 }
@@ -736,7 +760,7 @@ impl Insn {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{decode, Mode, Operand};
+    use super::super::{Mode, Operand, decode};
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
@@ -753,13 +777,30 @@ mod tests {
     fn disasm_access_spec_compiles_fully() {
         let r = rules();
         assert!(r.bad.is_empty(), "unparsable spec lines: {:?}", &r.bad[..r.bad.len().min(5)]);
-        assert!(r.unknown.is_empty(), "unknown mnemonics: {:?}", &r.unknown[..r.unknown.len().min(5)]);
+        assert!(
+            r.unknown.is_empty(),
+            "unknown mnemonics: {:?}",
+            &r.unknown[..r.unknown.len().min(5)]
+        );
         assert!(r.rules.len() > 1000);
     }
 
     #[test]
     fn disasm_op_tokens_round_trip() {
-        for code in [0x101u16, 0x102, 0x104, 0x108, 0x100 | b'x' as u16, 0x100 | b'k' as u16, 0x200, 0x204, 0x21C, 0x300, 0x301, 0x308] {
+        for code in [
+            0x101u16,
+            0x102,
+            0x104,
+            0x108,
+            0x100 | b'x' as u16,
+            0x100 | b'k' as u16,
+            0x200,
+            0x204,
+            0x21C,
+            0x300,
+            0x301,
+            0x308,
+        ] {
             assert_eq!(parse_op_token(&op_token(code)), Some(code), "{code:#x}");
         }
         for t in ["f6/1", "0f18/4", "0f38f0", "a9", "00"] {
@@ -814,8 +855,14 @@ mod tests {
         let i = decode(&hex("62f1fd4958400410"), 0, Mode::X86_64).unwrap();
         assert_eq!(i.detail_operands().len(), 4);
         assert_eq!(i.capstone_opcode(), [0x62, 0xf1, 0xfd, 0x49]);
-        assert_eq!(decode(&hex("c5f97ec0"), 0, Mode::X86_64).unwrap().capstone_opcode(), [0xc5, 0xf9, 0, 0]);
-        assert_eq!(decode(&hex("660f3a0fd90c"), 0, Mode::X86_32).unwrap().capstone_opcode(), [0x0f, 0x0f, 0, 0]);
+        assert_eq!(
+            decode(&hex("c5f97ec0"), 0, Mode::X86_64).unwrap().capstone_opcode(),
+            [0xc5, 0xf9, 0, 0]
+        );
+        assert_eq!(
+            decode(&hex("660f3a0fd90c"), 0, Mode::X86_32).unwrap().capstone_opcode(),
+            [0x0f, 0x0f, 0, 0]
+        );
         assert!(decode(&hex("0000"), 0, Mode::X86_64).unwrap().opcode_all_zero());
         assert!(!decode(&hex("0100"), 0, Mode::X86_64).unwrap().opcode_all_zero());
         // imm sizes: branch targets are 8 bytes in 64-bit mode, 4 with REX.W / 66
@@ -839,7 +886,9 @@ mod tests {
         let dir = std::path::Path::new("/home/user/rs-vol/testdata/scratch/disasm/ref");
         let names = |l: &RegList| l.names().collect::<Vec<_>>().join(",");
         let unhex = |s: &str| -> Vec<u8> {
-            (0..s.len() / 2).filter_map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()).collect()
+            (0..s.len() / 2)
+                .filter_map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok())
+                .collect()
         };
         let mut bad = Vec::new();
         let mut n = 0;
@@ -874,7 +923,13 @@ mod tests {
                             Operand::Imm(v) => format!("i,{v},{},{}", o.size, o.access),
                             Operand::Mem(m) => format!(
                                 "m,{},{},{},{},{},{},{},",
-                                reg(m.segment), reg(m.base), reg(m.index), m.scale, m.disp, o.size, o.access
+                                reg(m.segment),
+                                reg(m.base),
+                                reg(m.index),
+                                m.scale,
+                                m.disp,
+                                o.size,
+                                o.access
                             ),
                             Operand::None => "?".into(),
                         }
@@ -884,16 +939,30 @@ mod tests {
                 let cs_ops: Vec<String> = p[14]
                     .split('|')
                     .filter(|s| !s.is_empty())
-                    .map(|s| if s.starts_with("m,") { s[..s.rfind(',').unwrap_or(s.len()) + 1].to_string() } else { s.to_string() })
+                    .map(|s| {
+                        if s.starts_with("m,") {
+                            s[..s.rfind(',').unwrap_or(s.len()) + 1].to_string()
+                        } else {
+                            s.to_string()
+                        }
+                    })
                     .collect();
                 let got = [opc, names(&ir), names(&iw), names(&r), names(&w), ops.join("|")];
                 let exp = [p[5], p[10], p[11], p[12], p[13], &cs_ops.join("|")];
                 if got.iter().zip(exp.iter()).any(|(g, e)| g != e) && bad.len() < 20 {
-                    bad.push(format!("{name} {} {} {}:\n  got {:?}\n  exp {:?}", p[3], p[15], p[16], got, exp));
+                    bad.push(format!(
+                        "{name} {} {} {}:\n  got {:?}\n  exp {:?}",
+                        p[3], p[15], p[16], got, exp
+                    ));
                 }
             }
         }
-        assert!(bad.is_empty(), "{} mismatches vs capstone detail (of {n}):\n{}", bad.len(), bad.join("\n"));
+        assert!(
+            bad.is_empty(),
+            "{} mismatches vs capstone detail (of {n}):\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
         assert!(n >= 100_000 || !dir.join("real64.det").exists(), "only {n} instructions checked");
     }
 
@@ -906,7 +975,10 @@ mod tests {
             s ^= s << 17;
             s
         };
-        let prefixes = [0x66u8, 0x67, 0xF2, 0xF3, 0xF0, 0x2E, 0x26, 0x64, 0x65, 0x48, 0x41, 0x4F, 0xC4, 0xC5, 0x62, 0x8F, 0x0F];
+        let prefixes = [
+            0x66u8, 0x67, 0xF2, 0xF3, 0xF0, 0x2E, 0x26, 0x64, 0x65, 0x48, 0x41, 0x4F, 0xC4, 0xC5,
+            0x62, 0x8F, 0x0F,
+        ];
         let mut buf = [0u8; 15];
         let mut n = 0usize;
         for it in 0..200_000u32 {
@@ -925,8 +997,14 @@ mod tests {
                 let (r, w) = i.regs_access();
                 let (ir, iw) = i.implicit_regs();
                 assert!(ops.len() <= super::super::MAX_DETAIL_OPS);
-                assert!(r.len() <= MAX_REGS && w.len() <= MAX_REGS && ir.len() <= r.len() && iw.len() <= w.len());
-                let _ = (i.capstone_opcode(), i.regs_written_contains("rax"), r.name(0), w.name(99));
+                assert!(
+                    r.len() <= MAX_REGS
+                        && w.len() <= MAX_REGS
+                        && ir.len() <= r.len()
+                        && iw.len() <= w.len()
+                );
+                let _ =
+                    (i.capstone_opcode(), i.regs_written_contains("rax"), r.name(0), w.name(99));
                 n += 1;
             }
         }

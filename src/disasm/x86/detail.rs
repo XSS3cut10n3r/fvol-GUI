@@ -7,7 +7,7 @@
 
 use super::regs::{self, RFLAGS};
 use super::tables::{self, Entry};
-use super::{Insn, Mem, MemSize, Mode, Operand, Reg, MAX_OPS};
+use super::{Insn, MAX_OPS, Mem, MemSize, Mode, Operand, Reg};
 use std::ops::Deref;
 use std::sync::OnceLock;
 
@@ -164,7 +164,10 @@ pub(crate) fn prefixes(insn: &Insn) -> Prefixes {
                     j += 1;
                 }
                 if j < d.len()
-                    && matches!(d[j], 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 | 0x67)
+                    && matches!(
+                        d[j],
+                        0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 | 0x67
+                    )
                 {
                     i = j;
                     continue;
@@ -247,17 +250,20 @@ pub(crate) fn entry(insn: &Insn) -> Option<&'static Entry> {
 /// capstone register operand size.
 pub(crate) fn reg_size(r: Reg, mode: Mode) -> u8 {
     let m64 = mode == Mode::X86_64;
+    const DR_END: u8 = regs::DR0 + 15;
+    const K_END: u8 = regs::K0 + 7;
+    const BND_END: u8 = regs::BND0 + 3;
     match r.0 {
         // capstone's 32-bit size table: cr0..cr4 and dr0..dr15 are 4 bytes, cr5..cr15 8
-        regs::CR0..=109 => {
+        regs::CR0..=DR_END => {
             if m64 || (r.0 >= regs::CR0 + 5 && r.0 < regs::DR0) {
                 8
             } else {
                 4
             }
         }
-        regs::K0..=229 => 2,
-        regs::BND0..=233 => 16,
+        regs::K0..=K_END => 2,
+        regs::BND0..=BND_END => 16,
         _ => r.size(),
     }
 }
@@ -284,9 +290,9 @@ fn special_of(m: &str) -> u8 {
         "jmp" => SP_JMP,
         "call" => SP_CALL,
         "ljmp" | "lcall" => SP_LFAR,
-        "les" | "lds" | "lss" | "lfs" | "lgs" | "fxsave" | "fxrstor" | "fxsave64" | "fxrstor64" | "xsave"
-        | "xrstor" | "xsaves" | "xrstors" | "xsavec" | "xsaveopt" | "xsave64" | "xrstor64" | "xsaves64"
-        | "xrstors64" | "xsavec64" | "xsaveopt64" => SP_NATIVE,
+        "les" | "lds" | "lss" | "lfs" | "lgs" | "fxsave" | "fxrstor" | "fxsave64" | "fxrstor64"
+        | "xsave" | "xrstor" | "xsaves" | "xrstors" | "xsavec" | "xsaveopt" | "xsave64"
+        | "xrstor64" | "xsaves64" | "xrstors64" | "xsavec64" | "xsaveopt64" => SP_NATIVE,
         "fnstenv" | "fldenv" | "fstenv" => SP_ENV,
         "sgdt" | "sidt" | "lgdt" | "lidt" => SP_DT,
         "bndldx" | "bndstx" | "bndcl" | "bndcu" | "bndcn" => SP_BND,
@@ -438,7 +444,10 @@ pub(crate) fn cs_operands(insn: &Insn, p: &Prefixes) -> DetailOps {
     }
     // EVEX opmask: capstone lists {kN} as a separate operand right after the destination.
     if insn.evex & 0x80 != 0 && out.n > 0 {
-        out.insert(1, DetailOp { op: Operand::Reg(Reg(regs::K0 + (insn.evex & 7))), size: 2, access: 0 });
+        out.insert(
+            1,
+            DetailOp { op: Operand::Reg(Reg(regs::K0 + (insn.evex & 7))), size: 2, access: 0 },
+        );
     }
     out
 }
