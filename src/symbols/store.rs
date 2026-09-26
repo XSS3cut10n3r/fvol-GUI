@@ -19,6 +19,7 @@
 //! (key = source URL + size + mtime + natives), so a warm load is one mmap.
 
 use super::isf::{BuildOptions, build_blob};
+use super::lazy::{JsonBuf, LazyCore};
 use super::table::{Blob, SymbolTable};
 use crate::error::{Error, Result};
 use crate::util::json::Json;
@@ -614,62 +615,275 @@ fn cache_file_bytes(blob: &[u8], key: &[u8]) -> Vec<u8> {
 /// differ only in the symbol mask) shares the blob instead of rebuilding it.
 static BUILT: std::sync::Mutex<Vec<(Vec<u8>, std::sync::Arc<Vec<u8>>)>> = std::sync::Mutex::new(Vec::new());
 
+/// Blobs built in this process as lazy tables (see [`super::lazy`]), by cache key.
+static LAZY_BUILT: std::sync::Mutex<Vec<(Vec<u8>, std::sync::Arc<LazyCore>)>> = std::sync::Mutex::new(Vec::new());
+
+/// One lock per cache key: a load waits for a concurrent (speculative) load of the same table
+/// instead of building it a second time.
+fn key_lock(key: &[u8]) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::Mutex<Vec<(Vec<u8>, std::sync::Arc<std::sync::Mutex<()>>)>> = std::sync::Mutex::new(Vec::new());
+    let mut g = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, l)) = g.iter().find(|(k, _)| k == key) {
+        return l.clone();
+    }
+    let l = std::sync::Arc::new(std::sync::Mutex::new(()));
+    g.push((key.to_vec(), l.clone()));
+    l
+}
+
+/// The table of `loc` already in memory (built or being built in this process, or cached),
+/// without building anything.
+fn load_known(url: &str, cf: &Option<(PathBuf, Vec<u8>)>, name: &str) -> Option<SymbolTable> {
+    let (cf, key) = cf.as_ref()?;
+    let built = BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|b| b.0 == *key).map(|b| b.1.clone());
+    if let Some(b) = built {
+        return SymbolTable::from_blob(Blob::Shared(b), name, url).ok();
+    }
+    let lazy = LAZY_BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|b| b.0 == *key).map(|b| b.1.clone());
+    if let Some(c) = lazy {
+        return SymbolTable::from_lazy(c, name, url).ok();
+    }
+    let f = std::fs::File::open(cf).ok()?;
+    let m = Mmap::map(&f).ok()?;
+    if !cached_blob_matches(m.as_slice(), key) {
+        return None;
+    }
+    SymbolTable::from_blob(Blob::Mapped(m), name, url).ok()
+}
+
 /// Load a symbol table from `loc` (binary cache first). `name` is the table name.
 pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
     let url = loc.url();
     let cf = cache_file(loc, &url, opts);
-    if let Some((_, key)) = &cf {
-        let built = BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|b| b.0 == *key).map(|b| b.1.clone());
-        if let Some(b) = built {
-            return SymbolTable::from_blob(Blob::Shared(b), name, &url);
-        }
-    }
-    if let Some((cf, key)) = &cf {
-        if let Ok(f) = std::fs::File::open(cf) {
-            if let Ok(m) = Mmap::map(&f) {
-                if cached_blob_matches(m.as_slice(), key) {
-                    if let Ok(t) = SymbolTable::from_blob(Blob::Mapped(m), name, &url) {
-                        return Ok(t);
-                    }
-                }
-            }
-        }
+    let lock = cf.as_ref().map(|(_, k)| key_lock(k));
+    let _g = lock.as_ref().map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
+    if let Some(t) = load_known(&url, &cf, name) {
+        return Ok(t);
     }
     // the build is parallel: start the pool's workers while this thread decompresses
     crate::util::pool::warm();
     let json = match take_kept(loc, &url) {
-        Some(j) => JsonSrc::Bytes(std::borrow::Cow::Owned(j)),
+        Some(j) => JsonBuf::Owned(j),
         None => {
             let _t = crate::util::trace::span("isf read+decompress");
             json_for_build(loc)?
         }
     };
+    let json = match lazy_build(loc, &url, &cf, json, opts) {
+        Ok(core) => return SymbolTable::from_lazy(core, name, &url),
+        Err(j) => j,
+    };
     let blob = build_remember(&url, cf, json, opts, true)?;
     SymbolTable::from_blob(Blob::Shared(blob), name, &url)
 }
 
-/// ISF JSON to build a table from: bytes (decompressed, embedded, kept by the identifier
-/// index), or a plain `.json` file mapped in place.
-enum JsonSrc {
-    Bytes(std::borrow::Cow<'static, [u8]>),
-    Mapped(crate::util::mmap::MapWindow),
+// ---------------------------------------------------------------------------------------------
+// Lazy tables and their deferred blobs
+// ---------------------------------------------------------------------------------------------
+
+/// Whether big ISFs load as lazy tables (see [`set_lazy_tables`]).
+static LAZY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// JSON documents at least this big load lazily (the kernel ISFs; the small ISFs shipped with
+/// volatility3 build in well under a millisecond).
+const LAZY_MIN: usize = 1 << 20;
+
+/// Let big ISFs load as lazy tables (the one-shot CLI: its blob is written after the output,
+/// see [`finish_deferred`]). `RSVOL_LAZY_ISF=0` turns them off.
+pub fn set_lazy_tables(on: bool) {
+    let on = on && std::env::var_os("RSVOL_LAZY_ISF").is_none_or(|v| v != "0");
+    LAZY.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-impl std::ops::Deref for JsonSrc {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            JsonSrc::Bytes(b) => b,
-            JsonSrc::Mapped(m) => m.as_slice(),
+/// A lazy table whose full blob is not cached yet: built after the output
+/// ([`finish_deferred`]).
+struct Deferred {
+    loc: IsfLocation,
+    core: std::sync::Arc<LazyCore>,
+    cf: PathBuf,
+    key: Vec<u8>,
+}
+
+static DEFERRED: std::sync::Mutex<Vec<Deferred>> = std::sync::Mutex::new(Vec::new());
+
+/// A lazy table over `json` when lazy tables are on and the document qualifies (remembered
+/// in-process by cache key, its blob deferred); `Err(json)` gives the JSON back for an eager
+/// build.
+fn lazy_build(loc: &IsfLocation, url: &str, cf: &Option<(PathBuf, Vec<u8>)>, json: JsonBuf, opts: &BuildOptions) -> std::result::Result<std::sync::Arc<LazyCore>, JsonBuf> {
+    if !LAZY.load(std::sync::atomic::Ordering::Relaxed) || opts.natives.is_some() || json.len() < LAZY_MIN || matches!(loc, IsfLocation::Embedded { .. }) {
+        return Err(json);
+    }
+    let core = std::sync::Arc::new(LazyCore::build(json, opts)?);
+    crate::util::trace::note(|| format!("lazy table: {url}"));
+    if let Some((cf, key)) = cf {
+        LAZY_BUILT.lock().unwrap_or_else(|e| e.into_inner()).push((key.clone(), core.clone()));
+        DEFERRED.lock().unwrap_or_else(|e| e.into_inner()).push(Deferred { loc: loc.clone(), core: core.clone(), cf: cf.clone(), key: key.clone() });
+    }
+    Ok(core)
+}
+
+/// How the blobs of lazy tables are written (`RSVOL_DEFERRED_ISFB`): `helper` (default) = a
+/// detached helper process per blob, `thread` = a background thread of this process joined
+/// before exit, `off` = not at all.
+fn deferred_mode() -> &'static str {
+    match std::env::var("RSVOL_DEFERRED_ISFB").as_deref() {
+        Ok("thread") => "thread",
+        Ok("off") => "off",
+        _ => "helper",
+    }
+}
+
+/// Write the blobs of this run's lazy tables. `main` calls this after the output is complete
+/// and flushed: by default each blob is handed to a detached helper process (this binary in
+/// helper mode, see [`run_helper`]), so the process exits as soon as its output is done and
+/// the next run of any plugin maps the finished blob. If the helper cannot be started, the
+/// blob is built on a background thread that `main` joins before exit.
+pub fn finish_deferred() {
+    let jobs = std::mem::take(&mut *DEFERRED.lock().unwrap_or_else(|e| e.into_inner()));
+    let mode = deferred_mode();
+    for j in jobs {
+        if mode == "off" {
+            continue;
+        }
+        if mode == "helper" && spawn_helper(&j.loc) {
+            crate::util::trace::note(|| format!("isf blob: helper started for {}", j.loc.url()));
+            continue;
+        }
+        crate::util::bg::spawn(move || {
+            let _t = crate::util::trace::span("isf blob build (deferred, in-process)");
+            if let Ok(blob) = super::isf::build_blob(j.core.json(), &BuildOptions::default()) {
+                let len = (j.key.len() as u32).to_le_bytes();
+                let _ = paths::write_atomic_parts(&j.cf, &cache_file_parts(&blob, &j.key, &len));
+            }
+        });
+    }
+}
+
+/// The helper-mode environment variable: its value names the ISF whose blob to build.
+pub const HELPER_ENV: &str = "RSVOL_ISFB_HELPER";
+
+/// The [`HELPER_ENV`] value for `loc` (files, zip members and downloaded URLs; the shipped
+/// ISFs never load lazily).
+fn helper_spec(loc: &IsfLocation) -> Option<String> {
+    Some(match loc {
+        IsfLocation::File(p) => format!("F{}", paths::hex(p.as_os_str().as_encoded_bytes())),
+        IsfLocation::Zip { zip, member } => format!("Z{}:{}", paths::hex(zip.as_os_str().as_encoded_bytes()), paths::hex(member.as_bytes())),
+        IsfLocation::Url(u) => format!("U{}", paths::hex(u.as_bytes())),
+        IsfLocation::Embedded { .. } => return None,
+    })
+}
+
+fn parse_helper_spec(spec: &str) -> Option<IsfLocation> {
+    let os = |h: &str| -> Option<PathBuf> { Some(PathBuf::from(std::ffi::OsString::from_vec(unhex(h)?))) };
+    use std::os::unix::ffi::OsStringExt;
+    let (kind, rest) = spec.split_at_checked(1)?;
+    Some(match kind {
+        "F" => IsfLocation::File(os(rest)?),
+        "Z" => {
+            let (z, m) = rest.split_once(':')?;
+            IsfLocation::Zip { zip: os(z)?, member: String::from_utf8(unhex(m)?).ok()? }
+        }
+        "U" => IsfLocation::Url(String::from_utf8(unhex(rest)?).ok()?),
+        _ => return None,
+    })
+}
+
+/// Start the helper process for `loc`'s blob: this executable with [`HELPER_ENV`] set, stdio
+/// on /dev/null, not waited for (it detaches itself, see [`run_helper`]).
+fn spawn_helper(loc: &IsfLocation) -> bool {
+    use std::os::unix::process::CommandExt;
+    let (Some(spec), Some(exe)) = (helper_spec(loc), paths::current_exe()) else { return false };
+    std::process::Command::new(exe)
+        .arg0("rsvol-isfb-helper")
+        .env(HELPER_ENV, spec)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+unsafe extern "C" {
+    fn setsid() -> i32;
+    fn flock(fd: i32, op: i32) -> i32;
+    fn close_range(first: u32, last: u32, flags: i32) -> i32;
+    fn close(fd: i32) -> i32;
+    fn sched_setscheduler(pid: i32, policy: i32, param: *const i32) -> i32;
+    fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+}
+
+/// Helper mode (`main` runs this when [`HELPER_ENV`] is set, before anything else): build and
+/// write the blob of the ISF named by `spec`. Detached from the run that started it (own
+/// session, no inherited descriptors, idle CPU priority); at most one helper per blob (an
+/// exclusive non-blocking lock next to the blob); the blob is written through a temporary
+/// file and a rename, and only if the ISF did not change while it was read. Returns the exit
+/// status (nothing is printed).
+pub fn run_helper(spec: &std::ffi::OsStr) -> i32 {
+    const SCHED_IDLE: i32 = 5;
+    // SAFETY: plain syscalls on this process
+    unsafe {
+        setsid();
+        if close_range(3, u32::MAX, 0) != 0 {
+            for fd in 3..1024 {
+                close(fd);
+            }
+        }
+        let param = 0i32;
+        if sched_setscheduler(0, SCHED_IDLE, &param) != 0 {
+            setpriority(0, 0, 19);
         }
     }
+    let Some(loc) = spec.to_str().and_then(parse_helper_spec) else { return 2 };
+    match write_blob_locked(&loc) {
+        Some(()) => 0,
+        None => 1,
+    }
+}
+
+fn write_blob_locked(loc: &IsfLocation) -> Option<()> {
+    use std::os::fd::AsRawFd;
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let url = loc.url();
+    let opts = BuildOptions::default();
+    let (cf, key) = cache_file(loc, &url, &opts)?;
+    std::fs::create_dir_all(cf.parent()?).ok()?;
+    let lock_path = cf.with_extension("lock");
+    let lf = std::fs::File::options().create(true).append(true).open(&lock_path).ok()?;
+    // SAFETY: flock on an open descriptor
+    if unsafe { flock(lf.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        return Some(()); // another helper is building it
+    }
+    // (removing the lock file while holding it is safe: a helper that opened it too fails its
+    // non-blocking lock and exits, a later one finds the blob first)
+    let done = || {
+        let _ = std::fs::remove_file(&lock_path);
+        drop(lf);
+    };
+    if let Ok(f) = std::fs::File::open(&cf)
+        && let Ok(m) = Mmap::map(&f)
+        && cached_blob_matches(m.as_slice(), &key)
+    {
+        done();
+        return Some(());
+    }
+    let json = json_for_build(loc).ok()?;
+    let blob = super::isf::build_blob(&json, &opts).ok()?;
+    // the source must be the one the key describes (not modified while it was read)
+    if cache_file(loc, &url, &opts).map(|c| c.1).as_ref() != Some(&key) {
+        return None;
+    }
+    let len = (key.len() as u32).to_le_bytes();
+    paths::write_atomic_parts(&cf, &cache_file_parts(&blob, &key, &len)).ok()?;
+    done();
+    Some(())
 }
 
 /// The JSON of `loc` for a build. A plain `.json` file (a dwarf2json kernel ISF is 50-100 MB)
 /// is mapped, pre-faulted, from the page cache: reading it first faults in and zeroes a fresh
 /// buffer of that size, then copies (28-40 ms for the 46 / 64 MB jammy / noble ISFs vs 7-10 ms
 /// to map; the parse from the mapping is a little slower, net 4-9 ms per cold kernel load).
-fn json_for_build(loc: &IsfLocation) -> Result<JsonSrc> {
+fn json_for_build(loc: &IsfLocation) -> Result<JsonBuf> {
     if let IsfLocation::File(p) = loc
         && p.as_os_str().as_encoded_bytes().ends_with(b".json")
     {
@@ -678,16 +892,19 @@ fn json_for_build(loc: &IsfLocation) -> Result<JsonSrc> {
         if len > 0
             && let Ok(m) = crate::util::mmap::MapWindow::new(&f, 0, len, true)
         {
-            return Ok(JsonSrc::Mapped(m));
+            return Ok(JsonBuf::Mapped(m));
         }
     }
-    Ok(JsonSrc::Bytes(loc.read()?))
+    Ok(match loc.read()? {
+        std::borrow::Cow::Borrowed(b) => JsonBuf::Static(b),
+        std::borrow::Cow::Owned(v) => JsonBuf::Owned(v),
+    })
 }
 
 /// Build the blob of an ISF's JSON, remember it in-process ([`BUILT`]) and write its cache
 /// file in the background (overlapping the plugin run; joined before exit), where the JSON is
 /// freed too.
-fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: JsonSrc, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
+fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: JsonBuf, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
     let blob = {
         let _t = crate::util::trace::span("isf parse+build");
         let b = if parallel { build_blob(&json, opts) } else { super::isf::build_blob_serial(&json, opts) };
@@ -739,13 +956,8 @@ fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool)
     if let Some(h) = hint {
         // the image's own banner is known: build exactly the matching ISFs, keep nothing else
         if identifier.starts_with(&h) && SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < 2 * MAX_SPEC_BUILDS {
-            let url = loc.url();
-            let cf = cache_file(loc, &url, &BuildOptions::default());
-            let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
-            if !known {
-                let _t = crate::util::trace::span("isf speculative build (identifier index, banner hint)");
-                let _ = build_remember(&url, cf, JsonSrc::Bytes(std::borrow::Cow::Owned(json)), &BuildOptions::default(), false);
-            }
+            let _t = crate::util::trace::span("isf speculative load (identifier index, banner hint)");
+            spec_build(loc, json);
         }
         return;
     }
@@ -753,16 +965,45 @@ fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool)
         return;
     }
     if SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < MAX_SPEC_BUILDS {
-        let url = loc.url();
-        let cf = cache_file(loc, &url, &BuildOptions::default());
-        let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
-        if !known {
-            let _t = crate::util::trace::span("isf speculative build (identifier index)");
-            let _ = build_remember(&url, cf, JsonSrc::Bytes(std::borrow::Cow::Owned(json)), &BuildOptions::default(), false);
-        }
+        let _t = crate::util::trace::span("isf speculative load (identifier index)");
+        spec_build(loc, json);
         return;
     }
     keep_decoded(loc, json);
+}
+
+/// A speculative table of `loc` from its decoded `json` (see [`speculate`]): a lazy table when
+/// they are on (its blob deferred like any other), else the blob, built on this worker; nothing
+/// when the table is already in memory or cached.
+fn spec_build(loc: &IsfLocation, json: Vec<u8>) {
+    let url = loc.url();
+    let opts = BuildOptions::default();
+    let cf = cache_file(loc, &url, &opts);
+    let lock = cf.as_ref().map(|(_, k)| key_lock(k));
+    let _g = lock.as_ref().map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
+    if load_known(&url, &cf, "").is_some() {
+        return;
+    }
+    if let Err(json) = lazy_build(loc, &url, &cf, JsonBuf::Owned(json), &opts) {
+        let _ = build_remember(&url, cf, json, &opts, false);
+    }
+}
+
+/// Load the table of `loc` on another thread (a speculative load: the automagic loads it next,
+/// and that load waits for this one). Nothing happens if the table is in memory already.
+pub fn load_in_background(loc: IsfLocation) {
+    let url = loc.url();
+    let cf = cache_file(&loc, &url, &BuildOptions::default());
+    let known = cf.as_ref().is_some_and(|(_, key)| {
+        BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key) || LAZY_BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key)
+    });
+    if known {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("rsvol-isf-spec".into()).spawn(move || {
+        let _t = crate::util::trace::span("isf speculative load (background)");
+        let _ = load(&loc, "", &BuildOptions::default());
+    });
 }
 
 /// Load an ISF by python sub_path/filename (e.g. `("windows", "pe")`), first match wins
@@ -1399,17 +1640,18 @@ fn estimated_json_size(loc: &IsfLocation) -> u64 {
 /// The (decompressed) JSON of `loc`, decoded into the reusable `buf` when possible (plain and
 /// `.xz` files: no per-file allocation, pages faulted in once per worker), then `f(json)`.
 pub(crate) fn with_json<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
-    with_json_len(loc, buf, |j, _| f(j))
+    with_json_len(loc, buf, false, |j, _| f(j))
 }
 
 /// [`with_json`]; `f` also gets `Some((n, decompressed))` when the JSON is `buf[..n]`.
-fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8], Option<(usize, bool)>) -> R) -> Result<R> {
+/// `parallel`: decode the blocks of a multi-block `.xz` file on several threads.
+fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, parallel: bool, f: impl FnOnce(&[u8], Option<(usize, bool)>) -> R) -> Result<R> {
     let owned;
     let (json, decoded): (&[u8], Option<(usize, bool)>) = match loc {
         IsfLocation::Embedded { data, .. } => (data, None),
         IsfLocation::File(p) if p.to_string_lossy().ends_with(".xz") => {
             let raw = std::fs::read(p)?;
-            let n = crate::codecs::xz::decompress_reuse(&raw, buf, false)?;
+            let n = crate::codecs::xz::decompress_reuse(&raw, buf, parallel)?;
             (&buf[..n], Some((n, true)))
         }
         IsfLocation::File(p) if p.to_string_lossy().ends_with(".json") => {
@@ -1509,6 +1751,10 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
     order.sort_by_key(|&k| std::cmp::Reverse(est[k]));
     let max_est = est.iter().copied().max().unwrap_or(1).max(1);
     let threads = crate::util::par::threads().min(todo.len()).min((BUDGET / max_est).max(1) as usize);
+    // a few big (kernel) ISFs among many small ones: their blocks decode on the cores the
+    // small files leave idle (a 64 MB dwarf2json ISF is 2-3 xz blocks)
+    const BIG: u64 = 32 << 20;
+    let big_par = est.iter().filter(|&&e| e >= BIG).count() * 3 <= crate::util::par::threads();
     let next = AtomicUsize::new(0);
     let keep_os = *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner());
     let work = |out: &mut Vec<(usize, R)>| {
@@ -1518,11 +1764,19 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
             let Some(&k) = order.get(j) else { break };
             let loc = &locs[todo[k]];
             let mut decoded = None;
-            let ident = with_json_len(loc, &mut buf, |json, n| {
+            let t0 = crate::util::trace::enabled().then(std::time::Instant::now);
+            let mut t1 = None;
+            let ident = with_json_len(loc, &mut buf, big_par && est[k] >= BIG, |json, n| {
                 decoded = n;
+                t1 = t0.map(|_| std::time::Instant::now());
                 extract_identifier(json)
             })
             .map_err(drop);
+            if let (Some(t0), Some(t1)) = (t0, t1)
+                && est[k] >= 4 << 20
+            {
+                crate::util::trace::note(|| format!("identifier index: {} read+decode {:.1} ms, identifier {:.1} ms", loc.url(), (t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3));
+            }
             // the OS the caller is about to load a kernel ISF for: build it now or keep the JSON
             if let (Some((n, was_decoded)), Some(os), Ok(Some((ios, iid)))) = (decoded, keep_os, &ident)
                 && os == ios

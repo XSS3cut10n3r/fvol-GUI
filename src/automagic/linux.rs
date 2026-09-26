@@ -17,7 +17,7 @@ use crate::layers::scan::{FnScanner, scan_each};
 use crate::symbols::linux::search::{FastBytesScanner, FastMultiStringScanner, Needle};
 use crate::layers::{IntelLayer, Layer, PagingMode, PteFlavor};
 use crate::objects::{LayerRef, Module};
-use crate::symbols::linux::vmcoreinfo::{VmCoreInfo, VmValue, search_vmcoreinfo_elf_note};
+use crate::symbols::linux::vmcoreinfo::{VmCoreInfo, VmValue, search_vmcoreinfo_elf_note_early};
 use crate::symbols::linux::{register_kernel, virtual_to_physical_address_i};
 use crate::symbols::{IsfLocation, TableRef, Ty};
 use crate::util::trace::span;
@@ -98,7 +98,7 @@ pub fn collect_notes(phys: &dyn Layer, stop_at: Option<&[u8]>) -> Notes {
     let _t = span("linux vmcoreinfo: note search (concurrent)");
     let mut notes = Vec::new();
     let mut complete = true;
-    let r = search_vmcoreinfo_elf_note(phys, |_off, vmci| {
+    let r = search_vmcoreinfo_elf_note_early(phys, |_off, vmci| {
         notes.push(vmci.clone());
         let stop = stop_at.is_some_and(|rel| matches!(vmci.get("OSRELEASE"), Some(VmValue::Str(s)) if s.as_bytes() == rel));
         if stop {
@@ -107,6 +107,118 @@ pub fn collect_notes(phys: &dyn Layer, stop_at: Option<&[u8]>) -> Notes {
         !stop
     });
     Notes { notes, err: r.err(), complete }
+}
+
+/// The image's first `Linux version ` (a hint: see `automagic::banner_hint`) and its
+/// VMCOREINFO notes ([`collect_notes`], when `want_notes`) from ONE progressive scan of `phys`
+/// in python's hit order: both searches share each piece of memory read (the note of a 3 GiB
+/// image may sit 2 GiB in, past the banner). `on_hint` gets the hint (`Linux version <release>
+/// (`) as soon as it is found, or `None` when there is none. The notes stop after the first
+/// one of the hint's release (usually the deciding one) once the hint is known.
+pub fn hint_and_notes(phys: &dyn Layer, want_notes: bool, on_hint: impl FnOnce(Option<Vec<u8>>)) -> Option<Notes> {
+    const PREFIX: &[u8] = b"Linux version ";
+    let _t = span("linux banner hint + vmcoreinfo notes (one scan)");
+    let scanner = HintNotesScanner { banner: Needle::new(PREFIX), magic: Needle::new(crate::symbols::linux::vmcoreinfo::VMCOREINFO_MAGIC_ALIGNED), notes: want_notes };
+    let mut on_hint = Some(on_hint);
+    let mut release: Option<Vec<u8>> = None;
+    let (mut notes, mut err, mut complete) = (Vec::new(), None, true);
+    // still collecting notes (python's generator has neither raised nor been stopped)
+    let mut notes_open = want_notes;
+    let matches_release = |rel: &[u8], v: &VmCoreInfo| matches!(v.get("OSRELEASE"), Some(VmValue::Str(s)) if s.as_bytes() == rel);
+    crate::layers::scan::scan_each_progressive_max(phys, &scanner, crate::util::par::threads(), |h| h.0, |(off, kind)| {
+        if kind == 0 {
+            // the first banner: the hint
+            if let Some(cb) = on_hint.take() {
+                let hint = crate::automagic::banner_hint_at(phys, off, PREFIX, b" (");
+                release = hint.as_ref().map(|h| h[PREFIX.len()..h.len() - 2].to_vec());
+                cb(hint);
+                if notes_open
+                    && let Some(rel) = &release
+                    && notes.iter().any(|n| matches_release(rel, n))
+                {
+                    complete = false;
+                    notes_open = false;
+                }
+            }
+            return on_hint.is_some() || notes_open;
+        }
+        if !notes_open {
+            return on_hint.is_some();
+        }
+        match crate::symbols::linux::vmcoreinfo::note_at(phys, off) {
+            Ok(Some((_, v))) => {
+                if release.as_deref().is_some_and(|rel| matches_release(rel, &v)) {
+                    complete = false;
+                    notes_open = false;
+                }
+                notes.push(v);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // python's generator raised: no more notes
+                err = Some(e);
+                notes_open = false;
+            }
+        }
+        // (the hint may still be ahead)
+        on_hint.is_some() || notes_open
+    });
+    if let Some(cb) = on_hint.take() {
+        cb(None);
+    }
+    want_notes.then_some(Notes { notes, err, complete })
+}
+
+/// Scanner of [`hint_and_notes`]: `Linux version ` (kind 0) and `VMCOREINFO\0\0` (kind 1)
+/// occurrences in address order, each reported like `FastBytesScanner` would (python's
+/// `BytesScanner` chunking) and searched in the same cache-resident pieces.
+struct HintNotesScanner<'n> {
+    banner: Needle<'n>,
+    magic: Needle<'n>,
+    notes: bool,
+}
+
+impl HintNotesScanner<'_> {
+    fn search(&self, data: &[u8], from: usize, cs_limit: usize, base: u64, out: &mut Vec<(u64, u32)>) {
+        let n0 = out.len();
+        for (kind, nd, len) in [(0u32, &self.banner, 14usize), (1, &self.magic, 12)] {
+            if kind == 1 && !self.notes {
+                continue;
+            }
+            if from < cs_limit {
+                let end = (cs_limit + len - 1).min(data.len());
+                nd.for_each(&data[from..end], |i| {
+                    out.push((base + (from + i) as u64, kind));
+                    true
+                });
+            }
+        }
+        out[n0..].sort_unstable();
+    }
+}
+
+impl crate::layers::scan::Scanner for HintNotesScanner<'_> {
+    type Hit = (u64, u32);
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        let mut m = Vec::new();
+        self.search(data, 0, (self.chunk_size() as usize).min(data.len()), 0, &mut m);
+        hits.extend(m.into_iter().map(|(o, k)| (data_offset + o, k)));
+    }
+    fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
+        self.search(data, 0, (self.chunk_size() as usize).min(data.len()), 0, out);
+        true
+    }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        hits.extend(matches.iter().map(|&(o, k)| (data_offset + o, k)));
+    }
+    fn stream_window(&self) -> Option<usize> {
+        Some(14)
+    }
+    fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
+        let cs_limit = self.chunk_size().saturating_sub(base).min(limit as u64) as usize;
+        self.search(data, from, cs_limit, base, out);
+        limit
+    }
 }
 
 /// [`vmcoreinfo_stack`]; with `pre`, the notes a concurrent [`collect_notes`] found are
@@ -182,7 +294,7 @@ pub fn vmcoreinfo_stack_notes(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation
     };
     let mut found = None;
     let search = |found: &mut Option<LinuxAutomagic>| {
-        search_vmcoreinfo_elf_note(phys, |_off, vmci| match eval(vmci) {
+        search_vmcoreinfo_elf_note_early(phys, |_off, vmci| match eval(vmci) {
             Some(a) => {
                 *found = Some(a);
                 false
@@ -536,25 +648,42 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
             let (index, banners, notes) = {
                 let _t = span("linux banners (identifier index)");
                 // the stackers load the matching kernel ISF next: the index builds it right away
-                // from the JSON it decompresses anyway, guided by the image's banner (found by a
-                // quick scan meanwhile)
+                // from the JSON it decompresses anyway, guided by the image's banner
                 crate::symbols::store::keep_decoded_for(Some("linux"));
                 let phys: LayerRef = *phys;
-                let hint = std::sync::Mutex::new(None);
                 let want_notes = phys.as_intel().is_none() && crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), VMCOREINFO_STACKER);
-                let index = crate::symbols::store::identifier_index_with(ctx.symbol_path(), &|| {
-                    // the index decompresses for a while: meanwhile, find the image's banner
-                    // (steers the index's speculative ISF build) and its VMCOREINFO notes
-                    let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
-                        let hint = crate::automagic::banner_hint(phys, b"Linux version ", b" (");
-                        let release = hint.as_ref().map(|h| h[b"Linux version ".len()..h.len() - 2].to_vec());
-                        crate::symbols::store::set_banner_hint(hint);
-                        want_notes.then(|| collect_notes(phys, release.as_deref()))
-                    });
-                    *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
-                });
+                // meanwhile: the image's banner (steers the index's speculative ISF build and
+                // the choice of the ISF loaded ahead, below) and its VMCOREINFO notes (the
+                // first stacker's input)
+                let (tx, rx) = std::sync::mpsc::channel();
+                let h = std::thread::Builder::new()
+                    .name("rsvol-hint".into())
+                    .spawn(move || {
+                        hint_and_notes(phys, want_notes, |hint| {
+                            crate::symbols::store::set_banner_hint(hint.clone());
+                            let _ = tx.send(hint);
+                        })
+                    })
+                    .ok();
+                let index = crate::symbols::store::identifier_index(ctx.symbol_path());
                 let d = index.dictionary("linux");
-                let notes = hint.into_inner().unwrap_or_else(|e| e.into_inner()).and_then(|h| h.join().ok()).flatten();
+                // the kernel ISF the stackers will most likely load (the only one, or the only
+                // one of the image's kernel release): load it now, while the notes are searched
+                let mut isfs: Vec<&IsfLocation> = d.iter().map(|(_, l)| l).collect();
+                isfs.dedup();
+                let pick = if isfs.len() == 1 {
+                    Some(isfs[0].clone())
+                } else {
+                    rx.recv().ok().flatten().and_then(|hint| {
+                        let mut m: Vec<&IsfLocation> = d.iter().filter(|(b, _)| b.starts_with(&hint)).map(|(_, l)| l).collect();
+                        m.dedup();
+                        (m.len() == 1).then(|| m[0].clone())
+                    })
+                };
+                if let Some(l) = pick {
+                    crate::symbols::store::load_in_background(l);
+                }
+                let notes = h.and_then(|h| h.join().ok()).flatten();
                 (index, d, notes)
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);

@@ -932,7 +932,20 @@ where
 /// chunks are python's chunks; the section ends where python's last chunk of the batch ends,
 /// which makes the layer produce one extra overlap-sized tail chunk whose hits (offset >= last
 /// chunk start + chunk_size) belong to the next batch and are dropped via `offset_of`.
-pub fn scan_each_progressive<S, F, O>(layer: &dyn Layer, scanner: &S, offset_of: O, mut f: F)
+pub fn scan_each_progressive<S, F, O>(layer: &dyn Layer, scanner: &S, offset_of: O, f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+    O: Fn(&S::Hit) -> u64,
+{
+    scan_each_progressive_max(layer, scanner, crate::util::par::threads() * 4, offset_of, f)
+}
+
+/// [`scan_each_progressive`] with batches of at most `max_batch` chunks: for a scan whose
+/// first hit may be far into the layer (the VMCOREINFO note of a 3 GiB image can sit at
+/// 1.3 GiB), batches of about one chunk per core keep the memory bus busy and read at most
+/// one batch past the hit.
+pub fn scan_each_progressive_max<S, F, O>(layer: &dyn Layer, scanner: &S, max_batch: usize, offset_of: O, mut f: F)
 where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
@@ -946,7 +959,7 @@ where
     }
     // python default section: (min_address, max_address - min_address)
     let section_end = layer.max_address();
-    let max_batch = crate::util::par::threads() * 4;
+    let max_batch = max_batch.max(2);
     let (mut i0, mut batch) = (0usize, 2usize);
     while i0 < n {
         let i1 = (i0 + batch).min(n);

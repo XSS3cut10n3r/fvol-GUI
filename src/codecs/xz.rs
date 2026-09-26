@@ -333,6 +333,7 @@ pub fn decompress_reuse(data: &[u8], buf: &mut Vec<u8>, parallel: bool) -> Resul
     if buf.len() < total {
         buf.clear();
         buf.try_reserve_exact(total).map_err(|_| err("output too large"))?;
+        super::advise_huge(buf.as_mut_ptr(), buf.capacity());
         buf.resize(total, 0);
     }
     decode_blocks(data, &blocks, &mut buf[..total], parallel)?;

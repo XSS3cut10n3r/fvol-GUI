@@ -165,6 +165,13 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
         });
         *index = Some(idx);
         let d = idx.dictionary("mac");
+        // a single mac kernel ISF: load it while the banner is searched (the stacker loads it
+        // next and waits for this load)
+        let mut isfs: Vec<&IsfLocation> = d.iter().map(|(_, l)| l).collect();
+        isfs.dedup();
+        if isfs.len() == 1 {
+            symbols::store::load_in_background(isfs[0].clone());
+        }
         if let Some(h) = hint.into_inner().unwrap_or_else(|e| e.into_inner()) {
             let _ = h.join();
         }

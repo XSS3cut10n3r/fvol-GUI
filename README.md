@@ -200,6 +200,11 @@ files downloaded by either tool are shared.
 | Downloads                          | `~/.cache/rsvol/data_<SHA512>.cache`            | Remote images and `-u` files are downloaded once           |
 | Converted Windows PDBs             | `~/.cache/volatility3/symbols/windows/`         | Shared with python volatility3                             |
 
+A binary symbol table is written after the run that first loads its ISF. For a big ISF, such as
+a Linux kernel's, that run resolves only the types and symbols it uses, and a helper process
+started after its output is complete writes the table in the background, at idle priority,
+while the run exits: `ps` shows it as `rsvol-isfb-helper`. Concurrent runs build a table once.
+
 A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
 directory where the file can be created, as python does: normally
 `~/.cache/volatility3/symbols`, but a writable `-s` directory or python volatility3 installation
@@ -255,6 +260,8 @@ same contents. If you modify an image in place and restore its timestamp, clear 
 | `RSVOL_TRACE=1`          | Print timing spans to stderr.                                                       |
 | `RSVOL_VOL3_ROOT=<DIR>`  | Use the symbol directories of the python volatility3 checkout at `<DIR>`.           |
 | `RSVOL_NO_PY_IDENT_SEED=1` | Do not seed the identifier index from python's identifier cache.                  |
+| `RSVOL_LAZY_ISF=0`       | Build every symbol table in full before the plugin runs.                            |
+| `RSVOL_DEFERRED_ISFB=<M>` | How the binary table of a lazily loaded ISF is written: `helper` (default), `thread` (by the run itself, before it exits) or `off`. |
 
 ## Verification
 
