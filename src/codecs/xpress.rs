@@ -334,8 +334,8 @@ const HUFF_SYMBOLS: usize = 512;
 const HUFF_MAX_LEN: usize = 15;
 const HUFF_BLOCK: usize = 65536;
 /// Primary lookup table bits: 2048 entries * 8 bytes (16 KiB) stay in L1 and cover 99.9% of
-/// literal and ~97% of match symbols of real memory; longer codes take the canonical slow
-/// path.
+/// literal and ~97% of match symbols of real memory; longer codes (up to 15 bits) go through
+/// a second table indexed by the top 15 bits, covering only the long end of the code space.
 const TABLE_BITS: u32 = 11;
 
 // Decode table entry layout (u64), everything the fast loop needs for a symbol with few
@@ -345,15 +345,17 @@ const TABLE_BITS: u32 = 11;
 //   bits  6..11  output length: 1 for a literal, 3..=17 for a match, 0 for SLOW entries
 //   bit  12      literal
 //   bits 16..25  symbol
-//   bits 25..29  code length (0: code longer than TABLE_BITS)
-//   bits 36..64  K: the "offset" is (top `nbits` bits of the stream) ^ K. For a match that
+//   bits 25..29  code length (0 in the primary table for codes longer than TABLE_BITS)
+//   bits 33..64  K: the "offset" is (top `nbits` bits of the stream) ^ K. For a match that
 //                is its offset (the offset bits with the implicit leading one); for a
 //                literal it is 256 - byte, so `LIT_SRC + 256 - offset` points at the byte.
-//                SLOW entries (length code 15, long codes) set K bit 27: an offset >= 2^27
-//                is never valid in the fast loop (it stops before 2^27 bytes of output).
+//                SLOW entries (length code 15, long codes) set K bit 30: an offset >= 2^30
+//                is never valid in the fast loop (it stops before 2^30 bytes of output).
 const E_LIT: u64 = 1 << 12;
-const E_K_SHIFT: u32 = 36;
-const E_SLOW_K: u64 = 1 << 27;
+const E_K_SHIFT: u32 = 33;
+const E_SLOW_K: u64 = 1 << 30;
+/// Code length field of an entry.
+const E_CODE_LEN: u64 = 15 << 25;
 /// Entry for codes longer than the table (nbits 1 keeps the shifts in range).
 const E_LONG: u64 = (E_SLOW_K << E_K_SHIFT) | 1;
 
@@ -379,6 +381,10 @@ const fn entry(sym: usize, l: usize, code: u64) -> u64 {
 /// in (length, symbol) order, i.e. standard canonical codes.
 struct HuffTable {
     fast: [u64; 1 << TABLE_BITS],
+    /// Entries for the 15-bit codes `long_base..2^15` (the prefixes of the primary table's
+    /// `E_LONG` slots), one per 15-bit value.
+    long: Vec<u64>,
+    long_base: usize,
     first_code: [u32; HUFF_MAX_LEN + 1],
     count: [u32; HUFF_MAX_LEN + 1],
     offset: [u16; HUFF_MAX_LEN + 1],
@@ -389,6 +395,8 @@ impl HuffTable {
     fn new() -> HuffTable {
         HuffTable {
             fast: [0; 1 << TABLE_BITS],
+            long: Vec::new(),
+            long_base: 1 << HUFF_MAX_LEN,
             first_code: [0; HUFF_MAX_LEN + 1],
             count: [0; HUFF_MAX_LEN + 1],
             offset: [0; HUFF_MAX_LEN + 1],
@@ -441,13 +449,39 @@ impl HuffTable {
             }
         }
         self.fast[pos..].fill(E_LONG);
+        // the long codes fill the rest of the code space in canonical order
+        const SUB: usize = HUFF_MAX_LEN - TABLE_BITS as usize;
+        self.long_base = pos << SUB;
+        self.long.clear();
+        self.long.resize((1 << HUFF_MAX_LEN) - self.long_base, E_LONG);
+        let mut at = 0usize;
+        for l in TABLE_BITS as usize + 1..=HUFF_MAX_LEN {
+            let span = 1usize << (HUFF_MAX_LEN - l);
+            let o = self.offset[l] as usize;
+            let mut code = self.first_code[l] as u64;
+            for &sym in &self.sorted[o..o + count[l] as usize] {
+                self.long[at..at + span].fill(entry(sym as usize, l, code));
+                at += span;
+                code += 1;
+            }
+        }
         Ok(())
+    }
+
+    /// Entry of a code longer than TABLE_BITS from the top 15 bits of the stream (E_LONG if
+    /// the bits are not a long code).
+    #[inline(always)]
+    fn long_entry(&self, top15: usize) -> u64 {
+        self.long.get(top15.wrapping_sub(self.long_base)).copied().unwrap_or(E_LONG)
     }
 
     /// Decode the symbol at the top of `bits`: (symbol, code length).
     #[inline(always)]
     fn decode(&self, bits: u32) -> (usize, u32) {
-        let e = self.fast[(bits >> (32 - TABLE_BITS)) as usize];
+        let mut e = self.fast[(bits >> (32 - TABLE_BITS)) as usize];
+        if e & E_CODE_LEN == 0 {
+            e = self.long_entry((bits >> (32 - HUFF_MAX_LEN)) as usize);
+        }
         let l = ((e >> 25) & 15) as u32;
         if l != 0 {
             return (((e >> 16) & 511) as usize, l);
@@ -720,16 +754,16 @@ unsafe fn load_lanes(p: *const u8) -> u64 {
 /// The bulk decoder. Every symbol takes the same branch-free path: the table entry gives the
 /// bits to consume, the output length and the source offset (a literal is "copied" from
 /// `LIT_SRC`), and 32 bytes are moved. One refill (>= 48 bits) serves up to three symbols
-/// (only the first may be unusual; the others must fit in the bits left). Runs while the
-/// input has 16 bytes and the output 32 bytes of slack and at least 256 bytes have been
-/// produced; length extensions, long codes, overlapping and invalid matches leave the common
-/// path, and errors are produced by the same code as the checked loop.
+/// (the second and third while they fit in the bits left). Runs while the input has 24 bytes
+/// and the output 32 bytes of slack and at least 256 bytes have been produced; length
+/// extensions, long codes, overlapping and invalid matches leave the common path, and errors
+/// are produced by the same code as the checked loop.
 #[inline(never)]
 fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitReader, op: &mut usize, block_end: usize) -> Result<(), XpressError> {
-    if input.len() < 16 || out.len() < 32 || *op < 256 {
+    if input.len() < 24 || out.len() < 32 || *op < 256 {
         return Ok(());
     }
-    let ip_end = input.len() - 16; // ptr <= ip_end before each refill
+    let ip_end = input.len() - 24; // ptr <= ip_end at the top of an iteration
     // o < o_end: 32 bytes writable at o, and o < E_SLOW_K
     let o_end = block_end.min(out.len() - 31).min(E_SLOW_K as usize);
     let sp = input.as_ptr();
@@ -769,18 +803,33 @@ fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitRe
         }};
     }
 
-    while o < o_end && ptr <= ip_end {
-        // refill to 48..63 counted bits: cnt | 48 adds whole words
-        // SAFETY: ptr + 8 <= input.len()
-        buf |= unsafe { load_lanes(sp.add(ptr)) }.wrapping_shr(cnt as u32);
-        let c2 = cnt | 48;
-        ptr += ((c2 ^ cnt) >> 3) as usize;
-        cnt = c2;
-
-        // ---- symbol A: anything (>= 48 bits buffered)
-        let (e, off, len) = lookup!();
-        // common case: len <= off <= o (o >= 256 > len, so o - len does not wrap)
-        if off.wrapping_sub(len) > o - len {
+    // Top up to 48..63 counted bits (cnt | 48 adds whole words); the bits already at the top
+    // of `buf` do not change.
+    macro_rules! refill {
+        () => {{
+            // SAFETY: ptr + 8 <= input.len(): ptr <= ip_end at the top of an iteration and
+            // at most three refills (<= 18 bytes) happen before the next check
+            buf |= unsafe { load_lanes(sp.add(ptr)) }.wrapping_shr(cnt as u32);
+            let c2 = cnt | 48;
+            ptr += ((c2 ^ cnt) >> 3) as usize;
+            cnt = c2;
+        }};
+    }
+    // Any symbol that is not the common case, with >= 48 bits buffered; always ends the
+    // iteration (`continue`).
+    macro_rules! special {
+        ($next:lifetime, $e:expr, $off:expr, $len:expr) => {{
+            let (mut e, mut off, mut len) = ($e, $off, $len);
+            if e & E_CODE_LEN == 0 {
+                // code longer than the table: the second-level entry of the top 15 bits
+                e = table.long_entry((buf >> (64 - HUFF_MAX_LEN)) as usize);
+                off = (buf.wrapping_shr((e as u32).wrapping_neg()) ^ (e >> E_K_SHIFT)) as usize;
+                len = ((e >> 6) & 31) as usize;
+            }
+            if off.wrapping_sub(len) <= o - len {
+                emit!(e, off, len);
+                continue $next;
+            }
             if off < E_SLOW_K as usize {
                 if off <= o {
                     // overlapping match (off < len <= 17)
@@ -789,9 +838,9 @@ fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitRe
                     // SAFETY: off <= o valid bytes before o, 32 writable at o (o < o_end)
                     unsafe { pattern32(dp.add(o), off) };
                     o += len;
-                    continue;
+                    continue $next;
                 }
-            } else if e & (15 << 25) != 0 {
+            } else if e & E_CODE_LEN != 0 {
                 // length code 15: one extension byte at the spec input position (as
                 // huff_match: consume the code, read the byte, resync, then the offset bits)
                 let cl = ((e >> 25) & 15) as u32;
@@ -799,7 +848,7 @@ fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitRe
                 let consumed = 8 * (ptr - base) - ((cnt & 63) as usize - cl as usize);
                 let r = (consumed.div_ceil(16) + 1).max(2);
                 let p = base + 2 * r;
-                // SAFETY: the spec position is at most ptr - 2 <= input.len() - 10
+                // SAFETY: the spec position is at most ptr - 2 < input.len()
                 let b = unsafe { *sp.add(p) } as usize;
                 if b != 255 {
                     let keep = (16 * r - consumed) as u32; // 16..=31
@@ -810,22 +859,28 @@ fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitRe
                     ptr = p + 1;
                     base = p + 1 - 2 * r;
                     let len = b + 18;
-                    if off >= 32 && off <= o && len + 32 <= out.len() - o {
-                        let mut k = 0;
-                        while k < len {
-                            // SAFETY: chunks read final bytes (off >= 32) inside out and
-                            // write below o + len + 32 <= out.len()
-                            unsafe {
+                    if off >= 32 && off <= o && len + 64 <= out.len() - o {
+                        // SAFETY: chunks read final bytes (off >= 32) inside out and write
+                        // below o + max(len, 64) + 32 <= out.len()
+                        unsafe {
+                            // lengths 18..=64 (80% of them): two fixed moves, no loop exit
+                            // to mispredict
+                            for k in [0, 32] {
                                 let v = (dp.add(o + k - off) as *const [u8; 32]).read_unaligned();
                                 (dp.add(o + k) as *mut [u8; 32]).write_unaligned(v);
                             }
-                            k += 32;
+                            let mut k = 64;
+                            while k < len {
+                                let v = (dp.add(o + k - off) as *const [u8; 32]).read_unaligned();
+                                (dp.add(o + k) as *mut [u8; 32]).write_unaligned(v);
+                                k += 32;
+                            }
                         }
                         o += len;
                     } else {
                         o = copy_match(out, o, off, len)?;
                     }
-                    continue;
+                    continue $next;
                 }
             }
             // long length, long code or bad offset: the checked code, one symbol
@@ -836,27 +891,32 @@ fn huff_run_fast(input: &[u8], out: &mut [u8], table: &HuffTable, rd: &mut BitRe
             *op = o;
             huff_symbol_cold(input, out, table, rd, op)?;
             (buf, cnt, ptr, base, o) = (rd.buf, rd.cnt as u64, rd.ptr, rd.base, *op);
-            continue;
-        }
-        emit!(e, off, len);
+            continue $next;
+        }};
+    }
 
-        // ---- symbols B and C: only the common case, with the bits left
-        if o >= o_end {
-            break;
-        }
+    'next: while o < o_end && ptr <= ip_end {
+        refill!();
+        // ---- symbol A (>= 48 bits buffered)
         let (e, off, len) = lookup!();
-        if (off.wrapping_sub(len) > o - len) | ((e & 31) > (cnt & 63)) {
-            continue; // redo it as symbol A
+        // common case: len <= off <= o (o >= 256 > len, so o - len does not wrap)
+        if off.wrapping_sub(len) > o - len {
+            special!('next, e, off, len);
         }
         emit!(e, off, len);
-        if o >= o_end {
-            break;
+        // ---- symbols B and C: common case with the bits left, else refill and as A
+        for _ in 0..2 {
+            if o >= o_end {
+                break;
+            }
+            let (e, off, len) = lookup!();
+            if (off.wrapping_sub(len) > o - len) | ((e & 31) > (cnt & 63)) {
+                refill!();
+                let off = (buf.wrapping_shr((e as u32).wrapping_neg()) ^ (e >> E_K_SHIFT)) as usize;
+                special!('next, e, off, len);
+            }
+            emit!(e, off, len);
         }
-        let (e, off, len) = lookup!();
-        if (off.wrapping_sub(len) > o - len) | ((e & 31) > (cnt & 63)) {
-            continue;
-        }
-        emit!(e, off, len);
     }
     rd.buf = buf;
     rd.cnt = (cnt & 63) as u32;
