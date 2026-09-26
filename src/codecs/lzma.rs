@@ -565,6 +565,20 @@ macro_rules! rev_lasta {
     };
 }
 
+/// 16-byte unaligned move: VEX-encoded in AVX builds (no SSE/AVX transition costs).
+#[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+macro_rules! movdqu {
+    () => {
+        "vmovdqu"
+    };
+}
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx")))]
+macro_rules! movdqu {
+    () => {
+        "movdqu"
+    };
+}
+
 /// Picks the template text of mode `fixed` (lc=3 lp=0 pb=2) or `generic`.
 #[cfg(target_arch = "x86_64")]
 macro_rules! sel {
@@ -1473,22 +1487,22 @@ impl LzmaDecoder {
                         "jb 75f",
                         // distance >= 16: 16-byte chunks (each chunk's source is complete); 64
                         // bytes unconditionally (~85% of the matches in text are shorter)
-                        "movdqu xmm0, xmmword ptr [{sym} - 1]",
-                        "movdqu xmmword ptr [{op}], xmm0",
-                        "movdqu xmm1, xmmword ptr [{sym} + 15]",
-                        "movdqu xmmword ptr [{op} + 16], xmm1",
-                        "movdqu xmm0, xmmword ptr [{sym} + 31]",
-                        "movdqu xmmword ptr [{op} + 32], xmm0",
-                        "movdqu xmm1, xmmword ptr [{sym} + 47]",
-                        "movdqu xmmword ptr [{op} + 48], xmm1",
+                        concat!(movdqu!(), " xmm0, xmmword ptr [{sym} - 1]"),
+                        concat!(movdqu!(), " xmmword ptr [{op}], xmm0"),
+                        concat!(movdqu!(), " xmm1, xmmword ptr [{sym} + 15]"),
+                        concat!(movdqu!(), " xmmword ptr [{op} + 16], xmm1"),
+                        concat!(movdqu!(), " xmm0, xmmword ptr [{sym} + 31]"),
+                        concat!(movdqu!(), " xmmword ptr [{op} + 32], xmm0"),
+                        concat!(movdqu!(), " xmm1, xmmword ptr [{sym} + 47]"),
+                        concat!(movdqu!(), " xmmword ptr [{op} + 48], xmm1"),
                         "cmp {t2}, 64",
                         "jbe 63f",
                         "mov {t1}, 64",
                         "62:",
-                        "movdqu xmm0, xmmword ptr [{sym} + {t1} - 1]",
-                        "movdqu xmmword ptr [{op} + {t1}], xmm0",
-                        "movdqu xmm1, xmmword ptr [{sym} + {t1} + 15]",
-                        "movdqu xmmword ptr [{op} + {t1} + 16], xmm1",
+                        concat!(movdqu!(), " xmm0, xmmword ptr [{sym} + {t1} - 1]"),
+                        concat!(movdqu!(), " xmmword ptr [{op} + {t1}], xmm0"),
+                        concat!(movdqu!(), " xmm1, xmmword ptr [{sym} + {t1} + 15]"),
+                        concat!(movdqu!(), " xmmword ptr [{op} + {t1} + 16], xmm1"),
                         "add {t1}, 32",
                         "cmp {t1}, {t2}",
                         "jb 62b",
