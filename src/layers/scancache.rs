@@ -2114,6 +2114,31 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    /// The Linux fast needle scanner (vmcoreinfo's magic scan) through the cache: overlapping
+    /// occurrences, matches in chunk overlaps, stream pieces; cold and warm equal the executor.
+    #[test]
+    fn fast_bytes_scanner_cached() {
+        use crate::symbols::linux::search::FastBytesScanner;
+        let magic = b"VMCOREINFO\x00\x00";
+        let mut data = planted(20 << 20, &[magic, b"VMCOREINFO\x00\x00VMCOREINFO\x00\x00", b"VMCOREINF"], 11);
+        for at in [0x100_0000 - 5, 0x100_0000 + 0x800, (20 << 20) - 12] {
+            data[at..at + magic.len()].copy_from_slice(magic);
+        }
+        let (p, file) = file_with(&data);
+        let root = scratch("root");
+        let s = FastBytesScanner::cached(magic);
+        assert!(FastBytesScanner::new(magic).cache_query().is_none());
+        let want = reference(file.as_ref(), &s, None);
+        assert!(want.len() > 3);
+        let (cold, h0) = cached(&root, file.as_ref(), &s, None);
+        let (warm, h1) = cached(&root, file.as_ref(), &s, None);
+        assert!(!h0 && h1);
+        assert_eq!(cold, want);
+        assert_eq!(warm, want);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&p);
+    }
+
     #[test]
     fn identity_distinguishes_layers() {
         let (p, file) = file_with(&[1u8; 8192]);
