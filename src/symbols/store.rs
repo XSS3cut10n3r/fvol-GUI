@@ -71,9 +71,9 @@ impl IsfLocation {
     }
 
     /// Cache identity: (url, size, mtime or content hash).
-    fn stamp(&self) -> Option<u64> {
+    fn stamp_with_url(&self, url: &str) -> Option<u64> {
         let mut h = FxHasher::default();
-        h.write(self.url().as_bytes());
+        h.write(url.as_bytes());
         match self {
             IsfLocation::File(p) => {
                 let (s, m) = paths::file_stamp(p)?;
@@ -86,12 +86,28 @@ impl IsfLocation {
                 h.write_u64(m as u64);
             }
             IsfLocation::Embedded { data, .. } => {
+                // embedded data only changes with the executable: its (size, mtime) is one stat
+                // for all ~170 entries instead of hashing 6 MB on every index check
                 h.write_u64(data.len() as u64);
-                h.write_u64(hash_bytes(data));
+                h.write_u64(embedded_stamp(data));
             }
         }
         Some(h.finish())
     }
+}
+
+/// Identity of the embedded ISF data: the running executable's (size, mtime); a content hash
+/// only when the executable cannot be stat'ed.
+fn embedded_stamp(data: &[u8]) -> u64 {
+    static EXE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let exe = EXE.get_or_init(|| {
+        let (s, m) = paths::file_stamp(&std::env::current_exe().ok()?)?;
+        let mut h = FxHasher::default();
+        h.write_u64(s);
+        h.write_u64(m as u64);
+        Some(h.finish())
+    });
+    exe.unwrap_or_else(|| hash_bytes(data))
 }
 
 /// Decompress according to the file extension.
@@ -322,7 +338,7 @@ fn path_ends_with(path: &Path, tail: &str) -> bool {
 
 /// Cache file for a location + options.
 fn cache_file(loc: &IsfLocation, opts: &BuildOptions) -> Option<PathBuf> {
-    let stamp = loc.stamp()?;
+    let stamp = loc.stamp_with_url(&loc.url())?;
     let mut h = FxHasher::default();
     h.write_u64(stamp);
     h.write_u32(super::table::BLOB_VERSION);
@@ -453,39 +469,61 @@ impl IdentifierIndex {
     /// Build/refresh the index: only new or modified files are (decompressed and) parsed.
     pub fn update(path: &SymbolPath) -> IdentifierIndex {
         let cache_path = paths::rsvol_cache_dir().join("identifiers.cache");
-        let old = read_ident_cache(&cache_path);
-        let mut old_map: crate::util::FxHashMap<String, IdentEntry> = old.into_iter().map(|e| (e.url.clone(), e)).collect();
-        let locs = path.all();
-        // dedupe by url
+        // entries for every symbol path ever indexed are kept, so alternating `-s` dirs does
+        // not rewrite (or re-extract) the cache on each run
+        let mut all = read_ident_cache(&cache_path);
+        let mut by_url: crate::util::FxHashMap<String, usize> =
+            all.iter().enumerate().map(|(i, e)| (e.url.clone(), i)).collect();
         let mut seen = crate::util::FxHashSet::default();
-        let locs: Vec<IsfLocation> = locs.into_iter().filter(|l| seen.insert(l.url())).collect();
-        let stamps: Vec<Option<u64>> = locs.iter().map(|l| l.stamp()).collect();
+        let mut locs = Vec::new();
+        let mut urls = Vec::new();
+        for l in path.all() {
+            let u = l.url();
+            if seen.insert(u.clone()) {
+                urls.push(u);
+                locs.push(l);
+            }
+        }
+        let stamps: Vec<Option<u64>> = locs.iter().zip(&urls).map(|(l, u)| l.stamp_with_url(u)).collect();
         let todo: Vec<usize> = (0..locs.len())
-            .filter(|&i| match (old_map.get(&locs[i].url()), stamps[i]) {
-                (Some(e), Some(s)) => e.stamp != s,
+            .filter(|&i| match (by_url.get(&urls[i]), stamps[i]) {
+                (Some(&j), Some(s)) => all[j].stamp != s,
                 _ => true,
             })
             .collect();
-        // bounded: each item may decompress a 50-100 MB ISF
-        let fresh: Vec<Option<IdentEntry>> = crate::util::par::par_map_bounded(todo.len(), 4, |k| {
+        // bounded: each item may decompress a 50-100 MB ISF (8 x 100 MB peak)
+        let fresh: Vec<Option<IdentEntry>> = crate::util::par::par_map_bounded(todo.len(), 8, |k| {
             let i = todo[k];
-            let loc = &locs[i];
             let stamp = stamps[i]?;
-            let (os, identifier) = match loc.read() {
+            let (os, identifier) = match locs[i].read() {
                 Ok(json) => extract_identifier(&json).unwrap_or_default(),
                 Err(_) => Default::default(),
             };
-            Some(IdentEntry { url: loc.url(), stamp, os, identifier })
+            Some(IdentEntry { url: urls[i].clone(), stamp, os, identifier })
         });
-        let changed = !todo.is_empty() || old_map.len() != locs.len();
+        let mut changed = false;
         for e in fresh.into_iter().flatten() {
-            old_map.insert(e.url.clone(), e);
+            changed = true;
+            match by_url.get(&e.url) {
+                Some(&j) => all[j] = e,
+                None => {
+                    by_url.insert(e.url.clone(), all.len());
+                    all.push(e);
+                }
+            }
         }
-        let entries: Vec<IdentEntry> = locs.iter().filter_map(|l| old_map.get(&l.url()).cloned()).collect();
         if changed {
-            write_ident_cache(&cache_path, &entries);
+            write_ident_cache(&cache_path, &all);
         }
-        IdentifierIndex { entries, locations: locs.iter().filter(|l| old_map.contains_key(&l.url())).cloned().collect() }
+        let mut entries = Vec::with_capacity(locs.len());
+        let mut locations = Vec::with_capacity(locs.len());
+        for (l, u) in locs.into_iter().zip(&urls) {
+            if let Some(&j) = by_url.get(u) {
+                entries.push(all[j].clone());
+                locations.push(l);
+            }
+        }
+        IdentifierIndex { entries, locations }
     }
 
     /// python `SqliteCache.find_location(identifier, os)`: the LAST matching location.
