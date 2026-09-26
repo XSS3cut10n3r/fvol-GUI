@@ -66,9 +66,9 @@ pub fn parse_fb_info(fb_info: &Obj) -> Result<Framebuffer> {
 /// python `Fbdev.convert_fb_raw_buffer_to_image`: RGBA pixels (row-major, `xres * yres * 4`),
 /// reading `bpp / 8` bytes per pixel sequentially from `raw` (short reads give 0 like
 /// `int.from_bytes(b"")`), values clipped to 0..=255 like pillow's `putpixel`.
-pub fn fb_raw_to_rgba(fb: &Framebuffer, raw: &[u8], fields: &[(u32, u32, u32); 4]) -> Vec<u8> {
-    let bpp = (fb.bpp / 8) as usize;
-    let n = (fb.xres_virtual * fb.yres_virtual) as usize;
+pub fn fb_raw_to_rgba(xres: u64, yres: u64, bits_per_pixel: u64, raw: &[u8], fields: &[(u32, u32, u32); 4]) -> Vec<u8> {
+    let bpp = (bits_per_pixel / 8) as usize;
+    let n = (xres * yres) as usize;
     let mut out = Vec::with_capacity(n * 4);
     let mut pos = 0usize;
     for _ in 0..n {
@@ -156,7 +156,7 @@ pub fn dump_fb(ctx: &Context, fb: &Framebuffer, convert_to_png: bool) -> Result<
     let data = k.vlayer.read_vec(screen_base, fb.size as usize)?;
     let (buf, filename) = match (&fb.color_fields, convert_to_png) {
         (Some(fields), true) => {
-            let rgba = fb_raw_to_rgba(fb, &data, fields);
+            let rgba = fb_raw_to_rgba(fb.xres_virtual, fb.yres_virtual, fb.bpp, &data, fields);
             (png_rgba(fb.xres_virtual as u32, fb.yres_virtual as u32, &rgba), format!("{base}.png"))
         }
         _ => (data, format!("{base}.raw")),
@@ -241,6 +241,26 @@ impl Plugin for Fbdev {
 
 #[cfg(test)]
 mod tests {
+    use super::fb_raw_to_rgba;
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn raw_to_rgba_like_python_putpixel() {
+        // expected: python's convert_fb_raw_buffer_to_image(...).tobytes() (pillow 12.3.0)
+        let raw: Vec<u8> = (0..64u32).map(|i| ((i * 37 + 11) & 255) as u8).collect();
+        let xrgb = [(16, 8, 0), (8, 8, 0), (0, 8, 0), (0, 0, 0)];
+        assert_eq!(hex(&fb_raw_to_rgba(3, 2, 32, &raw, &xrgb)), "55300bffe9c49fff7d5833ff11ecc7ffa5805bff3914efff");
+        let rgb565 = [(11, 5, 0), (5, 6, 1), (0, 5, 0), (0, 0, 0)];
+        assert_eq!(hex(&fb_raw_to_rgba(4, 2, 16, &raw, &rgb565)), "06000bff0f1215ff18091fff013b09ff0b2013ff14321dff1d1907ff060311ff");
+        let short = [(0, 8, 1), (8, 8, 0), (16, 8, 0), (20, 4, 0)];
+        assert_eq!(hex(&fb_raw_to_rgba(3, 2, 24, &raw[..10], &short)), "d03055055e9fc40c970e33031a0000000000000000000000");
+        let wide = [(0, 12, 0), (12, 10, 0), (22, 10, 1), (30, 2, 0)];
+        assert_eq!(hex(&fb_raw_to_rgba(2, 2, 32, &raw, &wide)), "0bffff01ffffff00ffffff02ffff6c00");
+    }
+
     #[test]
     fn msb_right_reverses_bits() {
         let v: u128 = 0b0011;
