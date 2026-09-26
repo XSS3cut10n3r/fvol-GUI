@@ -1,8 +1,8 @@
 //! Differential tester / benchmark for src/disasm against capstone reference corpora
 //! produced by bench/scripts/disasm_diff.py.
 //!
-//!   cargo run --profile fast --example disasm_diff -- cmp /tmp/rsvol-disasm [--only real64,rand32] [--show N]
-//!   cargo run --release --example disasm_diff -- bench /tmp/rsvol-disasm/real64.bin ...
+//!   cargo run --profile fast --example disasm_diff -- cmp testdata/scratch/disasm/ref [--only real64,rand32] [--show N]
+//!   (throughput benchmarks: examples/disasm_bench.rs)
 //!
 //! `cmp` compares every reference line (count, mode, addr, window, size, mnemonic, op_str) with
 //! our decoder and prints mismatch rates per corpus (unique lines and occurrence weighted);
@@ -108,7 +108,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("cmp") => {
-            let dir = args.get(1).cloned().unwrap_or_else(|| "/tmp/rsvol-disasm".into());
+            let dir = args.get(1).cloned().unwrap_or_else(|| "/home/user/rs-vol/testdata/scratch/disasm/ref".into());
             let mut only = None;
             let mut show = 0;
             let mut i = 2;

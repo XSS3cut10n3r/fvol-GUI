@@ -6,7 +6,7 @@ Usage (run with the bench venv python, which has capstone):
   disasm_diff.py cmp  [--out DIR] [--only NAME] [--show N]   build & run examples/disasm_diff.rs
   disasm_diff.py probe MODE HEX...                           print capstone's decoding
 
-Corpus/reference files are written to DIR (default /tmp/rsvol-disasm) as NAME.ref, one line per
+Corpus/reference files are written to DIR (default testdata/scratch/disasm/ref) as NAME.ref, one line per
 unique instruction:  count<TAB>mode<TAB>addr_hex<TAB>window_hex<TAB>size<TAB>mnemonic<TAB>op_str
 `window_hex` holds the bytes available to the decoder at that position (<= 15); size 0 means
 capstone rejected the bytes (mnemonic/op_str empty).  Corpora:
@@ -28,9 +28,9 @@ from multiprocessing import Pool
 import capstone
 
 MODES = {32: capstone.CS_MODE_32, 64: capstone.CS_MODE_64}
-DEFAULT_OUT = "/tmp/rsvol-disasm"
+DEFAULT_OUT = "/home/user/rs-vol/testdata/scratch/disasm/ref"  # on disk: /tmp is RAM-backed
 DEFAULT_PE = [
-    "/tmp/claude-1000/-home-user-rs-vol/c12d8bb7-14a2-4f12-b8c0-878249a94793/scratchpad/pe",
+    "/home/user/rs-vol/testdata/scratch/disasm/pe",
 ]
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 

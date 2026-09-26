@@ -51,13 +51,13 @@ fn disasm_never_panics_on_random_bytes() {
 }
 
 /// Differential check against capstone reference corpora produced by
-/// `bench/scripts/disasm_diff.py gen` (skipped when /tmp/rsvol-disasm is absent).
+/// `bench/scripts/disasm_diff.py gen` (skipped when testdata/scratch/disasm/ref is absent).
 /// Only the first lines of each corpus are checked here to keep `cargo test` fast; run
-/// `examples/disasm_diff cmp /tmp/rsvol-disasm` for the full comparison.
+/// `examples/disasm_diff cmp testdata/scratch/disasm/ref` for the full comparison.
 #[test]
 fn disasm_matches_capstone_corpora() {
     use std::io::BufRead;
-    let dir = std::path::Path::new("/tmp/rsvol-disasm");
+    let dir = std::path::Path::new("/home/user/rs-vol/testdata/scratch/disasm/ref");
     if !dir.is_dir() {
         eprintln!("disasm corpora not found in {dir:?}; skipping");
         return;
