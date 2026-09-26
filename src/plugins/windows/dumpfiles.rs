@@ -26,6 +26,7 @@
 //! `RSVOL_TRACE=1`); everything else takes a few tens of milliseconds.
 
 use crate::cli::regex::Regex;
+use crate::plugins::windows::handles::HandleWalker;
 use crate::context::{Context, WinKernel};
 use crate::error::{Error, Result};
 use crate::layers::metadata;
@@ -84,154 +85,6 @@ fn ntpath_basename(p: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------------------------
-// handles (python handles.Handles.handles / _make_handle_array / _get_item)
-// TODO(dedupe): owned by W1 (windows.handles helpers)
-
-/// Pre-resolved handle table layout for one kernel.
-struct HandleWalker {
-    vl: LayerRef,
-    sp: &'static Space,
-    ptr_ty: Ty,
-    ptr_size: u64,
-    entry_ty: Ty,
-    entry_size: u64,
-    is_64: bool,
-    /// pre-Windows 8 `_HANDLE_TABLE_ENTRY.Object`
-    has_object: bool,
-    header_ty: Ty,
-    has_type_index: bool,
-}
-
-impl HandleWalker {
-    fn new(k: &WinKernel) -> Result<HandleWalker> {
-        let t = k.table;
-        let entry_ty = t.get_type("_HANDLE_TABLE_ENTRY")?;
-        let ptr_ty = t.get_type("pointer")?;
-        let header_ty = t.get_type("_OBJECT_HEADER")?;
-        let sp = Space::on(k.vlayer, t);
-        let entry = Obj::new(sp, entry_ty, 0);
-        let header = Obj::new(sp, header_ty, 0);
-        Ok(HandleWalker {
-            vl: k.vlayer,
-            sp,
-            ptr_ty,
-            ptr_size: t.size_of(ptr_ty),
-            entry_ty,
-            entry_size: t.size_of(entry_ty),
-            is_64: t.is_64bit(),
-            has_object: entry.has_member("Object"),
-            header_ty,
-            has_type_index: header.has_member("TypeIndex"),
-        })
-    }
-
-    /// python `Handles.handles(handle_table)`: the `_OBJECT_HEADER`s of the table's in-use
-    /// entries, in python order. A trailing `Err` = python raised.
-    fn handles(&self, handle_table: &Obj) -> Vec<Result<Obj>> {
-        let mut out = Vec::new();
-        let tc = match handle_table.m("TableCode").and_then(|t| t.u64()) {
-            Ok(v) => v,
-            Err(e) if e.is_invalid_address() => return out,
-            Err(e) => return vec![Err(e)],
-        };
-        if let Err(e) = self.make_handle_array(tc & !7, tc & 7, &mut out) {
-            out.push(Err(e));
-        }
-        out
-    }
-
-    fn make_handle_array(&self, offset: u64, level: u64, out: &mut Vec<Result<Obj>>) -> Result<()> {
-        let (subtype, size) = if level > 0 { (self.ptr_ty, self.ptr_size) } else { (self.entry_ty, self.entry_size) };
-        if size == 0 {
-            return Err(Error::msg("ZeroDivisionError: division by zero"));
-        }
-        let count = 0x1000 / size;
-        if !self.vl.is_valid(offset, 1) {
-            return Ok(());
-        }
-        let base = Obj::new(self.sp, subtype, offset).addr;
-        for i in 0..count {
-            let entry = Obj::new(self.sp, subtype, base.wrapping_add(i * size));
-            if level > 0 {
-                // python reads the pointer when indexing the array
-                let v = match entry.u64() {
-                    Ok(v) => v,
-                    Err(e) if e.is_invalid_address() => continue,
-                    Err(e) => return Err(e),
-                };
-                if !self.vl.is_valid(entry.addr, 1) {
-                    continue;
-                }
-                self.make_handle_array(v, level - 1, out)?;
-            } else {
-                if !self.vl.is_valid(entry.addr, 1) {
-                    continue;
-                }
-                let Some(item) = self.get_item(&entry)? else { continue };
-                if self.has_type_index {
-                    match item.m("TypeIndex").and_then(|t| t.int()) {
-                        Ok(0) => {}
-                        Ok(_) => out.push(Ok(item)),
-                        Err(e) if e.is_invalid_address() => {}
-                        Err(e) => return Err(e),
-                    }
-                } else {
-                    // `if item.Type.Name:` -- a struct, always true once the pointer is read
-                    item.m("Type")?.u64()?;
-                    out.push(Ok(item));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// python `Handles._get_item(entry)`: the object header of a handle table entry.
-    fn get_item(&self, entry: &Obj) -> Result<Option<Obj>> {
-        if self.has_object {
-            // before windows 8
-            let obj = entry.m("Object")?;
-            if !self.vl.is_valid(obj.u64()?, 1) {
-                return Ok(None);
-            }
-            let header = match obj.cast("_EX_FAST_REF")?.fast_ref_dereference() {
-                Ok(p) => p.cast("_OBJECT_HEADER")?,
-                Err(e) if e.is_invalid_address() => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            entry.m("GrantedAccess")?.int()?;
-            return Ok(Some(header));
-        }
-        let offset = if self.is_64 {
-            let bits = match entry.m("ObjectPointerBits")?.u64() {
-                Ok(v) => v,
-                Err(e) if e.is_invalid_address() => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            if bits == 0 {
-                return Ok(None);
-            }
-            bits << 4
-        } else {
-            let it = match entry.m("InfoTable")?.u64() {
-                Ok(v) => v,
-                Err(e) if e.is_invalid_address() => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            if it == 0 {
-                return Ok(None);
-            }
-            it & !7
-        };
-        let header = Obj::new(self.sp, self.header_ty, offset);
-        match entry.m("GrantedAccessBits")?.int() {
-            Ok(_) => Ok(Some(header)),
-            Err(e) if e.is_invalid_address() => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
 // candidate file objects
 
 /// One step of python's `_generator` loop: a file object reaching the `dumped_files` check,
@@ -279,7 +132,7 @@ fn proc_steps(hw: &HandleWalker, proc: &Obj, type_map: &TypeMap, cookie: Option<
     };
     for entry in hw.handles(&object_table) {
         let entry = match entry {
-            Ok(e) => e,
+            Ok(e) => e.header,
             Err(e) => {
                 out.push(Step::Fatal(e));
                 return out;
