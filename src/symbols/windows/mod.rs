@@ -13,6 +13,7 @@
 pub mod cache;
 pub mod ext;
 pub mod kdbg;
+pub mod network;
 pub mod objects;
 pub mod pdb;
 pub mod pe;
