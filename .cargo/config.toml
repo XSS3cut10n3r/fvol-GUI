@@ -1,4 +1,7 @@
 [build]
-rustflags = ["-C", "target-cpu=native"]
+# crt-static: a static-pie binary skips the dynamic loader (library search, ~500k instructions of
+# symbol binding, ~25 syscalls), about 0.4 ms of every run's fixed cost. rsvol only needs libc
+# functions that work statically (no NSS / dlopen / iconv).
+rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+crt-static"]
 # Several agents build concurrently on this 20-core / 62 GB box; keep each build's footprint bounded.
 jobs = 6
