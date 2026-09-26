@@ -374,6 +374,9 @@ impl WinExt for Obj {
             })()
             .unwrap_or(false),
             Some("_DRIVER_OBJECT") | Some("_KMUTANT") | Some("_OBJECT_SYMBOLIC_LINK") => true,
+            Some("_CONTROL_AREA") => super::cache::control_area_is_valid(self),
+            Some("_SHARED_CACHE_MAP") => super::cache::shared_cache_map_is_valid(self).unwrap_or(false),
+            Some("_ERESOURCE") => super::cache::eresource_is_valid(self).unwrap_or(false),
             _ => true,
         }
     }

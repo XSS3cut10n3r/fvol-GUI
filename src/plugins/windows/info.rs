@@ -73,10 +73,18 @@ impl Plugin for Info {
         row("Symbols", k.table.isf_url().to_string())?;
         row("Is64Bit", py_bool(k.table.is_64bit()).into())?;
         row("IsPAE", py_bool(metadata(k.vlayer).pae.unwrap_or(false)).into())?;
-        let mut deps = Vec::new();
-        get_depends(k.vlayer, 0, &mut deps);
-        for (i, name, class) in deps {
-            row(&name, format!("{i} {class}"))?;
+        // python get_depends(kernel.layer_name): the kernel layer, then its memory_layer
+        // subtree (container stack), then swap layers
+        row(k.vlayer.name(), format!("0 {}", k.vlayer.class_name()))?;
+        for e in ctx.physical_listing()? {
+            row(&e.name, format!("{} {}", e.depth + 1, e.class))?;
+        }
+        for swap in k.vlayer.dependencies().iter().skip(1) {
+            let mut deps = Vec::new();
+            get_depends(swap.as_ref(), 1, &mut deps);
+            for (i, name, class) in deps {
+                row(&name, format!("{i} {class}"))?;
+            }
         }
         if kdbg.path("Header.OwnerTag")?.u64()? == 0x4742444B {
             row("KdDebuggerDataBlock", format!("{:#x}", kdbg.addr))?;

@@ -202,10 +202,25 @@ pub fn metadata(layer: &dyn Layer) -> Metadata {
 
 /// Convenience readers available on every layer.
 pub trait LayerExt: Layer {
+    /// Read `len` bytes (error if any byte is unavailable). Large reads grow the buffer as the
+    /// data is read, so a garbage length (smeared structure) fails at the first bad page
+    /// instead of allocating gigabytes first -- like python's lazy mapping-driven read.
     #[inline]
     fn read_vec(&self, addr: u64, len: usize) -> Result<Vec<u8>> {
-        let mut v = vec![0u8; len];
-        self.read(addr, &mut v)?;
+        const STEP: usize = 1 << 20;
+        if len <= STEP {
+            let mut v = vec![0u8; len];
+            self.read(addr, &mut v)?;
+            return Ok(v);
+        }
+        let mut v: Vec<u8> = Vec::with_capacity(STEP);
+        let mut done = 0usize;
+        while done < len {
+            let n = STEP.min(len - done);
+            v.resize(done + n, 0);
+            self.read(addr.wrapping_add(done as u64), &mut v[done..done + n])?;
+            done += n;
+        }
         Ok(v)
     }
     #[inline]

@@ -1,0 +1,524 @@
+{
+  "base_types": {
+    "char": {
+      "endian": "little",
+      "kind": "char",
+      "signed": true,
+      "size": 1
+    },
+    "double": {
+      "endian": "little",
+      "kind": "float",
+      "signed": true,
+      "size": 8
+    },
+    "f32": {
+      "endian": "little",
+      "kind": "float",
+      "signed": true,
+      "size": 4
+    },
+    "int": {
+      "endian": "little",
+      "kind": "int",
+      "signed": true,
+      "size": 4
+    },
+    "int8": {
+      "endian": "little",
+      "kind": "int",
+      "signed": true,
+      "size": 1
+    },
+    "long long": {
+      "endian": "little",
+      "kind": "int",
+      "signed": true,
+      "size": 8
+    },
+    "pointer": {
+      "endian": "little",
+      "kind": "int",
+      "signed": false,
+      "size": 4
+    },
+    "pointer32": {
+      "endian": "little",
+      "kind": "int",
+      "signed": false,
+      "size": 4
+    },
+    "pointer64": {
+      "endian": "little",
+      "kind": "int",
+      "signed": false,
+      "size": 8
+    },
+    "unsigned char": {
+      "endian": "little",
+      "kind": "char",
+      "signed": false,
+      "size": 1
+    },
+    "unsigned long": {
+      "endian": "little",
+      "kind": "int",
+      "signed": false,
+      "size": 4
+    },
+    "unsigned long long": {
+      "endian": "little",
+      "kind": "int",
+      "signed": false,
+      "size": 8
+    },
+    "unsigned short": {
+      "endian": "little",
+      "kind": "int",
+      "signed": false,
+      "size": 2
+    },
+    "void": {
+      "endian": "little",
+      "kind": "void",
+      "signed": true,
+      "size": 0
+    },
+    "wchar": {
+      "endian": "little",
+      "kind": "int",
+      "signed": true,
+      "size": 2
+    }
+  },
+  "enums": {
+    "Colors": {
+      "base": "int",
+      "constants": {
+        "A": 5,
+        "L": 100000,
+        "NEG": -1,
+        "S": -300,
+        "UL": 4294967295,
+        "US": 36864
+      },
+      "size": 4
+    }
+  },
+  "metadata": {
+    "format": "6.1.0",
+    "producer": {
+      "datetime": "2026-09-25T19:36:53.448461",
+      "name": "volatility3",
+      "version": "2.28.2"
+    },
+    "windows": {
+      "pdb": {
+        "GUID": "131211101514171618191A1B1C1D1E1F",
+        "age": 3,
+        "database": "other.pdb",
+        "machine_type": 332
+      }
+    }
+  },
+  "symbols": {
+    "?bar@@YAXXZ": {
+      "address": 69664
+    },
+    "?q@12": {
+      "address": 69780
+    },
+    "IMPORT_DESCRIPTOR_x": {
+      "address": 139312,
+      "linkage_name": "\u007fIMPORT_DESCRIPTOR_x"
+    },
+    "_imp_Y": {
+      "address": 139360,
+      "linkage_name": "__imp_Y"
+    },
+    "_tail@": {
+      "address": 69788
+    },
+    "a@b@c": {
+      "address": 69784,
+      "linkage_name": "_a@b@c"
+    },
+    "below_omap": {
+      "address": 28688
+    },
+    "caf\u00e9\"\\": {
+      "address": 69824
+    },
+    "dup": {
+      "address": 139392,
+      "linkage_name": "_dup"
+    },
+    "fast": {
+      "address": 69696,
+      "linkage_name": "@fast@8"
+    },
+    "foo": {
+      "address": 69648,
+      "linkage_name": "_foo@12"
+    },
+    "in_zero_region": {
+      "address": 139520
+    },
+    "lprocref": {
+      "address": 69648
+    },
+    "n": {
+      "address": 69776,
+      "linkage_name": "_n@\u00b2"
+    },
+    "pascal_sym": {
+      "address": 69792
+    },
+    "seg0_last_section": {
+      "address": 28688
+    },
+    "x": {
+      "address": 69712,
+      "linkage_name": "_x"
+    }
+  },
+  "user_types": {
+    "A\u0090BigUnion": {
+      "fields": {
+        "c": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "unsigned char"
+          }
+        }
+      },
+      "kind": "union",
+      "size": 32770
+    },
+    "B": {
+      "fields": {
+        "d": {
+          "offset": 16,
+          "type": {
+            "kind": "base",
+            "name": "double"
+          }
+        },
+        "x": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "unsigned long"
+          }
+        },
+        "y": {
+          "offset": 8,
+          "type": {
+            "kind": "base",
+            "name": "long long"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 24
+    },
+    "Early": {
+      "fields": {
+        "second": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "unsigned long long"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 8
+    },
+    "Empty": {
+      "fields": {},
+      "kind": "struct",
+      "size": 1
+    },
+    "FieldsNotAList": {
+      "fields": {},
+      "kind": "struct",
+      "size": 4
+    },
+    "HasRawList": {
+      "fields": {
+        "rawlist": {
+          "offset": 0,
+          "type": []
+        }
+      },
+      "kind": "struct",
+      "size": 4
+    },
+    "Main": {
+      "fields": {
+        "a": {
+          "offset": 7,
+          "type": {
+            "kind": "base",
+            "name": "int"
+          }
+        },
+        "arrArr": {
+          "offset": 136,
+          "type": {
+            "count": 2,
+            "kind": "array",
+            "subtype": {
+              "count": 3,
+              "kind": "array",
+              "subtype": {
+                "kind": "struct",
+                "name": "B"
+              }
+            }
+          }
+        },
+        "arrB": {
+          "offset": 16,
+          "type": {
+            "count": 3,
+            "kind": "array",
+            "subtype": {
+              "kind": "struct",
+              "name": "B"
+            }
+          }
+        },
+        "arrConstB": {
+          "offset": 88,
+          "type": {
+            "count": 2,
+            "kind": "array",
+            "subtype": {
+              "kind": "struct",
+              "name": "B"
+            }
+          }
+        },
+        "bigarr": {
+          "offset": 36864,
+          "type": {
+            "count": 36864,
+            "kind": "array",
+            "subtype": {
+              "kind": "base",
+              "name": "char"
+            }
+          }
+        },
+        "bits": {
+          "offset": 280,
+          "type": {
+            "bit_length": 3,
+            "bit_position": 5,
+            "kind": "bitfield",
+            "type": {
+              "kind": "base",
+              "name": "unsigned long"
+            }
+          }
+        },
+        "caf\u00e9 \"q\" \\ x": {
+          "offset": 10,
+          "type": {
+            "kind": "base",
+            "name": "wchar"
+          }
+        },
+        "color": {
+          "offset": 312,
+          "type": {
+            "kind": "enum",
+            "name": "Colors"
+          }
+        },
+        "constB": {
+          "offset": 320,
+          "type": {
+            "kind": "struct",
+            "name": "B"
+          }
+        },
+        "fn": {
+          "offset": 292,
+          "type": {
+            "kind": "pointer",
+            "subtype": {
+              "kind": "function"
+            }
+          }
+        },
+        "negoff": {
+          "offset": -1,
+          "type": {
+            "kind": "base",
+            "name": "unsigned long"
+          }
+        },
+        "p32late": {
+          "offset": 296,
+          "type": {
+            "kind": "pointer",
+            "subtype": {
+              "kind": "base",
+              "name": "void"
+            }
+          }
+        },
+        "p64late": {
+          "offset": 8,
+          "type": {
+            "base": "pointer64",
+            "kind": "pointer",
+            "subtype": {
+              "kind": "base",
+              "name": "void"
+            }
+          }
+        },
+        "p64late2": {
+          "offset": 300,
+          "type": {
+            "base": "pointer64",
+            "kind": "pointer",
+            "subtype": {
+              "kind": "base",
+              "name": "void"
+            }
+          }
+        },
+        "pB": {
+          "offset": 284,
+          "type": {
+            "kind": "pointer",
+            "subtype": {
+              "kind": "struct",
+              "name": "B"
+            }
+          }
+        },
+        "ppB": {
+          "offset": 288,
+          "type": {
+            "kind": "pointer",
+            "subtype": {
+              "kind": "pointer",
+              "subtype": {
+                "kind": "struct",
+                "name": "B"
+              }
+            }
+          }
+        },
+        "st_member": {
+          "offset": 9,
+          "type": {
+            "kind": "base",
+            "name": "char"
+          }
+        },
+        "u": {
+          "offset": 308,
+          "type": {
+            "kind": "union",
+            "name": "__unnamed_1002"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 73728
+    },
+    "OldStyle": {
+      "fields": {
+        "w": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "unsigned short"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 2
+    },
+    "Vs19Class": {
+      "fields": {
+        "w": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "unsigned short"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 2
+    },
+    "__anonymous_1026": {
+      "fields": {
+        "v": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "int8"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 1
+    },
+    "__unnamed_1013": {
+      "fields": {
+        "uf": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "f32"
+          }
+        },
+        "ui": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "int"
+          }
+        }
+      },
+      "kind": "union",
+      "size": 4
+    },
+    "alpha": {
+      "fields": {
+        "v": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "int8"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 1
+    },
+    "\u00e9t\u00e9": {
+      "fields": {
+        "v": {
+          "offset": 0,
+          "type": {
+            "kind": "base",
+            "name": "int8"
+          }
+        }
+      },
+      "kind": "struct",
+      "size": 1
+    }
+  }
+}
