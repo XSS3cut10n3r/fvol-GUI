@@ -107,10 +107,17 @@ pub fn elf_sym_get_name(sym: &Obj, strtab: u64) -> Result<Option<String>> {
         Err(e) if e.is_invalid_address() => return Ok(None),
         Err(e) => return Err(e),
     };
+    Ok(Some(sym_name_at(sym.layer(), strtab, st_name)))
+}
+
+/// The rest of python `elf_sym.get_name()` once `st_name` is known: the NUL-terminated name at
+/// `strtab + st_name` of `layer` (padded read of `KSYM_NAME_LEN` bytes, UTF-8 with
+/// replacement). Shared with the raw kernel-module symbol view (`module::ElfSym`).
+pub fn sym_name_at(layer: LayerRef, strtab: u64, st_name: u64) -> String {
     let mut buf = [0u8; KSYM_NAME_LEN];
-    sym.layer().read_padded(strtab.wrapping_add(st_name), &mut buf);
+    layer.read_padded(strtab.wrapping_add(st_name), &mut buf);
     let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    Ok(Some(String::from_utf8_lossy(&buf[..n]).into_owned()))
+    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
 /// python `elf_linkmap`: an `Elf32_LinkMap` / `Elf64_LinkMap` at [`LinkMap::offset`].
