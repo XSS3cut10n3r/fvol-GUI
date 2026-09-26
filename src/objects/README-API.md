@@ -296,6 +296,33 @@ generate_pool_scan_each(ctx, k, k.table, &cons, |h| {
 The ignored test `context::bench::object_scans_via_core_api` rebuilds symlinkscan, mutantscan
 and driverscan this way and diffs them against python's output.
 
+### Kernel objects, threads, callbacks (`crate::plugins::windows::*`, package W1)
+
+Streaming `*_each(ctx, k, |obj| { ..; Ok(true) })` variants return python's mid-iteration
+error after the objects before it; collected variants return `Vec<Result<..>>` with a trailing
+`Err`.
+
+| python | rust |
+|---|---|
+| `ssdt.SSDT.build_module_collection(ctx, kernel)` | `ssdt::build_module_collection(k)?` → `ModuleCollection` |
+| `collection.get_module_symbols_by_absolute_location(addr)` | `coll.module_symbols(addr)` → `Vec<(module name, Vec<symbol>)>` (symbols without `table!`); `coll.contains(addr)` = non-empty |
+| `context.modules.free_module_name(prefix)` / `os.path.splitext(p)[0]` | `ssdt::free_module_name(&existing, prefix)?` / `ssdt::splitext_root(p)` |
+| `DriverScan.scan_drivers(ctx, kernel)` / `get_names_for_driver(d)` | `driverscan::scan_drivers_each(ctx, k, f)` / `scan_drivers` / `get_names_for_driver(&d)?` |
+| `driver.get_devices()` / `device.get_attached_devices()` | `d.get_devices()` / `dev.get_attached_devices()` (`ObjectsExt`; python semantics: a NULL pointer yields the object at 0, the walk ends on an unreadable pointer) |
+| `driverirp.MAJOR_FUNCTIONS` | `driverirp::MAJOR_FUNCTIONS`, `driverirp::IRP_MJ_SHUTDOWN` |
+| `Handles.handles(ctx, kernel, handle_table)` (`_make_handle_array`, `_get_item`) | `handles::HandleWalker::new(k)?.handles(&proc.m("ObjectTable")?)` → `Vec<Result<HandleItem { header, handle_value, granted_access }>>` |
+| `Handles._generator`'s per-handle naming (File / Process / Thread / Key / NameInfo) | `handles::handle_object_info(&item, &type_map, cookie)?` → `Option<(type, name Value)>` |
+| `FileScan.scan_files` / `MutantScan.scan_mutants` / `SymlinkScan.scan_symlinks` / `ModScan.scan_modules` | `filescan::scan_files_each` / `mutantscan::scan_mutants_each` / `symlinkscan::scan_symlinks_each` / `modscan::scan_modules` |
+| `Modules._generator` (dump / base / name handling) | `modules::generate(ctx, cfg, out, &mut \|\| entries)` + `modules::columns()` |
+| `BigPools.list_big_pools(ctx, kernel, tags, show_free)` | `bigpools::list_big_pools_each(ctx, k, tags, show_free, f)` |
+| `ThrdScan.scan_threads` / `gather_thread_info(ethread, vads_cache)` | `thrdscan::scan_threads(_each)` / `thrdscan::gather_thread_info(&t, Some(&mut cache))?` → `Option<ThreadInfo>`; many threads: `thrdscan::thread_rows(threads, out)` (parallel VAD walks) |
+| `Threads.list_threads(ctx, kernel, proc)` / `list_process_threads` | `threads::list_threads(k, &proc)` / `threads::list_process_threads(k)` |
+| `orphan_kernel_threads.Threads.list_orphan_kernel_threads` | `orphan_kernel_threads::list_orphan_kernel_threads(ctx, k)` |
+| `KPCRs.list_kpcrs(ctx, kernel)` / `Timers.list_timers(ctx, kernel)` | `kpcrs::list_kpcrs(k)` → `Vec<Result<(kpcr, prcb)>>` / `timers::list_timers_each(k, f)` |
+| `Callbacks.create_callback_symbol_table / scan / list_notify_routines / list_registry_callbacks / list_bugcheck(_reason)_callbacks` | same names in `callbacks` → `Vec<Result<CallbackEntry { kind, address, detail }>>` |
+| `UnloadedModules.create_unloadedmodules_table / list_unloadedmodules` | same names in `unloadedmodules` |
+| `DebugRegisters._get_debug_info(ethread)` | `debugregisters::get_debug_info(&t)?` |
+
 ## Plugins & output
 
 * A plugin is a unit struct implementing `crate::plugins::Plugin` (see `src/plugins/windows/pslist.rs`),
