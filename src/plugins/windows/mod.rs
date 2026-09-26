@@ -2,6 +2,8 @@
 
 use crate::plugins::Plugin;
 
+pub mod cmdscan;
+pub mod consoles;
 pub mod info;
 pub mod modules;
 pub mod poolscanner;
@@ -11,6 +13,8 @@ pub mod registry;
 pub mod vadinfo;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
+    v.push(&cmdscan::CmdScan);
+    v.push(&consoles::Consoles);
     v.push(&info::Info);
     v.push(&modules::Modules);
     v.push(&poolscanner::PoolScanner);
