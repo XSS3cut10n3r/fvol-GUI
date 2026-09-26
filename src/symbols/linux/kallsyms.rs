@@ -1392,7 +1392,19 @@ impl Kallsyms {
             let mut tokens = PageReader::new(self.layer);
             let mut off = 0u64;
             let mut found = None;
+            // with a complete address table and a known section end, `_get_symbol`'s address /
+            // size computation cannot raise, so only the names need expanding until the match
+            let cheap = matches!(self.addr_table(), Some(Ok(t)) if t.complete && t.addrs.len() as u64 == n) && (self.cfg.end.is_some() || self.cfg.etext.is_some());
             for idx in 0..n {
+                if cheap {
+                    let (b, len) = self.expand_with(&mut names, &mut tokens, off)?;
+                    if b.name == name {
+                        found = Some(self.get_symbol_at(&mut names, &mut tokens, off, idx)?.0);
+                        break;
+                    }
+                    off += len + 1;
+                    continue;
+                }
                 let (s, len) = self.get_symbol_at(&mut names, &mut tokens, off, idx)?;
                 if s.name == name {
                     found = Some(s);
@@ -1510,3 +1522,34 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod tests_lookup {
+    use super::*;
+    use crate::context::{Context, GlobalOptions};
+
+    /// `lookup_name` / `lookup_address` agree with the ISF for a few kernel symbols:
+    /// `RSVOL_BENCH_IMAGE=<img> cargo test --profile fast kallsyms_lookup_name -- --ignored`.
+    #[test]
+    #[ignore]
+    fn kallsyms_lookup_name() {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let ctx = Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap();
+        let k = ctx.linux_kernel().unwrap();
+        let kas = Kallsyms::get(k).unwrap();
+        let mask = k.vlayer.address_mask();
+        for name in ["init_task", "schedule", "do_syscall_64", "rescuer_thread", "kthread_worker_fn"] {
+            let t = std::time::Instant::now();
+            let s = kas.lookup_name(name).unwrap().unwrap();
+            let isf = k.symbol_addr(name).unwrap() & mask;
+            eprintln!("{name}: {:#x} (isf {isf:#x}) type {:?} size {:?} in {:?}", s.address, s.type_, s.size, t.elapsed());
+            assert_eq!(s.address, isf);
+            if matches!(s.type_.as_deref(), Some("t" | "T")) {
+                // lookup_address only resolves kernel text
+                let back = kas.lookup_address(s.address).unwrap().unwrap();
+                assert_eq!(back.address, s.address);
+            }
+        }
+        assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
+    }
+}
