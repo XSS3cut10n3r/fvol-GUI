@@ -54,6 +54,21 @@ fn yara_smoke_yre_strings() {
 }
 
 #[test]
+fn yara_smoke_thread_safety() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Regex>();
+    assert_send_sync::<super::scan::re_string::ReString>();
+    // concurrent use of one Regex
+    let re = Regex::new(br"[a-z]{3}\d", 0).unwrap();
+    let hay = b"abc1 xyz9 ".repeat(1000);
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| assert_eq!(re.find_iter(&hay).count(), 2000));
+        }
+    });
+}
+
+#[test]
 fn yara_smoke_multi_string_pattern() {
     use super::regex::multi_string_pattern;
     // expectations from volatility3's MultiStringScanner._regex
