@@ -184,6 +184,11 @@ files downloaded by either tool are shared.
 | Remote ISF downloads               | `~/.cache/rsvol/remote/`                        | Files fetched for `-u` are downloaded once                 |
 | Converted Windows PDBs             | `~/.cache/volatility3/symbols/windows/`         | Shared with python volatility3                             |
 
+A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
+directory where the file can be created, as python does: normally
+`~/.cache/volatility3/symbols`, but a writable `-s` directory or python volatility3 installation
+comes first.
+
 To empty the caches, run any plugin with `--clear-cache` or delete the directory. `--clear-cache`
 removes the symbol tables, the identifier index, the kernel discovery results and the scan
 results. It keeps downloaded files and the `isfinfo` cache, and never deletes anything in
@@ -272,9 +277,6 @@ gates.
   unless `RSVOL_THREADS` says otherwise.
 - **YARA.** Rules that `import` a module such as `pe` fail with "modules are not supported", and
   `--yara-compiled-file` is not supported. Plain rules, strings and conditions work.
-- **Downloaded PDB symbols** are stored as plain `<GUID>-<age>.json`, where python writes
-  `<GUID>-<age>.json.xz`. Both tools read both. The file URL shown by `windows.info.Info` names
-  whichever file exists.
 - **Remote images.** The image must be a local file, given as a path or a `file://` URL. python can
   also open `http://` and `https://` locations.
 - **Corrupt circular lists.** Where python would loop forever on a smeared structure, such as a

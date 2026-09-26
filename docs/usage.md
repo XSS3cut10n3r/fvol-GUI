@@ -64,9 +64,12 @@ rsvol prints no progress output, so `-q` is accepted but changes nothing.
    vol -f <IMAGE> windows.info.Info
    ```
 
-   The converted file is stored in `~/.cache/volatility3/symbols/windows/`, where python
-   volatility3 finds it as well. Later runs on any image of the same Windows build need no
-   network.
+   The converted file, `windows/ntkrnlmp.pdb/<GUID>-<AGE>.json.xz`, goes where python
+   volatility3 would write it: into the first directory of the symbol search path (see
+   [Control where symbol files are found](#control-where-symbol-files-are-found)) in which it can
+   be created. That is normally `~/.cache/volatility3/symbols/`, but a writable `-s` directory
+   or python volatility3 installation comes first. python finds the file as well, and later runs
+   on any image of the same Windows build need no network.
 
 2. Run the plugins you need. A typical triage sequence:
 

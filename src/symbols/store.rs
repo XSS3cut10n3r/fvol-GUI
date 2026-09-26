@@ -6,10 +6,14 @@
 //! Search order (python `volatility3.symbols.__path__`):
 //!   1. `-s/--symbol-dirs` directories,
 //!   2. `<directory of the rsvol binary>/symbols` (like a frozen python executable),
-//!   3. the ISFs shipped with volatility3 (embedded in the binary: `volatility3/symbols/**`
-//!      then `volatility3/framework/symbols/**`),
+//!   3. the ISFs shipped with volatility3 (python's own `volatility3/symbols` and
+//!      `volatility3/framework/symbols` directories when an installation is found, the copies
+//!      embedded in the binary otherwise),
 //!   4. python's download cache `~/.cache/volatility3/symbols` (so existing downloads are
-//!      reused; new PDB conversions are written there too).
+//!      reused).
+//!
+//! A downloaded PDB is converted to `windows/<pdb>/<GUID>-<age>.json.xz` in the first of
+//! these directories where the file can be created, like python's `download_pdb_isf`.
 //!
 //! Every loaded table is cached as a flat blob in `~/.cache/rsvol/isf/<key>.isfb`
 //! (key = source URL + size + mtime + natives), so a warm load is one mmap.
@@ -204,7 +208,7 @@ pub enum Root {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolPath {
     pub roots: Vec<Root>,
-    /// Where downloaded / converted PDB ISFs are written (python's cache symbols dir).
+    /// python's cache symbols dir (the last root; part of some cache keys).
     pub download_dir: PathBuf,
 }
 
@@ -1370,9 +1374,14 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
     if let Some(l) = idx.find(ident.as_bytes(), "windows") {
         return Ok(l);
     }
-    // download + convert (pdb agent)
-    let out = super::windows::pdb::download_and_convert(pdb_name, &guid.to_uppercase(), age, &path.download_dir, offline)?;
-    Ok(IsfLocation::File(out))
+    // download + convert into the first writable directory of the search path, like python's
+    // `download_pdb_isf` over `symbols.__path__` (the embedded roots are not directories)
+    let dirs: Vec<PathBuf> = path.roots.iter().filter_map(|r| if let Root::Dir(d) = r { Some(d.clone()) } else { None }).collect();
+    let (out, json) = super::windows::pdb::download_and_convert(pdb_name, &guid.to_uppercase(), age, &dirs, offline)?;
+    let loc = IsfLocation::File(out);
+    // the load that follows builds the table from this JSON instead of decompressing the file
+    keep_decoded(&loc, json);
+    Ok(loc)
 }
 
 #[cfg(test)]
