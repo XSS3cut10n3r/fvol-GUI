@@ -89,22 +89,34 @@ impl DetailOp {
 pub struct DetailOps {
     pub(crate) n: u8,
     pub(crate) ops: [DetailOp; MAX_DETAIL_OPS],
+    /// provenance of each operand: index into `Insn::operands`, or one of the `SRC_*` values
+    pub(crate) src: [u8; MAX_DETAIL_OPS],
 }
+
+/// [`DetailOps::src`]: the implicit `st(0)` of `fxch`
+pub(crate) const SRC_ST0: u8 = 0x80;
+/// [`DetailOps::src`]: the hidden literal 1 of `rcl m`
+pub(crate) const SRC_ONE: u8 = 0x81;
+/// [`DetailOps::src`]: the EVEX opmask register
+pub(crate) const SRC_KMASK: u8 = 0x82;
 
 impl DetailOps {
     #[inline]
-    pub(crate) fn push(&mut self, op: DetailOp) {
+    pub(crate) fn push(&mut self, op: DetailOp, src: u8) {
         if (self.n as usize) < MAX_DETAIL_OPS {
             self.ops[self.n as usize] = op;
+            self.src[self.n as usize] = src;
             self.n += 1;
         }
     }
     #[inline]
-    pub(crate) fn insert(&mut self, at: usize, op: DetailOp) {
+    pub(crate) fn insert(&mut self, at: usize, op: DetailOp, src: u8) {
         let n = self.n as usize;
         if n < MAX_DETAIL_OPS && at <= n {
             self.ops.copy_within(at..n, at + 1);
+            self.src.copy_within(at..n, at + 1);
             self.ops[at] = op;
+            self.src[at] = src;
             self.n += 1;
         }
     }
@@ -113,6 +125,7 @@ impl DetailOps {
         let n = self.n as usize;
         if at < n {
             self.ops.copy_within(at + 1..n, at);
+            self.src.copy_within(at + 1..n, at);
             self.ops[n - 1] = DetailOp::default();
             self.n -= 1;
         }
@@ -345,6 +358,13 @@ fn bare_mem_size(sp: u8, m64: bool, ops: &[Operand]) -> u8 {
 /// Build capstone's detail operand list (access flags are filled in by `access.rs`).
 pub(crate) fn cs_operands(insn: &Insn, p: &Prefixes) -> DetailOps {
     let mut out = DetailOps::default();
+    cs_operands_into(insn, p, &mut out);
+    out
+}
+
+/// [`cs_operands`] into a reused list (only the first `n` entries are written).
+pub(crate) fn cs_operands_into(insn: &Insn, p: &Prefixes, out: &mut DetailOps) {
+    out.n = 0;
     let ops = insn.ops();
     let e = entry(insn);
     let sp = special(insn);
@@ -373,9 +393,9 @@ pub(crate) fn cs_operands(insn: &Insn, p: &Prefixes) -> DetailOps {
         let spec = e.and_then(|e| e.ops.get(k)).copied().unwrap_or_default();
         if spec.src == tables::S_FARPTR {
             // ptr16:16 / ptr16:32: selector (2 bytes) then offset (always reported as 4)
-            out.push(DetailOp { op: *o, size: 2, access: 0 });
+            out.push(DetailOp { op: *o, size: 2, access: 0 }, k as u8);
             if let Some(o2) = ops.get(k + 1) {
-                out.push(DetailOp { op: *o2, size: 4, access: 0 });
+                out.push(DetailOp { op: *o2, size: 4, access: 0 }, k as u8 + 1);
             }
             k += 2;
             continue;
@@ -426,19 +446,19 @@ pub(crate) fn cs_operands(insn: &Insn, p: &Prefixes) -> DetailOps {
         if out.n == 0 {
             op0_size = size;
         }
-        out.push(DetailOp { op: *o, size, access: 0 });
+        out.push(DetailOp { op: *o, size, access: 0 }, k as u8);
         k += 1;
     }
     match sp {
         // capstone keeps the implicit ST(0) as the first operand
         SP_FXCH if out.n == 1 => {
-            out.insert(0, DetailOp { op: Operand::Reg(Reg(regs::ST0)), size: 10, access: 0 });
+            out.insert(0, DetailOp { op: Operand::Reg(Reg(regs::ST0)), size: 10, access: 0 }, SRC_ST0);
         }
         // legacy-SSE forms with an implicit xmm0 (printed, but not a detail operand)
         SP_XMM0 if out.n == 3 => out.remove(2),
         // D0 /2, D1 /2 on memory: "rcl m" has a hidden literal 1
         SP_RCL if out.n == 1 && out.ops[0].is_mem() => {
-            out.push(DetailOp { op: Operand::Imm(1), size: 0, access: 0 });
+            out.push(DetailOp { op: Operand::Imm(1), size: 0, access: 0 }, SRC_ONE);
         }
         _ => {}
     }
@@ -447,9 +467,9 @@ pub(crate) fn cs_operands(insn: &Insn, p: &Prefixes) -> DetailOps {
         out.insert(
             1,
             DetailOp { op: Operand::Reg(Reg(regs::K0 + (insn.evex & 7))), size: 2, access: 0 },
+            SRC_KMASK,
         );
     }
-    out
 }
 
 /// capstone's name for `r` in detail output (`cs_reg_name`): like [`Reg::name`], except that

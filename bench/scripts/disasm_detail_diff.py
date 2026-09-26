@@ -7,6 +7,8 @@ Usage (bench venv python, which has capstone; run through bench/scripts/limit.sh
   disasm_detail_diff.py probe 32|64 HEX...                             print capstone's detail view
   disasm_detail_diff.py gen-mut [--dir DIR]                            write DIR/mut{32,64}.det (EVEX z/aaa/b
                                                                        and compare-predicate variants of sweep windows)
+  disasm_detail_diff.py gen-evex [--dir DIR]                           write DIR/evex{32,64}.det (all EVEX
+                                                                       opcodes x decoration contexts)
   disasm_detail_diff.py learn [--dir DIR] [--only ...]                 relearn the access rules from DIR/*.det and
                                                                        rewrite SPEC in src/disasm/x86/access_spec.rs
 
@@ -159,7 +161,48 @@ def gen_mut(dirn):
         print(f"  wrote {dst}: {n} lines", file=sys.stderr)
 
 
-LEARN_CORPORA = ["real64", "real32", "sweep64", "sweep32", "rand64", "rand32", "mut64", "mut32"]
+def gen_evex(dirn):
+    """Write DIR/evex{32,64}.det: every EVEX opcode (maps 1-3, all pp / W / L) in register and
+    memory form, crossed with every decoration context (merge / zero masking, broadcast or
+    rounding), so the learner sees each mnemonic's access in every EVEX context capstone has."""
+    for bits in (64, 32):
+        md = mk(bits)
+        n = 0
+        dst = os.path.join(dirn, f"evex{bits}.det")
+        addr = 0x140001000 if bits == 64 else 0x401000
+        seen = set()
+        with open(dst + ".tmp", "w") as fo:
+            for mm in (1, 2, 3):
+                for pp in range(4):
+                    for W in (0, 1):
+                        for op in range(256):
+                            for L in (0, 1, 2):
+                                for reg in (0, 1, 2, 3, 4, 5, 6, 7):
+                                    for form in ("m", "r"):
+                                        for z, b, aaa in ((0, 0, 0), (0, 0, 1), (1, 0, 1), (0, 1, 0), (0, 1, 1), (1, 1, 1)):
+                                            for vvvv in (2, 0):
+                                                p0 = 0xF0 | mm
+                                                p1 = (W << 7) | ((~vvvv & 15) << 3) | 4 | pp
+                                                p2 = (z << 7) | (L << 5) | (b << 4) | 0x08 | aaa
+                                                modrm = bytes([0x40 | (reg << 3), 0x01]) if form == "m" else bytes([0xC0 | (reg << 3) | 1])
+                                                w = bytes([0x62, p0, p1, p2, op]) + modrm + b"\x11\x22\x33\x44"
+                                                insn = next(md.disasm(w, addr, 1), None)
+                                                if insn is None:
+                                                    continue
+                                                key = (insn.mnemonic, op, pp, W, L, form, z, b, aaa > 0, reg)
+                                                if key in seen:
+                                                    break
+                                                seen.add(key)
+                                                win = w[: insn.size]
+                                                fo.write(f"1\t{bits}\t{addr:x}\t{win.hex()}\t{insn.size}\t{detail_fields(insn)}\t"
+                                                         f"{insn.mnemonic}\t{insn.op_str}\n")
+                                                n += 1
+                                                break
+        os.replace(dst + ".tmp", dst)
+        print(f"  wrote {dst}: {n} lines", file=sys.stderr)
+
+
+LEARN_CORPORA = ["real64", "real32", "sweep64", "sweep32", "rand64", "rand32", "mut64", "mut32", "evex64", "evex32"]
 
 
 def learn(dirn, only):
@@ -217,6 +260,8 @@ def main():
         learn(dirn, only)
     elif cmd == "gen-mut":
         gen_mut(dirn)
+    elif cmd == "gen-evex":
+        gen_evex(dirn)
     elif cmd == "probe":
         probe(int(rest[0]), rest[1:])
     elif cmd == "cmp":
