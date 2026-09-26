@@ -7,6 +7,7 @@ pub mod capabilities;
 pub mod elfs;
 pub mod envars;
 pub mod graphics;
+pub mod ip;
 pub mod kthreads;
 pub mod library_list;
 pub mod lsof;
@@ -21,6 +22,8 @@ pub mod pslist;
 pub mod psscan;
 pub mod pstree;
 pub mod ptrace;
+pub mod sockscan;
+pub mod sockstat;
 pub mod vmaregexscan;
 pub mod vmayarascan;
 
@@ -30,6 +33,8 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&elfs::Elfs);
     v.push(&envars::Envars);
     v.push(&graphics::fbdev::Fbdev);
+    v.push(&ip::Addr);
+    v.push(&ip::Link);
     v.push(&library_list::LibraryList);
     v.push(&lsof::Lsof);
     v.push(&malware::malfind::Malfind);
@@ -46,6 +51,8 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&psscan::PsScan);
     v.push(&pstree::PsTree);
     v.push(&ptrace::Ptrace);
+    v.push(&sockscan::Sockscan);
+    v.push(&sockstat::Sockstat);
     v.push(&vmaregexscan::VmaRegExScan);
     v.push(&vmayarascan::VmaYaraScan);
     v.push(&pscallstack::PsCallStack);
