@@ -851,6 +851,33 @@ impl Field {
         }
         Ok(Field { offset: off, ty, sp: None })
     }
+
+    /// The python int value of this member, decoded from `rec` = the bytes of the containing
+    /// struct (from its start), exactly as `obj.f(self).int()` reads it: integers, bitfields
+    /// and pointers (masked with `native_mask`, the native layer's address mask). `None` for
+    /// other types (enums, floats, ...) or when `rec` is too short: read the object instead.
+    #[inline]
+    pub fn int_from(&self, rec: &[u8], native_mask: u64) -> Option<i128> {
+        let prim_at = |p: Prim| -> Option<i128> {
+            let o = usize::try_from(self.offset).ok()?;
+            let b = rec.get(o..o.checked_add(p.size as usize)?)?;
+            Some(p.decode_int(b))
+        };
+        match self.ty {
+            Ty::Int(p) if self.sp.is_none() => prim_at(p),
+            Ty::Pointer { prim, .. } if self.sp.is_none() => {
+                let mut p = prim;
+                p.signed = false;
+                Some((prim_at(p)? as u128 as u64 & native_mask) as i128)
+            }
+            Ty::BitField { start, end, base } if self.sp.is_none() => {
+                let v = prim_at(base)?;
+                let mask = if end >= 127 { -1i128 } else { (1i128 << end) - 1 };
+                Some((v & mask) >> start)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A module (python `contexts.Module`): a symbol table bound to a layer at a base offset.
