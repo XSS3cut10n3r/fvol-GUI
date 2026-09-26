@@ -386,7 +386,7 @@ fn scan_self_referential(vm: &Module, lo: u64, hi: u64, align: u64, off: u64, mo
     let layer = vm.layer();
     let mask = layer.address_mask();
     // chunks of the address range, a multiple of `align` so chunk starts stay on the grid
-    const CHUNK: u64 = 1 << 22;
+    const CHUNK: u64 = 1 << 18;
     let step = (CHUNK / align).max(1) * align;
     let n = (hi - lo).div_ceil(step);
     let parts = crate::util::par::par_map(n as usize, |i| {
