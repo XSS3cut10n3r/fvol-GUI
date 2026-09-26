@@ -260,6 +260,7 @@ pub(crate) fn ty_decode(b: &[u8]) -> Ty {
 pub(crate) enum Blob {
     Owned(Vec<u8>),
     Mapped(Mmap),
+    #[allow(dead_code)]
     Static(&'static [u8]),
 }
 
@@ -418,6 +419,7 @@ impl SymbolTable {
     pub fn isf_url(&self) -> &str {
         &self.url
     }
+    #[allow(dead_code)]
     pub(crate) fn set_url(&mut self, url: &str) {
         self.url = url.to_string();
     }
@@ -442,6 +444,7 @@ impl SymbolTable {
         self.format
     }
     /// The raw blob (for the cache writer).
+    #[allow(dead_code)]
     pub(crate) fn blob_bytes(&self) -> &[u8] {
         self.blob.bytes()
     }

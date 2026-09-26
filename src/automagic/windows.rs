@@ -416,6 +416,7 @@ fn method_low_stub(vlayer: &IntelLayer, phys: &dyn Layer) -> Option<KernelFound>
 
 /// python `_method_offset` (kdbg / module list methods): scan the physical layer for `pattern`,
 /// read a u64 at hit + `result_offset`, try it as a kernel base.
+#[allow(dead_code)]
 fn method_offset(vlayer: &IntelLayer, phys: &dyn Layer, pattern: &[u8], result_offset: i64) -> Result<Option<KernelFound>> {
     let mut seen = crate::util::FxHashSet::default();
     let mut found = None;
@@ -443,6 +444,102 @@ fn method_offset(vlayer: &IntelLayer, phys: &dyn Layer, pattern: &[u8], result_o
         return Err(e);
     }
     Ok(found)
+}
+
+/// Hits of the fused KDBG / module-list scan.
+enum OffHit {
+    Kdbg(u64),
+    Module(u64),
+}
+
+/// Two BytesScanners in one pass (python semantics per needle: every occurrence starting in the
+/// first `chunk_size` bytes of a chunk).
+struct TwoNeedles {
+    a: &'static [u8],
+    b: &'static [u8],
+}
+
+impl Scanner for TwoNeedles {
+    type Hit = OffHit;
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<OffHit>) {
+        let cs = self.chunk_size() as usize;
+        let mut ha = Vec::new();
+        let mut hb = Vec::new();
+        for (needle, out) in [(self.a, &mut ha), (self.b, &mut hb)] {
+            let mut pos = 0usize;
+            while let Some(i) = find(&data[pos..], needle) {
+                let at = pos + i;
+                if at >= cs {
+                    break;
+                }
+                out.push(data_offset + at as u64);
+                pos = at + 1;
+            }
+        }
+        // merge by offset (the two needles can never start at the same offset)
+        let (mut i, mut j) = (0, 0);
+        while i < ha.len() || j < hb.len() {
+            if j >= hb.len() || (i < ha.len() && ha[i] < hb[j]) {
+                hits.push(OffHit::Kdbg(ha[i]));
+                i += 1;
+            } else {
+                hits.push(OffHit::Module(hb[j]));
+                j += 1;
+            }
+        }
+    }
+}
+
+/// python `method_kdbg_offset` followed by `method_module_offset`, in one physical pass:
+/// KDBG hits are validated as they stream in (stopping at the first valid kernel, like
+/// python); module-list hits are kept and tried afterwards in order, with python's separate
+/// `seen` set.
+fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<KernelFound>> {
+    let module_ro = -16 - (vlayer.bits_per_register() as i64 / 8);
+    let mut seen = crate::util::FxHashSet::default();
+    let mut found = None;
+    let mut err = None;
+    let mut module_hits = Vec::new();
+    let scanner = TwoNeedles { a: b"KDBG", b: b"\\SystemRoot\\system32\\nt" };
+    let try_hit = |hit: u64, ro: i64, seen: &mut crate::util::FxHashSet<u64>| -> std::result::Result<Option<KernelFound>, Error> {
+        let at = (hit as i128 + ro as i128) as u64;
+        let ptr = phys.read_u64(at)?;
+        let address = ptr & vlayer.address_mask();
+        if !seen.insert(address) {
+            return Ok(None);
+        }
+        Ok(check_kernel_offset(vlayer, address))
+    };
+    scan_each(phys, &scanner, None, |h| match h {
+        OffHit::Kdbg(o) => match try_hit(o, 8, &mut seen) {
+            Ok(Some(k)) => {
+                found = Some(k);
+                false
+            }
+            Ok(None) => true,
+            Err(e) => {
+                err = Some(e);
+                false
+            }
+        },
+        OffHit::Module(o) => {
+            module_hits.push(o);
+            true
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    if found.is_some() {
+        return Ok(found);
+    }
+    let mut seen = crate::util::FxHashSet::default();
+    for o in module_hits {
+        if let Some(k) = try_hit(o, module_ro, &mut seen)? {
+            return Ok(Some(k));
+        }
+    }
+    Ok(None)
 }
 
 /// python `method_fixed_mapping`.
@@ -498,15 +595,10 @@ pub fn find_kernel(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<Kerne
         }
     }
     {
-        let _t = span("pdbscan: kdbg offset");
-        if let Some(k) = method_offset(vlayer, phys, b"KDBG", 8)? {
-            return Ok(Some(k));
-        }
-    }
-    {
-        let _t = span("pdbscan: module offset");
-        let ro = -16 - (vlayer.bits_per_register() as i64 / 8);
-        if let Some(k) = method_offset(vlayer, phys, b"\\SystemRoot\\system32\\nt", ro)? {
+        // python runs method_kdbg_offset then method_module_offset, each a full physical scan;
+        // one fused pass gives the same hits in the same order (see method_offsets_fused)
+        let _t = span("pdbscan: kdbg + module offset (fused scan)");
+        if let Some(k) = method_offsets_fused(vlayer, phys)? {
             return Ok(Some(k));
         }
     }
