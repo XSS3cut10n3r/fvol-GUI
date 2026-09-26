@@ -136,6 +136,7 @@ fn run_detail(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
 fn run_cdetail(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
     let mut r = Res::default();
     let mut insn = Insn::default();
+    let mut d = x86::Detail::new();
     for c in chunks {
         let buf = &data[c.off..c.off + c.len];
         r.bytes += c.len as u64;
@@ -143,10 +144,13 @@ fn run_cdetail(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
         while pos < buf.len() {
             let addr = c.addr.wrapping_add(pos as u64);
             if x86::decode_into(&buf[pos..], addr, mode, &mut insn) {
-                let ops = insn.detail_operands();
-                let (rd, wr) = insn.implicit_regs();
-                let (ar, aw) = insn.regs_access();
-                r.check += (ops.len() + rd.len() + wr.len() + ar.len() + aw.len()) as u64;
+                // one pass: operands, implicit regs and regs_access into a reused record
+                insn.detail_into(&mut d);
+                r.check += (d.ops.len()
+                    + d.implicit_read.len()
+                    + d.implicit_write.len()
+                    + d.regs_read.len()
+                    + d.regs_write.len()) as u64;
                 r.insns += 1;
                 pos += insn.size as usize;
             } else {

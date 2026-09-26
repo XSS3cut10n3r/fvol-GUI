@@ -85,7 +85,58 @@ fn stream(bin: &str, idx: &str, mode: Mode) {
     }
 }
 
+/// Per-chunk (or, for one chunk, per-instruction) detail counts, for diffing against
+/// capstone (op_count + implicit read/write + regs_access read/write).
+fn dump(bin: &str, idx: &str, mode: Mode, want: Option<usize>) {
+    let data = std::fs::read(bin).expect("bin");
+    let mut off = 0usize;
+    let mut insn = Insn::default();
+    let mut d = x86::Detail::new();
+    for (ci, l) in std::fs::read_to_string(idx).expect("idx").lines().enumerate() {
+        let Some((a, n)) = l.split_once('\t') else { continue };
+        let a = u64::from_str_radix(a, 16).unwrap_or(0);
+        let n: usize = n.parse().unwrap_or(0);
+        let buf = &data[off..(off + n).min(data.len())];
+        off += n;
+        let mut sum = 0u64;
+        let mut p = 0usize;
+        while p < buf.len() {
+            if x86::decode_into(&buf[p..], a + p as u64, mode, &mut insn) {
+                insn.detail_into(&mut d);
+                let c = d.ops.len() + d.implicit_read.len() + d.implicit_write.len() + d.regs_read.len()
+                    + d.regs_write.len();
+                sum += c as u64;
+                if want == Some(ci) {
+                    println!(
+                        "{:x} {} {} {} {} {} {} {}",
+                        insn.address,
+                        d.ops.len(),
+                        d.implicit_read.len(),
+                        d.implicit_write.len(),
+                        d.regs_read.len(),
+                        d.regs_write.len(),
+                        insn.mnemonic(),
+                        insn.op_str()
+                    );
+                }
+                p += insn.size as usize;
+            } else {
+                p += 1;
+            }
+        }
+        if want.is_none() {
+            println!("{ci} {sum}");
+        }
+    }
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("dump") {
+        let a: Vec<String> = std::env::args().collect();
+        let mode = if a.get(4).map(|s| s.as_str()) == Some("32") { Mode::X86_32 } else { Mode::X86_64 };
+        dump(&a[2], &a[3], mode, a.get(5).and_then(|s| s.parse().ok()));
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("stream") {
         let a: Vec<String> = std::env::args().collect();
         let mode = if a.get(4).map(|s| s.as_str()) == Some("32") { Mode::X86_32 } else { Mode::X86_64 };
@@ -134,18 +185,6 @@ fn main() {
         s
     });
     println!("decode            {:7.1} ns/insn  ({c})", t / n * 1e9);
-    for (which, name) in [(0u8, "+prefixes"), (1, "+cs_operands"), (2, "+info")] {
-        let (t, c) = best(5, || {
-            let mut s = 0u64;
-            for (w, l, m, a) in &wins {
-                if x86::decode_into(&w[..*l as usize], *a, *m, &mut insn) {
-                    s += x86::_bench_part(&insn, which);
-                }
-            }
-            s
-        });
-        println!("{name:17} {:7.1} ns/insn  ({c})", t / n * 1e9);
-    }
     let (t, c) = best(5, || {
         let mut s = 0u64;
         for (w, l, m, a) in &wins {

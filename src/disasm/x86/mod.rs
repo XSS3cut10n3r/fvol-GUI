@@ -21,7 +21,7 @@ mod spec_evex;
 #[allow(dead_code)]
 mod tables;
 
-pub use access::{_bench_part, learn_features, uncovered_mnemonics, Detail, RegList, MAX_REGS};
+pub use access::{learn_features, uncovered_mnemonics, Detail, RegList, MAX_REGS};
 pub use detail::{reg_name, DetailOp, DetailOps, CS_AC_READ, CS_AC_WRITE, MAX_DETAIL_OPS};
 pub use regs::Reg;
 
