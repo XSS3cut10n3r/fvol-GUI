@@ -275,6 +275,10 @@ impl LzmaDecoder {
         let mut code = rc.code;
         let mut state = self.state;
         let [mut rep0, mut rep1, mut rep2, mut rep3] = self.reps;
+        // The previous output byte, kept in a register (avoids a store->load round trip in
+        // front of every literal).
+        // SAFETY: p <= out_len; p - 1 valid when p > 0.
+        let mut prev: usize = if p > 0 { (unsafe { *outp.add(p - 1) }) as usize } else { 0 };
         let stop;
 
         macro_rules! normalize {
@@ -318,13 +322,15 @@ impl LzmaDecoder {
                 let pr = $pr;
                 normalize!();
                 let bound = (range >> 11) * pr;
-                let b = code >= bound;
-                let adj = ((b as u32).wrapping_sub(1)) & (2048 - 31);
+                // One subtraction yields both the bit (no borrow = 1) and the new code.
+                let (c2, borrow) = code.overflowing_sub(bound);
+                let r2 = range.wrapping_sub(bound);
+                code = std::hint::select_unpredictable(borrow, code, c2);
+                range = std::hint::select_unpredictable(borrow, bound, r2);
+                let adj = std::hint::select_unpredictable(borrow, 2048 - 31, 0u32);
                 // SAFETY: caller guarantees $pp is inside the probability array.
                 unsafe { *$pp = (pr as i32 - ((pr as i32 - adj as i32) >> 5)) as u16 };
-                range = std::hint::select_unpredictable(b, range.wrapping_sub(bound), bound);
-                code = std::hint::select_unpredictable(b, code.wrapping_sub(bound), code);
-                b
+                !borrow
             }};
         }
         // Bit-tree walk of $n bits rooted at probs[$base + 1]. Both children of the current
@@ -382,7 +388,6 @@ impl LzmaDecoder {
             if bit!(IS_MATCH + (state << 4) + pos_state) == 0 {
                 // ---- literal ----
                 // SAFETY: p < limit <= out_len; p - 1 valid when p > 0.
-                let prev = if p > 0 { (unsafe { *outp.add(p - 1) }) as usize } else { 0 };
                 let lit = LITERAL + 0x300 * (((p & lp_mask) << lc) + (prev >> (8 - lc)));
                 let mut sym = 1usize;
                 if state < 7 {
@@ -423,8 +428,10 @@ impl LzmaDecoder {
                 }
                 // SAFETY: p < limit <= out_len.
                 unsafe { *outp.add(p) = sym as u8 };
+                prev = sym & 0xFF;
                 p += 1;
-                state = LIT_NEXT_STATE[state & 15] as usize;
+                // 0..3 -> 0, 4..9 -> state - 3, 10..11 -> state - 6
+                state = state.saturating_sub(std::hint::select_unpredictable(state >= 10, 6, 3));
                 continue;
             }
 
@@ -476,7 +483,8 @@ impl LzmaDecoder {
                         }
                         state = if state < 7 { 9 } else { 11 };
                         // SAFETY: rep0 < p < limit <= out_len.
-                        unsafe { *outp.add(p) = *outp.add(p - rep0 - 1) };
+                        prev = (unsafe { *outp.add(p - rep0 - 1) }) as usize;
+                        unsafe { *outp.add(p) = prev as u8 };
                         p += 1;
                         continue;
                     }
@@ -512,6 +520,8 @@ impl LzmaDecoder {
             // SAFETY: rep0 < p, p + n <= limit <= out_len.
             unsafe { copy_match(outp, out_len, p - rep0 - 1, p, n) };
             p += n;
+            // SAFETY: n >= 1 (len >= 2 and p < limit), so p - 1 was just written.
+            prev = (unsafe { *outp.add(p - 1) }) as usize;
             if n < len {
                 self.pending_len = len - n;
                 stop = Stop::Limit;
@@ -539,7 +549,9 @@ pub(crate) unsafe fn copy_match(out: *mut u8, out_len: usize, src: usize, dst: u
     use std::ptr::copy_nonoverlapping as cp;
     let dist = dst - src;
     unsafe {
-        if dist >= 32 && dst + len + 64 <= out_len {
+        if len <= 16 && dist >= 16 && dst + 16 <= out_len {
+            cp(out.add(src), out.add(dst), 16);
+        } else if dist >= 32 && dst + len + 64 <= out_len {
             // Copy 64 bytes unconditionally (most matches are shorter), then 32 at a time.
             // Chunks of C bytes are correct for any overlap as long as dist >= C.
             let s = out.add(src);

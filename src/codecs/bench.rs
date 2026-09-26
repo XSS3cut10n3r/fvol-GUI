@@ -117,15 +117,265 @@ fn codecs_bench_file() {
     let n = out.len();
     drop(out);
     let mut best = f64::MAX;
+    let mut best_counts = [0u64; 3];
+    let counters = perf::Counters::open();
     for _ in 0..runs {
+        if let Some(c) = counters.as_ref() {
+            c.start();
+        }
         let t = Instant::now();
         let r = decode(codec, &data).unwrap().unwrap();
         let dt = t.elapsed().as_secs_f64();
+        if let Some(c) = counters.as_ref() {
+            let v = c.stop();
+            if best_counts[0] == 0 || v[0] < best_counts[0] {
+                best_counts = v;
+            }
+        }
         assert_eq!(r.len(), n);
         drop(r);
         best = best.min(dt);
     }
-    println!("rust {codec} {file} {n} {:.3} {:.1}", best * 1e3, n as f64 / best / 1e6);
+    // Fields 7..9: user-mode cycles, instructions, branch misses of the run with the fewest
+    // cycles (0 when perf counters are unavailable).
+    println!(
+        "rust {codec} {file} {n} {:.3} {:.1} {} {} {}",
+        best * 1e3,
+        n as f64 / best / 1e6,
+        best_counts[0],
+        best_counts[1],
+        best_counts[2]
+    );
+}
+
+/// Sampling profile ("perf record" without perf): decodes CODECS_BENCH_FILE CODECS_RUNS times
+/// while sampling the instruction pointer every CODECS_PROFILE_PERIOD events of
+/// CODECS_PROFILE_EVENT (0 = cycles, 5 = branch misses) and writes "vaddr count" lines
+/// (addresses relative to the executable's load base, for addr2line) to CODECS_PROFILE_OUT.
+#[test]
+#[ignore]
+fn codecs_profile_file() {
+    let (Ok(file), Ok(codec), Ok(outp)) = (
+        std::env::var("CODECS_BENCH_FILE"),
+        std::env::var("CODECS_BENCH_CODEC"),
+        std::env::var("CODECS_PROFILE_OUT"),
+    ) else {
+        eprintln!("set CODECS_BENCH_FILE, CODECS_BENCH_CODEC and CODECS_PROFILE_OUT");
+        return;
+    };
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+    let runs = env("CODECS_RUNS", 3);
+    let event = env("CODECS_PROFILE_EVENT", 0);
+    let period = env("CODECS_PROFILE_PERIOD", if event == 0 { 20011 } else { 211 });
+    let data = std::fs::read(&file).unwrap();
+    let mut s = perf::Sampler::open(event, period).expect("perf_event_open (sampling) failed");
+    let mut hist: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    for _ in 0..runs {
+        s.start();
+        let r = decode(&codec, &data).unwrap().unwrap();
+        s.stop();
+        s.drain(&mut hist);
+        drop(r);
+    }
+    // Load base of the executable = start of its mapping at file offset 0.
+    let exe = std::fs::read_link("/proc/self/exe").unwrap();
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    let base = maps
+        .lines()
+        .filter(|l| l.ends_with(&*exe.to_string_lossy()))
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let range = it.next()?;
+            let _perms = it.next()?;
+            let off = u64::from_str_radix(it.next()?, 16).ok()?;
+            let start = u64::from_str_radix(range.split('-').next()?, 16).ok()?;
+            (off == 0).then_some(start)
+        })
+        .min()
+        .unwrap();
+    let mut v: Vec<(u64, u64)> = hist.into_iter().map(|(ip, n)| (ip.wrapping_sub(base), n)).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    let text: String = v.iter().map(|(a, n)| format!("{a:#x} {n}\n")).collect();
+    std::fs::write(&outp, text).unwrap();
+    println!("profile: {} samples at {} distinct addresses -> {outp} (exe {})", v.iter().map(|x| x.1).sum::<u64>(), v.len(), exe.display());
+}
+
+/// Minimal perf_event_open(2) wrapper (user-mode cycles / instructions / branch misses of
+/// the calling thread), used only by the benchmarks. Unavailable counters yield None.
+mod perf {
+    use std::os::raw::{c_int, c_long, c_ulong};
+    unsafe extern "C" {
+        fn syscall(num: c_long, ...) -> c_long;
+        fn ioctl(fd: c_int, req: c_ulong, ...) -> c_int;
+        fn read(fd: c_int, buf: *mut u8, n: usize) -> isize;
+        fn close(fd: c_int) -> c_int;
+    }
+    const SYS_PERF_EVENT_OPEN: c_long = 298;
+    const IOC_ENABLE: c_ulong = 0x2400;
+    const IOC_DISABLE: c_ulong = 0x2401;
+    const IOC_RESET: c_ulong = 0x2403;
+
+    pub struct Counters {
+        fds: [c_int; 3],
+    }
+
+    fn open_one(config: u64) -> Option<c_int> {
+        // perf_event_attr, PERF_ATTR_SIZE_VER0 (64 bytes).
+        let mut attr = [0u64; 8];
+        // Hybrid CPUs: PERF_TYPE_HARDWARE with the P-core PMU type in config bits 32..63.
+        let pmu = std::fs::read_to_string("/sys/bus/event_source/devices/cpu_core/type")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        attr[0] = 64u64 << 32; // type = PERF_TYPE_HARDWARE (0), size = 64
+        attr[1] = config | (pmu << 32);
+        attr[5] = 1 | (1 << 5) | (1 << 6); // disabled, exclude_kernel, exclude_hv
+        // SAFETY: attr is a valid perf_event_attr of the declared size.
+        let fd = unsafe {
+            syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0 as c_int, -1 as c_int, -1 as c_int, 0 as c_ulong)
+        };
+        if fd < 0 { None } else { Some(fd as c_int) }
+    }
+
+    impl Counters {
+        pub fn open() -> Option<Counters> {
+            // cycles, instructions, branch-misses
+            Some(Counters { fds: [open_one(0)?, open_one(1)?, open_one(5)?] })
+        }
+        pub fn start(&self) {
+            for &fd in &self.fds {
+                // SAFETY: valid perf fds.
+                unsafe {
+                    ioctl(fd, IOC_RESET, 0 as c_ulong);
+                    ioctl(fd, IOC_ENABLE, 0 as c_ulong);
+                }
+            }
+        }
+        pub fn stop(&self) -> [u64; 3] {
+            let mut v = [0u64; 3];
+            for (i, &fd) in self.fds.iter().enumerate() {
+                // SAFETY: valid perf fds; reading one u64 counter value.
+                unsafe {
+                    ioctl(fd, IOC_DISABLE, 0 as c_ulong);
+                    read(fd, &mut v[i] as *mut u64 as *mut u8, 8);
+                }
+            }
+            v
+        }
+    }
+
+    impl Drop for Counters {
+        fn drop(&mut self) {
+            for &fd in &self.fds {
+                // SAFETY: closing our own fds.
+                unsafe { close(fd) };
+            }
+        }
+    }
+
+    unsafe extern "C" {
+        fn mmap(addr: *mut u8, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut u8;
+        fn munmap(addr: *mut u8, len: usize) -> c_int;
+    }
+
+    /// IP sampler backed by the perf ring buffer.
+    pub struct Sampler {
+        fd: c_int,
+        ring: *mut u8,
+        len: usize,
+    }
+
+    const DATA_PAGES: usize = 1 << 11; // 8 MiB of 16-byte samples
+
+    impl Sampler {
+        pub fn open(event: u64, period: u64) -> Option<Sampler> {
+            let pmu = std::fs::read_to_string("/sys/bus/event_source/devices/cpu_core/type")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let mut fd = -1;
+            for precise in [2u64, 1, 0] {
+                let mut attr = [0u64; 8];
+                attr[0] = 64u64 << 32; // PERF_TYPE_HARDWARE, size 64
+                attr[1] = event | (pmu << 32);
+                attr[2] = period; // sample_period
+                attr[3] = 1; // sample_type = PERF_SAMPLE_IP
+                attr[5] = 1 | (1 << 5) | (1 << 6) | (precise << 15); // disabled, excl kernel/hv
+                // SAFETY: valid perf_event_attr.
+                fd = unsafe {
+                    syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0 as c_int, -1 as c_int, -1 as c_int, 0 as c_ulong)
+                } as c_int;
+                if fd >= 0 {
+                    break;
+                }
+            }
+            if fd < 0 {
+                return None;
+            }
+            let len = (1 + DATA_PAGES) * 4096;
+            // SAFETY: mapping the perf ring buffer of our own fd (PROT_READ|PROT_WRITE, MAP_SHARED).
+            let ring = unsafe { mmap(std::ptr::null_mut(), len, 3, 1, fd, 0) };
+            if ring as isize == -1 {
+                return None;
+            }
+            Some(Sampler { fd, ring, len })
+        }
+        pub fn start(&self) {
+            // SAFETY: valid perf fd.
+            unsafe { ioctl(self.fd, IOC_ENABLE, 0 as c_ulong) };
+        }
+        pub fn stop(&self) {
+            // SAFETY: valid perf fd.
+            unsafe { ioctl(self.fd, IOC_DISABLE, 0 as c_ulong) };
+        }
+        /// Moves all buffered PERF_RECORD_SAMPLE IPs into `hist`.
+        pub fn drain(&mut self, hist: &mut std::collections::HashMap<u64, u64>) {
+            use std::sync::atomic::{AtomicU64, Ordering, fence};
+            // SAFETY: perf_event_mmap_page: data_head at 1024, data_tail at 1032; data at page 1.
+            unsafe {
+                let head_p = &*(self.ring.add(1024) as *const AtomicU64);
+                let tail_p = &*(self.ring.add(1032) as *const AtomicU64);
+                let head = head_p.load(Ordering::Acquire);
+                fence(Ordering::Acquire);
+                let mut tail = tail_p.load(Ordering::Relaxed);
+                let data = self.ring.add(4096);
+                let size = (DATA_PAGES * 4096) as u64;
+                let rd = |off: u64, n: usize| -> [u8; 16] {
+                    let mut b = [0u8; 16];
+                    for (i, x) in b.iter_mut().enumerate().take(n) {
+                        *x = *data.add(((off + i as u64) % size) as usize);
+                    }
+                    b
+                };
+                while tail < head {
+                    let h = rd(tail, 8);
+                    let typ = u32::from_le_bytes(h[0..4].try_into().unwrap());
+                    let sz = u16::from_le_bytes(h[6..8].try_into().unwrap()) as u64;
+                    if sz == 0 {
+                        break;
+                    }
+                    if typ == 9 && sz >= 16 {
+                        let b = rd(tail + 8, 8);
+                        let ip = u64::from_le_bytes(b[0..8].try_into().unwrap());
+                        *hist.entry(ip).or_insert(0) += 1;
+                    }
+                    tail += sz;
+                }
+                fence(Ordering::Release);
+                tail_p.store(head, Ordering::Release);
+            }
+        }
+    }
+
+    impl Drop for Sampler {
+        fn drop(&mut self) {
+            // SAFETY: our own mapping / fd.
+            unsafe {
+                munmap(self.ring, self.len);
+                close(self.fd);
+            }
+        }
+    }
 }
 
 /// Symbol statistics (build with RUSTFLAGS="--cfg lzma_stats").

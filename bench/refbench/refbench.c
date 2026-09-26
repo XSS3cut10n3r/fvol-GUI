@@ -9,7 +9,9 @@
  * The compressed file is loaded into memory once. Each timed run allocates a fresh output
  * buffer of the exact uncompressed size (like the Rust API, which returns a new Vec), decodes
  * the whole input in one call sequence, and frees the buffer outside the timed region.
- * Prints: "c <codec> <file> <out_bytes> <best_ms> <MB/s>" (MB = 1e6 bytes of output).
+ * Prints: "c <codec> <file> <out_bytes> <best_ms> <MB/s> <cycles> <instructions> <branch_misses>"
+ * (MB = 1e6 bytes of output; the last three are user-mode perf counters of the run with the
+ * fewest cycles, 0 if perf_event_open is unavailable).
  */
 #include <bzlib.h>
 #include <lzma.h>
@@ -19,8 +21,54 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+/* perf counters: cycles, instructions, branch-misses (user mode, this thread). */
+static int perf_fds[3] = {-1, -1, -1};
+
+static void perf_open(void) {
+    static const unsigned long long cfg[3] = {PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_HW_INSTRUCTIONS,
+                                              PERF_COUNT_HW_BRANCH_MISSES};
+    unsigned long long pmu = 0;
+    FILE *f = fopen("/sys/bus/event_source/devices/cpu_core/type", "r");
+    if (f) {
+        if (fscanf(f, "%llu", &pmu) != 1) pmu = 0;
+        fclose(f);
+    }
+    for (int i = 0; i < 3; i++) {
+        struct perf_event_attr a;
+        memset(&a, 0, sizeof a);
+        a.type = PERF_TYPE_HARDWARE;
+        a.size = sizeof a;
+        a.config = cfg[i] | (pmu << 32);
+        a.disabled = 1;
+        a.exclude_kernel = 1;
+        a.exclude_hv = 1;
+        perf_fds[i] = syscall(__NR_perf_event_open, &a, 0, -1, -1, 0);
+    }
+}
+
+static void perf_start(void) {
+    for (int i = 0; i < 3; i++)
+        if (perf_fds[i] >= 0) {
+            ioctl(perf_fds[i], PERF_EVENT_IOC_RESET, 0);
+            ioctl(perf_fds[i], PERF_EVENT_IOC_ENABLE, 0);
+        }
+}
+
+static void perf_stop(unsigned long long v[3]) {
+    for (int i = 0; i < 3; i++) {
+        v[i] = 0;
+        if (perf_fds[i] >= 0) {
+            ioctl(perf_fds[i], PERF_EVENT_IOC_DISABLE, 0);
+            if (read(perf_fds[i], &v[i], 8) != 8) v[i] = 0;
+        }
+    }
+}
 
 static double now(void) {
     struct timespec ts;
@@ -157,16 +205,22 @@ int main(int argc, char **argv) {
 
     double best = 1e30;
     unsigned sink = 0;
+    unsigned long long best_c[3] = {0, 0, 0}, c[3];
+    perf_open();
     for (int i = 0; i < runs; i++) {
+        perf_start();
         double t = now();
         unsigned char *out = malloc(n ? n : 1);
         size_t m = decode(codec, in, in_len, out, n);
         double dt = now() - t;
+        perf_stop(c);
+        if (best_c[0] == 0 || c[0] < best_c[0]) memcpy(best_c, c, sizeof c);
         if (m != n) { fprintf(stderr, "decode failed\n"); return 1; }
         sink += n ? out[n / 2] : 0;
         free(out);
         if (dt < best) best = dt;
     }
-    printf("c %s %s %zu %.3f %.1f\n", codec, argv[2], n, best * 1e3, n / best / 1e6);
+    printf("c %s %s %zu %.3f %.1f %llu %llu %llu\n", codec, argv[2], n, best * 1e3, n / best / 1e6, best_c[0],
+           best_c[1], best_c[2]);
     return sink == 0xFFFFFFFF;
 }
