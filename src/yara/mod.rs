@@ -29,6 +29,8 @@ pub mod yre;
 #[cfg(test)]
 mod benchdrv;
 #[cfg(test)]
+mod fuzz;
+#[cfg(test)]
 mod smoke;
 #[cfg(test)]
 mod smoke_cases;
