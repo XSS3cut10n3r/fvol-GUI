@@ -70,16 +70,24 @@ pub struct CollectedModules {
 /// in every process (by file name), with the process layer and VAD range.
 // TODO(dedupe): owned by W2b pe_symbols
 pub fn get_process_modules(k: &WinKernel) -> Result<CollectedModules> {
+    let _t = crate::util::trace::span("get_process_modules");
     let mut out = CollectedModules::default();
     let procs = crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false));
-    for p in procs {
-        let proc = p?;
+    // the per-process VAD walks are independent: run them in parallel, merge in python's order
+    let per = crate::util::par::par_map(procs.len(), |i| -> Option<Result<(LayerRef, Vec<Range>)>> {
+        let proc = procs[i].as_ref().ok()?;
         let layer = match proc.add_process_layer() {
             Ok(l) => l,
-            Err(e) if e.is_invalid_address() => continue,
-            Err(e) => return Err(e),
+            Err(e) if e.is_invalid_address() => return None,
+            Err(e) => return Some(Err(e)),
         };
-        for (start, size, path) in get_proc_vads_with_file_paths(&proc)? {
+        Some(get_proc_vads_with_file_paths(proc).map(|v| (layer, v)))
+    });
+    for (p, r) in procs.into_iter().zip(per) {
+        p?;
+        let Some(r) = r else { continue };
+        let (layer, vads) = r?;
+        for (start, size, path) in vads {
             let name = filename_for_path(&path);
             let e = out.map.entry(name.clone()).or_default();
             if e.is_empty() {
