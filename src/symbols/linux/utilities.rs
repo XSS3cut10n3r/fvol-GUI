@@ -41,9 +41,39 @@ pub fn get_path_mnt(task: &Obj, mnt: &Obj) -> Result<String> {
     do_get_path(&rdentry, &rmnt, &dentry, &vfsmnt)
 }
 
+/// Memo key of a `do_get_path` call: (layer identity, rdentry, rmnt, dentry, vfsmnt value or
+/// address, vfsmnt is a pointer). Memory never changes during a run, so equal keys always give
+/// equal results; only successes are cached.
+type PathKey = (usize, u64, u64, u64, u64, bool);
+
+thread_local! {
+    static PATH_MEMO: std::cell::RefCell<crate::util::FxHashMap<PathKey, String>> = std::cell::RefCell::new(Default::default());
+}
+
 /// python `LinuxUtilities.do_get_path(rdentry, rmnt, dentry, vfsmnt)` (the kernel's
-/// `prepend_path`).
+/// `prepend_path`). Memoized per thread (the same file is usually mapped / opened many times).
 pub fn do_get_path(rdentry: &Obj, rmnt: &Obj, dentry: &Obj, vfsmnt: &Obj) -> Result<String> {
+    let key = (|| -> Result<PathKey> {
+        let lk = dentry.layer() as *const dyn crate::layers::Layer as *const u8 as usize;
+        let v = if vfsmnt.is_pointer() { vfsmnt.u64()? } else { vfsmnt.addr };
+        Ok((lk, rdentry.u64()?, rmnt.u64()?, dentry.u64()?, v, vfsmnt.is_pointer()))
+    })();
+    let Ok(key) = key else { return do_get_path_uncached(rdentry, rmnt, dentry, vfsmnt) };
+    if let Some(p) = PATH_MEMO.with(|m| m.borrow().get(&key).cloned()) {
+        return Ok(p);
+    }
+    let r = do_get_path_uncached(rdentry, rmnt, dentry, vfsmnt)?;
+    PATH_MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 1 << 16 {
+            m.clear();
+        }
+        m.insert(key, r.clone());
+    });
+    Ok(r)
+}
+
+fn do_get_path_uncached(rdentry: &Obj, rmnt: &Obj, dentry: &Obj, vfsmnt: &Obj) -> Result<String> {
     if !(ptr_ok(rdentry)? && ptr_ok(rmnt)?) {
         return Ok(String::new());
     }
@@ -133,7 +163,7 @@ pub fn get_new_sock_pipe_path(filp: &Obj) -> Result<String> {
     if !(sym_v != 0 && sym_addr.is_readable()) {
         return Ok(format!("<invalid d_dname pointer> {sym_v:x}"));
     }
-    let symbs = kernel.symbols_at(sym_v, 0);
+    let symbs = symbols_at_cached(&kernel, sym_v);
     let inode = dentry.m("d_inode")?;
     let inode_v = inode.u64()?;
     if !(inode_v != 0 && inode.is_readable() && inode_valid(&inode.deref()?)?) {
@@ -159,6 +189,21 @@ pub fn get_new_sock_pipe_path(filp: &Obj) -> Result<String> {
         format!("<unknown d_dname pointer> {sym_v:x}")
     };
     Ok(format!("{pre_name}:[{}]", inode.m("i_ino")?.int()?))
+}
+
+/// python `kernel.get_symbols_by_absolute_location(addr)` for the handful of `d_dname`
+/// callbacks (no full address index; cached per kernel + address).
+fn symbols_at_cached(kernel: &Module, addr: u64) -> Vec<&'static str> {
+    use std::sync::Mutex;
+    type Entry = (usize, u64, Vec<&'static str>);
+    static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+    let key = kernel.table() as *const _ as usize;
+    if let Some(e) = CACHE.lock().unwrap().iter().find(|e| e.0 == key && e.1 == addr) {
+        return e.2.clone();
+    }
+    let v = kernel.symbols_at_exact(addr);
+    CACHE.lock().unwrap().push((key, addr, v.clone()));
+    v
 }
 
 /// The `ns_dname` branch of `_get_new_sock_pipe_path` (SymbolError / IndexError -> the
@@ -371,5 +416,61 @@ mod tests {
     fn fourcc() {
         assert_eq!(super::convert_fourcc_code(0x3432_5258), "XR24");
         assert_eq!(super::convert_fourcc_code(0), "");
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::context::{Context, GlobalOptions};
+    use crate::objects::util::array_to_string;
+    use crate::renderers::Value;
+
+    fn v(x: Value) -> String {
+        match x {
+            Value::DateTime(d) => crate::util::time::fmt_quick(&d),
+            Value::Str(s) => s,
+            Value::SStr(s) => s.into(),
+            Value::Int(i) => i.to_string(),
+            _ => "-".into(),
+        }
+    }
+
+    /// Prints `linux.lsof.Lsof`-like rows to check `files_descriptors_for_process` /
+    /// `path_for_file` / the inode helpers against python's reference:
+    /// `RSVOL_BENCH_IMAGE=<image> cargo test --profile fast lsof_like -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lsof_like() {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
+        let ctx = Context::new(opts).unwrap();
+        let k = ctx.linux_kernel().unwrap();
+        crate::plugins::linux::pslist::list_tasks(k, &|_| Ok(false), true, &mut |task| {
+            let comm = array_to_string(&task.m("comm")?, None)?;
+            for e in files_descriptors_for_process(&task, false) {
+                let (fd, filp, path) = e?;
+                let pre = format!("LS\t{}\t{}\t{comm}\t{fd}\t{path}", task.m("tgid")?.int()?, task.m("pid")?.int()?);
+                match filp.get_inode()? {
+                    Some(i) => {
+                        let sb = i.m("i_sb")?;
+                        let dev = if ptr_ok(&sb)? { format!("{}:{}", sb.major()?, sb.minor()?) } else { "-".into() };
+                        println!(
+                            "{pre}\t{dev}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            i.m("i_ino")?.int()?,
+                            i.get_inode_type()?.unwrap_or("-"),
+                            i.get_file_mode()?,
+                            v(i.get_change_time()?),
+                            v(i.get_modification_time()?),
+                            v(i.get_access_time()?),
+                            i.m("i_size")?.int()?
+                        );
+                    }
+                    None => println!("{pre}\t-\t-\t-\t-\t-\t-\t-\t-"),
+                }
+            }
+            Ok(true)
+        })
+        .unwrap();
     }
 }

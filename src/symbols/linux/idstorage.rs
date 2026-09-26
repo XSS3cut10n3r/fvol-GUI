@@ -514,3 +514,48 @@ pub fn sg_get_content(sg: &Obj) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod pagecache_tests {
+    use super::*;
+    use crate::context::{Context, GlobalOptions};
+    use std::io::{Seek, SeekFrom, Write};
+
+    /// Dumps an inode's page cache like python `linux.pagecache.InodePages --inode X --dump`
+    /// (`write_inode_content_to_stream`) to check IDStorage / PageCache / page.get_content:
+    /// `RSVOL_BENCH_IMAGE=<image> RSVOL_INODE=0x... RSVOL_TEST_OUT=<file> cargo test --profile fast
+    /// inode_dump_like -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn inode_dump_like() {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let addr = u64::from_str_radix(std::env::var("RSVOL_INODE").unwrap().trim_start_matches("0x"), 16).unwrap();
+        let out = std::env::var("RSVOL_TEST_OUT").unwrap();
+        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
+        let ctx = Context::new(opts).unwrap();
+        let k = ctx.linux_kernel().unwrap();
+        let inode = k.object_abs("inode", addr).unwrap();
+        assert!(inode.is_reg().unwrap());
+        let size = inode.m("i_size").unwrap().int().unwrap() as u64;
+        let mut f = std::fs::File::create(&out).unwrap();
+        let mut init = false;
+        let mut n = 0;
+        let t = std::time::Instant::now();
+        for c in inode.get_contents() {
+            let (idx, data) = c.unwrap();
+            let fp = idx * 0x1000;
+            let len = (size.saturating_sub(fp)).min(data.len() as u64);
+            if fp >= size || fp + len > size {
+                continue;
+            }
+            if !init {
+                f.set_len(size).unwrap();
+                init = true;
+            }
+            f.seek(SeekFrom::Start(fp)).unwrap();
+            f.write_all(&data[..len as usize]).unwrap();
+            n += 1;
+        }
+        eprintln!("pages written: {n} in {:?}", t.elapsed());
+    }
+}

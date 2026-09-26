@@ -795,27 +795,57 @@ impl SymbolTable {
     pub fn symbols(&self) -> impl Iterator<Item = Symbol<'_>> + '_ {
         (0..self.symbol_count() as u32).map(move |i| self.sym_at(i))
     }
+    /// `symbols_at(offset, 0)` (python `get_symbols_by_location(offset)`: the names of the
+    /// symbols exactly at `offset`, sorted) without building the address index: a linear scan
+    /// over the raw records, cheap when only a handful of addresses are looked up.
+    pub fn symbols_at_exact(&self, offset: u64) -> Vec<&str> {
+        if self.by_addr.get().is_some() {
+            return self.symbols_at(offset, 0);
+        }
+        let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+        let recs = self.sec(sec::SYMBOLS);
+        let mut v: Vec<&str> = recs.chunks_exact(SYMBOL_SZ).filter(|r| rd64(r, 8) & mask == offset).map(|r| self.rec_str(r)).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Symbol names with `offset <= address <= offset + size` (python
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
-        // index sorted by address only (integer keys: no name lookups while building it; some
-        // addresses carry tens of thousands of aliases); the matches of one query are ordered
-        // by (address, name) afterwards, names being unique
         let idx = self.by_addr.get_or_init(|| {
-            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32)
-                .map(|i| {
-                    let a = rd64(self.sym_rec(i), 8);
-                    (if self.symbol_mask != 0 { a & self.symbol_mask } else { a }, i)
-                })
-                .collect();
-            v.sort_unstable();
+            let _t = crate::util::trace::span("symbol address index");
+            let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (rd64(self.sym_rec(i), 8) & mask, i)).collect();
+            // sort by address (cheap integer keys), then order equal-address runs by name like
+            // python's (address, name) tuples (names are unique: the result is deterministic)
+            v.sort_unstable_by_key(|e| e.0);
+            let mut i = 0;
+            while i < v.len() {
+                let mut j = i + 1;
+                while j < v.len() && v[j].0 == v[i].0 {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    // compare the raw name bytes (== str order; no UTF-8 validation per compare)
+                    let pool = self.sec(sec::STRINGS);
+                    let name = |k: u32| -> &[u8] {
+                        let r = self.sym_rec(k);
+                        let (o, l) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
+                        pool.get(o..o.saturating_add(l)).unwrap_or(&[])
+                    };
+                    let mut run: Vec<(&[u8], u32)> = v[i..j].iter().map(|e| (name(e.1), e.1)).collect();
+                    run.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    for (k, e) in run.into_iter().enumerate() {
+                        v[i + k].1 = e.1;
+                    }
+                }
+                i = j;
+            }
             v
         });
         let start = idx.partition_point(|e| e.0 < offset);
         let end_addr = offset.saturating_add(size);
-        let mut hits: Vec<(u64, &str)> = idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| (e.0, self.rec_str(self.sym_rec(e.1)))).collect();
-        hits.sort_unstable();
-        hits.into_iter().map(|(_, n)| n).collect()
+        idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| self.sym_at(e.1).name).collect()
     }
 
     // ------------------------------------------------------------------ types by name
