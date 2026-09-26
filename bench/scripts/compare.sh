@@ -11,7 +11,7 @@ REF=${REF:-/home/user/rs-vol/bench/ref/py/$P.txt}
 OUTDIR=${OUTDIR:-/home/user/rs-vol/bench/out}
 mkdir -p $OUTDIR/dump/$P
 s=$(date +%s%N)
-$BIN -q -o $OUTDIR/dump/$P -f $IMG $P "$@" > $OUTDIR/$P.txt 2> $OUTDIR/$P.err
+$BIN -q $GLOBAL_ARGS -o $OUTDIR/dump/$P -f $IMG $P "$@" > $OUTDIR/$P.txt 2> $OUTDIR/$P.err
 rc=$?
 e=$(date +%s%N)
 secs=$(( (e - s) / 1000000 ))
