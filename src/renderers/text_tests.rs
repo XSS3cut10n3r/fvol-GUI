@@ -149,7 +149,7 @@ fn python_renderers_match() {
         let want = case.get("out").unwrap().as_str().unwrap();
         let want_exc = case.get("exc").unwrap() != &Json::Null;
         let (got, failed) =
-            render(&grid, name, RenderOptions { filters: filters.clone(), hide_columns: hide.clone() });
+            render(&grid, name, RenderOptions { filters: filters.clone(), hide_columns: hide.clone(), flush_rows: false });
         if got != want || failed != want_exc {
             bad.push(format!(
                 "{name} filters={filters:?} hide={hide:?} exc={want_exc}/{failed}\n--- want\n{want}\n--- got\n{got}"
@@ -214,7 +214,7 @@ fn bench_renderers() {
     let mut sink = std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
     let start = std::time::Instant::now();
     {
-        let opts = RenderOptions { filters: vec!["ImageFileName,svchost".into()], hide_columns: None };
+        let opts = RenderOptions { filters: vec!["ImageFileName,svchost".into()], hide_columns: None, flush_rows: false };
         let mut r = create("quick", &mut sink, opts).unwrap();
         r.begin(columns()).unwrap();
         for i in 0..N {

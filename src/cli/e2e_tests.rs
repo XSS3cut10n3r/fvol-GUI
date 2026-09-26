@@ -57,7 +57,7 @@ fn python_end_to_end_runs_match() {
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let s = Settings { no_system_defaults: true, columns: Some(80), color: Some(false), ..Default::default() };
+        let s = Settings { no_system_defaults: true, columns: Some(80), color: Some(false), interactive: Some(true), ..Default::default() };
         let code = run(&argv, &plugins, &mut out, &mut err, &s);
         let out = String::from_utf8(out).unwrap();
         if out != want || code != want_code {

@@ -286,6 +286,63 @@
   },
   {
    "argv": [
+    "-o",
+    "",
+    "windows.info"
+   ],
+   "columns": 80,
+   "out": "Volatility 3 Framework 2.28.2\n",
+   "err": "usage: vol.py [-h] [-c CONFIG] [--parallelism [{processes,threads,off}]]\n              [-e EXTEND] [-p PLUGIN_DIRS] [-s SYMBOL_DIRS] [-v] [-l LOG]\n              [-o OUTPUT_DIR] [-q] [-f FILE] [--write-config]\n              [--save-config SAVE_CONFIG] [--clear-cache]\n              [--cache-path CACHE_PATH] [--offline | -u URL]\n              [--filters FILTERS] [--hide-columns [HIDE_COLUMNS ...]]\n              [-r RENDERER] [--single-location SINGLE_LOCATION]\n              [--stackers [STACKERS ...]]\n              [--single-swap-locations [SINGLE_SWAP_LOCATIONS ...]]\n              PLUGIN ...\nvol.py: error: The output directory specified does not exist: \n",
+   "code": 2
+  },
+  {
+   "argv": [
+    "-f",
+    "",
+    "-c",
+    "",
+    "windows.info"
+   ],
+   "columns": 80,
+   "out": "Volatility 3 Framework 2.28.2\n{\"cache_path\": \"/tmp/rsvol-cli-fixture/cache/volatility3\", \"clear_cache\": false, \"config\": \"\", \"extend\": null, \"file\": \"\", \"filters\": [], \"hide_columns\": null, \"log\": null, \"offline\": false, \"output_dir\": \"/tmp/rsvol-cli-fixture\", \"parallelism\": null, \"plugin\": \"windows.info.Info\", \"plugin_dirs\": \"\", \"quiet\": false, \"remote_isf_url\": null, \"renderer\": \"quick\", \"save_config\": null, \"single_location\": null, \"single_swap_locations\": null, \"stackers\": null, \"symbol_dirs\": \"\", \"verbosity\": 0, \"write_config\": false}\n",
+   "err": "",
+   "code": 0
+  },
+  {
+   "argv": [
+    "-o",
+    "cache",
+    "windows.info"
+   ],
+   "columns": 80,
+   "out": "Volatility 3 Framework 2.28.2\n{\"cache_path\": \"/tmp/rsvol-cli-fixture/cache/volatility3\", \"clear_cache\": false, \"config\": null, \"extend\": null, \"file\": null, \"filters\": [], \"hide_columns\": null, \"log\": null, \"offline\": false, \"output_dir\": \"cache\", \"parallelism\": null, \"plugin\": \"windows.info.Info\", \"plugin_dirs\": \"\", \"quiet\": false, \"remote_isf_url\": null, \"renderer\": \"quick\", \"save_config\": null, \"single_location\": null, \"single_swap_locations\": null, \"stackers\": null, \"symbol_dirs\": \"\", \"verbosity\": 0, \"write_config\": false}\n",
+   "err": "",
+   "code": 0
+  },
+  {
+   "argv": [
+    "-f",
+    "image.raw",
+    "windows.info"
+   ],
+   "columns": 80,
+   "out": "Volatility 3 Framework 2.28.2\n{\"cache_path\": \"/tmp/rsvol-cli-fixture/cache/volatility3\", \"clear_cache\": false, \"config\": null, \"extend\": null, \"file\": \"image.raw\", \"filters\": [], \"hide_columns\": null, \"log\": null, \"offline\": false, \"output_dir\": \"/tmp/rsvol-cli-fixture\", \"parallelism\": null, \"plugin\": \"windows.info.Info\", \"plugin_dirs\": \"\", \"quiet\": false, \"remote_isf_url\": null, \"renderer\": \"quick\", \"save_config\": null, \"single_location\": null, \"single_swap_locations\": null, \"stackers\": null, \"symbol_dirs\": \"\", \"verbosity\": 0, \"write_config\": false}\n",
+   "err": "",
+   "code": 0
+  },
+  {
+   "argv": [
+    "-f",
+    "./sub/../image.raw",
+    "windows.info"
+   ],
+   "columns": 80,
+   "out": "Volatility 3 Framework 2.28.2\n{\"cache_path\": \"/tmp/rsvol-cli-fixture/cache/volatility3\", \"clear_cache\": false, \"config\": null, \"extend\": null, \"file\": \"./sub/../image.raw\", \"filters\": [], \"hide_columns\": null, \"log\": null, \"offline\": false, \"output_dir\": \"/tmp/rsvol-cli-fixture\", \"parallelism\": null, \"plugin\": \"windows.info.Info\", \"plugin_dirs\": \"\", \"quiet\": false, \"remote_isf_url\": null, \"renderer\": \"quick\", \"save_config\": null, \"single_location\": null, \"single_swap_locations\": null, \"stackers\": null, \"symbol_dirs\": \"\", \"verbosity\": 0, \"write_config\": false}\n",
+   "err": "",
+   "code": 0
+  },
+  {
+   "argv": [
     "-f"
    ],
    "columns": 80,

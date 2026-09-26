@@ -27,6 +27,10 @@ pub struct RenderOptions {
     pub filters: Vec<String>,
     /// `--hide-columns` (None when not given)
     pub hide_columns: Option<Vec<String>>,
+    /// Hand every row to the output right away (the CLI sets this when stdout is a terminal,
+    /// so rows show up as a slow plugin finds them, like python's per-row flush). Otherwise
+    /// output is written in large blocks.
+    pub flush_rows: bool,
 }
 
 /// A failure raised by the renderer itself (python: RenderException, or an uncaught exception
@@ -122,7 +126,7 @@ impl<'a> Base<'a> {
 
     #[inline]
     fn maybe_flush(&mut self) -> Result<()> {
-        if self.buf.len() >= FLUSH_AT {
+        if self.buf.len() >= FLUSH_AT || (self.opts.flush_rows && !self.buf.is_empty()) {
             self.flush_buf()?;
         }
         Ok(())

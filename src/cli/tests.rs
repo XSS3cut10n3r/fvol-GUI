@@ -106,6 +106,7 @@ fn settings(base: &str, columns: usize) -> Settings {
         cwd: Some(base.to_string()),
         columns: Some(columns),
         color: Some(false),
+        interactive: Some(false),
     }
 }
 

@@ -39,6 +39,12 @@ pub struct Settings {
     pub columns: Option<usize>,
     /// Force colour on / off in help output (default: python's `can_colorize()` rules).
     pub color: Option<bool>,
+    /// Flush every rendered row (default: when stdout is a terminal).
+    pub interactive: Option<bool>,
+}
+
+unsafe extern "C" {
+    fn isatty(fd: i32) -> i32;
 }
 
 /// stdout without std's line buffering or locking: the renderers hand it large blocks.
@@ -594,7 +600,8 @@ fn run_inner(
     }
 
     let output_dir = args.str("output_dir").unwrap_or("").to_string();
-    if !path_exists(&abspath(&output_dir, &cwd)) {
+    // os.path.exists("") is False
+    if output_dir.is_empty() || !path_exists(&abspath(&output_dir, &cwd)) {
         return Err(parser.error(&format!("The output directory specified does not exist: {output_dir}")));
     }
 
@@ -740,7 +747,8 @@ fn run_inner(
         _ => None,
     };
     drop(parser);
-    Ok(execute(plugin, &class, opts, &cfg, &renderer_name, RenderOptions { filters, hide_columns }, out, err))
+    let flush_rows = s.interactive.unwrap_or_else(|| unsafe { isatty(1) == 1 });
+    Ok(execute(plugin, &class, opts, &cfg, &renderer_name, RenderOptions { filters, hide_columns, flush_rows }, out, err))
 }
 
 /// Construct the context, run the plugin into the renderer and report failures like python.
@@ -763,7 +771,22 @@ fn execute(
             Some(r) => r,
             None => return 2,
         };
-        let res = plugin.run(&ctx, cfg, &mut *r);
+        // a panicking plugin is python's uncaught exception: what was rendered so far is
+        // flushed, a traceback goes to stderr, exit status 1 (no "\n\n" block)
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plugin.run(&ctx, cfg, &mut *r)));
+        let res = match res {
+            Ok(res) => res,
+            Err(p) => {
+                let msg = p
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "plugin panicked".into());
+                let _ = r.abort(false);
+                drop(r);
+                return traceback(err, &format!("RuntimeError: {msg}"));
+            }
+        };
         match res {
             Ok(()) => match r.finish() {
                 Ok(()) => (Ok(()), None),
