@@ -25,7 +25,7 @@
 
 use crate::context::Context;
 use crate::error::{Error, Result};
-use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement, TimeKind, TimelineEvent};
+use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement, TimeKind, TimelineBatch, TimelineEvent, TimelineTime};
 use crate::renderers::{ColType, Column, DateTime, RowSink, Value};
 use crate::util::FxHashMap;
 use std::io::Write;
@@ -164,6 +164,18 @@ struct Merge {
     stale: Vec<bool>,
 }
 
+/// The compact cell of a set timeline time.
+fn tv_of(t: TimelineTime) -> Tv {
+    match t {
+        TimelineTime::DateTime(dt) => Tv::Dt(dt),
+        TimelineTime::NotApplicable => Tv::NotApplicable,
+        TimelineTime::Unreadable => Tv::Unreadable,
+        TimelineTime::Unparsable => Tv::Unparsable,
+        TimelineTime::NotAvailable => Tv::NotAvailable,
+        TimelineTime::Unset => Tv::Missing,
+    }
+}
+
 /// Plugins yielding at least this many events are merged by the parallel `add_bulk`.
 const BULK_MIN: usize = 1 << 16;
 
@@ -182,23 +194,27 @@ impl Merge {
     }
 
     /// All events of one plugin, in order (`add_event` for each).
-    fn add_events(&mut self, class: u16, batches: Vec<Vec<TimelineEvent>>) {
+    fn add_events(&mut self, class: u16, batches: Vec<TimelineBatch>) {
         let n: usize = batches.iter().map(|b| b.len()).sum();
         if n >= BULK_MIN {
             return self.add_bulk(class, batches);
         }
         self.refresh_index(class);
-        for ev in batches.into_iter().flatten() {
-            self.add_event(class, ev);
+        for b in batches {
+            for ev in b.into_events() {
+                self.add_event(class, ev);
+            }
         }
     }
 
     /// `add_event` for every event, in parallel: only the plugin's end state matters (entries
     /// in first-occurrence order, the last value set per time type, `cur` = the last event's
-    /// entry; snapshots are only taken by `pass`). Events are sharded by description hash,
-    /// each shard reduced on its own thread, then the new entries appended in order.
-    fn add_bulk(&mut self, class: u16, mut batches: Vec<Vec<TimelineEvent>>) {
+    /// entry; snapshots are only taken by `pass`). Groups of consecutive same-description
+    /// events are sharded by description hash, each shard reduced on its own thread, then the
+    /// new entries appended in first-occurrence order.
+    fn add_bulk(&mut self, class: u16, mut batches: Vec<TimelineBatch>) {
         const SHARDS: usize = 64;
+        const UNIT: usize = 1 << 16;
         if self.stale.len() <= class as usize {
             self.stale.resize(class as usize + 1, false);
         }
@@ -207,37 +223,57 @@ impl Merge {
             self.refresh_index(class);
         }
         let shard_of = |d: &str| (crate::util::fxhash::hash_bytes(d.as_bytes()) >> 58) as usize;
-        // work units of at most 64k events: (batch, start, end)
+        let has_times = |t: &[TimelineTime; 4]| t.iter().any(|x| *x != TimelineTime::Unset);
+        // work units of at most 64k events / groups: (batch, start, end)
         let mut units: Vec<(u32, u32, u32)> = Vec::new();
         for (b, v) in batches.iter().enumerate() {
+            let len = match v {
+                TimelineBatch::Events(e) => e.len(),
+                TimelineBatch::Groups(g) => g.groups.len(),
+            };
             let mut s = 0;
-            while s < v.len() {
-                let e = (s + (1 << 16)).min(v.len());
+            while s < len {
+                let e = (s + UNIT).min(len);
                 units.push((b as u32, s as u32, e as u32));
                 s = e;
             }
         }
-        // 1. per unit and shard: groups of consecutive events with the same description (an
-        //    entry's events come back to back: MFT records yield 4), as (start, count)
+        // position of the plugin's last event: (batch, event index / group index)
+        let last_pos = batches.iter().enumerate().rev().find_map(|(b, v)| match v {
+            TimelineBatch::Events(e) => (!e.is_empty()).then(|| (b as u32, e.len() as u32 - 1)),
+            TimelineBatch::Groups(g) => g.groups.iter().rposition(|x| has_times(&x.1)).map(|i| (b as u32, i as u32)),
+        });
+        // 1. per unit and shard: groups as (start, count); events: consecutive events with the
+        //    same description (an entry's events come back to back), groups: (index, 0)
         let parts: Vec<Vec<Vec<(u32, u32)>>> = crate::util::par::par_map(units.len(), |u| {
             let (b, s, e) = units[u];
-            let evs = &batches[b as usize];
             let mut v = vec![Vec::new(); SHARDS];
-            let mut i = s;
-            while i < e {
-                let d = &evs[i as usize].description;
-                let mut j = i + 1;
-                while j < e && evs[j as usize].description == *d {
-                    j += 1;
+            match &batches[b as usize] {
+                TimelineBatch::Events(evs) => {
+                    let mut i = s;
+                    while i < e {
+                        let d = &evs[i as usize].description;
+                        let mut j = i + 1;
+                        while j < e && evs[j as usize].description == *d {
+                            j += 1;
+                        }
+                        v[shard_of(d)].push((i, j - i));
+                        i = j;
+                    }
                 }
-                v[shard_of(d)].push((i, j - i));
-                i = j;
+                TimelineBatch::Groups(g) => {
+                    for i in s..e {
+                        if has_times(&g.groups[i as usize].1) {
+                            v[shard_of(g.desc(i as usize))].push((i, 0));
+                        }
+                    }
+                }
             }
             v
         });
         // 2. per shard: distinct new descriptions (first position, values), and the values set
-        //    on existing entries; non-date values are resolved later (`Tv::Other(k)` = the k-th
-        //    position in `other`)
+        //    on existing entries; non-date event values are resolved later (`Tv::Other(k)` = the
+        //    k-th position in `other`)
         struct Shard {
             first: Vec<(u32, u32)>,
             times: Vec<[Tv; 4]>,
@@ -246,16 +282,18 @@ impl Merge {
             /// local id / existing entry of the plugin's last event (if in this shard)
             last: Option<std::result::Result<u32, u32>>,
         }
-        let last_pos = batches.iter().enumerate().rev().find(|(_, v)| !v.is_empty()).map(|(b, v)| (b as u32, v.len() as u32 - 1));
         let index = &self.index;
         let shards: Vec<Shard> = crate::util::par::par_map(SHARDS, |s| {
             let mut map: FxHashMap<&str, u32> = FxHashMap::default();
             let mut old: FxHashMap<u32, [Tv; 4]> = FxHashMap::default();
             let mut sh = Shard { first: Vec::new(), times: Vec::new(), old: Vec::new(), other: Vec::new(), last: None };
             for (u, &(b, _, _)) in units.iter().enumerate() {
-                let evs = &batches[b as usize];
+                let batch = &batches[b as usize];
                 for &(i, c) in &parts[u][s] {
-                    let d = evs[i as usize].description.as_str();
+                    let d = match batch {
+                        TimelineBatch::Events(evs) => evs[i as usize].description.as_str(),
+                        TimelineBatch::Groups(g) => g.desc(i as usize),
+                    };
                     let g = if has_old { index.get(&(class, d)).copied() } else { None };
                     let (id, t) = match g {
                         Some(g) => (Err(g), old.entry(g).or_insert([Tv::Missing; 4])),
@@ -268,24 +306,30 @@ impl Merge {
                             (Ok(id), &mut sh.times[id as usize])
                         }
                     };
-                    for j in i..i + c {
-                        let ev = &evs[j as usize];
-                        t[kind_index(ev.kind)] = match &ev.time {
-                            Value::DateTime(dt) => Tv::Dt(*dt),
-                            Value::NotApplicable => Tv::NotApplicable,
-                            Value::Unreadable => Tv::Unreadable,
-                            Value::Unparsable => Tv::Unparsable,
-                            Value::NotAvailable => Tv::NotAvailable,
-                            _ => {
-                                sh.other.push((b, j));
-                                Tv::Other(sh.other.len() as u32 - 1)
+                    let is_last = match batch {
+                        TimelineBatch::Events(evs) => {
+                            for j in i..i + c {
+                                let ev = &evs[j as usize];
+                                t[kind_index(ev.kind)] = match TimelineTime::from_value(&ev.time) {
+                                    Some(x) => tv_of(x),
+                                    None => {
+                                        sh.other.push((b, j));
+                                        Tv::Other(sh.other.len() as u32 - 1)
+                                    }
+                                };
                             }
-                        };
-                    }
-                    if let Some((lb, li)) = last_pos
-                        && lb == b
-                        && (i..i + c).contains(&li)
-                    {
+                            last_pos.is_some_and(|(lb, li)| lb == b && (i..i + c).contains(&li))
+                        }
+                        TimelineBatch::Groups(g) => {
+                            for (k, x) in g.groups[i as usize].1.iter().enumerate() {
+                                if *x != TimelineTime::Unset {
+                                    t[kind_index(g.order[k])] = tv_of(*x);
+                                }
+                            }
+                            last_pos == Some((b, i))
+                        }
+                    };
+                    if is_last {
                         sh.last = Some(id);
                     }
                 }
@@ -296,7 +340,7 @@ impl Merge {
             sh
         });
         drop(parts);
-        // 3. new entries in first-occurrence order
+        // 3. new entries in first-occurrence order; their descriptions in one arena
         let mut order: Vec<(u64, u32, u32)> = Vec::new();
         for (s, sh) in shards.iter().enumerate() {
             for (j, &(b, i)) in sh.first.iter().enumerate() {
@@ -304,12 +348,28 @@ impl Merge {
             }
         }
         order.sort_unstable_by_key(|x| x.0);
+        let desc_at = |pos: u64| -> &str {
+            let (b, i) = ((pos >> 32) as usize, pos as u32 as usize);
+            match &batches[b] {
+                TimelineBatch::Events(evs) => &evs[i].description,
+                TimelineBatch::Groups(g) => g.desc(i),
+            }
+        };
+        let total: usize = order.iter().map(|x| desc_at(x.0).len()).sum();
+        let mut arena = String::with_capacity(total);
+        for x in &order {
+            arena.push_str(desc_at(x.0));
+        }
+        let arena: &'static str = arena.leak();
         let base = self.entries.len() as u32;
         let mut gid: Vec<Vec<u32>> = shards.iter().map(|sh| vec![0; sh.first.len()]).collect();
         self.entries.reserve(order.len());
+        let mut at = 0;
         for (k, &(pos, s, j)) in order.iter().enumerate() {
             gid[s as usize][j as usize] = base + k as u32;
-            let desc: &'static str = std::mem::take(&mut batches[(pos >> 32) as usize][pos as u32 as usize].description).leak();
+            let n = desc_at(pos).len();
+            let desc = &arena[at..at + n];
+            at += n;
             self.entries.push(Entry { class, desc, times: shards[s as usize].times[j as usize], snap: 0, dirty: true });
         }
         // 4. existing entries' new values; non-date values
@@ -317,7 +377,9 @@ impl Merge {
             for v in t.iter_mut() {
                 if let Tv::Other(k) = *v {
                     let (b, i) = sh.other[k as usize];
-                    *v = m.tv(std::mem::replace(&mut batches[b as usize][i as usize].time, Value::NotApplicable));
+                    if let TimelineBatch::Events(evs) = &mut batches[b as usize] {
+                        *v = m.tv(std::mem::replace(&mut evs[i as usize].time, Value::NotApplicable));
+                    }
                 }
             }
         };
@@ -580,7 +642,7 @@ fn record_config(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Result<()> {
     Ok(())
 }
 
-type Outcome = Option<(Vec<Vec<TimelineEvent>>, Option<Error>)>;
+type Outcome = Option<(Vec<TimelineBatch>, Option<Error>)>;
 
 /// Run the plugins' timelines concurrently; a panicking plugin is python's `except Exception`.
 fn run_all(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Vec<Outcome> {
@@ -623,7 +685,7 @@ impl Plugin for Timeliner {
         let plugins = usable_plugins(&cfg.get_strs("plugin-filter"));
         let results = run_all(ctx, &plugins);
         // python constructs the plugins first: unsatisfied ones never run
-        let ran: Vec<(&'static dyn Plugin, (Vec<Vec<TimelineEvent>>, Option<Error>))> = plugins
+        let ran: Vec<(&'static dyn Plugin, (Vec<TimelineBatch>, Option<Error>))> = plugins
             .iter()
             .zip(results)
             .filter_map(|(p, r)| match r {
@@ -799,12 +861,30 @@ mod tests {
             let pool = [50u64, 5_000, 200_000][round % 3];
             // odd rounds: also non-date values (python can't sort those: rows not compared)
             let others = round % 2 == 1;
-            let mut plugins: Vec<(u16, Vec<Vec<TimelineEvent>>)> = Vec::new();
+            let mut plugins: Vec<(u16, Vec<TimelineBatch>)> = Vec::new();
             for p in 0..4 {
                 let class = [0u16, 1, 0, 2][p];
                 let nb = 1 + rnd(12) as usize;
-                let batches: Vec<Vec<TimelineEvent>> = (0..nb)
+                let batches: Vec<TimelineBatch> = (0..nb)
                     .map(|_| {
+                        let date = |r: &mut dyn FnMut(u64) -> u64| dt(1_600_000_000 + r(1_000_000) as i64, r(3) as u32);
+                        if rnd(2) == 0 {
+                            // compact groups (MFTScan): random type order, some unset (all unset too)
+                            let mut order = kinds;
+                            order.swap(rnd(4) as usize, rnd(4) as usize);
+                            let mut g = crate::plugins::TimelineGroups::new(order);
+                            for _ in 0..rnd(1500) {
+                                let d = format!("entry {}", rnd(pool));
+                                let t = [0; 4].map(|_| match rnd(8) {
+                                    0 => TimelineTime::Unset,
+                                    1 => TimelineTime::NotApplicable,
+                                    2 => TimelineTime::Unparsable,
+                                    _ => TimelineTime::DateTime(date(&mut rnd)),
+                                });
+                                g.push(&d, t);
+                            }
+                            return TimelineBatch::Groups(g);
+                        }
                         let mut v = Vec::new();
                         for _ in 0..rnd(1500) {
                             // an entry's events back to back (like MFT records), 1-5 of them
@@ -815,12 +895,12 @@ mod tests {
                                     1 => Value::Unreadable,
                                     2 => Value::NotAvailable,
                                     3 if others => Value::Int(rnd(1000) as i128),
-                                    _ => Value::DateTime(dt(1_600_000_000 + rnd(1_000_000) as i64, rnd(3) as u32)),
+                                    _ => Value::DateTime(date(&mut rnd)),
                                 };
                                 v.push(TimelineEvent { description: description.clone(), kind: kinds[rnd(4) as usize], time });
                             }
                         }
-                        v
+                        TimelineBatch::Events(v)
                     })
                     .collect();
                 plugins.push((class, batches));
@@ -833,7 +913,7 @@ mod tests {
                         m.add_bulk(*class, b);
                     } else {
                         m.refresh_index(*class);
-                        for ev in b.into_iter().flatten() {
+                        for ev in b.into_iter().flat_map(TimelineBatch::into_events) {
                             m.add_event(*class, ev);
                         }
                     }

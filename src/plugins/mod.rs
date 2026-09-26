@@ -158,6 +158,108 @@ pub struct TimelineEvent {
     pub time: Value,
 }
 
+/// A timeline time in compact form: a datetime or one of python's absent values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TimelineTime {
+    /// no event of this type in the group
+    Unset,
+    DateTime(crate::renderers::DateTime),
+    NotApplicable,
+    Unreadable,
+    Unparsable,
+    NotAvailable,
+}
+
+impl TimelineTime {
+    /// The compact form of a timeline `Value` (None for values it can't hold).
+    pub fn from_value(v: &Value) -> Option<TimelineTime> {
+        Some(match v {
+            Value::DateTime(dt) => TimelineTime::DateTime(*dt),
+            Value::NotApplicable => TimelineTime::NotApplicable,
+            Value::Unreadable => TimelineTime::Unreadable,
+            Value::Unparsable => TimelineTime::Unparsable,
+            Value::NotAvailable => TimelineTime::NotAvailable,
+            _ => return None,
+        })
+    }
+    /// The `Value` (None for `Unset`).
+    pub fn value(self) -> Option<Value> {
+        Some(match self {
+            TimelineTime::Unset => return None,
+            TimelineTime::DateTime(dt) => Value::DateTime(dt),
+            TimelineTime::NotApplicable => Value::NotApplicable,
+            TimelineTime::Unreadable => Value::Unreadable,
+            TimelineTime::Unparsable => Value::Unparsable,
+            TimelineTime::NotAvailable => Value::NotAvailable,
+        })
+    }
+}
+
+/// Timeline events in compact form, for plugins yielding millions (MFT scans): groups of
+/// consecutive events with the same description. A group stands for its events in the order
+/// `order` (python's yield order), one per set time; the descriptions are back to back in
+/// `text`.
+#[derive(Clone, Debug)]
+pub struct TimelineGroups {
+    pub text: String,
+    /// per group: end of its description in `text`, time per type (indexed like `order`)
+    pub groups: Vec<(u32, [TimelineTime; 4])>,
+    /// the types of a group's events in yield order
+    pub order: [TimeKind; 4],
+}
+
+impl TimelineGroups {
+    pub fn new(order: [TimeKind; 4]) -> TimelineGroups {
+        TimelineGroups { text: String::new(), groups: Vec::new(), order }
+    }
+    /// Append a group.
+    pub fn push(&mut self, desc: &str, times: [TimelineTime; 4]) {
+        self.text.push_str(desc);
+        self.groups.push((self.text.len() as u32, times));
+    }
+    /// The description of group `i`.
+    pub fn desc(&self, i: usize) -> &str {
+        let start = if i == 0 { 0 } else { self.groups[i - 1].0 as usize };
+        &self.text[start..self.groups[i].0 as usize]
+    }
+    /// The events, one by one.
+    pub fn events(&self) -> impl Iterator<Item = TimelineEvent> + '_ {
+        (0..self.groups.len()).flat_map(move |i| {
+            let d = self.desc(i);
+            (0..4).filter_map(move |k| {
+                self.groups[i].1[k].value().map(|time| TimelineEvent { description: d.to_string(), kind: self.order[k], time })
+            })
+        })
+    }
+}
+
+/// A run of a plugin's timeline events: plain, or compact groups.
+#[derive(Clone, Debug)]
+pub enum TimelineBatch {
+    Events(Vec<TimelineEvent>),
+    Groups(TimelineGroups),
+}
+
+impl TimelineBatch {
+    /// Number of events.
+    pub fn len(&self) -> usize {
+        match self {
+            TimelineBatch::Events(v) => v.len(),
+            TimelineBatch::Groups(g) => g.groups.iter().map(|x| x.1.iter().filter(|t| **t != TimelineTime::Unset).count()).sum(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// The events, one by one.
+    pub fn into_events(self) -> Vec<TimelineEvent> {
+        match self {
+            TimelineBatch::Events(v) => v,
+            TimelineBatch::Groups(g) => g.events().collect(),
+        }
+    }
+}
+
 /// A volatility plugin.
 pub trait Plugin: Sync {
     /// Full dotted name as volatility3 prints it, e.g. "windows.pslist.PsList".
@@ -193,10 +295,11 @@ pub trait Plugin: Sync {
     }
     /// [`Plugin::timeline_events`] as consecutive batches (the events in order are the batches
     /// concatenated), so producers of millions of events (MFT scans) hand over their per-worker
-    /// vectors without concatenating them. Default: `timeline_events` as one batch.
+    /// results, in compact form, without concatenating them. Default: `timeline_events` as one
+    /// batch.
     #[allow(clippy::type_complexity)]
-    fn timeline_batches(&self, ctx: &Context, cfg: &Config) -> Option<(Vec<Vec<TimelineEvent>>, Option<crate::error::Error>)> {
-        self.timeline_events(ctx, cfg).map(|(v, e)| (vec![v], e))
+    fn timeline_batches(&self, ctx: &Context, cfg: &Config) -> Option<(Vec<TimelineBatch>, Option<crate::error::Error>)> {
+        self.timeline_events(ctx, cfg).map(|(v, e)| (vec![TimelineBatch::Events(v)], e))
     }
 }
 
