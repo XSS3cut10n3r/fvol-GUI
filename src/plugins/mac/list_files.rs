@@ -10,19 +10,25 @@
 //! * vnodes reached through `.dereference()` are STRUCT objects: always truthy, never `in`
 //!   the dict (python hashes them by identity), `vol.offset` is the vnode address.
 //! `loop_vnodes` keeps python's dict insertion order.
+//!
+//! Speed: the walk itself is inherently sequential (dict order), so it only decides WHETHER a
+//! vnode name can be read (`pointer_to_string` fails iff the pointer or the string's first
+//! page is unreadable); the strings are read afterwards in parallel, and the paths are built
+//! in parallel too. Each vnode's four fields come from one zero-copy slice when possible.
 
 use crate::automagic::mac::MacKernel;
 use crate::context::Context;
 use crate::error::Result;
 use crate::layers::{Layer, LayerExt};
-use crate::objects::util::pointer_to_string;
-use crate::objects::{Obj, Space};
+use crate::objects::util::address_to_string;
+use crate::objects::{LayerRef, Obj, Space};
 use crate::plugins::mac::mount::list_mounts;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::Ty;
 use crate::symbols::mac::{MAX_ELEMENTS, MacExt};
 use crate::util::FxHashMap;
+use crate::util::par::par_map;
 
 pub struct ListFiles;
 
@@ -54,11 +60,28 @@ impl VObj {
     }
 }
 
-/// One `loop_vnodes` value: `(v_name, parent_val, vnode)`.
+/// Where an entry's name comes from.
+enum Name {
+    /// `pointer_to_string(v_name, 255)` of this (readable) pointer value, read after the walk.
+    Ptr(u64),
+    /// `full_path()` (VROOT vnodes), computed during the walk like python.
+    Str(String),
+}
+
+/// One `loop_vnodes` item: key -> `(v_name, parent_val, vnode)`.
 struct Entry {
     key: u64,
-    name: String,
+    name: Name,
     parent: Option<u64>,
+}
+
+/// The fields the walk reads from one vnode (`None` = unreadable).
+#[derive(Clone, Copy)]
+struct VInfo {
+    flag: Option<u32>,
+    name_ptr: Option<u64>,
+    parent: Option<u64>,
+    next: Option<u64>,
 }
 
 /// python recursion limit stand-in: nested `_walk_vnode` calls beyond this depth would make
@@ -78,6 +101,17 @@ struct Walker {
     off_tqe_next: u64,
     entries: Vec<Entry>,
     index: FxHashMap<u64, u32>,
+    valid_memo: FxHashMap<u64, bool>,
+}
+
+#[inline]
+fn rd(s: &[u8], off: u64, size: u64) -> Option<u64> {
+    let o = off as usize;
+    match size {
+        8 => s.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap())),
+        4 => s.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as u64),
+        _ => None,
+    }
 }
 
 impl Walker {
@@ -85,6 +119,7 @@ impl Walker {
         let t = k.table;
         let vnode_ty = t.get_type("vnode")?;
         let ptr_size = t.size_of(t.get_type("pointer")?);
+        let mnt = Obj::new(k.sp, vnode_ty, 0).m("v_mntvnodes")?;
         Ok(Walker {
             layer: k.vlayer,
             sp: k.sp,
@@ -95,84 +130,90 @@ impl Walker {
             off_v_flag: t.offset_of("vnode", "v_flag")?,
             off_v_name: t.offset_of("vnode", "v_name")?,
             off_v_parent: t.offset_of("vnode", "v_parent")?,
-            off_tqe_next: t.offset_of("vnode", "v_mntvnodes")? + {
-                let o = Obj::new(k.sp, vnode_ty, 0).m("v_mntvnodes")?;
-                o.member_offset("tqe_next")?
-            },
+            off_tqe_next: mnt.addr + mnt.member_offset("tqe_next")?,
             entries: Vec::new(),
             index: FxHashMap::default(),
+            valid_memo: FxHashMap::default(),
         })
     }
 
     #[inline]
-    fn read_ptr(&self, addr: u64) -> Result<u64> {
-        let v = if self.ptr_size == 4 { self.layer.read_u32(addr)? as u64 } else { self.layer.read_u64(addr)? };
-        Ok(v & self.ptr_mask)
+    fn read_ptr(&self, addr: u64) -> Option<u64> {
+        let v = if self.ptr_size == 4 { self.layer.read_u32(addr).ok()? as u64 } else { self.layer.read_u64(addr).ok()? };
+        Some(v & self.ptr_mask)
     }
 
-    fn vnode_obj(&self, addr: u64) -> Obj {
-        Obj::new(self.sp, self.vnode_ty, addr)
-    }
-
-    /// python `_vnode_name(vnode)`.
-    fn vnode_name(&self, v: VObj) -> Result<Option<String>> {
-        let base = v.base();
-        let v_flag = self.layer.read_u32(base.wrapping_add(self.off_v_flag))?;
-        if v_flag & 1 == 1 {
-            return self.vnode_obj(base).full_path().map(Some);
+    /// The walk's fields of the vnode at `base`: one slice when the struct is in one mapped
+    /// page (then every field read succeeds, as python's would), else field by field.
+    fn vinfo(&self, base: u64) -> VInfo {
+        if let Some(s) = self.layer.slice(base, self.vnode_size as usize) {
+            let p = |off| rd(s, off, self.ptr_size).map(|v| v & self.ptr_mask);
+            return VInfo {
+                flag: rd(s, self.off_v_flag, 4).map(|v| v as u32),
+                name_ptr: p(self.off_v_name),
+                parent: p(self.off_v_parent),
+                next: p(self.off_tqe_next),
+            };
         }
-        let name_ptr = match self.read_ptr(base.wrapping_add(self.off_v_name)) {
-            Ok(p) => p,
-            Err(e) if e.is_invalid_address() => return Ok(None),
-            Err(e) => return Err(e),
+        VInfo {
+            flag: self.layer.read_u32(base.wrapping_add(self.off_v_flag)).ok(),
+            name_ptr: self.read_ptr(base.wrapping_add(self.off_v_name)),
+            parent: self.read_ptr(base.wrapping_add(self.off_v_parent)),
+            next: self.read_ptr(base.wrapping_add(self.off_tqe_next)),
+        }
+    }
+
+    /// python `_vnode_name(vnode)`, deciding only whether it is None (the string itself is
+    /// read later unless python computes `full_path()`).
+    fn vnode_name(&self, base: u64, info: &VInfo) -> Result<Option<Name>> {
+        let v_flag = match info.flag {
+            Some(f) => f,
+            // uncaught in python: re-read for the exact error
+            None => self.layer.read_u32(base.wrapping_add(self.off_v_flag))?,
         };
-        match read_cstring_255(self.layer, name_ptr, || self.vnode_obj(base).m("v_name")) {
-            Ok(s) => Ok(Some(s)),
-            Err(e) if e.is_invalid_address() => Ok(None),
-            Err(e) => Err(e),
+        if v_flag & 1 == 1 {
+            return Obj::new(self.sp, self.vnode_ty, base).full_path().map(|s| Some(Name::Str(s)));
         }
+        Ok(match info.name_ptr {
+            // gather_contiguous_bytes raises iff the string's first page is unmapped
+            Some(p) if self.layer.is_valid(p, 1) => Some(Name::Ptr(p)),
+            _ => None,
+        })
     }
 
     /// python `_get_parent(context, vnode)`: the parent vnode STRUCT address.
-    fn get_parent(&self, v: VObj) -> Result<Option<u64>> {
-        let p = match self.read_ptr(v.base().wrapping_add(self.off_v_parent)) {
-            Ok(p) => p,
-            Err(e) if e.is_invalid_address() => return Ok(None),
-            Err(e) => return Err(e),
+    #[inline]
+    fn get_parent(&mut self, info: &VInfo) -> Option<u64> {
+        info.parent.filter(|&p| self.valid_vnode(p))
+    }
+
+    /// python `is_valid(p, vnode.size)` for a vnode struct address (memoized: parents repeat).
+    #[inline]
+    fn valid_vnode(&mut self, p: u64) -> bool {
+        if let Some(&v) = self.valid_memo.get(&p) {
+            return v;
+        }
+        let v = self.layer.is_valid(p, self.vnode_size);
+        self.valid_memo.insert(p, v);
+        v
+    }
+
+    /// python `_add_vnode(context, vnode, loop_vnodes)`; returns `Some(info)` when added.
+    fn add_vnode(&mut self, v: VObj) -> Result<Option<VInfo>> {
+        let key = v.offset();
+        let valid = match v {
+            VObj::Ptr { .. } => self.layer.is_valid(key, self.ptr_size),
+            VObj::Struct { .. } => self.valid_vnode(key),
         };
-        if !self.layer.is_valid(p, self.vnode_size) {
+        if !valid || self.index.contains_key(&key) {
             return Ok(None);
         }
-        Ok(Some(p))
-    }
-
-    /// python `_add_vnode(context, vnode, loop_vnodes)`.
-    fn add_vnode(&mut self, v: VObj) -> Result<bool> {
-        let size = match v {
-            VObj::Ptr { .. } => self.ptr_size,
-            VObj::Struct { .. } => self.vnode_size,
-        };
-        let key = v.offset();
-        if !self.layer.is_valid(key, size) {
-            return Ok(false);
-        }
-        if self.index.contains_key(&key) {
-            return Ok(false);
-        }
-        let Some(name) = self.vnode_name(v)? else { return Ok(false) };
-        let parent = self.get_parent(v)?;
+        let info = self.vinfo(v.base());
+        let Some(name) = self.vnode_name(v.base(), &info)? else { return Ok(None) };
+        let parent = self.get_parent(&info);
         self.index.insert(key, self.entries.len() as u32);
         self.entries.push(Entry { key, name, parent });
-        Ok(true)
-    }
-
-    /// python `vnode in loop_vnodes`.
-    #[inline]
-    fn contains(&self, v: VObj) -> bool {
-        match v {
-            VObj::Ptr { value, .. } => self.index.contains_key(&value),
-            VObj::Struct { .. } => false,
-        }
+        Ok(Some(info))
     }
 
     /// python `_walk_vnode(context, vnode, loop_vnodes)`.
@@ -183,29 +224,29 @@ impl Walker {
         let mut added = false;
         let mut vnode = v;
         loop {
-            // `while vnode:`
-            if let VObj::Ptr { value: 0, .. } = vnode {
-                break;
+            // `while vnode:` and `if vnode in loop_vnodes: return added`
+            if let VObj::Ptr { value, .. } = vnode {
+                if value == 0 {
+                    break;
+                }
+                if self.index.contains_key(&value) {
+                    return Ok(added);
+                }
             }
-            if self.contains(vnode) {
-                return Ok(added);
-            }
-            if !self.add_vnode(vnode)? {
-                break;
-            }
+            let Some(info) = self.add_vnode(vnode)? else { break };
             added = true;
+            let mut parent = self.get_parent(&info);
             // `while parent and parent not in loop_vnodes` (a struct is never `in`)
-            let mut parent = self.get_parent(vnode)?;
             while let Some(p) = parent {
                 if !self.walk_vnode(VObj::Struct { addr: p }, depth + 1)? {
                     break;
                 }
-                parent = self.get_parent(VObj::Struct { addr: p })?;
+                let pi = self.vinfo(p);
+                parent = self.get_parent(&pi);
             }
-            match self.read_ptr(vnode.base().wrapping_add(self.off_tqe_next)) {
-                Ok(next) => vnode = VObj::Struct { addr: next },
-                Err(e) if e.is_invalid_address() => break,
-                Err(e) => return Err(e),
+            match info.next {
+                Some(next) => vnode = VObj::Struct { addr: next },
+                None => break,
             }
         }
         Ok(added)
@@ -230,22 +271,24 @@ impl Walker {
     }
 }
 
-/// python `utility.pointer_to_string(ptr, 255)` for the pointer value `addr`: a direct read
-/// when all 255 bytes are mapped (the common case), else the exact python routine.
-fn read_cstring_255(layer: &dyn Layer, addr: u64, ptr: impl FnOnce() -> Result<Obj>) -> Result<String> {
-    let mut buf = [0u8; 255];
-    if layer.read(addr, &mut buf).is_ok() {
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        let s = &buf[..end];
-        if s.is_ascii() {
-            // decode("utf-8", "replace") cut at NUL/U+FFFD is the identity on ASCII
-            return Ok(String::from_utf8(s.to_vec()).unwrap_or_default());
+/// python `utility.pointer_to_string(ptr, 255)` for the pointer value `addr`: zero-copy when
+/// the NUL is found in the first page part (bytes after it cannot change the result), else
+/// the exact python routine.
+fn read_cstring_255(layer: LayerRef, addr: u64) -> Result<String> {
+    let in_page = (0x1000 - (addr & 0xfff)).min(255) as usize;
+    if let Some(s) = layer.slice(addr, in_page) {
+        if let Some(end) = s.iter().position(|&b| b == 0) {
+            let s = &s[..end];
+            if s.is_ascii() {
+                // decode("utf-8", "replace") cut at NUL/U+FFFD is the identity on ASCII
+                return Ok(String::from_utf8_lossy(s).into_owned());
+            }
         }
     }
-    pointer_to_string(&ptr()?, 255)
+    address_to_string(layer, addr, 255, "replace", "utf-8")
 }
 
-/// python `List_Files._walk_mounts`: `(key, name, parent)` in dict order.
+/// python `List_Files._walk_mounts`.
 fn walk_mounts(k: &MacKernel) -> Result<Walker> {
     let mut w = Walker::new(k)?;
     for mnt in list_mounts(k) {
@@ -261,26 +304,37 @@ fn walk_mounts(k: &MacKernel) -> Result<Walker> {
 }
 
 /// python `List_Files._build_path(vnodes, vnode_name, parent_offset)`.
-fn build_path(w: &Walker, name: &str, parent: Option<u64>) -> String {
+fn build_path(w: &Walker, names: &[String], i: usize) -> String {
+    let name = names[i].as_str();
     let mut rev: Vec<&str> = vec![name];
-    let mut seen: crate::util::FxHashSet<u64> = Default::default();
-    let mut cur = parent;
+    // `seen_offsets`: a short list scanned linearly (chains are short), a set when long
+    let mut seen: Vec<u64> = Vec::new();
+    let mut seen_set: crate::util::FxHashSet<u64> = Default::default();
+    let mut cur = w.entries[i].parent;
     let mut cycle = false;
     while let Some(po) = cur {
-        let Some(&i) = w.index.get(&po) else { break };
-        let e = &w.entries[i as usize];
+        let Some(&j) = w.index.get(&po) else { break };
+        let e = &w.entries[j as usize];
         match e.parent {
             None => cur = Some(0),
-            Some(pp) if seen.contains(&pp) => {
-                cycle = true;
-                break;
-            }
             Some(pp) => {
-                seen.insert(pp);
+                let dup = if seen.len() < 64 { seen.contains(&pp) } else { seen_set.contains(&pp) };
+                if dup {
+                    cycle = true;
+                    break;
+                }
+                if seen.len() < 64 {
+                    seen.push(pp);
+                    if seen.len() == 64 {
+                        seen_set.extend(seen.iter().copied());
+                    }
+                } else {
+                    seen_set.insert(pp);
+                }
                 cur = Some(pp);
             }
         }
-        rev.push(&e.name);
+        rev.push(&names[j as usize]);
     }
     let path = if !cycle && rev.len() > 1 {
         rev.reverse();
@@ -297,8 +351,22 @@ fn build_path(w: &Walker, name: &str, parent: Option<u64>) -> String {
 /// python `List_Files.list_files(context, kernel_module_name)`: `(vnode vol.offset, full
 /// path)` in python order.
 pub fn list_files(k: &MacKernel) -> Result<Vec<(u64, String)>> {
-    let w = walk_mounts(k)?;
-    Ok(w.entries.iter().map(|e| (e.key, build_path(&w, &e.name, e.parent))).collect())
+    let w = {
+        let _t = crate::util::trace::span("list_files walk");
+        walk_mounts(k)?
+    };
+    let names: Vec<String> = {
+        let _t = crate::util::trace::span("list_files names");
+        let layer = w.layer;
+        let res: Vec<Result<String>> = par_map(w.entries.len(), |i| match &w.entries[i].name {
+            Name::Str(s) => Ok(s.clone()),
+            Name::Ptr(p) => read_cstring_255(layer, *p),
+        });
+        res.into_iter().collect::<Result<_>>()?
+    };
+    let _t = crate::util::trace::span("list_files build paths");
+    let paths = par_map(w.entries.len(), |i| build_path(&w, &names, i));
+    Ok(w.entries.iter().map(|e| e.key).zip(paths).collect())
 }
 
 impl Plugin for ListFiles {
@@ -311,9 +379,10 @@ impl Plugin for ListFiles {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         let k = ctx.mac_kernel()?;
         out.begin(vec![Column::new("Address", ColType::Hex), Column::new("File Path", ColType::Str)])?;
-        let w = walk_mounts(k)?;
-        for e in &w.entries {
-            out.row(0, vec![Value::Int(e.key as i128), Value::Str(build_path(&w, &e.name, e.parent))])?;
+        let files = list_files(k)?;
+        let _t = crate::util::trace::span("list_files render");
+        for (addr, path) in files {
+            out.row(0, vec![Value::Int(addr as i128), Value::Str(path)])?;
         }
         Ok(())
     }

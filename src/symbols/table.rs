@@ -799,8 +799,22 @@ impl SymbolTable {
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
         let idx = self.by_addr.get_or_init(|| {
-            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (self.sym_at(i).address, i)).collect();
-            v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1)))));
+            // addresses straight from the records (no type/name decoding), sorted by address;
+            // runs of equal addresses are then ordered by name
+            let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (rd64(self.sym_rec(i), 8) & mask, i)).collect();
+            v.sort_unstable();
+            let mut i = 0;
+            while i < v.len() {
+                let mut j = i + 1;
+                while j < v.len() && v[j].0 == v[i].0 {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    v[i..j].sort_by(|a, b| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1))).then(a.1.cmp(&b.1)));
+                }
+                i = j;
+            }
             v
         });
         let start = idx.partition_point(|e| e.0 < offset);
