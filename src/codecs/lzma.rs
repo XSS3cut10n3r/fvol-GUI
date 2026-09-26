@@ -48,7 +48,7 @@ const END_MARKER: u32 = 0xFFFF_FFFF;
 const LIT_NEXT_STATE: [u8; 16] = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 4, 5, 0, 0, 0, 0];
 
 /// Largest `.lzma` output we pre-allocate before seeing data (grows beyond on demand).
-const PREALLOC_CAP: usize = 256 << 20;
+const PREALLOC_CAP: usize = 1 << 30;
 
 #[inline(always)]
 fn corrupt(what: &str) -> Error {
@@ -737,7 +737,8 @@ pub(crate) fn decode_lzma1(input: &[u8], props: Props, size: Option<u64>) -> Res
     let mut rc = RangeDecoder::new(input, 0)?;
     let mut dec = LzmaDecoder::new(props);
     // Initial allocation: the declared size if sane, else a guess from the input size.
-    let guess = input.len().saturating_mul(8).saturating_add(4096).min(PREALLOC_CAP);
+    // calloc memory costs nothing until written, so guess generously (then shrink).
+    let guess = input.len().saturating_mul(32).saturating_add(4096).min(PREALLOC_CAP);
     let target = match size {
         Some(s) => usize::try_from(s).map_err(|_| corrupt("uncompressed size"))?,
         None => usize::MAX,
@@ -774,6 +775,7 @@ pub(crate) fn decode_lzma1(input: &[u8], props: Props, size: Option<u64>) -> Res
         return Err(corrupt("truncated input"));
     }
     out.truncate(pos);
+    out.shrink_to_fit();
     Ok((out, rc.ip))
 }
 
