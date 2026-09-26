@@ -82,6 +82,16 @@ pub fn decode_utf16(data: &[u8], big_endian: bool, errors: StrErrors) -> Result<
         if big_endian { u16::from_be_bytes([a, b]) } else { u16::from_le_bytes([a, b]) }
     };
     let mut i = 0;
+    // ASCII run (most names): the low bytes straight into the string
+    {
+        let (lo, hi) = if big_endian { (1, 0) } else { (0, 1) };
+        // SAFETY: only bytes < 0x80 are pushed, so the string stays valid UTF-8
+        let v = unsafe { out.as_mut_vec() };
+        while i < n && data[2 * i + hi] == 0 && data[2 * i + lo] < 0x80 {
+            v.push(data[2 * i + lo]);
+            i += 1;
+        }
+    }
     while i < n {
         let u = unit(i);
         if !(0xD800..0xE000).contains(&u) {
@@ -147,8 +157,34 @@ pub fn decode(data: &[u8], enc: StrEnc, errors: StrErrors) -> Result<String> {
     }
 }
 
+/// Index of the first NUL code unit of `data` in the encoding (a zero byte for the 8-bit
+/// encodings, a zero u16 at an even offset for UTF-16), or `data.len()`.
+fn first_nul_unit(data: &[u8], enc: StrEnc) -> usize {
+    match enc {
+        StrEnc::Utf16 | StrEnc::Utf16Le | StrEnc::Utf16Be => data.chunks_exact(2).position(|u| u[0] == 0 && u[1] == 0).map_or(data.len(), |i| 2 * i),
+        _ => data.iter().position(|&b| b == 0).unwrap_or(data.len()),
+    }
+}
+
 /// python `objects.String` value: decode then cut at the first NUL character.
 pub fn decode_cstring(data: &[u8], enc: StrEnc, errors: StrErrors) -> Result<String> {
+    // Only the text before the first NUL survives. With a non-strict error handler nothing at
+    // or after the first NUL code unit can change that text: a NUL unit always decodes to
+    // U+0000 on its own (it is never part of a multi-byte UTF-8 sequence or a surrogate pair),
+    // and an error just before it covers the same bytes whether the NUL follows or the data
+    // ends there (UTF-8: the maximal invalid subpart; UTF-16: the lone surrogate unit). So
+    // decode only up to it: a `max_length=512` UTF-16 cast of a 10-character name decodes 10
+    // units, not 256. Strict decoding must see every byte (python raises for an error after
+    // the NUL). UTF-16 with a BOM: the BOM is sniffed first, then the rest is cut.
+    if errors != StrErrors::Strict {
+        let (body, enc2) = match enc {
+            StrEnc::Utf16 if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xFE => (&data[2..], StrEnc::Utf16Le),
+            StrEnc::Utf16 if data.len() >= 2 && data[0] == 0xFE && data[1] == 0xFF => (&data[2..], StrEnc::Utf16Be),
+            StrEnc::Utf16 => (data, StrEnc::Utf16Le),
+            e => (data, e),
+        };
+        return decode(&body[..first_nul_unit(body, enc2)], enc2, errors);
+    }
     let mut s = decode(data, enc, errors)?;
     if let Some(i) = s.find('\0') {
         s.truncate(i);
@@ -208,6 +244,41 @@ mod tests {
         assert!(decode(&d, StrEnc::Utf16Le, StrErrors::Strict).is_err());
         let bom = [0xFF, 0xFE, b'h', 0, b'i', 0];
         assert_eq!(decode(&bom, StrEnc::Utf16, StrErrors::Strict).unwrap(), "hi");
+        let be = [0, b'h', 0, b'i', 0xd8, 0x3d, 0xde, 0x00];
+        assert_eq!(decode(&be, StrEnc::Utf16Be, StrErrors::Strict).unwrap(), "hi\u{1F600}");
+    }
+
+    /// Cutting at the first NUL unit before decoding gives what decode-then-cut gives, for
+    /// every non-strict handler, encoding and error placement (errors right before, at and
+    /// after the NUL, odd lengths, BOMs).
+    #[test]
+    fn cstring_cut_matches_full_decode() {
+        let reference = |data: &[u8], enc: StrEnc, errors: StrErrors| -> String {
+            let mut s = decode(data, enc, errors).unwrap();
+            if let Some(i) = s.find('\0') {
+                s.truncate(i);
+            }
+            s
+        };
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let pool: [u8; 10] = [0, 0, b'a', 0x80, 0xd8, 0xdc, 0xff, 0xfe, 0xe2, 0x82];
+        for _ in 0..20000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let len = (x % 9) as usize;
+            let data: Vec<u8> = (0..len).map(|k| pool[((x >> (8 + 4 * k)) % 10) as usize]).collect();
+            for enc in [StrEnc::Utf8, StrEnc::Utf16Le, StrEnc::Utf16Be, StrEnc::Utf16, StrEnc::Latin1, StrEnc::Ascii] {
+                for errors in [StrErrors::Replace, StrErrors::Ignore, StrErrors::BackslashReplace] {
+                    assert_eq!(decode_cstring(&data, enc, errors).unwrap(), reference(&data, enc, errors), "{data:x?} {enc:?} {errors:?}");
+                }
+                match (decode(&data, enc, StrErrors::Strict), decode_cstring(&data, enc, StrErrors::Strict)) {
+                    (Ok(_), Ok(s)) => assert_eq!(s, reference(&data, enc, StrErrors::Strict)),
+                    (Err(_), Err(_)) => {}
+                    (a, b) => panic!("strict mismatch {data:x?} {enc:?}: {a:?} {b:?}"),
+                }
+            }
+        }
     }
     #[test]
     fn utf8_replace() {
