@@ -34,9 +34,10 @@
 //! is shared and frequency-scaling, so cycles are the robust comparison.
 //! `CRYPTO_BENCH_ONLY=AES128,SHA1` restricts the run to matching primitives.
 //!
-//! Rows named `...*` measure the allocation-free in-place / caller-buffer APIs
-//! (`Aes::cbc_decrypt_into` etc.); the unstarred rows measure the `Vec`-returning
-//! APIs the plugins use, which is what the OpenSSL rows are compared against.
+//! Rows named `...*` measure the allocation-free in-place APIs
+//! (`Aes::cbc_decrypt_in_place`, `Des::ecb_decrypt_in_place`); the unstarred rows
+//! measure the `Vec`-returning APIs the plugins use, which is what the OpenSSL rows
+//! are compared against.
 
 use super::{aes::Aes, des::Des, hmac, md5, rc4, sha1, sha256};
 use std::hint::black_box;
