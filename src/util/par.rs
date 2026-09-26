@@ -192,7 +192,8 @@ where
             };
             job.consumed.store(i + 1, Ordering::SeqCst);
             if job.starved.swap(false, Ordering::SeqCst) {
-                pool::poke(t);
+                // one more item may start (a spinning helper also sees the poke)
+                pool::poke(1);
             }
             match r {
                 Ok(v) => {

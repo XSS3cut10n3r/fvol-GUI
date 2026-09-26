@@ -1,7 +1,8 @@
 //! Automagic: stack layers on the input file and discover OS kernels (python
 //! `framework/automagic`). Everything here is lazy -- the `Context` runs it when a plugin
 //! first asks for a kernel -- and results are cached per image in `~/.cache/rsvol/automagic/`
-//! (key: canonical path + size + mtime), so warm runs skip all scanning.
+//! (key: canonical path + size + mtime), so warm runs skip all scanning. Failures ("no Linux
+//! kernel in this image") are remembered too ([`cache::load_failure`]).
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
@@ -102,7 +103,21 @@ pub mod cache {
         k.extend_from_slice(kind.as_bytes());
         let label: String = kind.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').take(24).collect();
         let h = crate::layers::scancache::key_hash(&k);
-        Some((paths::rsvol_cache_dir().join("automagic").join(format!("{h:016x}.{label}")), paths::hex(&k)))
+        Some((cache_root().join("automagic").join(format!("{h:016x}.{label}")), paths::hex(&k)))
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// a test's private cache directory (tests run concurrently: no environment changes)
+        static TEST_ROOT: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn cache_root() -> std::path::PathBuf {
+        #[cfg(test)]
+        if let Some(r) = TEST_ROOT.with(|r| r.borrow().clone()) {
+            return r;
+        }
+        paths::rsvol_cache_dir()
     }
 
     /// Bump when the cached automagic semantics change.
@@ -149,6 +164,82 @@ pub mod cache {
     /// Lookup helper.
     pub fn get<'a>(kv: &'a [(String, String)], key: &str) -> Option<&'a str> {
         kv.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    // --------------------------------------------------------------------------------------
+    // remembered failures
+
+    /// Key material of a remembered failure of the discovery `kind`: `kind` itself and the
+    /// rsvol executable (size, mtime, path), since another build may find a kernel this one
+    /// could not; with `None` for the executable nothing is remembered.
+    fn failure_kind(kind: &str) -> Option<String> {
+        static EXE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let exe = EXE.get_or_init(|| {
+            let p = std::env::current_exe().ok()?;
+            let (size, mtime) = paths::file_stamp(&p)?;
+            Some(format!("{size}:{mtime}:{}", p.to_string_lossy()))
+        });
+        Some(format!("none-{kind}\0{}", exe.as_deref()?))
+    }
+
+    /// A remembered failure of the kernel discovery `kind` on `image` ("no Linux kernel in
+    /// this image"): the pairs stored with it ([`store_failure`]), when `deps_hold` accepts
+    /// them. Timeliner runs the plugins of every OS, so without this each run repeated the
+    /// discoveries of the two other OSes (full-image banner and DTB scans, 0.2-2 s).
+    ///
+    /// A failure is remembered per image (path, size, mtime), per `kind` (which carries what
+    /// the positive result's key carries: symbol path fingerprint, `--stackers`) and per rsvol
+    /// executable; `deps_hold` checks what else the discovery read (e.g. the identifier index
+    /// state for every banner of the OS, [`crate::symbols::store::IdentifierIndex::os_deps`]).
+    pub fn load_failure(image: &Path, kind: &str, deps_hold: impl FnOnce(&[(String, String)]) -> bool) -> Option<Vec<(String, String)>> {
+        let kv = load(image, &failure_kind(kind)?)?;
+        (get(&kv, "outcome") == Some("none") && deps_hold(&kv)).then_some(kv)
+    }
+
+    /// Remember that the kernel discovery `kind` found nothing on `image`: `kv` holds what the
+    /// caller needs to fail the same way again (e.g. the `-v` detail) and the key material
+    /// its `deps_hold` checks. Only for failures that depend on nothing but the image, `kind`
+    /// and those pairs (never after an I/O error or other unexpected exception).
+    pub fn store_failure(image: &Path, kind: &str, kv: &[(&str, String)]) {
+        let Some(k) = failure_kind(kind) else { return };
+        // one pair per line
+        if kv.iter().any(|(a, b)| a.contains(['=', '\n', '\r']) || b.contains(['\n', '\r'])) {
+            return;
+        }
+        let mut all = vec![("outcome", "none".to_string())];
+        all.extend(kv.iter().map(|(a, b)| (*a, b.clone())));
+        store(image, &k, &all);
+    }
+
+    /// Failures are remembered per image, kind and dependencies, and never shadow another
+    /// kind's result.
+    #[test]
+    fn failures_are_keyed() {
+        let dir = std::env::temp_dir().join(format!("rsvol-amcache-neg-{}", std::process::id()));
+        let img = dir.join("image.raw");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&img, b"not a memory image").unwrap();
+        TEST_ROOT.with(|r| *r.borrow_mut() = Some(dir.join("cache")));
+        let r = std::panic::catch_unwind(|| {
+            assert_eq!(load_failure(&img, "linux-x", |_| true), None);
+            store_failure(&img, "linux-x", &[("detail", "No Linux banners found".into()), ("dep", "1".into())]);
+            let kv = load_failure(&img, "linux-x", |_| true).unwrap();
+            assert_eq!(get(&kv, "detail"), Some("No Linux banners found"));
+            // dependencies that no longer hold: a miss
+            assert_eq!(load_failure(&img, "linux-x", |kv| get(kv, "dep") == Some("2")), None);
+            // another kind (symbol path, --stackers) and the positive result: separate
+            assert_eq!(load_failure(&img, "linux-y", |_| true), None);
+            assert_eq!(load(&img, "linux-x"), None);
+            // a changed image: a miss
+            std::fs::write(&img, b"another memory image").unwrap();
+            assert_eq!(load_failure(&img, "linux-x", |_| true), None);
+            // multi-line values are never stored (one pair per line)
+            store_failure(&img, "linux-x", &[("detail", "a\nb".into())]);
+            assert_eq!(load_failure(&img, "linux-x", |_| true), None);
+        });
+        TEST_ROOT.with(|r| *r.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+        r.unwrap();
     }
 
     /// A file found under a colliding name but written for another key is a miss.
