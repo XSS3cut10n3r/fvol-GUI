@@ -455,6 +455,52 @@ fn method_offset(vlayer: &IntelLayer, phys: &dyn Layer, pattern: &[u8], result_o
     Ok(found)
 }
 
+/// The fused scan's [`MultiStringScanner`], also reporting module-list matches to `spot` as
+/// the workers find them (out of order, before the in-order delivery reaches them).
+struct Spotting<'s> {
+    inner: MultiStringScanner,
+    spot: &'s (dyn Fn(u64) + Sync),
+}
+
+impl Scanner for Spotting<'_> {
+    type Hit = (u64, u32);
+    fn chunk_size(&self) -> u64 {
+        self.inner.chunk_size()
+    }
+    fn overlap(&self) -> u64 {
+        self.inner.overlap()
+    }
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        let n = hits.len();
+        self.inner.scan(data, data_offset, hits);
+        for &(o, pi) in &hits[n..] {
+            if pi == 1 {
+                (self.spot)(o);
+            }
+        }
+    }
+    fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
+        self.inner.prescan(data, out)
+    }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        for &(o, pi) in matches {
+            if pi == 1 {
+                (self.spot)(data_offset + o);
+            }
+        }
+        self.inner.finish(matches, data_offset, hits)
+    }
+    fn stream_window(&self) -> Option<usize> {
+        self.inner.stream_window()
+    }
+    fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
+        self.inner.prescan_piece(data, base, from, limit, out)
+    }
+    fn cache_query(&self) -> Option<crate::layers::scancache::CacheQuery<'_>> {
+        self.inner.cache_query()
+    }
+}
+
 /// Hits of the fused KDBG / module-list scan.
 enum OffHit {
     Kdbg(u64),
@@ -463,18 +509,41 @@ enum OffHit {
 
 /// python `method_kdbg_offset` followed by `method_module_offset`, in one physical pass:
 /// KDBG hits are validated as they stream in (stopping at the first valid kernel, like
-/// python); module-list hits are kept and tried afterwards in order, with python's separate
-/// `seen` set.
-fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<KernelFound>> {
+/// python). Module-list hits are validated as they stream in too, in order with python's
+/// separate `seen` set, up to the first decisive one (a valid kernel, or a read error that
+/// python would raise); that result is what python's module method returns if no KDBG hit
+/// validates by the end of the scan. `candidate` sees it as soon as it is known (while the
+/// scan continues), so the caller can start loading that kernel's symbols speculatively.
+fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer, candidate: &(dyn Fn(&KernelFound) + Sync)) -> Result<Option<KernelFound>> {
     let module_ro = -16 - (vlayer.bits_per_register() as i64 / 8);
     let mut seen = crate::util::FxHashSet::default();
     let mut found = None;
     let mut err = None;
-    let mut module_hits = Vec::new();
+    let mut module_hits = 0usize;
+    let mut module_seen = crate::util::FxHashSet::default();
+    // the module method's outcome once decided: Ok(kernel) or the error python raises
+    let mut module_decision: Option<std::result::Result<KernelFound, Error>> = None;
     // Two BytesScanners (default chunking) in one pass. Neither needle can overlap itself or
     // the other, so the non-overlapping multi-string search yields exactly the union of both
     // needles' occurrences, in offset order.
-    let scanner = MultiStringScanner::new(&[&b"KDBG"[..], &b"\\SystemRoot\\system32\\nt"[..]]);
+    let inner = MultiStringScanner::new(&[&b"KDBG"[..], &b"\\SystemRoot\\system32\\nt"[..]]);
+    // Speculation: a helper validates the first module-list matches the workers spot (any
+    // order) and reports a valid kernel to `candidate` right away; the in-order evaluation
+    // below decides the result as before.
+    struct Spots {
+        offs: Vec<u64>,
+        done: bool,
+    }
+    let spots = std::sync::Mutex::new(Spots { offs: Vec::new(), done: false });
+    let spotted = std::sync::Condvar::new();
+    let spot = |o: u64| {
+        let mut g = spots.lock().unwrap_or_else(|e| e.into_inner());
+        if g.offs.len() < 8 && !g.done {
+            g.offs.push(o);
+            spotted.notify_one();
+        }
+    };
+    let scanner = Spotting { inner, spot: &spot };
     let try_hit = |hit: u64, ro: i64, seen: &mut crate::util::FxHashSet<u64>| -> std::result::Result<Option<KernelFound>, Error> {
         let at = (hit as i128 + ro as i128) as u64;
         let ptr = phys.read_u64(at)?;
@@ -484,22 +553,67 @@ fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<
         }
         Ok(check_kernel_offset(vlayer, address))
     };
-    scan_each(phys, &scanner, None, |(o, pi)| match if pi == 0 { OffHit::Kdbg(o) } else { OffHit::Module(o) } {
-        OffHit::Kdbg(o) => match try_hit(o, 8, &mut seen) {
-            Ok(Some(k)) => {
-                crate::util::trace::note(|| format!("pdbscan: kernel from KDBG hit at {o:#x}"));
-                found = Some(k);
-                false
+    let helper = |_: ()| {
+        let mut seen_h = crate::util::FxHashSet::default();
+        let mut next = 0usize;
+        loop {
+            let o = {
+                let mut g = spots.lock().unwrap_or_else(|e| e.into_inner());
+                while next >= g.offs.len() && !g.done {
+                    g = spotted.wait(g).unwrap_or_else(|e| e.into_inner());
+                }
+                if next >= g.offs.len() {
+                    return;
+                }
+                next += 1;
+                g.offs[next - 1]
+            };
+            if let Ok(Some(k)) = try_hit(o, module_ro, &mut seen_h) {
+                crate::util::trace::note(|| format!("pdbscan: speculative kernel candidate from module-list hit at {o:#x}"));
+                candidate(&k);
+                spots.lock().unwrap_or_else(|e| e.into_inner()).done = true;
+                return;
             }
-            Ok(None) => true,
-            Err(e) => {
-                err = Some(e);
-                false
+        }
+    };
+    std::thread::scope(|sc| {
+        let h = std::thread::Builder::new().name("rsvol-spot".into()).spawn_scoped(sc, || helper(())).ok();
+        scan_each(phys, &scanner, None, |(o, pi)| match if pi == 0 { OffHit::Kdbg(o) } else { OffHit::Module(o) } {
+            OffHit::Kdbg(o) => match try_hit(o, 8, &mut seen) {
+                Ok(Some(k)) => {
+                    crate::util::trace::note(|| format!("pdbscan: kernel from KDBG hit at {o:#x}"));
+                    found = Some(k);
+                    false
+                }
+                Ok(None) => true,
+                Err(e) => {
+                    err = Some(e);
+                    false
+                }
+            },
+            OffHit::Module(o) => {
+                module_hits += 1;
+                if module_decision.is_none() {
+                    match try_hit(o, module_ro, &mut module_seen) {
+                        Ok(Some(k)) => {
+                            crate::util::trace::note(|| format!("pdbscan: kernel candidate from module-list hit at {o:#x}"));
+                            candidate(&k);
+                            module_decision = Some(Ok(k));
+                        }
+                        Ok(None) => {}
+                        Err(e) => module_decision = Some(Err(e)),
+                    }
+                }
+                true
             }
-        },
-        OffHit::Module(o) => {
-            module_hits.push(o);
-            true
+        });
+        {
+            let mut g = spots.lock().unwrap_or_else(|e| e.into_inner());
+            g.done = true;
+            spotted.notify_all();
+        }
+        if let Some(h) = h {
+            let _ = h.join();
         }
     });
     if let Some(e) = err {
@@ -508,15 +622,12 @@ fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<
     if found.is_some() {
         return Ok(found);
     }
-    let mut seen = crate::util::FxHashSet::default();
-    crate::util::trace::note(|| format!("pdbscan: no valid KDBG; {} module-list hits", module_hits.len()));
-    for o in module_hits {
-        if let Some(k) = try_hit(o, module_ro, &mut seen)? {
-            crate::util::trace::note(|| format!("pdbscan: kernel from module-list hit at {o:#x}"));
-            return Ok(Some(k));
-        }
+    crate::util::trace::note(|| format!("pdbscan: no valid KDBG; {module_hits} module-list hits"));
+    match module_decision {
+        Some(Ok(k)) => Ok(Some(k)),
+        Some(Err(e)) => Err(e),
+        None => Ok(None),
     }
-    Ok(None)
 }
 
 /// python `method_fixed_mapping`.
@@ -564,6 +675,12 @@ fn method_slow_scan(vlayer: &IntelLayer) -> Option<KernelFound> {
 
 /// python `KernelPDBScanner.determine_valid_kernel` on one Intel layer.
 pub fn find_kernel(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<KernelFound>> {
+    find_kernel_with(vlayer, phys, &|_| {})
+}
+
+/// [`find_kernel`], telling `candidate` about a kernel that will be the result unless a later
+/// KDBG hit validates (see `method_offsets_fused`); for speculative symbol loading.
+pub fn find_kernel_with(vlayer: &IntelLayer, phys: &dyn Layer, candidate: &(dyn Fn(&KernelFound) + Sync)) -> Result<Option<KernelFound>> {
     use crate::util::trace::span;
     {
         let _t = span("pdbscan: low stub");
@@ -575,7 +692,7 @@ pub fn find_kernel(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<Kerne
         // python runs method_kdbg_offset then method_module_offset, each a full physical scan;
         // one fused pass gives the same hits in the same order (see method_offsets_fused)
         let _t = span("pdbscan: kdbg + module offset (fused scan)");
-        if let Some(k) = method_offsets_fused(vlayer, phys)? {
+        if let Some(k) = method_offsets_fused(vlayer, phys, candidate)? {
             return Ok(Some(k));
         }
     }

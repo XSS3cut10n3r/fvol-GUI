@@ -1012,9 +1012,10 @@ pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
     i
 }
 
-/// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
-/// by name `windows/<pdb>/<GUID>-<AGE>.json*`, then by identifier, then download + convert).
-pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
+/// The first steps of [`find_windows_isf`]: an ISF found by name (canonical layout
+/// `<root>/windows/<pdb>/<GUID>-<AGE>.json*`, then python's rglob), without the identifier
+/// index or a download. Cheap (a few stats), for speculative loading.
+pub fn find_windows_isf_local(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32) -> Option<IsfLocation> {
     let pdb_name = pdb_name.trim_matches('\0');
     let filter = format!("{}/{}-{}", pdb_name, guid.to_uppercase(), age);
     // fast path: the canonical layout <root>/windows/<pdb>/<GUID>-<AGE>.json*
@@ -1023,14 +1024,21 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
             for ext in ISF_EXTENSIONS {
                 let p = d.join("windows").join(format!("{filter}{ext}"));
                 if p.is_file() {
-                    return Ok(IsfLocation::File(p));
+                    return Some(IsfLocation::File(p));
                 }
             }
         }
     }
-    if let Some(l) = path.find_first("windows", &filter) {
+    path.find_first("windows", &filter)
+}
+
+/// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
+/// by name `windows/<pdb>/<GUID>-<AGE>.json*`, then by identifier, then download + convert).
+pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
+    if let Some(l) = find_windows_isf_local(path, pdb_name, guid, age) {
         return Ok(l);
     }
+    let pdb_name = pdb_name.trim_matches('\0');
     let idx = identifier_index(path);
     let ident = format!("{}|{}|{}", pdb_name, guid.to_uppercase(), age);
     if let Some(l) = idx.find(ident.as_bytes(), "windows") {
