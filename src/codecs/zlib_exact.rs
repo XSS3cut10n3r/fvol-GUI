@@ -2100,6 +2100,55 @@ mod tests {
         assert!(failures.is_empty());
     }
 
+    /// Throughput harness matching `zlib_exact_ref bench` (bench/refbench/zlib_exact_run.sh):
+    /// ZX_FILE, ZX_PARAMS="level,wbits,memlevel,strategy", ZX_ROWLEN (0 = one deflate(Z_FINISH)
+    /// call, else ROWLEN-byte Z_NO_FLUSH calls then Z_FINISH), ZX_RUNS. Prints
+    /// "rust zlib_exact LEVEL FILE IN_BYTES OUT_BYTES BEST_MS MB/s".
+    #[test]
+    #[ignore]
+    fn zlib_exact_bench() {
+        let Ok(path) = std::env::var("ZX_FILE") else {
+            eprintln!("set ZX_FILE");
+            return;
+        };
+        let p: Vec<i32> = std::env::var("ZX_PARAMS")
+            .unwrap_or_else(|_| "6,15,8,0".into())
+            .split(',')
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let rowlen: usize = std::env::var("ZX_ROWLEN").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let runs: usize = std::env::var("ZX_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+        let data = std::fs::read(&path).unwrap();
+        let mut best = f64::MAX;
+        let mut outlen = 0;
+        let mut out = Vec::with_capacity(data.len() + data.len() / 8 + 4096);
+        for _ in 0..runs {
+            out.clear();
+            let t = std::time::Instant::now();
+            let mut d = Deflater::new(p[0], p[1], p[2], p[3]).unwrap();
+            if rowlen > 0 {
+                for row in data.chunks(rowlen) {
+                    d.deflate_vec(row, &mut out, Z_NO_FLUSH);
+                }
+                assert_eq!(d.deflate_vec(&[], &mut out, Z_FINISH), Z_STREAM_END);
+            } else {
+                assert_eq!(d.deflate_vec(&data, &mut out, Z_FINISH), Z_STREAM_END);
+            }
+            let dt = t.elapsed().as_secs_f64();
+            best = best.min(dt);
+            outlen = out.len();
+        }
+        println!(
+            "rust zlib_exact {} {} {} {} {:.3} {:.1}",
+            p[0],
+            path,
+            data.len(),
+            outlen,
+            best * 1e3,
+            data.len() as f64 / best / 1e6
+        );
+    }
+
     // python: zlib.compress(b"", 6), zlib.compress(b"a", 6), zlib.compress(b"hello hello hello hello", 9)
     #[test]
     fn tiny_vectors() {

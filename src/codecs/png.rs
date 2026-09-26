@@ -283,6 +283,32 @@ mod tests {
         assert!(!names.is_empty() && bad == 0);
     }
 
+    /// PNG_BENCH=DIR/NAME_WxH.rgba [PNG_RUNS=N]: best-of-N time of png_rgba_pillow. Prints
+    /// "rust png NAME BYTES BEST_MS".
+    #[test]
+    #[ignore]
+    fn png_bench() {
+        let Ok(path) = std::env::var("PNG_BENCH") else {
+            eprintln!("set PNG_BENCH");
+            return;
+        };
+        let runs: usize = std::env::var("PNG_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+        let p = std::path::Path::new(&path);
+        let stem = p.file_stem().unwrap().to_string_lossy().to_string();
+        let (w, h) = stem.rsplit('_').next().unwrap().split_once('x').unwrap();
+        let (w, h): (u32, u32) = (w.parse().unwrap(), h.parse().unwrap());
+        let rgba = std::fs::read(p).unwrap();
+        let mut best = f64::MAX;
+        let mut n = 0;
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            let png = png_rgba_pillow(w, h, &rgba);
+            best = best.min(t.elapsed().as_secs_f64());
+            n = png.len();
+        }
+        println!("rust png {stem} {n} {:.3}", best * 1e3);
+    }
+
     #[test]
     fn empty_image() {
         assert!(png_rgba_pillow(0, 5, &[]).is_empty());
