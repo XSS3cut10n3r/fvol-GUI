@@ -21,6 +21,7 @@ pub mod orphan_kernel_threads;
 pub mod poolscanner;
 pub mod pslist;
 pub mod psscan;
+pub mod registry;
 pub mod ssdt;
 pub mod suspended_threads;
 pub mod symlinkscan;
@@ -59,4 +60,5 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&timers::Timers);
     v.push(&unloadedmodules::UnloadedModules);
     v.push(&vadinfo::VadInfo);
+    registry::register(v);
 }
