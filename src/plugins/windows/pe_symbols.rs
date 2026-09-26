@@ -30,6 +30,7 @@ use crate::symbols::TableRef;
 use crate::symbols::windows::pefile::{Export, PeError, PeFile};
 use crate::symbols::windows::prelude::*;
 use crate::symbols::windows::pe;
+use crate::automagic::windows::PdbSig;
 use crate::util::FxHashMap;
 
 pub struct PESymbols;
@@ -180,55 +181,134 @@ pub fn get_exports(pe_table: TableRef, layer: LayerRef, base: u64) -> Result<Opt
     Ok(pe.parse_exports().map(|d| d.symbols))
 }
 
-/// python `PESymbols._get_pdb_module(...)`: the PDB symbols of one module instance.
-fn get_pdb_module(ctx: &Context, mod_name: &str, inst: &ModuleInstance) -> Option<Module> {
-    let pdb_names: Vec<String> = if mod_name == OS_MODULE_NAME {
-        KERNEL_MODULE_NAMES.iter().map(|n| format!("{n}.pdb")).collect()
-    } else {
-        // mod_name[:-3] + "pdb" and the same with the first character upper-cased
-        let chars: Vec<char> = mod_name.chars().collect();
-        let keep = chars.len().saturating_sub(3);
-        let lower: String = chars[..keep].iter().collect::<String>() + "pdb";
-        let mut it = lower.chars();
-        let first_upper = match it.next() {
-            Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
-            None => String::new(),
-        };
-        vec![lower, first_upper]
+/// The PDB file names python tries for a module (`PESymbols._get_pdb_module`): the kernel
+/// names for `ntoskrnl.exe`, else `name[:-3] + "pdb"` and the same with its first character
+/// upper-cased.
+fn pdb_candidates(mod_name: &str) -> Vec<String> {
+    if mod_name == OS_MODULE_NAME {
+        return KERNEL_MODULE_NAMES.iter().map(|n| format!("{n}.pdb")).collect();
+    }
+    let chars: Vec<char> = mod_name.chars().collect();
+    let keep = chars.len().saturating_sub(3);
+    let lower: String = chars[..keep].iter().collect::<String>() + "pdb";
+    let mut it = lower.chars();
+    let first_upper = match it.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
+        None => String::new(),
     };
-    for pdb_name in &pdb_names {
-        // VolatilityException (no GUID found, no symbols) -> next name
-        if let Ok(t) = ctx.symbol_table_from_pdb(inst.layer, pdb_name, Some(inst.start), Some(inst.size)) {
+    vec![lower, first_upper]
+}
+
+/// python `PDBUtility.pdbname_scan(...)` over one module instance: the first RSDS record
+/// naming `pdb_name` (what `symbol_table_from_pdb` uses).
+fn scan_pdb_name(inst: &ModuleInstance, pdb_name: &str) -> Option<PdbSig> {
+    let mut first = None;
+    crate::automagic::windows::pdbname_scan(inst.layer, &[pdb_name.as_bytes()], Some(inst.start), Some(inst.start.wrapping_add(inst.size)), |s| {
+        first = Some(s);
+        false
+    });
+    first
+}
+
+/// The pure (memory-scanning) part of `_get_pdb_module` for one instance: the scan result of
+/// each candidate name, up to the first one that found an RSDS record.
+fn scan_pdb_names(inst: &ModuleInstance, names: &[String]) -> Vec<Option<PdbSig>> {
+    let mut out = Vec::new();
+    for n in names {
+        let s = scan_pdb_name(inst, n);
+        let hit = s.is_some();
+        out.push(s);
+        if hit {
+            break;
+        }
+    }
+    out
+}
+
+/// python `PESymbols._get_pdb_module(...)` given the scan results of [`scan_pdb_names`]: load
+/// (or download) the symbol table of the first candidate that works.
+fn pdb_module_from_scans(ctx: &Context, inst: &ModuleInstance, names: &[String], scans: &[Option<PdbSig>]) -> Option<Module> {
+    for (j, name) in names.iter().enumerate() {
+        let sig = match scans.get(j) {
+            Some(s) => s.clone(),
+            None => scan_pdb_name(inst, name),
+        };
+        // SymbolSpaceError (no GUID in the module / no symbols for it) -> next name
+        let Some(sig) = sig else { continue };
+        if let Ok(t) = ctx.load_windows_pdb(&sig.pdb_name, &sig.guid, sig.age) {
             return Some(Module::new(inst.layer, t, inst.start));
         }
     }
     None
 }
 
+/// How many module instances are prepared ahead of python's sequential walk.
+fn lookahead() -> usize {
+    crate::util::par::threads().max(2)
+}
+
 /// python `PESymbols._resolve_symbols_through_methods(...)`: resolve `wanted` in every
 /// instance of `mod_name`, PDBs first then export tables, stopping as soon as one kind of
-/// wanted value is exhausted. Returns (found, remaining).
+/// wanted value is exhausted. Returns (found, remaining). The per-instance work (PDB name
+/// scans, export table parsing) runs ahead in parallel; results are consumed in python's
+/// order.
 fn resolve_symbols_through_methods(ctx: &Context, instances: &[ModuleInstance], wanted: &WantedSymbols, mod_name: &str) -> Result<(Vec<(String, u64)>, WantedSymbols)> {
     let mut found: Vec<(String, u64)> = Vec::new();
     let mut remaining = wanted.clone();
     let pe_table = ctx.load_isf("windows/pe")?;
-    for method in 0..2 {
-        for inst in instances {
-            let finder = if method == 0 {
-                match get_pdb_module(ctx, mod_name, inst) {
-                    Some(m) => Finder::Pdb(m),
-                    None => continue,
+    let names = pdb_candidates(mod_name);
+    let mut done = false;
+    let mut err: Option<Error> = None;
+    crate::util::par::par_map_stream(
+        instances.len(),
+        lookahead(),
+        |i| scan_pdb_names(&instances[i], &names),
+        |i, scans| {
+            let Some(m) = pdb_module_from_scans(ctx, &instances[i], &names, &scans) else { return true };
+            match get_symbol_values(&mut remaining, &Finder::Pdb(m), &mut found) {
+                Ok(false) => true,
+                Ok(true) => {
+                    done = true;
+                    false
                 }
-            } else {
-                match get_exports(pe_table, inst.layer, inst.start)? {
-                    Some(exports) => Finder::Exports { start: inst.start, exports },
-                    None => continue,
+                Err(e) => {
+                    err = Some(e);
+                    false
+                }
+            }
+        },
+    );
+    if let Some(e) = err {
+        return Err(e);
+    }
+    if done {
+        return Ok((found, remaining));
+    }
+    crate::util::par::par_map_stream(
+        instances.len(),
+        lookahead(),
+        |i| get_exports(pe_table, instances[i].layer, instances[i].start),
+        |i, r| {
+            let exports = match r {
+                Ok(Some(e)) => e,
+                Ok(None) => return true,
+                Err(e) => {
+                    err = Some(e);
+                    return false;
                 }
             };
-            if get_symbol_values(&mut remaining, &finder, &mut found)? {
-                return Ok((found, remaining));
+            match get_symbol_values(&mut remaining, &Finder::Exports { start: instances[i].start, exports }, &mut found) {
+                Ok(false) => true,
+                Ok(true) => false,
+                Err(e) => {
+                    err = Some(e);
+                    false
+                }
             }
-        }
+        },
+    );
+    if let Some(e) = err {
+        return Err(e);
     }
     Ok((found, remaining))
 }
