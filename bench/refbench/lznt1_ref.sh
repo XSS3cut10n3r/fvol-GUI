@@ -62,7 +62,9 @@ for s in "${SOURCES[@]}"; do
     [ -s "$WORK/$name.lznt1" ] && continue
     size=$(stat -c %s "$s")
     size=$((size > 33554432 ? 33554432 : size / 4096 * 4096))
-    head -c "$size" "$s" > "$WORK/$name"
+    if [ "$(realpath "$s")" != "$(realpath -m "$WORK/$name")" ]; then
+        head -c "$size" "$s" > "$WORK/$name"
+    fi
     "$WORK/lznt1_ref" compress "$WORK/$name" "$WORK/$name.lznt1"
 done
 
