@@ -39,6 +39,9 @@ const LEN_MID: usize = LEN_LOW + POS_STATES_MAX * 8; // 130
 const LEN_HIGH: usize = LEN_MID + POS_STATES_MAX * 8; // 258
 
 const PROB_INIT: u16 = 1024;
+/// The probability array is preceded by PROB_UPD (the asm loop addresses the update
+/// table relative to the probabilities).
+const PROBS_OFF: usize = 4096;
 /// Input bytes that must remain readable past the position checked at a symbol boundary.
 const INPUT_MARGIN: usize = 64;
 const TOP: u32 = 1 << 24;
@@ -201,67 +204,84 @@ macro_rules! upd_store {
     };
 }
 
-/// First bit of a bit tree: node 1, children 2 and 3 loaded up front.
+/// Probability update table: PROB_UPD[2p + bit] = p after decoding `bit` with probability p
+/// (p + ((2048 - p) >> 5) for 0, p - (p >> 5) for 1). A load instead of shift/cmov keeps the
+/// update off ports 0/6, which the range coder chain needs.
+static PROB_UPD: [u16; 4096] = {
+    let mut t = [0u16; 4096];
+    let mut p = 0;
+    while p < 2048 {
+        t[2 * p] = (p + ((2048 - p) >> 5)) as u16;
+        t[2 * p + 1] = (p - (p >> 5)) as u16;
+        p += 1;
+    }
+    t
+};
+
+/// One bit of a bit tree at node {sym} (probability in $a, zero-extended): both children are
+/// loaded before the bit is known and the one taken lands in $b; {sym} becomes the child.
+/// The chain is shr, imul, sub, cmov; the four cmovs are the only port-0/6 work besides the
+/// shift and the normalization branch. The probability update is a table load indexed by
+/// (p, new sym & 1), off the critical path. $n0/$n1: the two candidate next nodes (for the
+/// last bit they include the caller's final offset); $kids: load the children or not.
+#[cfg(target_arch = "x86_64")]
+macro_rules! tree_bit {
+    ($a:literal, $sel:expr, $n0:literal, $n1:literal, $kids:expr) => {
+        concat!(
+            $kids,
+            "lea {t3:e}, [", $n0, "]\n",
+            "lea {t4:e}, [", $n1, "]\n",
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {", $a, ":e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {t1:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "cmovae {t3:e}, {t4:e}\n",
+            $sel,
+            "cmovae {code:e}, {t1:e}\n",
+            "mov {t0:e}, {t3:e}\n",
+            "and {t0:e}, 1\n",
+            "lea {t0:e}, [{t0} + {", $a, "}*2]\n",
+            "movzx {t0:e}, word ptr [{tab} + {t0}*2]\n",
+            "mov word ptr [{base} + {sym}*2], {t0:x}\n",
+            "mov {sym:e}, {t3:e}\n",
+        )
+    };
+}
+
+/// First bit of a bit tree: node 1 (its probability loaded here), children 2 and 3.
 #[cfg(target_arch = "x86_64")]
 macro_rules! tree_first {
     ($a:literal, $b:literal) => {
-        concat!(
-            "movzx {", $a, ":e}, word ptr [{base} + 2]\n",
-            "mov {sym:e}, 2\n",
-            "movzx {", $b, ":e}, word ptr [{base} + 4]\n",
-            norm!(),
-            calc!($a),
-            "cmovae {range:e}, {t0:e}\n",
-            "movzx {t0:e}, word ptr [{base} + 6]\n",
-            "cmovae {", $b, ":e}, {t0:e}\n",
-            "lea {t0:e}, [{", $a, "} - 2017]\n",
-            "cmovb {code:e}, {t1:e}\n",
-            "mov {t1:e}, {sym:e}\n",
-            "cmovae {t0:e}, {", $a, ":e}\n",
-            "sbb {sym:e}, -1\n",
-            upd_store!($a, "{base} + {t1}"),
-        )
+        concat!("mov {sym:e}, 1\n", "movzx {", $a, ":e}, word ptr [{base} + 2]\n", tree_mid!($a, $b),)
     };
 }
 
-/// Middle bit: node {sym} (prob in $a); children loaded into $b.
 #[cfg(target_arch = "x86_64")]
 macro_rules! tree_mid {
     ($a:literal, $b:literal) => {
-        concat!(
-            "movzx {", $b, ":e}, word ptr [{base} + {sym}*4]\n",
-            norm!(),
-            calc!($a),
-            "cmovae {range:e}, {t0:e}\n",
-            "movzx {t0:e}, word ptr [{base} + {sym}*4 + 2]\n",
-            "lea {sym:e}, [{sym} + {sym}]\n",
-            "cmovae {", $b, ":e}, {t0:e}\n",
-            "lea {t0:e}, [{", $a, "} - 2017]\n",
-            "cmovb {code:e}, {t1:e}\n",
-            "mov {t1:e}, {sym:e}\n",
-            "cmovae {t0:e}, {", $a, ":e}\n",
-            "sbb {sym:e}, -1\n",
-            upd_store!($a, "{base} + {t1}"),
+        tree_bit!(
+            $a,
+            concat!("cmovae {", $b, ":e}, {t2:e}\n"),
+            "{sym} + {sym}",
+            "{sym} + {sym} + 1",
+            concat!(
+                "movzx {", $b, ":e}, word ptr [{base} + {sym}*4]\n",
+                "movzx {t2:e}, word ptr [{base} + {sym}*4 + 2]\n",
+            )
         )
     };
 }
 
-/// Last bit; {sym} = final node + {last} + 1 (the const operand folds in the offset).
+/// Last bit: {sym} = final node + {fa} (a const operand; must be even so that the new
+/// node's low bit is still the decoded bit).
 #[cfg(target_arch = "x86_64")]
 macro_rules! tree_last {
     ($a:literal) => {
-        concat!(
-            "add {sym:e}, {sym:e}\n",
-            norm!(),
-            calc!($a),
-            "cmovae {range:e}, {t0:e}\n",
-            "lea {t0:e}, [{", $a, "} - 2017]\n",
-            "cmovb {code:e}, {t1:e}\n",
-            "mov {t1:e}, {sym:e}\n",
-            "cmovae {t0:e}, {", $a, ":e}\n",
-            "sbb {sym:e}, {last}\n",
-            upd_store!($a, "{base} + {t1}"),
-        )
+        tree_bit!($a, "", "{sym} + {sym} + {fa}", "{sym} + {sym} + {fa} + 1", "")
     };
 }
 
@@ -336,6 +356,372 @@ macro_rules! rev_last {
     };
 }
 
+// ---------------------------------------------------------------------------------------
+// x86-64: the whole symbol loop in one asm block (lc=3 lp=0 pb=2)
+// ---------------------------------------------------------------------------------------
+//
+// The compiler cannot keep the decoder in registers around bit-tree asm blocks that need
+// a dozen registers each: it spilled the range coder to the stack on every symbol and grew
+// ~10 induction variables. Here the loop is written out with a fixed register plan:
+// range, code, inp, op (output pointer), probs, ctx live in registers throughout; the
+// rest of the state (state, reps, limits, length, literal context) sits in `AsmCtx`,
+// read and written only where a symbol needs it. The probability update table lives
+// right in front of the probabilities: entry 2p + bit at probs - 8192 + 4p + 2bit.
+//
+// Probability byte offsets (2 * index) used in the templates:
+//   IS_MATCH 0, IS_REP 384, IS_REP0 408, IS_REP1 432, IS_REP2 456, IS_REP0_LONG 480,
+//   DIST_SLOT 864, DIST_SPECIAL 1376, ALIGN 1604, LEN_CODER 1636, REP_LEN_CODER 2664,
+//   LITERAL 3692; in a length coder: CHOICE 0, CHOICE2 2, LOW 4, MID 260, HIGH 516.
+
+/// Branchy bit with the probability at [$addr]: falls through on 0 (range and the
+/// probability already updated), jumps to $one on 1, where `bit1!($addr)` must follow.
+/// Leaves the bound in {t0} and the old probability in {a} for `bit1!`.
+#[cfg(target_arch = "x86_64")]
+macro_rules! bit {
+    ($addr:expr, $one:expr) => {
+        concat!(
+            "movzx {a:e}, word ptr [", $addr, "]\n",
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {t0:e}, 11\n",
+            "imul {t0:e}, {a:e}\n",
+            "cmp {code:e}, {t0:e}\n",
+            "jae ", $one, "\n",
+            "mov {range:e}, {t0:e}\n",
+            "movzx {a:e}, word ptr [{probs} + {a}*4 - 8192]\n",
+            "mov word ptr [", $addr, "], {a:x}\n",
+        )
+    };
+}
+
+/// Bit-1 side of `bit!`.
+#[cfg(target_arch = "x86_64")]
+macro_rules! bit1 {
+    ($addr:expr) => {
+        concat!(
+            "sub {range:e}, {t0:e}\n",
+            "sub {code:e}, {t0:e}\n",
+            "movzx {a:e}, word ptr [{probs} + {a}*4 - 8190]\n",
+            "mov word ptr [", $addr, "], {a:x}\n",
+        )
+    };
+}
+
+/// Bit-tree step at node {sym} of the tree at $base (an address expression), current
+/// probability in $a, the taken child's probability ends up in $b. $pre/$post: extra code.
+/// Chain: shr, imul, sub, cmov. {sym} advances with sbb; the probability update is a table
+/// load indexed by (p, bit) (no port-0/6 work).
+#[cfg(target_arch = "x86_64")]
+macro_rules! tstep {
+    ($base:expr, $a:literal, $b:literal) => {
+        concat!(
+            "movzx {", $b, ":e}, word ptr [", $base, " + {sym}*4]\n",
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {", $a, ":e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "movzx {t0:e}, word ptr [", $base, " + {sym}*4 + 2]\n",
+            "lea {sym:e}, [{sym} + {sym}]\n",
+            "cmovae {", $b, ":e}, {t0:e}\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "sbb {sym:e}, -1\n",
+            "mov {t0:e}, {sym:e}\n",
+            "and {t0:e}, 1\n",
+            "lea {t0:e}, [{t0} + {", $a, "}*2]\n",
+            "movzx {t0:e}, word ptr [{probs} + {t0}*2 - 8192]\n",
+            "mov word ptr [", $base, " + {t1}], {t0:x}\n",
+        )
+    };
+}
+
+/// Last bit-tree step: {sym} = final node + $fa ($fa even, as a literal expression).
+#[cfg(target_arch = "x86_64")]
+macro_rules! tlast {
+    ($base:expr, $a:literal, $sbb:literal) => {
+        concat!(
+            "add {sym:e}, {sym:e}\n",
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {", $a, ":e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "sbb {sym:e}, ", $sbb, "\n",
+            "mov {t0:e}, {sym:e}\n",
+            "and {t0:e}, 1\n",
+            "lea {t0:e}, [{t0} + {", $a, "}*2]\n",
+            "movzx {t0:e}, word ptr [{probs} + {t0}*2 - 8192]\n",
+            "mov word ptr [", $base, " + {t1}], {t0:x}\n",
+        )
+    };
+}
+
+/// Start of a bit tree: node 1.
+#[cfg(target_arch = "x86_64")]
+macro_rules! tfirst {
+    ($base:expr) => {
+        concat!("mov {sym:e}, 1\n", "movzx {a:e}, word ptr [", $base, " + 2]\n")
+    };
+}
+
+/// 3-bit tree; $sbb = -1 - final_add.
+#[cfg(target_arch = "x86_64")]
+macro_rules! tree3a {
+    ($base:expr, $sbb:literal) => {
+        concat!(tfirst!($base), tstep!($base, "a", "b"), tstep!($base, "b", "a"), tlast!($base, "a", $sbb))
+    };
+}
+
+/// 6-bit tree.
+#[cfg(target_arch = "x86_64")]
+macro_rules! tree6a {
+    ($base:expr, $sbb:literal) => {
+        concat!(
+            tfirst!($base),
+            tstep!($base, "a", "b"),
+            tstep!($base, "b", "a"),
+            tstep!($base, "a", "b"),
+            tstep!($base, "b", "a"),
+            tstep!($base, "a", "b"),
+            tlast!($base, "b", $sbb),
+        )
+    };
+}
+
+/// 8-bit tree; $mid is inserted after the third bit (literal context capture).
+#[cfg(target_arch = "x86_64")]
+macro_rules! tree8a {
+    ($base:expr, $sbb:literal, $mid:expr) => {
+        concat!(
+            tfirst!($base),
+            tstep!($base, "a", "b"),
+            tstep!($base, "b", "a"),
+            tstep!($base, "a", "b"),
+            $mid,
+            tstep!($base, "b", "a"),
+            tstep!($base, "a", "b"),
+            tstep!($base, "b", "a"),
+            tstep!($base, "a", "b"),
+            tlast!($base, "b", $sbb),
+        )
+    };
+}
+
+/// Matched-literal step (the reference decoder's offset scheme): {sym} node, {t3} offset
+/// (0x100 while the decoded bits equal the match byte's, else 0), {t2} match byte (shifted
+/// left once per bit), {b} match bit. $last: omit the next-bit preparation.
+#[cfg(target_arch = "x86_64")]
+macro_rules! mstep {
+    ($nonlast1:expr, $nonlast2:expr) => {
+        concat!(
+            "add {sym:e}, {t3:e}\n",
+            "and {b:e}, {t3:e}\n",
+            "add {sym:e}, {b:e}\n",
+            "movzx {a:e}, word ptr [{base} + {sym}*2]\n",
+            "add {sym:e}, {sym:e}\n",
+            $nonlast1,
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {a:e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            $nonlast2,
+            "sbb {sym:e}, -1\n",
+            "mov {t0:e}, {sym:e}\n",
+            "and {t0:e}, 1\n",
+            "lea {t0:e}, [{t0} + {a}*2]\n",
+            "movzx {t0:e}, word ptr [{probs} + {t0}*2 - 8192]\n",
+            "and {sym:e}, 0x1FF\n",
+            "mov word ptr [{base} + {t1}], {t0:x}\n",
+        )
+    };
+}
+#[cfg(target_arch = "x86_64")]
+macro_rules! mstep_mid {
+    () => {
+        mstep!(
+            concat!("xor {t3:e}, {b:e}\n", "add {t2:e}, {t2:e}\n"),
+            concat!("cmovae {t3:e}, {b:e}\n", "mov {b:e}, {t2:e}\n")
+        )
+    };
+}
+
+/// Length decoder of the length coder at byte offset $c; result in {sym}. $l1..$l3: labels.
+#[cfg(target_arch = "x86_64")]
+macro_rules! len_dec {
+    ($c:literal, $l1:literal, $l2:literal, $l3:literal) => {
+        concat!(
+            bit!(concat!("{probs} + ", $c), concat!($l1, "f")),
+            // low: base = probs + c + 4 + pos_state * 16
+            "mov {t1}, {op}\n",
+            "sub {t1}, qword ptr [{ctx} + 16]\n",
+            "and {t1:e}, 3\n",
+            "shl {t1:e}, 4\n",
+            "lea {base}, [{probs} + {t1} + ", $c, " + 4]\n",
+            tree3a!("{base}", "5"),
+            "jmp ", $l3, "f\n",
+            $l1, ":\n",
+            bit1!(concat!("{probs} + ", $c)),
+            bit!(concat!("{probs} + ", $c, " + 2"), concat!($l2, "f")),
+            "mov {t1}, {op}\n",
+            "sub {t1}, qword ptr [{ctx} + 16]\n",
+            "and {t1:e}, 3\n",
+            "shl {t1:e}, 4\n",
+            "lea {base}, [{probs} + {t1} + ", $c, " + 260]\n",
+            tree3a!("{base}", "-3"),
+            "jmp ", $l3, "f\n",
+            $l2, ":\n",
+            bit1!(concat!("{probs} + ", $c, " + 2")),
+            tree8a!(concat!("{probs} + ", $c, " + 516"), "237", ""),
+            $l3, ":\n",
+        )
+    };
+}
+
+/// 4-bit reverse tree (align bits) at $base, LSB first, node = 2^depth + bits so far (the
+/// reference decoder's layout). Result in {sym}.
+#[cfg(target_arch = "x86_64")]
+macro_rules! rev4a {
+    ($base:expr) => {
+        concat!(
+            "movzx {a:e}, word ptr [", $base, " + 2]\n",
+            "xor {sym:e}, {sym:e}\n",
+            "movzx {b:e}, word ptr [", $base, " + 4]\n",
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {a:e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "movzx {t0:e}, word ptr [", $base, " + 6]\n",
+            "cmovae {b:e}, {t0:e}\n",
+            "lea {t0:e}, [{sym} + 1]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "cmovae {sym:e}, {t0:e}\n",
+            "lea {t0:e}, [{a} - 2017]\n",
+            "cmovae {t0:e}, {a:e}\n",
+            "shr {t0:e}, 5\n",
+            "sub {a:e}, {t0:e}\n",
+            "mov word ptr [", $base, " + 2], {a:x}\n",
+            rev_stepa!($base, "b", "a", "2", "4", "8", "12"),
+            rev_stepa!($base, "a", "b", "4", "8", "16", "24"),
+            rev_lasta!($base, "b", "8", "16"),
+        )
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! rev_stepa {
+    ($base:expr, $a:literal, $b:literal, $add:literal, $dcur:literal, $n0:literal, $n1:literal) => {
+        concat!(
+            "movzx {", $b, ":e}, word ptr [", $base, " + {sym}*2 + ", $n0, "]\n",
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {", $a, ":e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "movzx {t0:e}, word ptr [", $base, " + {sym}*2 + ", $n1, "]\n",
+            "cmovae {", $b, ":e}, {t0:e}\n",
+            "lea {t0:e}, [{sym} + ", $add, "]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "cmovae {sym:e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "shr {t0:e}, 5\n",
+            "sub {", $a, ":e}, {t0:e}\n",
+            "mov word ptr [", $base, " + {t1}*2 + ", $dcur, "], {", $a, ":x}\n",
+        )
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! rev_lasta {
+    ($base:expr, $a:literal, $add:literal, $dcur:literal) => {
+        concat!(
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {", $a, ":e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "lea {t0:e}, [{sym} + ", $add, "]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "cmovae {sym:e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "shr {t0:e}, 5\n",
+            "sub {", $a, ":e}, {t0:e}\n",
+            "mov word ptr [", $base, " + {t1}*2 + ", $dcur, "], {", $a, ":x}\n",
+        )
+    };
+}
+
+/// Per-decoder scratch for the asm loop (field offsets are hard-coded in the template).
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+struct AsmCtx {
+    in_limit: *const u8,  // 0
+    out_limit: *mut u8,   // 8
+    out_start: *mut u8,   // 16
+    out_end: *mut u8,     // 24
+    reps: [u64; 4],       // 32, 40, 48, 56
+    state: u64,           // 64
+    lctx: u64,            // 72: literal context of the next literal (previous byte >> 5)
+    pending: u64,         // 80
+    status: u64,          // 88
+    len: u64,             // 96
+    next: [u8; 48],       // 104: state after literal / match / rep / short rep (12 each)
+    dbase: [u8; 16],      // 152: distance base of slots 4..13
+    scratch: u64,         // 168
+}
+
+#[cfg(target_arch = "x86_64")]
+const ASM_NEXT: [u8; 48] = [
+    0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 4, 5, // literal
+    7, 7, 7, 7, 7, 7, 7, 10, 10, 10, 10, 10, // match
+    8, 8, 8, 8, 8, 8, 8, 11, 11, 11, 11, 11, // rep
+    9, 9, 9, 9, 9, 9, 9, 11, 11, 11, 11, 11, // short rep
+];
+#[cfg(target_arch = "x86_64")]
+const ASM_DBASE: [u8; 16] = [4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 0, 0, 0, 0, 0, 0];
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: decode lc=3 lp=0 pb=2 streams with the generic loop instead of the fast path.
+    static FORCE_GENERIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[inline(always)]
+fn force_generic() -> bool {
+    #[cfg(test)]
+    return FORCE_GENERIC.with(|f| f.get());
+    #[cfg(not(test))]
+    false
+}
+
 /// LZMA decoder state: probabilities, state machine, rep distances.
 pub(crate) struct LzmaDecoder {
     probs: Vec<u16>,
@@ -357,8 +743,9 @@ impl LzmaDecoder {
     /// Changes lc/lp/pb and resets the state.
     pub fn set_props(&mut self, props: Props) {
         self.props = props;
-        let n = LITERAL + (0x300usize << (props.lc + props.lp));
+        let n = PROBS_OFF + LITERAL + (0x300usize << (props.lc + props.lp));
         self.probs.clear();
+        self.probs.extend_from_slice(&PROB_UPD);
         self.probs.resize(n, PROB_INIT);
         self.state = 0;
         self.reps = [0; 4];
@@ -367,7 +754,7 @@ impl LzmaDecoder {
 
     /// State reset (probabilities, state, reps) keeping the properties.
     pub fn reset_state(&mut self) {
-        self.probs.fill(PROB_INIT);
+        self.probs[PROBS_OFF..].fill(PROB_INIT);
         self.state = 0;
         self.reps = [0; 4];
         self.pending_len = 0;
@@ -405,7 +792,7 @@ impl LzmaDecoder {
                 return Ok(Stop::Limit);
             }
         }
-        let fixed = self.props == Props { lc: 3, lp: 0, pb: 2 };
+        let fixed = self.props == Props { lc: 3, lp: 0, pb: 2 } && !force_generic();
         // Main part: read the input in place while at least INPUT_MARGIN bytes remain (a
         // single symbol never reads more than ~50 bytes), so reads need no bounds checks.
         if input.len() >= INPUT_MARGIN && rc.ip <= input.len() - INPUT_MARGIN {
@@ -459,11 +846,17 @@ impl LzmaDecoder {
         pos: &mut usize,
         limit: usize,
     ) -> Result<Stop> {
+        #[cfg(target_arch = "x86_64")]
+        if FIXED {
+            // SAFETY: same contract.
+            return unsafe { self.decode_fixed_asm(rc, inp0, ip_limit, out, pos, limit) };
+        }
         let out_len = out.len();
         let outp = out.as_mut_ptr();
         let mut p = *pos;
 
-        let probs = self.probs.as_mut_ptr();
+        // SAFETY: the update table occupies the first PROBS_OFF entries.
+        let probs = unsafe { self.probs.as_mut_ptr().add(PROBS_OFF) };
         let (lc, lp_mask, pb_mask) = if FIXED {
             (3usize, 0usize, 3usize)
         } else {
@@ -533,12 +926,16 @@ impl LzmaDecoder {
                         code = inout(reg) code,
                         inp = inout(reg) inp,
                         base = in(reg) base,
+                        tab = in(reg) PROB_UPD.as_ptr(),
                         sym = out(reg) sym,
                         t0 = out(reg) _,
                         t1 = out(reg) _,
+                        t2 = out(reg) _,
+                        t3 = out(reg) _,
+                        t4 = out(reg) _,
                         p0 = out(reg) _,
                         p1 = out(reg) _,
-                        last = const -1 - ($fa),
+                        fa = const $fa,
                         options(nostack),
                     )
                 };
@@ -902,6 +1299,379 @@ impl LzmaDecoder {
     }
 }
 
+impl LzmaDecoder {
+    /// `decode_inner::<true>` on x86-64: the symbol loop as one asm block.
+    ///
+    /// # Safety
+    /// As `decode_inner`.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    unsafe fn decode_fixed_asm(
+        &mut self,
+        rc: &mut RangeDecoder,
+        inp0: *const u8,
+        ip_limit: usize,
+        out: &mut [u8],
+        pos: &mut usize,
+        limit: usize,
+    ) -> Result<Stop> {
+        let outp = out.as_mut_ptr();
+        let p = *pos;
+        let mut ctx = AsmCtx {
+            in_limit: inp0.wrapping_add(ip_limit),
+            out_limit: outp.wrapping_add(limit),
+            out_start: outp,
+            out_end: outp.wrapping_add(out.len()),
+            reps: self.reps.map(|r| r as u64),
+            state: self.state as u64,
+            lctx: if p > 0 { (out[p - 1] >> 5) as u64 } else { 0 },
+            pending: 0,
+            status: 0,
+            len: 0,
+            next: ASM_NEXT,
+            dbase: ASM_DBASE,
+            scratch: 0,
+        };
+        let mut range = rc.range;
+        let mut code = rc.code;
+        // SAFETY: rc.ip <= ip_limit + INPUT_MARGIN; p <= limit <= out.len().
+        let mut inp = unsafe { inp0.add(rc.ip) };
+        let mut op = unsafe { outp.add(p) };
+        // SAFETY: the update table occupies the first PROBS_OFF entries.
+        let probs = unsafe { self.probs.as_mut_ptr().add(PROBS_OFF) };
+        let ctxp: *mut AsmCtx = &mut ctx;
+        // SAFETY: probability indices are bounded by the layout (literal contexts < 8, pos
+        // states < 4, states < 12, tree nodes inside their trees); input reads stay within
+        // INPUT_MARGIN of in_limit (checked at every symbol); output writes are checked
+        // against out_limit (symbol starts, match cut) and out_end (copy over-write);
+        // match sources are checked against the dictionary start (rep0 < p).
+        unsafe {
+            core::arch::asm!(
+                // ---- symbol loop ----
+                "20:",
+                "cmp {op}, qword ptr [{ctx} + 8]",
+                "jae 90f",
+                "cmp {inp}, qword ptr [{ctx}]",
+                "ja 91f",
+                "mov {t1}, {op}",
+                "sub {t1}, qword ptr [{ctx} + 16]",
+                "and {t1:e}, 3",
+                "mov {t2}, qword ptr [{ctx} + 64]",
+                "shl {t2:e}, 4",
+                "add {t1:e}, {t2:e}",
+                bit!("{probs} + {t1}*2", "40f"),
+                // ---- literal ----
+                "mov {t0}, qword ptr [{ctx} + 72]",
+                "imul {t0:e}, {t0:e}, 0x600",
+                "lea {base}, [{probs} + {t0} + 3692]",
+                "mov {t2}, qword ptr [{ctx} + 64]",
+                "cmp {t2:e}, 7",
+                "jae 30f",
+                tree8a!(
+                    "{base}",
+                    "255",
+                    concat!("mov {t2:e}, {sym:e}\n", "and {t2:e}, 7\n", "mov qword ptr [{ctx} + 72], {t2}\n")
+                ),
+                "mov byte ptr [{op}], {sym:l}",
+                "inc {op}",
+                "mov {t2}, qword ptr [{ctx} + 64]",
+                "movzx {t2:e}, byte ptr [{ctx} + {t2} + 104]",
+                "mov qword ptr [{ctx} + 64], {t2}",
+                "jmp 20b",
+                // ---- literal with match byte ----
+                "30:",
+                "mov {t0}, qword ptr [{ctx} + 32]",
+                "mov {t1}, {op}",
+                "sub {t1}, qword ptr [{ctx} + 16]",
+                "cmp {t0}, {t1}",
+                "jae 95f",
+                "neg {t0}",
+                "movzx {t2:e}, byte ptr [{op} + {t0} - 1]",
+                "add {t2:e}, {t2:e}",
+                "mov {b:e}, {t2:e}",
+                "mov {t3:e}, 0x100",
+                "mov {sym:e}, 1",
+                mstep_mid!(),
+                mstep_mid!(),
+                mstep_mid!(),
+                "mov {t0:e}, {sym:e}",
+                "and {t0:e}, 7",
+                "mov qword ptr [{ctx} + 72], {t0}",
+                mstep_mid!(),
+                mstep_mid!(),
+                mstep_mid!(),
+                mstep_mid!(),
+                mstep!("", ""),
+                "mov byte ptr [{op}], {sym:l}",
+                "inc {op}",
+                "mov {t2}, qword ptr [{ctx} + 64]",
+                "movzx {t2:e}, byte ptr [{ctx} + {t2} + 104]",
+                "mov qword ptr [{ctx} + 64], {t2}",
+                "jmp 20b",
+                // ---- match ----
+                "40:",
+                bit1!("{probs} + {t1}*2"),
+                "mov {t2}, qword ptr [{ctx} + 64]",
+                bit!("{probs} + {t2}*2 + 384", "50f"),
+                "movzx {t0:e}, byte ptr [{ctx} + {t2} + 116]",
+                "mov qword ptr [{ctx} + 64], {t0}",
+                len_dec!("1636", "41", "42", "43"),
+                "mov qword ptr [{ctx} + 96], {sym}",
+                // distance slot: tree at DIST_SLOT + min(len - 2, 3) * 64
+                "lea {t0:e}, [{sym} - 2]",
+                "mov {t1:e}, 3",
+                "cmp {t0:e}, 3",
+                "cmova {t0:e}, {t1:e}",
+                "shl {t0:e}, 7",
+                "lea {base}, [{probs} + {t0} + 864]",
+                tree6a!("{base}", "63"),
+                "cmp {sym:e}, 4",
+                "jb 48f",
+                "cmp {sym:e}, 14",
+                "jb 46f",
+                // slot >= 14: (slot >> 1) - 5 direct bits, then 4 align bits
+                "mov {t2:e}, {sym:e}",
+                "shr {t2:e}, 1",
+                "sub {t2:e}, 5",
+                "mov {t3:e}, {sym:e}",
+                "and {t3:e}, 1",
+                "or {t3:e}, 2",
+                "44:",
+                "add {t3:e}, {t3:e}",
+                "lea {t1:e}, [{t3} + 1]",
+                norm!(),
+                "shr {range:e}, 1",
+                "mov {t0:e}, {code:e}",
+                "sub {code:e}, {range:e}",
+                "cmovns {t3:e}, {t1:e}",
+                "cmovs {code:e}, {t0:e}",
+                "dec {t2:e}",
+                "jnz 44b",
+                "shl {t3:e}, 4",
+                rev4a!("{probs} + 1604"),
+                "add {sym:e}, {t3:e}",
+                "cmp {sym:e}, -1",
+                "je 92f",
+                "jmp 48f",
+                // slot 4..13: reverse tree of (slot >> 1) - 1 bits
+                "46:",
+                "mov {t2:e}, {sym:e}",
+                "shr {t2:e}, 1",
+                "dec {t2:e}",
+                "movzx {t3:e}, byte ptr [{ctx} + {sym} + 148]",
+                "mov qword ptr [{ctx} + 168], {t3}",
+                "sub {t3:e}, {sym:e}",
+                "lea {base}, [{probs} + {t3}*2 + 1374]",
+                "xor {sym:e}, {sym:e}",
+                "mov {t3:e}, 1",
+                "47:",
+                "lea {b:e}, [{sym} + {t3}]",
+                "movzx {a:e}, word ptr [{base} + {b}*2]",
+                norm!(),
+                "mov {t0:e}, {range:e}",
+                "shr {range:e}, 11",
+                "imul {range:e}, {a:e}",
+                "sub {t0:e}, {range:e}",
+                "mov {t1:e}, {code:e}",
+                "sub {code:e}, {range:e}",
+                "cmovae {range:e}, {t0:e}",
+                "cmovb {code:e}, {t1:e}",
+                "lea {t0:e}, [{sym} + {t3}]",
+                "cmovae {sym:e}, {t0:e}",
+                "lea {t0:e}, [{a} - 2017]",
+                "cmovae {t0:e}, {a:e}",
+                "shr {t0:e}, 5",
+                "sub {a:e}, {t0:e}",
+                "mov word ptr [{base} + {b}*2], {a:x}",
+                "add {t3:e}, {t3:e}",
+                "dec {t2:e}",
+                "jnz 47b",
+                "add {sym:e}, dword ptr [{ctx} + 168]",
+                // rep3..rep1 shift, rep0 = distance
+                "48:",
+                "mov {t0}, qword ptr [{ctx} + 48]",
+                "mov qword ptr [{ctx} + 56], {t0}",
+                "mov {t0}, qword ptr [{ctx} + 40]",
+                "mov qword ptr [{ctx} + 48], {t0}",
+                "mov {t0}, qword ptr [{ctx} + 32]",
+                "mov qword ptr [{ctx} + 40], {t0}",
+                "mov {t0:e}, {sym:e}",
+                "mov qword ptr [{ctx} + 32], {t0}",
+                "jmp 60f",
+                // ---- rep match ----
+                "50:",
+                bit1!("{probs} + {t2}*2 + 384"),
+                bit!("{probs} + {t2}*2 + 408", "52f"),
+                "mov {t1}, {op}",
+                "sub {t1}, qword ptr [{ctx} + 16]",
+                "and {t1:e}, 3",
+                "mov {t0:e}, {t2:e}",
+                "shl {t0:e}, 4",
+                "add {t1:e}, {t0:e}",
+                bit!("{probs} + {t1}*2 + 480", "51f"),
+                // short rep: one byte at distance rep0
+                "movzx {t0:e}, byte ptr [{ctx} + {t2} + 140]",
+                "mov qword ptr [{ctx} + 64], {t0}",
+                "mov {t0}, qword ptr [{ctx} + 32]",
+                "mov {t1}, {op}",
+                "sub {t1}, qword ptr [{ctx} + 16]",
+                "cmp {t0}, {t1}",
+                "jae 95f",
+                "neg {t0}",
+                "movzx {t0:e}, byte ptr [{op} + {t0} - 1]",
+                "mov byte ptr [{op}], {t0:l}",
+                "inc {op}",
+                "shr {t0:e}, 5",
+                "mov qword ptr [{ctx} + 72], {t0}",
+                "jmp 20b",
+                "51:",
+                bit1!("{probs} + {t1}*2 + 480"),
+                "jmp 55f",
+                "52:",
+                bit1!("{probs} + {t2}*2 + 408"),
+                bit!("{probs} + {t2}*2 + 432", "53f"),
+                "mov {t0}, qword ptr [{ctx} + 40]",
+                "mov {t1}, qword ptr [{ctx} + 32]",
+                "mov qword ptr [{ctx} + 32], {t0}",
+                "mov qword ptr [{ctx} + 40], {t1}",
+                "jmp 55f",
+                "53:",
+                bit1!("{probs} + {t2}*2 + 432"),
+                bit!("{probs} + {t2}*2 + 456", "54f"),
+                "mov {t0}, qword ptr [{ctx} + 48]",
+                "jmp 56f",
+                "54:",
+                bit1!("{probs} + {t2}*2 + 456"),
+                "mov {t0}, qword ptr [{ctx} + 56]",
+                "mov {t1}, qword ptr [{ctx} + 48]",
+                "mov qword ptr [{ctx} + 56], {t1}",
+                "56:",
+                "mov {t1}, qword ptr [{ctx} + 40]",
+                "mov qword ptr [{ctx} + 48], {t1}",
+                "mov {t1}, qword ptr [{ctx} + 32]",
+                "mov qword ptr [{ctx} + 40], {t1}",
+                "mov qword ptr [{ctx} + 32], {t0}",
+                "55:",
+                "movzx {t0:e}, byte ptr [{ctx} + {t2} + 128]",
+                "mov qword ptr [{ctx} + 64], {t0}",
+                len_dec!("2664", "57", "58", "59"),
+                "mov qword ptr [{ctx} + 96], {sym}",
+                // ---- copy len ([ctx + 96]) bytes from distance rep0 + 1 ----
+                "60:",
+                "mov {t0}, qword ptr [{ctx} + 32]",
+                "mov {t1}, {op}",
+                "sub {t1}, qword ptr [{ctx} + 16]",
+                "cmp {t0}, {t1}",
+                "jae 95f",
+                "mov {t2}, qword ptr [{ctx} + 96]",
+                "mov {t1}, qword ptr [{ctx} + 8]",
+                "sub {t1}, {op}",
+                "cmp {t2}, {t1}",
+                "ja 70f",
+                "mov {sym}, {op}",
+                "sub {sym}, {t0}",
+                "lea {t1}, [{op} + {t2} + 64]",
+                "cmp {t1}, qword ptr [{ctx} + 24]",
+                "ja 75f",
+                "cmp {t0}, 15",
+                "jb 75f",
+                // distance >= 16: 16-byte chunks (each chunk's source is complete)
+                "movdqu xmm0, xmmword ptr [{sym} - 1]",
+                "movdqu xmmword ptr [{op}], xmm0",
+                "movdqu xmm1, xmmword ptr [{sym} + 15]",
+                "movdqu xmmword ptr [{op} + 16], xmm1",
+                "cmp {t2}, 32",
+                "jbe 63f",
+                "mov {t1}, 32",
+                "62:",
+                "movdqu xmm0, xmmword ptr [{sym} + {t1} - 1]",
+                "movdqu xmmword ptr [{op} + {t1}], xmm0",
+                "add {t1}, 16",
+                "cmp {t1}, {t2}",
+                "jb 62b",
+                "63:",
+                "add {op}, {t2}",
+                "movzx {t0:e}, byte ptr [{op} - 1]",
+                "shr {t0:e}, 5",
+                "mov qword ptr [{ctx} + 72], {t0}",
+                "jmp 20b",
+                // short distance or near the end of the buffer: byte by byte
+                "75:",
+                "movzx {t1:e}, byte ptr [{sym} - 1]",
+                "mov byte ptr [{op}], {t1:l}",
+                "inc {sym}",
+                "inc {op}",
+                "dec {t2}",
+                "jnz 75b",
+                "movzx {t0:e}, byte ptr [{op} - 1]",
+                "shr {t0:e}, 5",
+                "mov qword ptr [{ctx} + 72], {t0}",
+                "jmp 20b",
+                // the match crosses the output limit: copy up to it, keep the rest pending
+                "70:",
+                "sub {t2}, {t1}",
+                "mov qword ptr [{ctx} + 80], {t2}",
+                "mov {t2}, {t1}",
+                "mov {sym}, {op}",
+                "sub {sym}, {t0}",
+                "76:",
+                "movzx {t1:e}, byte ptr [{sym} - 1]",
+                "mov byte ptr [{op}], {t1:l}",
+                "inc {sym}",
+                "inc {op}",
+                "dec {t2}",
+                "jnz 76b",
+                // ---- exits: status 0 limit, 1 input, 2 end marker, 3 bad distance ----
+                "90:",
+                "xor {t0:e}, {t0:e}",
+                "jmp 99f",
+                "91:",
+                "mov {t0:e}, 1",
+                "jmp 99f",
+                "92:",
+                "mov {t0:e}, 2",
+                "jmp 99f",
+                "95:",
+                "mov {t0:e}, 3",
+                "99:",
+                "mov qword ptr [{ctx} + 88], {t0}",
+                range = inout(reg) range,
+                code = inout(reg) code,
+                inp = inout(reg) inp,
+                op = inout(reg) op,
+                probs = in(reg) probs,
+                ctx = in(reg) ctxp,
+                base = out(reg) _,
+                sym = out(reg) _,
+                a = out(reg) _,
+                b = out(reg) _,
+                t0 = out(reg) _,
+                t1 = out(reg) _,
+                t2 = out(reg) _,
+                t3 = out(reg) _,
+                out("xmm0") _,
+                out("xmm1") _,
+                options(nostack),
+            )
+        };
+        rc.range = range;
+        rc.code = code;
+        rc.ip = inp as usize - inp0 as usize;
+        *pos = op as usize - outp as usize;
+        self.state = ctx.state as usize;
+        self.reps = ctx.reps.map(|r| r as usize);
+        match ctx.status {
+            0 => {
+                self.pending_len = ctx.pending as usize;
+                Ok(Stop::Limit)
+            }
+            1 => Ok(Stop::InputExhausted),
+            2 => Ok(Stop::EndMarker),
+            _ => Err(corrupt("distance")),
+        }
+    }
+}
+
 /// Copies `len` bytes from `out[src..]` to `out[dst..]` (src < dst, LZ77 overlap semantics).
 /// May write up to 15 bytes past `dst + len` but never at or beyond `out_len`.
 ///
@@ -1204,5 +1974,119 @@ mod tests {
             let _ = decompress(&v);
             let _ = decompress_lzma2(&v[13..]);
         }
+    }
+
+    /// Decodes with the lc=3 lp=0 pb=2 fast path and with the generic loop.
+    fn both<T: PartialEq + std::fmt::Debug>(f: impl Fn() -> T) -> (T, T) {
+        let fast = f();
+        FORCE_GENERIC.with(|g| g.set(true));
+        let generic = f();
+        FORCE_GENERIC.with(|g| g.set(false));
+        (fast, generic)
+    }
+
+    fn xorshift(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Outcome of a decode as a comparable value (error messages included).
+    fn outcome(r: Result<Vec<u8>>) -> std::result::Result<Vec<u8>, String> {
+        r.map_err(|e| format!("{e:?}"))
+    }
+
+    /// The fast path (x86-64: the asm symbol loop) and the generic Rust loop must agree on
+    /// every input: valid streams from our encoder over varied data (text, binary, runs,
+    /// short and long distances, chunk and output-limit crossings) and thousands of mutated
+    /// and truncated versions of them (same output, or the same error).
+    #[test]
+    fn codecs_lzma_fast_path_matches_generic() {
+        use crate::codecs::lzma_enc::{Lzma2Encoder, LzmaParams};
+        use crate::codecs::testdata::gen_data;
+        let mut s = 0x5EED_1234_ABCD_0001u64;
+        let mut inputs: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"abababababababababababababababababab".to_vec(),
+            vec![0u8; 70_000],
+            include_bytes!("testdata/text.json").to_vec(),
+            include_bytes!("testdata/x86.bin").to_vec(),
+        ];
+        for (i, n) in [100usize, 1000, 5000, 30_000, 70_000, 200_000, 600_000].into_iter().enumerate() {
+            inputs.push(gen_data(i as u64 + 1, n));
+            // short-period patterns (distances 1..20) mixed with random bytes
+            let mut v = Vec::with_capacity(n);
+            while v.len() < n {
+                let r = xorshift(&mut s);
+                let period = (r % 20 + 1) as usize;
+                let reps = (r >> 8) % 300;
+                let start = v.len();
+                for _ in 0..period {
+                    v.push((xorshift(&mut s) % 7) as u8 + b'a');
+                }
+                for k in 0..reps as usize {
+                    let b = v[start + k % period];
+                    v.push(b);
+                }
+            }
+            v.truncate(n);
+            inputs.push(v);
+        }
+        let mut streams = Vec::new();
+        for (i, data) in inputs.iter().enumerate() {
+            let mut e = Lzma2Encoder::new(LzmaParams::preset([0, 6, 9][i % 3]));
+            let mut out = Vec::new();
+            e.encode_block(data, &mut out);
+            let (fast, generic) = both(|| outcome(decompress_lzma2(&out)));
+            assert_eq!(fast.as_deref().ok(), Some(&data[..]), "input {i}: fast path");
+            assert!(fast == generic, "input {i}: paths differ");
+            streams.push(out);
+        }
+        streams.push(include_bytes!("testdata/text.lzma2").to_vec());
+        // Mutations: bytes, bit flips, truncations, splices.
+        let mut n_ok = 0;
+        for round in 0..6000 {
+            let base = &streams[round % streams.len()];
+            if base.len() < 8 {
+                continue;
+            }
+            let mut v = base.clone();
+            let r = xorshift(&mut s);
+            match r % 4 {
+                0 => {
+                    for _ in 0..(r >> 8) % 3 + 1 {
+                        let i = 6 + (xorshift(&mut s) as usize) % (v.len() - 6);
+                        v[i] = xorshift(&mut s) as u8;
+                    }
+                }
+                1 => {
+                    let i = 6 + (xorshift(&mut s) as usize) % (v.len() - 6);
+                    v[i] ^= 1 << (xorshift(&mut s) % 8);
+                }
+                2 => v.truncate((xorshift(&mut s) as usize) % v.len()),
+                _ => {
+                    let other = &streams[(xorshift(&mut s) as usize) % streams.len()];
+                    let a = (xorshift(&mut s) as usize) % v.len();
+                    let b = (xorshift(&mut s) as usize) % other.len();
+                    let n = ((xorshift(&mut s) % 64) as usize).min(v.len() - a).min(other.len() - b);
+                    v[a..a + n].copy_from_slice(&other[b..b + n]);
+                }
+            }
+            let (fast, generic) = both(|| outcome(decompress_lzma2(&v)));
+            assert!(fast == generic, "mutation {round}: paths differ");
+            n_ok += fast.is_ok() as usize;
+            // Raw LZMA1 on the payload of the first chunk: garbage symbols, end markers,
+            // output growth (no size) and a declared size.
+            if v.len() > 6 {
+                let size = xorshift(&mut s) % 100_000;
+                let (f1, g1) = both(|| outcome(decompress_lzma1_raw(&v[6..], 93, None)));
+                assert!(f1 == g1, "mutation {round}: lzma1 paths differ");
+                let (f2, g2) = both(|| outcome(decompress_lzma1_raw(&v[6..], 93, Some(size))));
+                assert!(f2 == g2, "mutation {round}: sized lzma1 paths differ");
+            }
+        }
+        assert!(n_ok > 20, "{n_ok}");
     }
 }
