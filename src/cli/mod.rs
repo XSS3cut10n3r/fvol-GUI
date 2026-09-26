@@ -868,19 +868,36 @@ fn report_error(e: &Error, failure: Option<&RenderFailure>, class: &str, out: &m
     1
 }
 
-/// `CommandLine.process_unsatisfied_exceptions` + the exit message.
+/// `CommandLine.process_unsatisfied_exceptions` + the exit message. Each line of `msg` is a
+/// config path, optionally followed by `\t<kind>\t<description>` (see
+/// [`crate::plugins::unsatisfied_requirement`]).
 fn report_unsatisfied(msg: &str, class: &str, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let is_path = |l: &str| !l.is_empty() && !l.contains(char::is_whitespace);
-    let lines: Vec<&str> = msg.lines().collect();
-    let rel: Vec<String> = if !lines.is_empty() && lines.iter().all(|l| is_path(l)) {
-        lines.iter().map(|l| l.to_string()).collect()
-    } else {
-        vec!["kernel.layer_name".into(), "kernel.symbol_table_name".into()]
+    let parse = |l: &str| -> Option<(String, String, String)> {
+        let mut it = l.splitn(3, '\t');
+        let p = it.next().filter(|p| !p.is_empty() && !p.contains(char::is_whitespace))?;
+        Some((p.to_string(), it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string()))
     };
-    let paths: Vec<String> = rel.iter().map(|r| format!("plugins.{class}.{r}")).collect();
+    let lines: Vec<&str> = msg.lines().collect();
+    let parsed: Vec<Option<(String, String, String)>> = lines.iter().map(|l| parse(l)).collect();
+    let items: Vec<(String, String, String)> = if !lines.is_empty() && parsed.iter().all(|p| p.is_some()) {
+        parsed.into_iter().flatten().collect()
+    } else {
+        vec![("kernel.layer_name".into(), String::new(), String::new()), ("kernel.symbol_table_name".into(), String::new(), String::new())]
+    };
+    let rel: Vec<String> = items
+        .iter()
+        .map(|(p, k, _)| match k.as_str() {
+            // the kind decides the hints below; bare paths are classified by their suffix
+            "layer" => "layer_name".to_string(),
+            "symbols" => "symbol_table_name".to_string(),
+            "" => p.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    let paths: Vec<String> = items.iter().map(|(r, _, _)| format!("plugins.{class}.{r}")).collect();
     let mut t = String::from("\n");
-    for p in &paths {
-        t.push_str(&format!("Unsatisfied requirement {p}: \n"));
+    for (p, (_, _, desc)) in paths.iter().zip(&items) {
+        t.push_str(&format!("Unsatisfied requirement {p}: {desc}\n"));
     }
     if rel.iter().any(|r| r.ends_with("layer_name")) {
         t.push_str(

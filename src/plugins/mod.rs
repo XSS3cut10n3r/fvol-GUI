@@ -192,6 +192,15 @@ pub fn unsatisfied(paths: &[&str]) -> crate::error::Error {
     crate::error::Error::Unsatisfied(paths.join("\n"))
 }
 
+/// [`unsatisfied`] for one python requirement with its description, e.g. a plugin's own
+/// `TranslationLayerRequirement(name="primary", description="Memory layer for the kernel")`:
+/// `unsatisfied_requirement("primary", "layer", "Memory layer for the kernel")`. `kind` picks
+/// the CLI's hint: "layer" (TranslationLayerRequirement), "symbols" (SymbolTableRequirement),
+/// anything else none.
+pub fn unsatisfied_requirement(path: &str, kind: &str, description: &str) -> crate::error::Error {
+    crate::error::Error::Unsatisfied(format!("{path}\t{kind}\t{description}"))
+}
+
 /// Every registered plugin, sorted by name.
 pub fn all() -> Vec<&'static dyn Plugin> {
     let mut v: Vec<&'static dyn Plugin> = Vec::new();

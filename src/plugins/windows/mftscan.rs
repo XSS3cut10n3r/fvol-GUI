@@ -24,6 +24,7 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::layers::Layer;
 use crate::layers::scan::{MultiStringScanner, Scanner, scan_each};
+use crate::objects::LayerRef;
 use crate::plugins::{Config, Plugin, TimeKind, TimelineEvent};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::mft::{MftEntry, mft_flags_name, permission_flags_name, signature_str};
@@ -473,6 +474,19 @@ fn emit_resident_data(b: DataBatch, out: &mut dyn RowSink) -> Result<()> {
     b.err.map_or(Ok(()), Err)
 }
 
+/// python `context.layers[config["primary"]].config["memory_layer"]`: the physical layer below
+/// the Windows translation layer. The plugins need no kernel symbols, a Windows DTB is enough.
+/// Without one python reports its own `primary` requirement (also on Linux images: python's
+/// stackers do not satisfy it there).
+pub fn primary_memory_layer(ctx: &Context) -> Result<LayerRef> {
+    match ctx.windows_kernel() {
+        Ok(k) => Ok(k.phys),
+        // the translation layer was built, only the kernel symbols are missing
+        Err(Error::Unsatisfied(s)) if !s.contains("layer_name") => ctx.physical(),
+        Err(_) => Err(crate::plugins::unsatisfied_requirement("primary", "layer", "Memory layer for the kernel")),
+    }
+}
+
 /// Scan the physical layer, build batches with `add`, render them with `emit`.
 fn run_batches<'a, B: Default + Send>(
     layer: &'a dyn Layer,
@@ -496,7 +510,7 @@ impl Plugin for MFTScan {
         "Scans for MFT FILE objects present in a particular windows memory image."
     }
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        let layer = ctx.windows_kernel()?.phys;
+        let layer = primary_memory_layer(ctx)?;
         out.begin(vec![
             Column::new("Offset", ColType::Hex),
             Column::new("Record Type", ColType::Str),
@@ -517,8 +531,8 @@ impl Plugin for MFTScan {
     /// record flags) the events generated before stay in python's timeline, so they are
     /// returned without the error.
     fn timeline(&self, ctx: &Context, _cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
-        let layer = match ctx.windows_kernel() {
-            Ok(k) => k.phys,
+        let layer = match primary_memory_layer(ctx) {
+            Ok(l) => l,
             Err(e) => return Some(Err(e)),
         };
         #[derive(Default)]
@@ -552,7 +566,7 @@ impl Plugin for ADS {
         "Scans for Alternate Data Stream"
     }
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        let layer = ctx.windows_kernel()?.phys;
+        let layer = primary_memory_layer(ctx)?;
         out.begin(vec![
             Column::new("Offset", ColType::Hex),
             Column::new("Record Type", ColType::Str),
@@ -574,7 +588,7 @@ impl Plugin for ResidentData {
         "Scans for MFT Records with Resident Data"
     }
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        let layer = ctx.windows_kernel()?.phys;
+        let layer = primary_memory_layer(ctx)?;
         out.begin(vec![
             Column::new("Offset", ColType::Hex),
             Column::new("Record Type", ColType::Str),
@@ -641,6 +655,100 @@ mod tests {
         want.push('\n');
         let got = std::fs::read_to_string(reference).unwrap();
         assert!(got == want, "timeliner model differs");
+    }
+
+    /// A data layer that is not file-backed (the scan reads it chunk by chunk through the layer).
+    struct Mem(Vec<u8>);
+    impl Layer for Mem {
+        fn name(&self) -> &str {
+            "memory_layer"
+        }
+        fn max_address(&self) -> u64 {
+            self.0.len() as u64 - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            let a = addr as usize;
+            match self.0.get(a..a + buf.len()) {
+                Some(s) => {
+                    buf.copy_from_slice(s);
+                    Ok(())
+                }
+                None => Err(Error::invalid(addr)),
+            }
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            addr + len <= self.0.len() as u64
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(crate::layers::Mapping) -> bool) {
+            let end = (addr + len).min(self.0.len() as u64);
+            if addr < end {
+                f(crate::layers::Mapping { offset: addr, len: end - addr, mapped: addr });
+            }
+        }
+    }
+
+    /// python's chunking + YaraScanner: 16 MiB + 4 KiB chunks, every hit of a chunk reported
+    /// (overlap hits twice), a hit straddling a chunk end only by the next chunk, the layer's
+    /// last byte never scanned.
+    #[test]
+    fn chunk_overlap_semantics() {
+        const C: usize = 0x100_0000;
+        let size = 2 * C + 0x3000;
+        let mut d = vec![0u8; size];
+        let put = |d: &mut Vec<u8>, at: usize, s: &[u8]| d[at..at + s.len()].copy_from_slice(s);
+        let sigs: [(usize, &[u8]); 7] = [
+            (0x10, b"FILE0"),
+            (C - 2, b"BAAD"),          // across the chunk boundary, inside chunk 0's overlap
+            (C + 0x100, b"FILE*"),     // in chunk 0's overlap: reported by chunks 0 and 1
+            (C + 0x1000 - 2, b"BAAD"), // straddles the end of chunk 0's data: only chunk 1
+            (2 * C + 0x20, b"FILE0"),  // chunk 1's overlap + chunk 2
+            (size - 0x20, b"FILE0"),   // only the last (short) chunk
+            (size - 4, b"BAAD"),       // needs the layer's last byte: never scanned
+        ];
+        for (at, s) in sigs {
+            put(&mut d, at, s);
+        }
+        let layer = Mem(d);
+        let mut got = Vec::new();
+        enumerate_mft_records(&layer, |e| e.offset, |o| {
+            got.push(o as usize);
+            true
+        });
+        let want = vec![0x10, C - 2, C + 0x100, C + 0x100, C + 0x1000 - 2, 2 * C + 0x20, 2 * C + 0x20, size - 0x20];
+        assert_eq!(got, want);
+    }
+
+    /// No Intel layer at all: python reports its own `primary` requirement (captured from
+    /// `vol.py -q -f <1 MiB of zeros> windows.mftscan.MFTScan`).
+    #[test]
+    fn unsatisfied_primary() {
+        struct Stub;
+        impl Plugin for Stub {
+            fn name(&self) -> &'static str {
+                "windows.mftscan.MFTScan"
+            }
+            fn description(&self) -> &'static str {
+                ""
+            }
+            fn run(&self, _ctx: &Context, _cfg: &Config, _out: &mut dyn RowSink) -> Result<()> {
+                Err(crate::plugins::unsatisfied_requirement("primary", "layer", "Memory layer for the kernel"))
+            }
+        }
+        static S: Stub = Stub;
+        let plugins: Vec<&'static dyn Plugin> = vec![&S];
+        let argv: Vec<String> = ["vol.py", "-q", "windows.mftscan.MFTScan"].iter().map(|s| s.to_string()).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let s = crate::cli::Settings { no_system_defaults: true, ..Default::default() };
+        assert_eq!(crate::cli::run(&argv, &plugins, &mut out, &mut err, &s), 1);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Volatility 3 Framework 2.28.2\n\nUnsatisfied requirement plugins.MFTScan.primary: Memory layer for the kernel\n\n\
+             A translation layer requirement was not fulfilled.  Please verify that:\n\
+             \tA file was provided to create this layer (by -f, --single-location or by config)\n\
+             \tThe file exists and is readable\n\
+             \tThe file is a valid memory image and was acquired cleanly\n"
+        );
+        assert_eq!(String::from_utf8(err).unwrap(), "Unable to validate the plugin requirements: ['plugins.MFTScan.primary']\n");
     }
 
     #[test]

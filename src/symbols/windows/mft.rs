@@ -544,9 +544,10 @@ impl MftFileName<'_> {
         let mut buf = [0u8; 512];
         let b = &mut buf[..2 * n];
         self.layer.read(at(self.offset, off::FN_NAME)?, b)?;
-        if b.chunks_exact(2).all(|u| u[1] == 0 && u[0] < 0x80) {
+        let units = b.as_chunks::<2>().0;
+        if units.iter().all(|u| u[1] == 0 && u[0] < 0x80) {
             // ASCII code units (no BOM, no surrogates): the same characters, cut at NUL
-            for u in b.chunks_exact(2) {
+            for u in units {
                 if u[0] == 0 {
                     break;
                 }

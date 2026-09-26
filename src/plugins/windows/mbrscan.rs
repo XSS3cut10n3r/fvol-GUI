@@ -98,10 +98,10 @@ pub fn layer_data_errors(layer: &dyn Layer, start: u64, len: u64) -> Result<Vec<
         if i < cur.offset {
             errors.push((i - start) as u32);
         }
-        if i > cur.offset + cur.len {
-            if let Some(n) = it.next() {
-                cur = n;
-            }
+        if i > cur.offset + cur.len
+            && let Some(n) = it.next()
+        {
+            cur = n;
         }
         if i > cur.offset + cur.len {
             errors.push((i - start) as u32);
