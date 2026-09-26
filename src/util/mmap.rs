@@ -23,6 +23,9 @@ pub const MADV_NORMAL: i32 = 0;
 pub const MADV_RANDOM: i32 = 1;
 pub const MADV_SEQUENTIAL: i32 = 2;
 pub const MADV_WILLNEED: i32 = 3;
+/// Drop the range's page-table entries (shared file mappings: the data stays in the page cache
+/// and a later access maps it again).
+pub const MADV_DONTNEED: i32 = 4;
 pub const MADV_POPULATE_READ: i32 = 22;
 
 /// A read-only shared mapping of an entire file.
