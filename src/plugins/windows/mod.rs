@@ -18,6 +18,7 @@ pub mod psscan;
 pub mod pstree;
 pub mod registry;
 pub mod sessions;
+pub mod shimcachemem;
 pub mod sids;
 pub mod statistics;
 pub mod strings;
@@ -41,6 +42,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&psscan::PsScan);
     v.push(&pstree::PsTree);
     v.push(&sessions::Sessions);
+    v.push(&shimcachemem::ShimcacheMem);
     v.push(&statistics::Statistics);
     v.push(&strings::Strings);
     v.push(&vadinfo::VadInfo);
