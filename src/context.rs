@@ -2,15 +2,28 @@
 //! loaded symbol tables, lazily-run automagic results (kernel discovery), and the output
 //! file handler.
 //!
+//! Derived from Volatility 3 (Volatility Software License 1.0).
+//!
 //! OWNED BY THE CORE AGENT. The CLI relies only on:
 //!   * `GlobalOptions` (fields below; add more as needed)
 //!   * `Context::new(opts) -> Result<Context>`  (must be cheap: nothing is scanned until a
 //!      plugin asks for it)
 //!   * `Context::create_output_file(&self, preferred_name) -> Result<(File, String)>`
+//!
+//! Plugins use:
+//!   * [`Context::windows_kernel`] -> [`WinKernel`] (virtual kernel layer, physical layer,
+//!     kernel symbol table, base; derefs to a [`Module`] so `k.object(...)`,
+//!     `k.get_symbol(...)` work like python's `context.modules[kernel]`);
+//!   * [`Context::physical`] -> python's `memory_layer`;
+//!   * [`Context::load_isf`] -> e.g. `ctx.load_isf("windows/pe")`.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::layers::{IntelLayer, Layer, PagingMode, PteFlavor};
+use crate::objects::{LayerRef, Module, leak_layer};
+use crate::symbols::{self, SymbolPath, TableRef};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Global (non plugin-specific) CLI options.
 #[derive(Clone, Debug, Default)]
@@ -41,22 +54,241 @@ pub struct GlobalOptions {
     pub clear_cache: bool,
 }
 
+/// The Windows kernel (python `context.modules[config["kernel"]]` plus its layers).
+/// Derefs to the kernel [`Module`].
+pub struct WinKernel {
+    /// The kernel module: virtual kernel layer, kernel symbol table, base (python module).
+    pub module: Module,
+    /// The kernel virtual layer (python `layer_name`, a `WindowsIntel*` layer).
+    pub layer: &'static IntelLayer,
+    /// Same layer as a `&dyn Layer`.
+    pub vlayer: LayerRef,
+    /// The physical layer (python `memory_layer`).
+    pub phys: LayerRef,
+    /// The kernel symbol table.
+    pub table: TableRef,
+    /// Kernel base (python `kernel_virtual_offset`, 48-bit masked).
+    pub base: u64,
+    /// python `page_map_offset`.
+    pub dtb: u64,
+    /// PDB identity of the kernel.
+    pub pdb_name: String,
+    pub guid: String,
+    pub age: u32,
+}
+
+impl std::ops::Deref for WinKernel {
+    type Target = Module;
+    fn deref(&self) -> &Module {
+        &self.module
+    }
+}
+
+type Lazy<T> = OnceLock<std::result::Result<T, String>>;
+
 pub struct Context {
     pub opts: GlobalOptions,
+    physical: Lazy<(Arc<dyn Layer>, LayerRef)>,
+    win: Lazy<WinKernel>,
+    output_lock: Mutex<()>,
+}
+
+fn keep_err<T>(r: &std::result::Result<T, String>) -> Result<&T> {
+    r.as_ref().map_err(|e| Error::Unsatisfied(e.clone()))
 }
 
 impl Context {
+    /// Cheap: records options and sets the symbol search path. Nothing is opened or scanned.
     pub fn new(opts: GlobalOptions) -> Result<Context> {
-        Ok(Context { opts })
+        symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
+        Ok(Context { opts, physical: OnceLock::new(), win: OnceLock::new(), output_lock: Mutex::new(()) })
+    }
+
+    /// The symbol search path.
+    pub fn symbol_path(&self) -> &'static SymbolPath {
+        symbols::symbol_path()
+    }
+
+    /// Path of the input image (`-f` or a `file://` `--single-location`).
+    pub fn image_path(&self) -> Result<PathBuf> {
+        if let Some(f) = &self.opts.file {
+            return Ok(PathBuf::from(f));
+        }
+        if let Some(loc) = &self.opts.single_location {
+            if let Some(p) = loc.strip_prefix("file://") {
+                return Ok(PathBuf::from(percent_decode(p)));
+            }
+            return Ok(PathBuf::from(loc));
+        }
+        Err(Error::Unsatisfied("Unable to run LayerStacker, single_location parameter not provided".into()))
+    }
+
+    /// python `memory_layer`: the input file with container layers stacked on it.
+    pub fn physical(&self) -> Result<LayerRef> {
+        Ok(self.physical_arc()?.1)
+    }
+
+    fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
+        keep_err(self.physical.get_or_init(|| {
+            let path = self.image_path().map_err(|e| e.to_string())?;
+            let l = crate::automagic::stack_physical(&path).map_err(|e| e.to_string())?;
+            let r = leak_layer(l.clone());
+            Ok((l, r))
+        }))
+    }
+
+    /// The Windows kernel (runs the Windows automagic on first use; cached per image).
+    pub fn windows_kernel(&self) -> Result<&WinKernel> {
+        keep_err(self.win.get_or_init(|| self.init_windows().map_err(|e| e.to_string())))
+    }
+
+    fn init_windows(&self) -> Result<WinKernel> {
+        let (phys_arc, phys) = self.physical_arc()?;
+        let image = self.image_path()?;
+        let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
+            use crate::automagic::cache::get;
+            let num = |k: &str| get(&kv, k).and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+            Some(crate::automagic::windows::WinAutomagic {
+                dtb: num("dtb")?,
+                mode: match get(&kv, "mode")? {
+                    "Intel32" => PagingMode::Intel32,
+                    "Pae" => PagingMode::Pae,
+                    "Intel32e" => PagingMode::Intel32e,
+                    _ => return None,
+                },
+                kvo: num("kvo")?,
+                pdb_name: get(&kv, "pdb")?.to_string(),
+                guid: get(&kv, "guid")?.to_string(),
+                age: get(&kv, "age")?.parse().ok()?,
+            })
+        });
+        let am = match cached {
+            Some(a) => a,
+            None => {
+                let a = crate::automagic::windows::run(phys_arc)?;
+                crate::automagic::cache::store(
+                    &image,
+                    "win",
+                    &[
+                        ("dtb", format!("{:#x}", a.dtb)),
+                        ("mode", format!("{:?}", a.mode)),
+                        ("kvo", format!("{:#x}", a.kvo)),
+                        ("pdb", a.pdb_name.clone()),
+                        ("guid", a.guid.clone()),
+                        ("age", a.age.to_string()),
+                    ],
+                );
+                a
+            }
+        };
+        let swap: Vec<Arc<dyn Layer>> = self
+            .opts
+            .swap_locations
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let p = s.strip_prefix("file://").map(percent_decode).unwrap_or_else(|| s.clone());
+                crate::layers::FileLayer::open(Path::new(&p)).ok().map(|f| Arc::new(f.with_name(&format!("swap_layers{i}"))) as Arc<dyn Layer>)
+            })
+            .collect();
+        let layer = IntelLayer::new("layer_name", phys_arc.clone(), am.dtb, am.mode, PteFlavor::Windows)
+            .with_os("Windows")
+            .with_kernel_virtual_offset(Some(am.kvo))
+            .with_swap(swap);
+        let layer: &'static IntelLayer = Box::leak(Box::new(layer));
+        let vlayer: LayerRef = layer;
+        let loc = symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline)?;
+        let table = symbols::load_location(&loc, "symbol_table_name", None, 0)?;
+        let module = Module::new(vlayer, table, am.kvo);
+        Ok(WinKernel {
+            module,
+            layer,
+            vlayer,
+            phys: *phys,
+            table,
+            base: am.kvo,
+            dtb: am.dtb,
+            pdb_name: am.pdb_name,
+            guid: am.guid,
+            age: am.age,
+        })
+    }
+
+    /// python `IntermediateSymbolTable.create(context, path, sub_path, filename)` by
+    /// `"sub/filename"`, e.g. `ctx.load_isf("windows/pe")`. Memoized.
+    pub fn load_isf(&self, name: &str) -> Result<TableRef> {
+        let (sub, file) = name.rsplit_once('/').unwrap_or(("", name));
+        symbols::load_isf(sub, file, None, &[])
+    }
+
+    /// `load_isf` with python `native_types=` (another table's natives) and `table_mapping=`.
+    pub fn load_isf_with(&self, name: &str, natives: Option<TableRef>, mapping: &[(&str, &str)]) -> Result<TableRef> {
+        let (sub, file) = name.rsplit_once('/').unwrap_or(("", name));
+        symbols::load_isf(sub, file, natives, mapping)
+    }
+
+    /// Load the ISF of a Windows PDB (e.g. a user module's PDB), downloading/converting it if
+    /// needed (python `PDBUtility.load_windows_symbol_table`).
+    pub fn load_windows_pdb(&self, pdb_name: &str, guid: &str, age: u32) -> Result<TableRef> {
+        let loc = symbols::store::find_windows_isf(self.symbol_path(), pdb_name, guid, age, self.opts.offline)?;
+        let prefix = pdb_name.trim_end_matches(".pdb").replace('.', "_");
+        symbols::load_location(&loc, &prefix, None, 0)
     }
 
     /// Create a file in the output directory (volatility3 CLIFileHandler semantics: if the
     /// preferred name already exists a counter is appended). Returns the open file and the
     /// final file name (as plugins print it).
     pub fn create_output_file(&self, preferred_name: &str) -> Result<(File, String)> {
+        let _g = self.output_lock.lock().unwrap();
         let dir = if self.opts.output_dir.is_empty() { "." } else { self.opts.output_dir.as_str() };
+        std::fs::create_dir_all(dir)?;
         let path: PathBuf = [dir, preferred_name].iter().collect();
-        let f = File::create(&path)?;
+        let final_path = unique_path(&path);
+        let f = File::create(&final_path)?;
         Ok((f, preferred_name.to_string()))
     }
+}
+
+/// python `CLIFileHandler._get_final_filename`: `name-1.ext`, `name-2.ext`, ... if taken.
+fn unique_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let s = path.to_string_lossy().into_owned();
+    // os.path.splitext: extension of the last component, ignoring leading dots
+    let (dir, base) = match s.rfind('/') {
+        Some(i) => (&s[..=i], &s[i + 1..]),
+        None => ("", s.as_str()),
+    };
+    let lead = base.len() - base.trim_start_matches('.').len();
+    let (stem, ext) = match base[lead..].rfind('.') {
+        Some(i) => (&base[..lead + i], &base[lead + i..]),
+        None => (base, ""),
+    };
+    let mut counter = 1;
+    loop {
+        let p = PathBuf::from(format!("{dir}{stem}-{counter}{ext}"));
+        if !p.exists() {
+            return p;
+        }
+        counter += 1;
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() + 0 && i + 2 <= b.len() - 1 {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

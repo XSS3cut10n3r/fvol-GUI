@@ -1,0 +1,550 @@
+//! ISF discovery (python `IntermediateSymbolTable.file_symbol_url`, `symbol_cache`,
+//! `pdbutil.load_windows_symbol_table`), decompression, and the binary table cache.
+//!
+//! Derived from Volatility 3 (Volatility Software License 1.0).
+//!
+//! Search order (python `volatility3.symbols.__path__`):
+//!   1. `-s/--symbol-dirs` directories,
+//!   2. `<directory of the rsvol binary>/symbols` (like a frozen python executable),
+//!   3. the ISFs shipped with volatility3 (embedded in the binary: `volatility3/symbols/**`
+//!      then `volatility3/framework/symbols/**`),
+//!   4. python's download cache `~/.cache/volatility3/symbols` (so existing downloads are
+//!      reused; new PDB conversions are written there too).
+//!
+//! Every loaded table is cached as a flat blob in `~/.cache/rsvol/isf/<key>.isfb`
+//! (key = source URL + size + mtime + natives), so a warm load is one mmap.
+
+use super::isf::{BuildOptions, build_blob};
+use super::table::{Blob, SymbolTable};
+use crate::error::{Error, Result};
+use crate::util::fxhash::{FxHasher, hash_bytes};
+use crate::util::mmap::Mmap;
+use crate::util::paths;
+use std::hash::Hasher;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// ISF file extensions in python's preference order (`constants.ISF_EXTENSIONS`).
+pub const ISF_EXTENSIONS: [&str; 4] = [".json", ".json.xz", ".json.gz", ".json.bz2"];
+
+/// Where an ISF lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsfLocation {
+    /// A file on disk (possibly compressed, by extension).
+    File(PathBuf),
+    /// A member of a zip symbol pack.
+    Zip { zip: PathBuf, member: String },
+    /// Shipped with volatility3 and embedded in the binary.
+    Embedded { rel: &'static str, top: bool, data: &'static [u8] },
+}
+
+impl IsfLocation {
+    /// python-style URL (`file:///...`, `jar:file:/path!member`, or `embedded:` for shipped
+    /// files, which python would report from its install directory).
+    pub fn url(&self) -> String {
+        match self {
+            IsfLocation::File(p) => paths::path_to_file_uri(p),
+            IsfLocation::Zip { zip, member } => format!("jar:file:{}!{}", zip.display(), member),
+            IsfLocation::Embedded { rel, top, .. } => {
+                if *top {
+                    format!("embedded:///volatility3/symbols/{rel}")
+                } else {
+                    format!("embedded:///volatility3/framework/symbols/{rel}")
+                }
+            }
+        }
+    }
+
+    /// The (decompressed) JSON bytes.
+    pub fn read(&self) -> Result<std::borrow::Cow<'static, [u8]>> {
+        match self {
+            IsfLocation::Embedded { data, .. } => Ok(std::borrow::Cow::Borrowed(*data)),
+            IsfLocation::File(p) => {
+                let raw = std::fs::read(p)?;
+                Ok(std::borrow::Cow::Owned(decompress_by_name(&p.to_string_lossy(), raw)?))
+            }
+            IsfLocation::Zip { zip, member } => {
+                let raw = super::zipfile::read_member(zip, member)?;
+                Ok(std::borrow::Cow::Owned(decompress_by_name(member, raw)?))
+            }
+        }
+    }
+
+    /// Cache identity: (url, size, mtime or content hash).
+    fn stamp(&self) -> Option<u64> {
+        let mut h = FxHasher::default();
+        h.write(self.url().as_bytes());
+        match self {
+            IsfLocation::File(p) => {
+                let (s, m) = paths::file_stamp(p)?;
+                h.write_u64(s);
+                h.write_u64(m as u64);
+            }
+            IsfLocation::Zip { zip, .. } => {
+                let (s, m) = paths::file_stamp(zip)?;
+                h.write_u64(s);
+                h.write_u64(m as u64);
+            }
+            IsfLocation::Embedded { data, .. } => {
+                h.write_u64(data.len() as u64);
+                h.write_u64(hash_bytes(data));
+            }
+        }
+        Some(h.finish())
+    }
+}
+
+/// Decompress according to the file extension.
+pub fn decompress_by_name(name: &str, raw: Vec<u8>) -> Result<Vec<u8>> {
+    if name.ends_with(".xz") {
+        crate::codecs::xz::decompress(&raw)
+    } else if name.ends_with(".gz") {
+        crate::codecs::gzip::decompress(&raw)
+    } else if name.ends_with(".bz2") {
+        crate::codecs::bzip2::decompress(&raw)
+    } else {
+        Ok(raw)
+    }
+}
+
+/// A search root.
+#[derive(Clone, Debug)]
+pub enum Root {
+    Dir(PathBuf),
+    /// the embedded files (`top` = volatility3/symbols, else framework/symbols)
+    Embedded { top: bool },
+}
+
+/// The symbol search path.
+#[derive(Clone, Debug)]
+pub struct SymbolPath {
+    pub roots: Vec<Root>,
+    /// Where downloaded / converted PDB ISFs are written (python's cache symbols dir).
+    pub download_dir: PathBuf,
+}
+
+impl SymbolPath {
+    /// Build the search path from `-s` dirs (python order).
+    pub fn new(symbol_dirs: &[String]) -> SymbolPath {
+        let mut roots = Vec::new();
+        for d in symbol_dirs {
+            if d.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(d);
+            let p = if p.is_absolute() { p } else { std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p) };
+            roots.push(Root::Dir(p));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let s = dir.join("symbols");
+                if s.is_dir() {
+                    roots.push(Root::Dir(s));
+                }
+            }
+        }
+        roots.push(Root::Embedded { top: true });
+        roots.push(Root::Embedded { top: false });
+        let cache_syms = paths::vol3_cache_dir(None).join("symbols");
+        roots.push(Root::Dir(cache_syms.clone()));
+        SymbolPath { roots, download_dir: cache_syms }
+    }
+
+    /// python `file_symbol_url(sub_path, filename)`: all matches, in search order.
+    /// `filename` may contain '/' (matched against trailing path components, like rglob).
+    pub fn find(&self, sub_path: &str, filename: &str) -> Vec<IsfLocation> {
+        let mut out = Vec::new();
+        for root in &self.roots {
+            match root {
+                Root::Dir(d) => {
+                    let base = if sub_path.is_empty() { d.clone() } else { d.join(sub_path) };
+                    if !base.is_dir() {
+                        continue;
+                    }
+                    let files = walk_files(&base);
+                    for ext in ISF_EXTENSIONS {
+                        let want = format!("{filename}{ext}");
+                        for f in &files {
+                            if path_ends_with(f, &want) {
+                                out.push(IsfLocation::File(f.clone()));
+                            }
+                        }
+                    }
+                    let wantzip = format!("{filename}.zip");
+                    for f in &files {
+                        if path_ends_with(f, &wantzip) {
+                            if let Ok(names) = super::zipfile::list(f) {
+                                let zip_match = filename.to_string();
+                                for name in names {
+                                    for ext in ISF_EXTENSIONS {
+                                        if name.ends_with(&format!("{zip_match}{ext}")) {
+                                            out.push(IsfLocation::Zip { zip: f.clone(), member: name.clone() });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Root::Embedded { top } => {
+                    for ext in ISF_EXTENSIONS {
+                        let want = format!("{filename}{ext}");
+                        for &(rel, is_top, data) in super::embedded::FILES {
+                            if is_top != *top {
+                                continue;
+                            }
+                            let under = if sub_path.is_empty() {
+                                Some(rel)
+                            } else {
+                                rel.strip_prefix(sub_path).and_then(|r| r.strip_prefix('/'))
+                            };
+                            if let Some(r) = under {
+                                if r == want || r.ends_with(&format!("/{want}")) {
+                                    out.push(IsfLocation::Embedded { rel, top: *top, data });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every ISF reachable from the search path (python `file_symbol_url("")`), including
+    /// zip pack members; used to build the identifier index.
+    pub fn all(&self) -> Vec<IsfLocation> {
+        let mut out = Vec::new();
+        for root in &self.roots {
+            match root {
+                Root::Dir(d) => {
+                    if !d.is_dir() {
+                        continue;
+                    }
+                    let files = walk_files(d);
+                    for ext in ISF_EXTENSIONS {
+                        for f in &files {
+                            let s = f.to_string_lossy();
+                            if s.ends_with(ext) {
+                                out.push(IsfLocation::File(f.clone()));
+                            }
+                        }
+                    }
+                    for f in &files {
+                        if f.to_string_lossy().ends_with(".zip") {
+                            if let Ok(names) = super::zipfile::list(f) {
+                                for name in names {
+                                    if ISF_EXTENSIONS.iter().any(|e| name.ends_with(e)) {
+                                        out.push(IsfLocation::Zip { zip: f.clone(), member: name });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Root::Embedded { top } => {
+                    for &(rel, is_top, data) in super::embedded::FILES {
+                        if is_top == *top {
+                            out.push(IsfLocation::Embedded { rel, top: *top, data });
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Recursively list regular files under `dir` (sorted for determinism).
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => stack.push(p),
+                Ok(t) if t.is_file() || t.is_symlink() => out.push(p),
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Whether `path` ends with the '/'-separated components of `tail`.
+fn path_ends_with(path: &Path, tail: &str) -> bool {
+    let s = path.to_string_lossy();
+    s == tail || s.ends_with(&format!("/{tail}"))
+}
+
+/// Cache file for a location + options.
+fn cache_file(loc: &IsfLocation, opts: &BuildOptions) -> Option<PathBuf> {
+    let stamp = loc.stamp()?;
+    let mut h = FxHasher::default();
+    h.write_u64(stamp);
+    h.write_u32(super::table::BLOB_VERSION);
+    if let Some(n) = &opts.natives {
+        for (name, ty) in n {
+            h.write(name.as_bytes());
+            h.write(&super::table::ty_encode(ty));
+        }
+    }
+    Some(paths::rsvol_cache_dir().join("isf").join(format!("{:016x}.isfb", h.finish())))
+}
+
+/// Load a symbol table from `loc` (binary cache first). `name` is the table name.
+pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
+    let url = loc.url();
+    let cf = cache_file(loc, opts);
+    if let Some(cf) = &cf {
+        if let Ok(f) = std::fs::File::open(cf) {
+            if let Ok(m) = Mmap::map(&f) {
+                if let Ok(t) = SymbolTable::from_blob(Blob::Mapped(m), name, &url) {
+                    return Ok(t);
+                }
+            }
+        }
+    }
+    let json = loc.read()?;
+    let blob = build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?;
+    if let Some(cf) = &cf {
+        let _ = paths::write_atomic(cf, &blob);
+    }
+    SymbolTable::from_blob(Blob::Owned(blob), name, &url)
+}
+
+/// Load an ISF by python sub_path/filename (e.g. `("windows", "pe")`), first match wins
+/// (python `IntermediateSymbolTable.create`).
+pub fn load_named(path: &SymbolPath, sub_path: &str, filename: &str, table_name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
+    let locs = path.find(sub_path, filename);
+    let loc = locs.first().ok_or_else(|| Error::Symbol(format!("No symbol files found at provided filename: {filename}")))?;
+    load(loc, table_name, opts)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Identifier index (python SqliteCache): identifier -> location
+// ---------------------------------------------------------------------------------------------
+
+/// One indexed ISF.
+#[derive(Clone, Debug)]
+pub struct IdentEntry {
+    pub url: String,
+    pub stamp: u64,
+    /// "windows" / "linux" / "mac" / "" (no identifier)
+    pub os: String,
+    pub identifier: Vec<u8>,
+}
+
+/// Extract (os, identifier) from ISF JSON without building the table.
+pub fn extract_identifier(json: &[u8]) -> Option<(String, Vec<u8>)> {
+    use crate::util::json::{Kind, Parser};
+    let mut p = Parser::new(json);
+    let mut win: Option<(String, String, u64)> = None;
+    let mut linux: Option<String> = None;
+    let mut mac: Option<String> = None;
+    let r = p.object(|p, k| {
+        match k.as_ref() {
+            "metadata" => {
+                let v = p.value()?;
+                if let Some(pdb) = v.path(&["windows", "pdb"]) {
+                    let guid = pdb.get("GUID").and_then(|g| g.as_str()).unwrap_or("").to_string();
+                    let db = pdb.get("database").and_then(|g| g.as_str()).unwrap_or("").to_string();
+                    let age = pdb.get("age").and_then(|g| g.as_u64()).unwrap_or(0);
+                    win = Some((guid, db, age));
+                }
+            }
+            "symbols" => {
+                p.object(|p, name| {
+                    if (name == "linux_banner" || name == "version") && p.peek_kind()? == Kind::Obj {
+                        let v = p.value()?;
+                        if let Some(cd) = v.get("constant_data").and_then(|c| c.as_str()) {
+                            if name == "linux_banner" {
+                                linux = Some(cd.to_string());
+                            } else {
+                                mac = Some(cd.to_string());
+                            }
+                        }
+                    } else {
+                        p.skip()?;
+                    }
+                    Ok(())
+                })?;
+            }
+            _ => p.skip()?,
+        }
+        Ok(())
+    });
+    if r.is_err() {
+        return None;
+    }
+    if let Some((guid, db, age)) = win {
+        if !guid.is_empty() && age != 0 && !db.is_empty() {
+            return Some(("windows".into(), format!("{db}|{}|{age}", guid.to_uppercase()).into_bytes()));
+        }
+    }
+    if let Some(m) = mac {
+        let b = super::isf::b64decode(&m);
+        return Some(("mac".into(), b));
+    }
+    if let Some(l) = linux {
+        let b = super::isf::b64decode(&l);
+        return Some(("linux".into(), b));
+    }
+    None
+}
+
+/// The identifier index over a symbol path, persisted in `~/.cache/rsvol/identifiers.cache`.
+pub struct IdentifierIndex {
+    pub entries: Vec<IdentEntry>,
+    locations: Vec<IsfLocation>,
+}
+
+impl IdentifierIndex {
+    /// Build/refresh the index: only new or modified files are (decompressed and) parsed.
+    pub fn update(path: &SymbolPath) -> IdentifierIndex {
+        let cache_path = paths::rsvol_cache_dir().join("identifiers.cache");
+        let old = read_ident_cache(&cache_path);
+        let mut old_map: crate::util::FxHashMap<String, IdentEntry> = old.into_iter().map(|e| (e.url.clone(), e)).collect();
+        let locs = path.all();
+        // dedupe by url
+        let mut seen = crate::util::FxHashSet::default();
+        let locs: Vec<IsfLocation> = locs.into_iter().filter(|l| seen.insert(l.url())).collect();
+        let stamps: Vec<Option<u64>> = locs.iter().map(|l| l.stamp()).collect();
+        let todo: Vec<usize> = (0..locs.len())
+            .filter(|&i| match (old_map.get(&locs[i].url()), stamps[i]) {
+                (Some(e), Some(s)) => e.stamp != s,
+                _ => true,
+            })
+            .collect();
+        let fresh: Vec<Option<IdentEntry>> = crate::util::par::par_map(todo.len(), |k| {
+            let i = todo[k];
+            let loc = &locs[i];
+            let stamp = stamps[i]?;
+            let (os, identifier) = match loc.read() {
+                Ok(json) => extract_identifier(&json).unwrap_or_default(),
+                Err(_) => Default::default(),
+            };
+            Some(IdentEntry { url: loc.url(), stamp, os, identifier })
+        });
+        let changed = !todo.is_empty() || old_map.len() != locs.len();
+        for e in fresh.into_iter().flatten() {
+            old_map.insert(e.url.clone(), e);
+        }
+        let entries: Vec<IdentEntry> = locs.iter().filter_map(|l| old_map.get(&l.url()).cloned()).collect();
+        if changed {
+            write_ident_cache(&cache_path, &entries);
+        }
+        IdentifierIndex { entries, locations: locs.iter().filter(|l| old_map.contains_key(&l.url())).cloned().collect() }
+    }
+
+    /// python `SqliteCache.find_location(identifier, os)`: the LAST matching location.
+    pub fn find(&self, identifier: &[u8], os: &str) -> Option<IsfLocation> {
+        let mut found = None;
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.os == os && e.identifier == identifier {
+                found = Some(i);
+            }
+        }
+        found.map(|i| self.locations[i].clone())
+    }
+
+    /// python `get_identifier_dictionary(os)`: identifier -> location (later entries win).
+    pub fn dictionary(&self, os: &str) -> Vec<(Vec<u8>, IsfLocation)> {
+        let mut map: crate::util::FxHashMap<Vec<u8>, usize> = Default::default();
+        let mut order: Vec<Vec<u8>> = Vec::new();
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.os == os && !e.identifier.is_empty() {
+                if map.insert(e.identifier.clone(), i).is_none() {
+                    order.push(e.identifier.clone());
+                }
+            }
+        }
+        order.into_iter().map(|id| {
+            let i = map[&id];
+            (id, self.locations[i].clone())
+        }).collect()
+    }
+}
+
+fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
+    let Ok(b) = std::fs::read(path) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let rd = |i: &mut usize, n: usize| -> Option<&[u8]> {
+        let s = b.get(*i..*i + n)?;
+        *i += n;
+        Some(s)
+    };
+    if rd(&mut i, 8) != Some(b"RSVOLID1") {
+        return out;
+    }
+    loop {
+        let Some(l) = rd(&mut i, 4) else { break };
+        let ul = u32::from_le_bytes(l.try_into().unwrap()) as usize;
+        let Some(url) = rd(&mut i, ul) else { break };
+        let Some(st) = rd(&mut i, 8) else { break };
+        let Some(l) = rd(&mut i, 4) else { break };
+        let ol = u32::from_le_bytes(l.try_into().unwrap()) as usize;
+        let Some(os) = rd(&mut i, ol) else { break };
+        let Some(l) = rd(&mut i, 4) else { break };
+        let il = u32::from_le_bytes(l.try_into().unwrap()) as usize;
+        let Some(id) = rd(&mut i, il) else { break };
+        out.push(IdentEntry {
+            url: String::from_utf8_lossy(url).into_owned(),
+            stamp: u64::from_le_bytes(st.try_into().unwrap()),
+            os: String::from_utf8_lossy(os).into_owned(),
+            identifier: id.to_vec(),
+        });
+    }
+    out
+}
+
+fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RSVOLID1");
+    for e in entries {
+        b.extend_from_slice(&(e.url.len() as u32).to_le_bytes());
+        b.extend_from_slice(e.url.as_bytes());
+        b.extend_from_slice(&e.stamp.to_le_bytes());
+        b.extend_from_slice(&(e.os.len() as u32).to_le_bytes());
+        b.extend_from_slice(e.os.as_bytes());
+        b.extend_from_slice(&(e.identifier.len() as u32).to_le_bytes());
+        b.extend_from_slice(&e.identifier);
+    }
+    let _ = paths::write_atomic(path, &b);
+}
+
+/// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
+/// by name `windows/<pdb>/<GUID>-<AGE>.json*`, then by identifier, then download + convert).
+pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
+    let pdb_name = pdb_name.trim_matches('\0');
+    let filter = format!("{}/{}-{}", pdb_name, guid.to_uppercase(), age);
+    // fast path: the canonical layout <root>/windows/<pdb>/<GUID>-<AGE>.json*
+    for root in &path.roots {
+        if let Root::Dir(d) = root {
+            for ext in ISF_EXTENSIONS {
+                let p = d.join("windows").join(format!("{filter}{ext}"));
+                if p.is_file() {
+                    return Ok(IsfLocation::File(p));
+                }
+            }
+        }
+    }
+    if let Some(l) = path.find("windows", &filter).into_iter().next() {
+        return Ok(l);
+    }
+    static INDEX: OnceLock<IdentifierIndex> = OnceLock::new();
+    let idx = INDEX.get_or_init(|| IdentifierIndex::update(path));
+    let ident = format!("{}|{}|{}", pdb_name, guid.to_uppercase(), age);
+    if let Some(l) = idx.find(ident.as_bytes(), "windows") {
+        return Ok(l);
+    }
+    // download + convert (pdb agent)
+    let out = super::windows::pdb::download_and_convert(pdb_name, &guid.to_uppercase(), age, &path.download_dir, offline)?;
+    Ok(IsfLocation::File(out))
+}
