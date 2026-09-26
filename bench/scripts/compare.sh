@@ -17,6 +17,8 @@ e=$(date +%s%N)
 secs=$(( (e - s) / 1000000 ))
 if cmp -s $OUTDIR/$P.txt $REF; then
   echo "OK $P ${secs}ms"
+elif grep -qx "$P" /home/user/rs-vol/bench/nondeterministic.txt && cmp -s <(sort $OUTDIR/$P.txt) <(sort $REF); then
+  echo "OK~ $P ${secs}ms (order; python order is nondeterministic)"
 else
   echo "DIFF $P rc=$rc ${secs}ms  (ours: $OUTDIR/$P.txt  ref: $REF)"
   diff $REF $OUTDIR/$P.txt | head -${DIFFLINES:-15}
