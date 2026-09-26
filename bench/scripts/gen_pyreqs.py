@@ -13,6 +13,7 @@ Encoding of one requirement, `<kind>:<name>`:
   S  SymbolTableRequirement
   v  VersionRequirement / PluginRequirement (recorded as `false`)
   b  BooleanRequirement           (always recorded: its value or default)
+  B  BooleanRequirement without a default (recorded only when given)
   i s u c y  Int / String / URI / Choice / Bytes requirement (recorded when it has a value)
   l  ListRequirement              (its value, `[]` when neither given nor defaulted)
   ?  anything else
@@ -45,6 +46,10 @@ def kind(req):
     ]
     for cls, k in order:
         if isinstance(req, cls):
+            # a BooleanRequirement without a default: argparse leaves it None unless given, so
+            # build_configuration() records it only when the flag was passed
+            if k == "b" and req.default is None:
+                return "B"
             return k
     return "?"
 
@@ -66,7 +71,7 @@ def main():
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 //!
 //! `<kind>:<name>`: K module, P translation layer, S symbol table, v version dependency,
-//! b bool, i int, s string, u URI, y bytes, c choice, l list, ? other.
+//! b bool, B bool without a default, i int, s string, u URI, y bytes, c choice, l list, ? other.
 
 pub const PY_REQS: [(&str, &[&str]); {len(lines)}] = [
 {chr(10).join(lines)}

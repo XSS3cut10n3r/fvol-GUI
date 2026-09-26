@@ -5,7 +5,7 @@
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 //!
 //! `<kind>:<name>`: K module, P translation layer, S symbol table, v version dependency,
-//! b bool, i int, s string, u URI, y bytes, c choice, l list, ? other.
+//! b bool, B bool without a default, i int, s string, u URI, y bytes, c choice, l list, ? other.
 
 pub const PY_REQS: [(&str, &[&str]); 197] = [
     ("banners.Banners", &["P:primary", "v:regex_scanner", "v:pdb_signature_scanner"]),
@@ -117,7 +117,7 @@ pub const PY_REQS: [(&str, &[&str]); 197] = [
     ("windows.drivermodule.DriverModule", &["K:kernel", "v:ssdt", "v:driverscan", "v:modules"]),
     ("windows.driverscan.DriverScan", &["K:kernel", "v:poolscanner", "v:modules"]),
     ("windows.dumpfiles.DumpFiles", &["K:kernel", "i:pid", "l:virtaddr", "l:physaddr", "s:filter", "b:ignore-case", "v:pslist", "v:handles"]),
-    ("windows.envars.Envars", &["K:kernel", "l:pid", "b:silent", "v:pslist", "v:hivelist"]),
+    ("windows.envars.Envars", &["K:kernel", "l:pid", "B:silent", "v:pslist", "v:hivelist"]),
     ("windows.etwpatch.EtwPatch", &["K:kernel", "v:pslist", "v:pe_symbols", "l:pid"]),
     ("windows.filescan.FileScan", &["K:kernel", "v:poolscanner"]),
     ("windows.getservicesids.GetServiceSIDs", &["K:kernel", "v:hivelist"]),
@@ -141,7 +141,7 @@ pub const PY_REQS: [(&str, &[&str]); 197] = [
     ("windows.malware.malfind.Malfind", &["K:kernel", "l:pid", "b:dump", "v:pslist", "v:vadinfo"]),
     ("windows.malware.pebmasquerade.PebMasquerade", &["K:kernel", "v:pslist", "l:pid"]),
     ("windows.malware.processghosting.ProcessGhosting", &["K:kernel", "v:pslist", "v:vadinfo"]),
-    ("windows.malware.psxview.PsXView", &["K:kernel", "v:pslist", "v:psscan", "v:thrdscan", "v:handles", "b:physical-offsets"]),
+    ("windows.malware.psxview.PsXView", &["K:kernel", "v:pslist", "v:psscan", "v:thrdscan", "v:handles", "B:physical-offsets"]),
     ("windows.malware.skeleton_key_check.Skeleton_Key_Check", &["K:kernel", "v:pslist", "v:vadinfo", "v:pdbutil", "v:pe_symbols", "v:bytes_scanner"]),
     ("windows.malware.suspicious_threads.SuspiciousThreads", &["K:kernel", "l:pid", "v:thrdscan", "v:pslist", "v:threads", "v:vadinfo"]),
     ("windows.malware.svcdiff.SvcDiff", &["K:kernel", "v:svclist", "v:svcscan"]),
@@ -165,7 +165,7 @@ pub const PY_REQS: [(&str, &[&str]); 197] = [
     ("windows.pslist.PsList", &["K:kernel", "b:physical", "v:timeliner", "l:pid", "b:dump"]),
     ("windows.psscan.PsScan", &["K:kernel", "v:pslist", "v:timeliner", "v:info", "v:poolscanner", "l:pid", "b:dump", "b:physical"]),
     ("windows.pstree.PsTree", &["K:kernel", "b:physical", "v:pslist", "l:pid"]),
-    ("windows.psxview.PsXView", &["K:kernel", "v:pslist", "v:psscan", "v:thrdscan", "v:handles", "b:physical-offsets"]),
+    ("windows.psxview.PsXView", &["K:kernel", "v:pslist", "v:psscan", "v:thrdscan", "v:handles", "B:physical-offsets"]),
     ("windows.registry.amcache.Amcache", &["K:kernel", "v:hivelist", "v:timeliner"]),
     ("windows.registry.cachedump.Cachedump", &["K:kernel", "v:hivelist", "v:lsadump", "v:hashdump"]),
     ("windows.registry.certificates.Certificates", &["K:kernel", "v:hivelist", "v:printkey", "b:dump"]),

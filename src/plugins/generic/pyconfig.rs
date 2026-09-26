@@ -197,8 +197,13 @@ pub fn config_value_json(v: &crate::plugins::ConfigValue) -> Json {
 /// it has a value (given or defaulted). Fails like python's construction when the kernel or the
 /// layer cannot be found.
 pub fn build_configuration(ctx: &Context, plugin: &str, cfg: &crate::plugins::Config, prefix: &str) -> Result<Items> {
+    walk_requirements(ctx, plugin, crate::plugins::pyreqs::py_reqs(plugin).unwrap_or(&[]), cfg, prefix)
+}
+
+/// [`build_configuration`] over an explicit `pyreqs` requirement list.
+fn walk_requirements(ctx: &Context, plugin: &str, reqs: &[&str], cfg: &crate::plugins::Config, prefix: &str) -> Result<Items> {
     let mut out = Items::new();
-    for r in crate::plugins::pyreqs::py_reqs(plugin).unwrap_or(&[]) {
+    for r in reqs {
         let (kind, name) = r.split_once(':').unwrap_or(("?", r));
         let key = format!("{prefix}{name}");
         match kind {
@@ -210,6 +215,12 @@ pub fn build_configuration(ctx: &Context, plugin: &str, cfg: &crate::plugins::Co
                 out.extend(primary_tree(ctx, &prim, &key, false, swap)?);
             }
             "v" => out.push((key, Json::Bool(false))),
+            // a flag without a python default stays None (unrecorded) unless it was passed
+            "B" => {
+                if cfg.get_bool(name) {
+                    out.push((key, Json::Bool(true)));
+                }
+            }
             "l" => out.push((key, cfg.get(name).map(config_value_json).unwrap_or(Json::Arr(Vec::new())))),
             _ => {
                 if let Some(v) = cfg.get(name) {
@@ -253,5 +264,21 @@ mod tests {
         // an unset list is recorded as []
         let items = build_configuration(&ctx, "isfinfo.IsfInfo", &Config::default(), "x.").unwrap();
         assert!(items.contains(&("x.filter".to_string(), Json::Arr(Vec::new()))));
+    }
+
+    /// psxview's `--physical-offsets` (a BooleanRequirement without a default): python records it
+    /// only when the flag was given, while an ordinary flag is always recorded.
+    #[test]
+    fn flag_without_python_default_recorded_only_when_given() {
+        let ctx = Context::new(Default::default()).unwrap();
+        let reqs = ["B:physical-offsets", "b:dump"];
+        let mut cfg = Config::default();
+        cfg.set("physical-offsets", ConfigValue::Bool(false));
+        cfg.set("dump", ConfigValue::Bool(false));
+        let items = walk_requirements(&ctx, "windows.psxview.PsXView", &reqs, &cfg, "").unwrap();
+        assert_eq!(items, vec![("dump".to_string(), Json::Bool(false))]);
+        cfg.set("physical-offsets", ConfigValue::Bool(true));
+        let items = walk_requirements(&ctx, "windows.psxview.PsXView", &reqs, &cfg, "").unwrap();
+        assert_eq!(items[0], ("physical-offsets".to_string(), Json::Bool(true)));
     }
 }
