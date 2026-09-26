@@ -4,20 +4,85 @@
 
 use super::DateTime;
 
-/// Append the decimal representation of `v` (python `str(int)`).
+/// "00" "01" ... "99"
+static DEC2: [[u8; 2]; 100] = {
+    let mut t = [[0u8; 2]; 100];
+    let mut i = 0;
+    while i < 100 {
+        t[i] = [b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        i += 1;
+    }
+    t
+};
+
+/// "00" "01" ... "ff"
+static HEX2: [[u8; 2]; 256] = {
+    let h = b"0123456789abcdef";
+    let mut t = [[0u8; 2]; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = [h[i >> 4], h[i & 15]];
+        i += 1;
+    }
+    t
+};
+
+/// Digits are formatted right-aligned to `END` in a `[u8; 48]` scratch buffer.
+const END: usize = 24;
+
+/// Append `buf[start..END]` (at most 24 bytes) with one fixed-size 24-byte copy into the
+/// spare capacity instead of a variable-length memcpy call.
+#[inline(always)]
+fn push_tail(out: &mut Vec<u8>, buf: &[u8; 48], start: usize) {
+    out.reserve(24);
+    unsafe {
+        let len = out.len();
+        std::ptr::copy_nonoverlapping(buf.as_ptr().add(start), out.as_mut_ptr().add(len), 24);
+        out.set_len(len + (END - start));
+    }
+}
+
+/// Append the decimal representation of `v` (python `str(int)`), two digits per step.
 #[inline]
 pub fn push_u64(out: &mut Vec<u8>, mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    loop {
+    if v < 10 {
+        out.push(b'0' + v as u8);
+        return;
+    }
+    let mut buf = [0u8; 48];
+    let mut i = END;
+    while v >= 100 {
+        i -= 2;
+        buf[i..i + 2].copy_from_slice(&DEC2[(v % 100) as usize]);
+        v /= 100;
+    }
+    if v >= 10 {
+        i -= 2;
+        buf[i..i + 2].copy_from_slice(&DEC2[v as usize]);
+    } else {
         i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
+        buf[i] = b'0' + v as u8;
+    }
+    push_tail(out, &buf, i);
+}
+
+/// Append python `f"{v:x}"` for a u64 (lower case, no prefix), a byte per step.
+#[inline]
+pub fn push_hex_u64(out: &mut Vec<u8>, mut v: u64) {
+    let mut buf = [0u8; 48];
+    let mut i = END;
+    loop {
+        i -= 2;
+        buf[i..i + 2].copy_from_slice(&HEX2[(v & 0xff) as usize]);
+        v >>= 8;
         if v == 0 {
             break;
         }
     }
-    out.extend_from_slice(&buf[i..]);
+    if buf[i] == b'0' {
+        i += 1;
+    }
+    push_tail(out, &buf, i);
 }
 
 /// Append the decimal representation of `v` (python `str(int)`).
@@ -48,6 +113,9 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// Append python `f"{v:x}"` (lower case, `-` sign for negatives, no prefix).
 #[inline]
 pub fn push_hex(out: &mut Vec<u8>, v: i128) {
+    if v >= 0 && v <= u64::MAX as i128 {
+        return push_hex_u64(out, v as u64);
+    }
     if v < 0 {
         out.push(b'-');
     }
@@ -343,81 +411,123 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 #[inline]
 fn push_2(out: &mut Vec<u8>, v: u32) {
-    out.push(b'0' + (v / 10 % 10) as u8);
-    out.push(b'0' + (v % 10) as u8);
+    out.extend_from_slice(&DEC2[(v % 100) as usize]);
+}
+
+/// `YYYY-MM-DD` of day `days` since 1970, for years 0..=9999 (None otherwise).
+#[inline]
+fn date_bytes(days: i64) -> Option<[u8; 10]> {
+    // one-entry per-thread cache: sorted / clustered timestamps share their day
+    thread_local! {
+        static DAY: std::cell::Cell<(i64, [u8; 10])> = const { std::cell::Cell::new((i64::MIN, [0; 10])) };
+    }
+    let (cd, cb) = DAY.with(|c| c.get());
+    if cd == days {
+        return Some(cb);
+    }
+    let (y, m, d) = civil_from_days(days);
+    if !(0..10_000).contains(&y) {
+        return None;
+    }
+    let y = y as usize;
+    let mut b = [0u8; 10];
+    b[0..2].copy_from_slice(&DEC2[y / 100]);
+    b[2..4].copy_from_slice(&DEC2[y % 100]);
+    b[4] = b'-';
+    b[5..7].copy_from_slice(&DEC2[m as usize]);
+    b[7] = b'-';
+    b[8..10].copy_from_slice(&DEC2[d as usize]);
+    DAY.with(|c| c.set((days, b)));
+    Some(b)
+}
+
+/// `HH:MM:SS` for a second of the day into `b[..8]`.
+#[inline(always)]
+fn time_bytes(sod: u32, b: &mut [u8]) {
+    b[0..2].copy_from_slice(&DEC2[(sod / 3600) as usize]);
+    b[2] = b':';
+    b[3..5].copy_from_slice(&DEC2[(sod / 60 % 60) as usize]);
+    b[5] = b':';
+    b[6..8].copy_from_slice(&DEC2[(sod % 60) as usize]);
+}
+
+/// `ffffff` into `b[..6]`.
+#[inline(always)]
+fn micros_bytes(micros: u32, b: &mut [u8]) {
+    let m = micros.min(999_999);
+    b[0..2].copy_from_slice(&DEC2[(m / 10_000) as usize]);
+    b[2..4].copy_from_slice(&DEC2[(m / 100 % 100) as usize]);
+    b[4..6].copy_from_slice(&DEC2[(m % 100) as usize]);
 }
 
 /// Append `YYYY-MM-DD{sep}HH:MM:SS` for the timestamp.
 fn push_date_time(out: &mut Vec<u8>, dt: &DateTime, sep: u8) {
     let days = dt.secs.div_euclid(86_400);
     let sod = dt.secs.rem_euclid(86_400) as u32;
-    let (y, m, d) = civil_from_days(days);
-    if (0..10_000).contains(&y) {
-        let y = y as u32;
-        push_2(out, y / 100);
-        push_2(out, y % 100);
-    } else {
-        push_i128(out, y as i128);
+    let mut b = [0u8; 19];
+    match date_bytes(days) {
+        Some(d) => b[..10].copy_from_slice(&d),
+        None => {
+            let (y, m, d) = civil_from_days(days);
+            push_i128(out, y as i128);
+            out.push(b'-');
+            push_2(out, m);
+            out.push(b'-');
+            push_2(out, d);
+            out.push(sep);
+            time_bytes(sod, &mut b[11..]);
+            out.extend_from_slice(&b[11..]);
+            return;
+        }
     }
-    out.push(b'-');
-    push_2(out, m);
-    out.push(b'-');
-    push_2(out, d);
-    out.push(sep);
-    push_2(out, sod / 3600);
-    out.push(b':');
-    push_2(out, sod / 60 % 60);
-    out.push(b':');
-    push_2(out, sod % 60);
-}
-
-fn push_micros(out: &mut Vec<u8>, micros: u32) {
-    let m = micros.min(999_999);
-    push_2(out, m / 10_000);
-    push_2(out, m / 100 % 100);
-    push_2(out, m % 100);
+    b[10] = sep;
+    time_bytes(sod, &mut b[11..]);
+    out.extend_from_slice(&b);
 }
 
 /// `dt.strftime("%Y-%m-%d %H:%M:%S.%f %Z")` (`%Z` is `UTC` for aware values, empty for naive).
+#[inline]
 pub fn push_datetime_cli(out: &mut Vec<u8>, dt: &DateTime) {
-    // small memo: sorted outputs (timeliner: 2.8M rows x 4 date columns) repeat the same
-    // values in consecutive rows
-    type Memo = ([Option<DateTime>; 4], [[u8; 48]; 4], [u8; 4], usize);
-    thread_local! {
-        static MEMO: std::cell::RefCell<Memo> = const { std::cell::RefCell::new(([None; 4], [[0; 48]; 4], [0; 4], 0)) };
-    }
-    MEMO.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some(i) = m.0.iter().position(|x| *x == Some(*dt)) {
-            let n = m.2[i] as usize;
-            out.extend_from_slice(&m.1[i][..n]);
-            return;
-        }
-        let start = out.len();
+    let days = dt.secs.div_euclid(86_400);
+    let sod = dt.secs.rem_euclid(86_400) as u32;
+    let Some(date) = date_bytes(days) else {
         push_date_time(out, dt, b' ');
-        out.push(b'.');
-        push_micros(out, dt.micros);
-        out.push(b' ');
+        let mut b = [0u8; 8];
+        b[0] = b'.';
+        micros_bytes(dt.micros, &mut b[1..7]);
+        b[7] = b' ';
+        out.extend_from_slice(&b);
         if dt.utc {
             out.extend_from_slice(b"UTC");
         }
-        let n = out.len() - start;
-        if n <= 48 {
-            let i = m.3;
-            m.3 = (i + 1) % 4;
-            m.1[i][..n].copy_from_slice(&out[start..]);
-            m.2[i] = n as u8;
-            m.0[i] = Some(*dt);
-        }
-    })
+        return;
+    };
+    // "YYYY-MM-DD HH:MM:SS.ffffff UTC", one fixed 32-byte store
+    let mut b = [0u8; 32];
+    b[..10].copy_from_slice(&date);
+    b[10] = b' ';
+    time_bytes(sod, &mut b[11..19]);
+    b[19] = b'.';
+    micros_bytes(dt.micros, &mut b[20..26]);
+    b[26] = b' ';
+    b[27..30].copy_from_slice(b"UTC");
+    let n = if dt.utc { 30 } else { 27 };
+    out.reserve(32);
+    unsafe {
+        let len = out.len();
+        std::ptr::copy_nonoverlapping(b.as_ptr(), out.as_mut_ptr().add(len), 32);
+        out.set_len(len + n);
+    }
 }
 
 /// python `str(dt)` (`sep=b' '`) or `dt.isoformat()` (`sep=b'T'`).
 pub fn push_datetime_iso(out: &mut Vec<u8>, dt: &DateTime, sep: u8) {
     push_date_time(out, dt, sep);
     if dt.micros != 0 {
-        out.push(b'.');
-        push_micros(out, dt.micros);
+        let mut b = [0u8; 7];
+        b[0] = b'.';
+        micros_bytes(dt.micros, &mut b[1..]);
+        out.extend_from_slice(&b);
     }
     if dt.utc {
         out.extend_from_slice(b"+00:00");
@@ -526,6 +636,74 @@ mod tests {
         let bs = '\\';
         let want = format!("\"{bs}u00e9{bs}u007f{bs}u001f{bs}u2028{bs}ud83d{bs}ude00{bs}\"{bs}{bs}/\"");
         assert_eq!(String::from_utf8(v).unwrap(), want);
+    }
+
+    #[test]
+    fn ints_and_hex_like_format() {
+        let mut vals: Vec<u64> = vec![0, 1, 9, 10, 15, 16, 99, 100, 255, 256, 999, 1000, u64::MAX, u64::MAX - 1, 1 << 63];
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..20000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            vals.push(x >> (x % 64));
+            vals.push(10u64.pow((x % 20) as u32));
+            vals.push(10u64.pow((x % 20) as u32) - 1);
+            vals.push(1u64 << (x % 64));
+        }
+        for v in vals {
+            let mut o = b"x".to_vec();
+            push_u64(&mut o, v);
+            push_hex_u64(&mut o, v);
+            push_i128(&mut o, -(v as i128));
+            push_hex(&mut o, -(v as i128));
+            push_hex(&mut o, v as i128 + (1 << 70));
+            let want = format!("x{v}{v:x}{}{}{:x}", -(v as i128), if v == 0 { "0".to_string() } else { format!("-{v:x}") }, v as i128 + (1 << 70));
+            assert_eq!(String::from_utf8(o).unwrap(), want);
+        }
+    }
+
+    #[test]
+    fn datetimes_like_chrono_math() {
+        // against a straightforward formatter over a wide range of seconds / micros
+        let slow = |dt: &DateTime, cli: bool| -> String {
+            let days = dt.secs.div_euclid(86_400);
+            let sod = dt.secs.rem_euclid(86_400);
+            let (y, m, d) = civil_from_days(days);
+            let ys = if (0..10_000).contains(&y) { format!("{y:04}") } else { format!("{y}") };
+            let base = format!("{ys}-{m:02}-{d:02} {:02}:{:02}:{:02}", sod / 3600, sod / 60 % 60, sod % 60);
+            if cli {
+                format!("{base}.{:06} {}", dt.micros.min(999_999), if dt.utc { "UTC" } else { "" })
+            } else {
+                let mut s = base;
+                if dt.micros != 0 {
+                    s += &format!(".{:06}", dt.micros.min(999_999));
+                }
+                if dt.utc {
+                    s += "+00:00";
+                }
+                s
+            }
+        };
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        for i in 0..200_000i64 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let secs = match i % 4 {
+                0 => (x % 400_000_000_000) as i64 - 100_000_000_000,
+                1 => 1_700_000_000 + (i % 1000),
+                2 => -11_644_473_600 + (x % 100_000) as i64,
+                _ => (x as i64) >> (x % 30),
+            };
+            let dt = DateTime { secs, micros: (x >> 40) as u32 % 1_000_000, utc: i % 3 != 0 };
+            let mut o = Vec::new();
+            push_datetime_cli(&mut o, &dt);
+            assert_eq!(String::from_utf8(o).unwrap(), slow(&dt, true), "{dt:?}");
+            let mut o = Vec::new();
+            push_datetime_iso(&mut o, &dt, b' ');
+            assert_eq!(String::from_utf8(o).unwrap(), slow(&dt, false), "{dt:?}");
+        }
     }
 
     #[test]

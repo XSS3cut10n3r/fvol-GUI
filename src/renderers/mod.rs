@@ -140,6 +140,26 @@ pub trait RowSink {
     fn begin(&mut self, columns: Vec<Column>) -> Result<()>;
     /// Emit one row at tree depth `depth` (0 = top level).
     fn row(&mut self, depth: usize, values: Vec<Value>) -> Result<()>;
+
+    /// [`RowSink::row`] from borrowed values (e.g. a stack array): no per-row `Vec` for hot
+    /// plugins. The text renderers format straight from the slice; the default copies.
+    fn row_ref(&mut self, depth: usize, values: &[Value]) -> Result<()> {
+        self.row(depth, values.to_vec())
+    }
+
+    /// A formatter producing exactly this sink's output for depth-0 rows that can run on other
+    /// threads (the text renderers without `--filters`). Plugins with huge outputs format rows
+    /// in parallel with it and hand the bytes to [`RowSink::rows_encoded`]. Only for plugins
+    /// whose rows are ALL at depth 0.
+    fn encoder(&self) -> Option<text::RowEncoder> {
+        None
+    }
+
+    /// Append `nrows` depth-0 rows formatted by this sink's [`RowSink::encoder`] (in order,
+    /// after every row emitted so far). Only valid when `encoder()` returned `Some`.
+    fn rows_encoded(&mut self, _block: &[u8], _nrows: usize) -> Result<()> {
+        Err(crate::error::Error::msg("rows_encoded: this sink has no row encoder"))
+    }
 }
 
 /// In-memory sink, handy for tests and for plugins that post-process another plugin's rows.

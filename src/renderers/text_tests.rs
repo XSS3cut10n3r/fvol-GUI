@@ -159,6 +159,66 @@ fn python_renderers_match() {
     assert!(bad.is_empty(), "{} of {} renderer cases differ:\n{}", bad.len(), cases.as_arr().len(), bad.join("\n=========\n"));
 }
 
+/// Rows handed over as pre-encoded blocks (`RowSink::encoder` / `rows_encoded`, formatted
+/// "elsewhere"), mixed with ordinary rows, render exactly like ordinary rows, for every
+/// renderer, with and without hidden columns, small and flush-sized blocks.
+#[test]
+fn encoded_rows_match_row_path() {
+    let grid = fixture("render_grid.json");
+    let cols = grid_columns(&grid);
+    let base: Vec<Vec<Value>> = grid_rows(&grid).into_iter().map(|(_, v)| v).collect();
+    for reps in [1usize, 2000] {
+        let rows: Vec<Vec<Value>> = (0..reps).flat_map(|_| base.iter().cloned()).collect();
+        let n = rows.len();
+        for name in ["quick", "csv", "jsonl", "json", "pretty", "none"] {
+            for hide in [None, Some(vec!["name".to_string(), "off".to_string(), "dump".to_string()])] {
+                let opts = || RenderOptions { filters: Vec::new(), hide_columns: hide.clone(), flush_rows: false };
+                let plain = {
+                    let mut out: Vec<u8> = Vec::new();
+                    {
+                        let mut r = create(name, &mut out, opts()).unwrap();
+                        r.begin(cols.clone()).unwrap();
+                        for v in &rows {
+                            r.row(0, v.clone()).unwrap();
+                        }
+                        r.finish().unwrap();
+                    }
+                    out
+                };
+                // splits: [0, a) rows, [a, b) and [b, c) encoded, [c, n) rows
+                for (a, b, c) in [(0, 0, 0), (0, n / 2, n), (1, n / 3, n - 1), (n, n, n), (2, 2, 3)] {
+                    let mut out: Vec<u8> = Vec::new();
+                    {
+                        let mut r = create(name, &mut out, opts()).unwrap();
+                        r.begin(cols.clone()).unwrap();
+                        let enc = r.encoder().expect("encoder");
+                        for v in &rows[..a] {
+                            r.row_ref(0, v).unwrap();
+                        }
+                        for (s, e) in [(a, b), (b, c)] {
+                            let mut blk = Vec::new();
+                            for v in &rows[s..e] {
+                                enc.row(&mut blk, v);
+                            }
+                            r.rows_encoded(&blk, e - s).unwrap();
+                        }
+                        for v in &rows[c..] {
+                            r.row(0, v.clone()).unwrap();
+                        }
+                        r.finish().unwrap();
+                    }
+                    assert!(out == plain, "{name} hide={hide:?} reps={reps} split=({a},{b},{c})");
+                }
+            }
+        }
+    }
+    // an active filter disables the encoder
+    let mut out: Vec<u8> = Vec::new();
+    let mut r = create("quick", &mut out, RenderOptions { filters: vec!["str,x".into()], hide_columns: None, flush_rows: false }).unwrap();
+    r.begin(cols.clone()).unwrap();
+    assert!(r.encoder().is_none());
+}
+
 /// Throughput of every renderer on 1M pslist-like rows written to /dev/null (values are built
 /// per row, as a plugin would). Run:
 ///   cargo test --profile fast bench_renderers -- --ignored --nocapture
@@ -209,6 +269,73 @@ fn bench_renderers() {
         }
         let dt = start.elapsed();
         println!("{name:>7}: {N} rows in {:>7.1} ms  ({:.0} ns/row)", dt.as_secs_f64() * 1e3, dt.as_nanos() as f64 / N as f64);
+    }
+    // the same values in a stack array (the Str still allocates, like a plugin's would)
+    let arr = |i: u64| -> [Value; 11] {
+        [
+            Value::Int(i as i128),
+            Value::Int((i / 3) as i128),
+            Value::Str(if i % 2 == 0 { "svchost.exe".into() } else { "MsMpEng.exe".into() }),
+            Value::Int(0xe485b4eaa040 + i as i128 * 0x80),
+            Value::Int((i % 97) as i128),
+            Value::Unreadable,
+            Value::NotApplicable,
+            Value::Bool(i % 5 == 0),
+            Value::DateTime(DateTime { secs: 1789354424 + i as i64, micros: 0, utc: true }),
+            Value::NotApplicable,
+            Value::SStr("Disabled"),
+        ]
+    };
+    // borrowed rows (no Vec per row), depth 0
+    for name in ["none", "quick", "csv", "jsonl", "json", "pretty"] {
+        let mut sink = std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+        let start = std::time::Instant::now();
+        {
+            let mut r = create(name, &mut sink, RenderOptions::default()).unwrap();
+            r.begin(columns()).unwrap();
+            for i in 0..N {
+                r.row_ref(0, &arr(i)).unwrap();
+            }
+            r.finish().unwrap();
+        }
+        let dt = start.elapsed();
+        println!("{name:>7} row_ref: {:>7.1} ms  ({:.0} ns/row)", dt.as_secs_f64() * 1e3, dt.as_nanos() as f64 / N as f64);
+    }
+    // pre-encoded blocks: one thread, then all threads (depth 0)
+    for par in [false, true] {
+        for name in ["none", "quick", "csv", "jsonl", "json", "pretty"] {
+            let mut sink = std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+            let start = std::time::Instant::now();
+            {
+                let mut r = create(name, &mut sink, RenderOptions::default()).unwrap();
+                r.begin(columns()).unwrap();
+                let enc = r.encoder().unwrap();
+                const B: u64 = 16384;
+                let block = |c: usize| {
+                    let mut blk = Vec::with_capacity(B as usize * 128);
+                    for i in c as u64 * B..((c as u64 + 1) * B).min(N) {
+                        enc.row(&mut blk, &arr(i));
+                    }
+                    blk
+                };
+                let nb = N.div_ceil(B) as usize;
+                if par {
+                    crate::util::par::par_map_stream(nb, 0, block, |c, blk| {
+                        r.rows_encoded(&blk, (((c as u64 + 1) * B).min(N) - c as u64 * B) as usize).unwrap();
+                        true
+                    });
+                } else {
+                    for c in 0..nb {
+                        let blk = block(c);
+                        r.rows_encoded(&blk, (((c as u64 + 1) * B).min(N) - c as u64 * B) as usize).unwrap();
+                    }
+                }
+                r.finish().unwrap();
+            }
+            let dt = start.elapsed();
+            let label = if par { "encoded/par" } else { "encoded/1t" };
+            println!("{name:>7} {label}: {:>7.1} ms  ({:.0} ns/row)", dt.as_secs_f64() * 1e3, dt.as_nanos() as f64 / N as f64);
+        }
     }
     // quick with a filter active (per-cell strings)
     let mut sink = std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
