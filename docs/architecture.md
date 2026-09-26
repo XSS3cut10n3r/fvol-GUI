@@ -265,4 +265,4 @@ PCRE2-JIT and RE2.
 Every cache is a pure function of its inputs: image identity, symbol file identity, format
 versions and, for the scan cache, the rsvol executable. Each cache file carries its full key,
 which is compared on load, and is written atomically. The rules and the list of cache files are
-in the [Caching section of the README](../README.md#caching).
+in [caching.md](caching.md).

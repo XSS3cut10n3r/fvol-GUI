@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 38 256 64" role="img" aria-label="fastvol">
+  <!--
+    The "fastvol" wordmark: hand-built monoline lowercase, stroke 10 on a 40-unit x-height,
+    slanted 10 degrees like the mascot's body cuts. No font is needed to render it.
+    Hand-written source for light backgrounds: "fast" in copper, "vol" in ink (#1f2328).
+    docs/assets/build.py derives wordmark-dark.svg and the logo lockups from it.
+    Baseline y=100, x-height y=60, ascender y=40.
+  -->
+  <g transform="translate(18 0) skewX(-10)">
+    <g id="fast" fill="none" stroke="#e0662b" stroke-width="10">
+      <path d="M5 100V58A13 13 0 0 1 18 45H27"/>
+      <path d="M-4 65H24"/>
+      <circle cx="52" cy="80" r="15"/>
+      <path d="M67 60V100"/>
+      <path fill="#e0662b" stroke="none" d="M115 60H92A14 12.125 0 0 0 92 84.25H101A4 3.625 0 0 1 101 91.5H78V100H101A14 12.125 0 0 0 101 75.75H92A4 3.625 0 0 1 92 68.5H115Z"/>
+      <path d="M129 46V100"/>
+      <path d="M120 65H141"/>
+    </g>
+    <g id="vol" fill="none" stroke="#1f2328" stroke-width="10">
+      <path fill="#1f2328" stroke="none" d="M146 60H156.5L164 83.1L171.5 60H182L169 100H159Z"/>
+      <circle cx="206" cy="80" r="15"/>
+      <path d="M236 40V100"/>
+    </g>
+  </g>
+</svg>
