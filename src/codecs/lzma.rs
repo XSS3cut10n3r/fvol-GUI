@@ -44,8 +44,6 @@ const INPUT_MARGIN: usize = 64;
 const TOP: u32 = 1 << 24;
 const END_MARKER: u32 = 0xFFFF_FFFF;
 
-/// Next state after a literal.
-const LIT_NEXT_STATE: [u8; 16] = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 4, 5, 0, 0, 0, 0];
 
 /// Largest `.lzma` output we pre-allocate before seeing data (grows beyond on demand).
 const PREALLOC_CAP: usize = 1 << 30;
