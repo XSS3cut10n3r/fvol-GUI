@@ -8,14 +8,17 @@
 
 mod access;
 mod access_spec;
+#[allow(dead_code)]
 mod decode;
 mod detail;
 mod format;
+#[allow(dead_code)]
 pub mod regs;
 mod spec_legacy;
 mod spec_sse;
 mod spec_vex;
 mod spec_evex;
+#[allow(dead_code)]
 mod tables;
 
 pub use access::{learn_features, uncovered_mnemonics, RegList, MAX_REGS};

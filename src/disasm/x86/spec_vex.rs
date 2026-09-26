@@ -41,50 +41,50 @@ v1 4a np w0 l1 r : kaddw r:k, v:k, R:k
 v1 4a np w1 l1 r : kaddq r:k, v:k, R:k
 v1 4b np w0 l1 r : kunpckwd r:k, v:k, R:k
 v1 4b np w1 l1 r : kunpckdq r:k, v:k, R:k
-v1 50 np l1 r : vmovmskps r:d, R:ymm ; novvvv
 v1 50 np l0 r : vmovmskps r:d, R:x ; novvvv
-v1 51 np l1 : vsqrtps r:ymm, m:ymm ; novvvv
+v1 50 np l1 r : vmovmskps r:d, R:ymm ; novvvv
 v1 51 np l0 : vsqrtps r:x, m:x ; novvvv
-v1 52 np l1 : vrsqrtps r:ymm, m:ymm ; novvvv
+v1 51 np l1 : vsqrtps r:ymm, m:ymm ; novvvv
 v1 52 np l0 : vrsqrtps r:x, m:x ; novvvv
-v1 53 np l1 : vrcpps r:ymm, m:ymm ; novvvv
+v1 52 np l1 : vrsqrtps r:ymm, m:ymm ; novvvv
 v1 53 np l0 : vrcpps r:x, m:x ; novvvv
-v1 54 np l1 : vandps r:ymm, v:ymm, m:ymm
+v1 53 np l1 : vrcpps r:ymm, m:ymm ; novvvv
 v1 54 np l0 : vandps r:x, v:x, m:x
-v1 55 np l1 : vandnps r:ymm, v:ymm, m:ymm
+v1 54 np l1 : vandps r:ymm, v:ymm, m:ymm
 v1 55 np l0 : vandnps r:x, v:x, m:x
-v1 56 np l1 : vorps r:ymm, v:ymm, m:ymm
+v1 55 np l1 : vandnps r:ymm, v:ymm, m:ymm
 v1 56 np l0 : vorps r:x, v:x, m:x
-v1 57 np l1 : vxorps r:ymm, v:ymm, m:ymm
+v1 56 np l1 : vorps r:ymm, v:ymm, m:ymm
 v1 57 np l0 : vxorps r:x, v:x, m:x
-v1 58 np l1 : vaddps r:ymm, v:ymm, m:ymm
+v1 57 np l1 : vxorps r:ymm, v:ymm, m:ymm
 v1 58 np l0 : vaddps r:x, v:x, m:x
-v1 59 np l1 : vmulps r:ymm, v:ymm, m:ymm
+v1 58 np l1 : vaddps r:ymm, v:ymm, m:ymm
 v1 59 np l0 : vmulps r:x, v:x, m:x
-v1 5a np l1 : vcvtps2pd r:ymm, m:x ; novvvv
+v1 59 np l1 : vmulps r:ymm, v:ymm, m:ymm
 v1 5a np l0 : vcvtps2pd r:x, m:x/q ; novvvv
-v1 5b np l1 : vcvtdq2ps r:ymm, m:ymm ; novvvv
+v1 5a np l1 : vcvtps2pd r:ymm, m:x ; novvvv
 v1 5b np l0 : vcvtdq2ps r:x, m:x ; novvvv
-v1 5c np l1 : vsubps r:ymm, v:ymm, m:ymm
+v1 5b np l1 : vcvtdq2ps r:ymm, m:ymm ; novvvv
 v1 5c np l0 : vsubps r:x, v:x, m:x
-v1 5d np l1 : vminps r:ymm, v:ymm, m:ymm
+v1 5c np l1 : vsubps r:ymm, v:ymm, m:ymm
 v1 5d np l0 : vminps r:x, v:x, m:x
-v1 5e np l1 : vdivps r:ymm, v:ymm, m:ymm
+v1 5d np l1 : vminps r:ymm, v:ymm, m:ymm
 v1 5e np l0 : vdivps r:x, v:x, m:x
-v1 5f np l1 : vmaxps r:ymm, v:ymm, m:ymm
+v1 5e np l1 : vdivps r:ymm, v:ymm, m:ymm
 v1 5f np l0 : vmaxps r:x, v:x, m:x
-v1 77 np l1 : vzeroall ; novvvv
+v1 5f np l1 : vmaxps r:ymm, v:ymm, m:ymm
 v1 77 np l0 : vzeroupper ; novvvv
-v1 90 np w1 l0 : kmovq r:k, m:k/q ; novvvv
+v1 77 np l1 : vzeroall ; novvvv
 v1 90 np w0 l0 : kmovw r:k, m:k/w ; novvvv
-v1 91 np w1 l0 m : kmovq M:/q, r:k ; novvvv
+v1 90 np w1 l0 : kmovq r:k, m:k/q ; novvvv
 v1 91 np w0 l0 m : kmovw M:/w, r:k ; novvvv
+v1 91 np w1 l0 m : kmovq M:/q, r:k ; novvvv
 v1 92 np w0 l0 r : kmovw r:k, R:d ; novvvv
 v1 93 np w0 l0 r : kmovw r:d, R:k ; novvvv
-v1 98 np w1 l0 r : kortestq r:k, R:k ; novvvv
 v1 98 np w0 l0 r : kortestw r:k, R:k ; novvvv
-v1 99 np w1 l0 r : ktestq r:k, R:k ; novvvv
+v1 98 np w1 l0 r : kortestq r:k, R:k ; novvvv
 v1 99 np w0 l0 r : ktestw r:k, R:k ; novvvv
+v1 99 np w1 l0 r : ktestq r:k, R:k ; novvvv
 v1 ae np l0 /2 m : vldmxcsr M:/d ; novvvv
 v1 ae np l0 /3 m : vstmxcsr M:/d ; novvvv
 v1 c2 np l0 : vcmpps r:x, v:x, m:x, i:b ; cmp32
@@ -111,20 +111,20 @@ v1 2b 66 l0 m : vmovntpd M:/x, r:x ; novvvv
 v1 2b 66 l1 m : vmovntpd M:/ymm, r:ymm ; novvvv
 v1 2e 66 : vucomisd r:x, m:x/q ; novvvv
 v1 2f 66 : vcomisd r:x, m:x/q ; novvvv
-v1 41 66 w1 l1 r : kandd r:k, v:k, R:k
 v1 41 66 w0 l1 r : kandb r:k, v:k, R:k
-v1 42 66 w1 l1 r : kandnd r:k, v:k, R:k
+v1 41 66 w1 l1 r : kandd r:k, v:k, R:k
 v1 42 66 w0 l1 r : kandnb r:k, v:k, R:k
+v1 42 66 w1 l1 r : kandnd r:k, v:k, R:k
 v1 44 66 w0 l0 r : knotb r:k, R:k ; novvvv
 v1 44 66 w1 l0 r : knotd r:k, R:k ; novvvv
-v1 45 66 w1 l1 r : kord r:k, v:k, R:k
 v1 45 66 w0 l1 r : korb r:k, v:k, R:k
-v1 46 66 w1 l1 r : kxnord r:k, v:k, R:k
+v1 45 66 w1 l1 r : kord r:k, v:k, R:k
 v1 46 66 w0 l1 r : kxnorb r:k, v:k, R:k
-v1 47 66 w1 l1 r : kxord r:k, v:k, R:k
+v1 46 66 w1 l1 r : kxnord r:k, v:k, R:k
 v1 47 66 w0 l1 r : kxorb r:k, v:k, R:k
-v1 4a 66 w1 l1 r : kaddd r:k, v:k, R:k
+v1 47 66 w1 l1 r : kxord r:k, v:k, R:k
 v1 4a 66 w0 l1 r : kaddb r:k, v:k, R:k
+v1 4a 66 w1 l1 r : kaddd r:k, v:k, R:k
 v1 4b 66 w0 l1 r : kunpckbw r:k, v:k, R:k
 v1 50 66 l0 r : vmovmskpd r:d, R:x ; novvvv
 v1 50 66 l1 r : vmovmskpd r:d, R:ymm ; novvvv
@@ -363,8 +363,8 @@ v1 10 f2 r : vmovsd r:x, v:x, R:x
 v1 10 f2 m : vmovsd r:x, M:/q ; novvvv
 v1 11 f2 r : vmovsd R:x, v:x, r:x
 v1 11 f2 m : vmovsd M:/q, r:x ; novvvv
-v1 12 f2 l1 : vmovddup r:ymm, m:ymm ; novvvv
 v1 12 f2 l0 : vmovddup r:x, m:x/q ; novvvv
+v1 12 f2 l1 : vmovddup r:ymm, m:ymm ; novvvv
 v1 2a f2 mode32 : vcvtsi2sd r:x, v:x, m:d
 v1 2c f2 mode32 : vcvttsd2si r:d, m:x/q ; novvvv
 v1 2d f2 mode32 : vcvtsd2si r:d, m:x/q ; novvvv
@@ -387,136 +387,136 @@ v1 92 f2 w1 l0 r : kmovq r:k, R:q ; novvvv
 v1 93 f2 w0 l0 r : kmovd r:d, R:k ; novvvv
 v1 93 f2 w1 l0 r : kmovq r:q, R:k ; novvvv
 v1 c2 f2 : vcmpsd r:x, v:x, m:x/q, i:b ; cmp32
-v1 d0 f2 l1 : vaddsubps r:ymm, v:ymm, m:ymm
 v1 d0 f2 l0 : vaddsubps r:x, v:x, m:x
-v1 e6 f2 l1 : vcvtpd2dq r:x, m:ymm ; novvvv
+v1 d0 f2 l1 : vaddsubps r:ymm, v:ymm, m:ymm
 v1 e6 f2 l0 : vcvtpd2dq r:x, m:x ; novvvv
-v1 f0 f2 l1 m : vlddqu r:ymm, M:/ymm ; novvvv
+v1 e6 f2 l1 : vcvtpd2dq r:x, m:ymm ; novvvv
 v1 f0 f2 l0 m : vlddqu r:x, M:/x ; novvvv
+v1 f0 f2 l1 m : vlddqu r:ymm, M:/ymm ; novvvv
 v2 f2 np mode32 l0 : andn r:d, v:d, m:d
 v2 f3 np mode32 l0 /1 : blsr v:d, m:d
 v2 f3 np mode32 l0 /2 : blsmsk v:d, m:d
 v2 f3 np mode32 l0 /3 : blsi v:d, m:d
 v2 f5 np mode32 l0 : bzhi r:d, m:d, v:d
 v2 f7 np mode32 l0 : bextr r:d, m:d, v:d
-v2 00 66 l1 : vpshufb r:ymm, v:ymm, m:ymm
 v2 00 66 l0 : vpshufb r:x, v:x, m:x
-v2 01 66 l1 : vphaddw r:ymm, v:ymm, m:ymm
+v2 00 66 l1 : vpshufb r:ymm, v:ymm, m:ymm
 v2 01 66 l0 : vphaddw r:x, v:x, m:x
-v2 02 66 l1 : vphaddd r:ymm, v:ymm, m:ymm
+v2 01 66 l1 : vphaddw r:ymm, v:ymm, m:ymm
 v2 02 66 l0 : vphaddd r:x, v:x, m:x
-v2 03 66 l1 : vphaddsw r:ymm, v:ymm, m:ymm
+v2 02 66 l1 : vphaddd r:ymm, v:ymm, m:ymm
 v2 03 66 l0 : vphaddsw r:x, v:x, m:x
-v2 04 66 l1 : vpmaddubsw r:ymm, v:ymm, m:ymm
+v2 03 66 l1 : vphaddsw r:ymm, v:ymm, m:ymm
 v2 04 66 l0 : vpmaddubsw r:x, v:x, m:x
-v2 05 66 l1 : vphsubw r:ymm, v:ymm, m:ymm
+v2 04 66 l1 : vpmaddubsw r:ymm, v:ymm, m:ymm
 v2 05 66 l0 : vphsubw r:x, v:x, m:x
-v2 06 66 w0 l1 : vphsubd r:ymm, v:ymm, m:ymm
+v2 05 66 l1 : vphsubw r:ymm, v:ymm, m:ymm
 v2 06 66 w0 l0 : vphsubd r:x, v:x, m:x
-v2 07 66 l1 : vphsubsw r:ymm, v:ymm, m:ymm
+v2 06 66 w0 l1 : vphsubd r:ymm, v:ymm, m:ymm
 v2 07 66 l0 : vphsubsw r:x, v:x, m:x
-v2 08 66 l1 : vpsignb r:ymm, v:ymm, m:ymm
+v2 07 66 l1 : vphsubsw r:ymm, v:ymm, m:ymm
 v2 08 66 l0 : vpsignb r:x, v:x, m:x
-v2 09 66 l1 : vpsignw r:ymm, v:ymm, m:ymm
+v2 08 66 l1 : vpsignb r:ymm, v:ymm, m:ymm
 v2 09 66 l0 : vpsignw r:x, v:x, m:x
-v2 0a 66 l1 : vpsignd r:ymm, v:ymm, m:ymm
+v2 09 66 l1 : vpsignw r:ymm, v:ymm, m:ymm
 v2 0a 66 l0 : vpsignd r:x, v:x, m:x
-v2 0b 66 l1 : vpmulhrsw r:ymm, v:ymm, m:ymm
+v2 0a 66 l1 : vpsignd r:ymm, v:ymm, m:ymm
 v2 0b 66 l0 : vpmulhrsw r:x, v:x, m:x
-v2 0c 66 w0 l1 : vpermilps r:ymm, v:ymm, m:ymm
+v2 0b 66 l1 : vpmulhrsw r:ymm, v:ymm, m:ymm
 v2 0c 66 w0 l0 : vpermilps r:x, v:x, m:x
-v2 0d 66 w0 l1 : vpermilpd r:ymm, v:ymm, m:ymm
+v2 0c 66 w0 l1 : vpermilps r:ymm, v:ymm, m:ymm
 v2 0d 66 w0 l0 : vpermilpd r:x, v:x, m:x
-v2 0e 66 w0 l1 : vtestps r:ymm, m:ymm ; novvvv
+v2 0d 66 w0 l1 : vpermilpd r:ymm, v:ymm, m:ymm
 v2 0e 66 w0 l0 : vtestps r:x, m:x ; novvvv
-v2 0f 66 w0 l1 : vtestpd r:ymm, m:ymm ; novvvv
+v2 0e 66 w0 l1 : vtestps r:ymm, m:ymm ; novvvv
 v2 0f 66 w0 l0 : vtestpd r:x, m:x ; novvvv
-v2 13 66 w0 l1 : vcvtph2ps r:ymm, m:x ; novvvv
+v2 0f 66 w0 l1 : vtestpd r:ymm, m:ymm ; novvvv
 v2 13 66 w0 l0 : vcvtph2ps r:x, m:x/q ; novvvv
+v2 13 66 w0 l1 : vcvtph2ps r:ymm, m:x ; novvvv
 v2 16 66 w0 l1 : vpermps r:ymm, v:ymm, m:ymm
-v2 17 66 l1 : vptest r:ymm, m:ymm ; novvvv
 v2 17 66 l0 : vptest r:x, m:x ; novvvv
-v2 18 66 w0 l1 : vbroadcastss r:ymm, m:x/d ; novvvv
+v2 17 66 l1 : vptest r:ymm, m:ymm ; novvvv
 v2 18 66 w0 l0 : vbroadcastss r:x, m:x/d ; novvvv
+v2 18 66 w0 l1 : vbroadcastss r:ymm, m:x/d ; novvvv
 v2 19 66 w0 l1 : vbroadcastsd r:ymm, m:x/q ; novvvv
 v2 1a 66 w0 l1 m : vbroadcastf128 r:ymm, M:/x ; novvvv
-v2 1c 66 l1 : vpabsb r:ymm, m:ymm ; novvvv
 v2 1c 66 l0 : vpabsb r:x, m:x ; novvvv
-v2 1d 66 l1 : vpabsw r:ymm, m:ymm ; novvvv
+v2 1c 66 l1 : vpabsb r:ymm, m:ymm ; novvvv
 v2 1d 66 l0 : vpabsw r:x, m:x ; novvvv
-v2 1e 66 l1 : vpabsd r:ymm, m:ymm ; novvvv
+v2 1d 66 l1 : vpabsw r:ymm, m:ymm ; novvvv
 v2 1e 66 l0 : vpabsd r:x, m:x ; novvvv
-v2 20 66 l1 : vpmovsxbw r:ymm, m:x ; novvvv
+v2 1e 66 l1 : vpabsd r:ymm, m:ymm ; novvvv
 v2 20 66 l0 : vpmovsxbw r:x, m:x/q ; novvvv
-v2 21 66 l1 : vpmovsxbd r:ymm, m:x/q ; novvvv
+v2 20 66 l1 : vpmovsxbw r:ymm, m:x ; novvvv
 v2 21 66 l0 : vpmovsxbd r:x, m:x/d ; novvvv
-v2 22 66 l1 : vpmovsxbq r:ymm, m:x/d ; novvvv
+v2 21 66 l1 : vpmovsxbd r:ymm, m:x/q ; novvvv
 v2 22 66 l0 : vpmovsxbq r:x, m:x/w ; novvvv
-v2 23 66 l1 : vpmovsxwd r:ymm, m:x ; novvvv
+v2 22 66 l1 : vpmovsxbq r:ymm, m:x/d ; novvvv
 v2 23 66 l0 : vpmovsxwd r:x, m:x/q ; novvvv
-v2 24 66 l1 : vpmovsxwq r:ymm, m:x/q ; novvvv
+v2 23 66 l1 : vpmovsxwd r:ymm, m:x ; novvvv
 v2 24 66 l0 : vpmovsxwq r:x, m:x/d ; novvvv
-v2 25 66 l1 : vpmovsxdq r:ymm, m:x ; novvvv
+v2 24 66 l1 : vpmovsxwq r:ymm, m:x/q ; novvvv
 v2 25 66 l0 : vpmovsxdq r:x, m:x/q ; novvvv
-v2 28 66 l1 : vpmuldq r:ymm, v:ymm, m:ymm
+v2 25 66 l1 : vpmovsxdq r:ymm, m:x ; novvvv
 v2 28 66 l0 : vpmuldq r:x, v:x, m:x
-v2 29 66 l1 : vpcmpeqq r:ymm, v:ymm, m:ymm
+v2 28 66 l1 : vpmuldq r:ymm, v:ymm, m:ymm
 v2 29 66 l0 : vpcmpeqq r:x, v:x, m:x
-v2 2a 66 l1 m : vmovntdqa r:ymm, M:/ymm ; novvvv
+v2 29 66 l1 : vpcmpeqq r:ymm, v:ymm, m:ymm
 v2 2a 66 l0 m : vmovntdqa r:x, M:/x ; novvvv
-v2 2b 66 w0 l1 : vpackusdw r:ymm, v:ymm, m:ymm
+v2 2a 66 l1 m : vmovntdqa r:ymm, M:/ymm ; novvvv
 v2 2b 66 w0 l0 : vpackusdw r:x, v:x, m:x
-v2 2c 66 w0 l1 m : vmaskmovps r:ymm, v:ymm, M:/ymm
+v2 2b 66 w0 l1 : vpackusdw r:ymm, v:ymm, m:ymm
 v2 2c 66 w0 l0 m : vmaskmovps r:x, v:x, M:/x
-v2 2d 66 w0 l1 m : vmaskmovpd r:ymm, v:ymm, M:/ymm
+v2 2c 66 w0 l1 m : vmaskmovps r:ymm, v:ymm, M:/ymm
 v2 2d 66 w0 l0 m : vmaskmovpd r:x, v:x, M:/x
-v2 2e 66 w0 l1 m : vmaskmovps M:/ymm, v:ymm, r:ymm
+v2 2d 66 w0 l1 m : vmaskmovpd r:ymm, v:ymm, M:/ymm
 v2 2e 66 w0 l0 m : vmaskmovps M:/x, v:x, r:x
-v2 2f 66 w0 l1 m : vmaskmovpd M:/ymm, v:ymm, r:ymm
+v2 2e 66 w0 l1 m : vmaskmovps M:/ymm, v:ymm, r:ymm
 v2 2f 66 w0 l0 m : vmaskmovpd M:/x, v:x, r:x
-v2 30 66 l1 : vpmovzxbw r:ymm, m:x ; novvvv
+v2 2f 66 w0 l1 m : vmaskmovpd M:/ymm, v:ymm, r:ymm
 v2 30 66 l0 : vpmovzxbw r:x, m:x/q ; novvvv
-v2 31 66 l1 : vpmovzxbd r:ymm, m:x/q ; novvvv
+v2 30 66 l1 : vpmovzxbw r:ymm, m:x ; novvvv
 v2 31 66 l0 : vpmovzxbd r:x, m:x/d ; novvvv
-v2 32 66 l1 : vpmovzxbq r:ymm, m:x/d ; novvvv
+v2 31 66 l1 : vpmovzxbd r:ymm, m:x/q ; novvvv
 v2 32 66 l0 : vpmovzxbq r:x, m:x/w ; novvvv
-v2 33 66 l1 : vpmovzxwd r:ymm, m:x ; novvvv
+v2 32 66 l1 : vpmovzxbq r:ymm, m:x/d ; novvvv
 v2 33 66 l0 : vpmovzxwd r:x, m:x/q ; novvvv
-v2 34 66 l1 : vpmovzxwq r:ymm, m:x/q ; novvvv
+v2 33 66 l1 : vpmovzxwd r:ymm, m:x ; novvvv
 v2 34 66 l0 : vpmovzxwq r:x, m:x/d ; novvvv
-v2 35 66 l1 : vpmovzxdq r:ymm, m:x ; novvvv
+v2 34 66 l1 : vpmovzxwq r:ymm, m:x/q ; novvvv
 v2 35 66 l0 : vpmovzxdq r:x, m:x/q ; novvvv
+v2 35 66 l1 : vpmovzxdq r:ymm, m:x ; novvvv
 v2 36 66 w0 l1 : vpermd r:ymm, v:ymm, m:ymm
-v2 37 66 l1 : vpcmpgtq r:ymm, v:ymm, m:ymm
 v2 37 66 l0 : vpcmpgtq r:x, v:x, m:x
-v2 38 66 l1 : vpminsb r:ymm, v:ymm, m:ymm
+v2 37 66 l1 : vpcmpgtq r:ymm, v:ymm, m:ymm
 v2 38 66 l0 : vpminsb r:x, v:x, m:x
-v2 39 66 l1 : vpminsd r:ymm, v:ymm, m:ymm
+v2 38 66 l1 : vpminsb r:ymm, v:ymm, m:ymm
 v2 39 66 l0 : vpminsd r:x, v:x, m:x
-v2 3a 66 l1 : vpminuw r:ymm, v:ymm, m:ymm
+v2 39 66 l1 : vpminsd r:ymm, v:ymm, m:ymm
 v2 3a 66 l0 : vpminuw r:x, v:x, m:x
-v2 3b 66 l1 : vpminud r:ymm, v:ymm, m:ymm
+v2 3a 66 l1 : vpminuw r:ymm, v:ymm, m:ymm
 v2 3b 66 l0 : vpminud r:x, v:x, m:x
-v2 3c 66 l1 : vpmaxsb r:ymm, v:ymm, m:ymm
+v2 3b 66 l1 : vpminud r:ymm, v:ymm, m:ymm
 v2 3c 66 l0 : vpmaxsb r:x, v:x, m:x
-v2 3d 66 l1 : vpmaxsd r:ymm, v:ymm, m:ymm
+v2 3c 66 l1 : vpmaxsb r:ymm, v:ymm, m:ymm
 v2 3d 66 l0 : vpmaxsd r:x, v:x, m:x
-v2 3e 66 l1 : vpmaxuw r:ymm, v:ymm, m:ymm
+v2 3d 66 l1 : vpmaxsd r:ymm, v:ymm, m:ymm
 v2 3e 66 l0 : vpmaxuw r:x, v:x, m:x
-v2 3f 66 l1 : vpmaxud r:ymm, v:ymm, m:ymm
+v2 3e 66 l1 : vpmaxuw r:ymm, v:ymm, m:ymm
 v2 3f 66 l0 : vpmaxud r:x, v:x, m:x
+v2 3f 66 l1 : vpmaxud r:ymm, v:ymm, m:ymm
 v2 40 66 l0 : vpmulld r:x, v:x, m:x
 v2 40 66 l1 : vpmulld r:ymm, v:ymm, m:ymm
 v2 41 66 l0 : vphminposuw r:x, m:x ; novvvv
 v2 45 66 w0 l0 : vpsrlvd r:x, v:x, m:x
-v2 45 66 w1 l0 : vpsrlvq r:x, v:x, m:x
 v2 45 66 w0 l1 : vpsrlvd r:ymm, v:ymm, m:ymm
+v2 45 66 w1 l0 : vpsrlvq r:x, v:x, m:x
 v2 45 66 w1 l1 : vpsrlvq r:ymm, v:ymm, m:ymm
 v2 46 66 w0 l0 : vpsravd r:x, v:x, m:x
 v2 46 66 w0 l1 : vpsravd r:ymm, v:ymm, m:ymm
 v2 47 66 w0 l0 : vpsllvd r:x, v:x, m:x
-v2 47 66 w1 l0 : vpsllvq r:x, v:x, m:x
 v2 47 66 w0 l1 : vpsllvd r:ymm, v:ymm, m:ymm
+v2 47 66 w1 l0 : vpsllvq r:x, v:x, m:x
 v2 47 66 w1 l1 : vpsllvq r:ymm, v:ymm, m:ymm
 v2 58 66 w0 l0 : vpbroadcastd r:x, m:x/d ; novvvv
 v2 58 66 w0 l1 : vpbroadcastd r:ymm, m:x/d ; novvvv
@@ -529,135 +529,135 @@ v2 79 66 w0 l0 : vpbroadcastw r:x, m:x/w ; novvvv
 v2 79 66 w0 l1 : vpbroadcastw r:ymm, m:x/w ; novvvv
 v2 8c 66 w0 l0 m : vpmaskmovd r:x, v:x, M:/x
 v2 8c 66 w0 l1 m : vpmaskmovd r:ymm, v:ymm, M:/ymm
-v2 8c 66 w1 l1 m : vpmaskmovq r:ymm, v:ymm, M:/ymm
 v2 8c 66 w1 l0 m : vpmaskmovq r:x, v:x, M:/x
+v2 8c 66 w1 l1 m : vpmaskmovq r:ymm, v:ymm, M:/ymm
 v2 8e 66 w0 l0 m : vpmaskmovd M:/x, v:x, r:x
 v2 8e 66 w0 l1 m : vpmaskmovd M:/ymm, v:ymm, r:ymm
-v2 8e 66 w1 l1 m : vpmaskmovq M:/ymm, v:ymm, r:ymm
 v2 8e 66 w1 l0 m : vpmaskmovq M:/x, v:x, r:x
+v2 8e 66 w1 l1 m : vpmaskmovq M:/ymm, v:ymm, r:ymm
 v2 90 66 w0 l0 m : vpgatherdd r:x, Vs:x/x, v:x
 v2 90 66 w0 l1 m : vpgatherdd r:ymm, Vs:ymm/ymm, v:ymm
-v2 90 66 w1 l1 m : vpgatherdq r:ymm, Vs:x/ymm, v:ymm
 v2 90 66 w1 l0 m : vpgatherdq r:x, Vs:x/x, v:x
+v2 90 66 w1 l1 m : vpgatherdq r:ymm, Vs:x/ymm, v:ymm
 v2 91 66 w0 l0 m : vpgatherqd r:x, Vs:x/q, v:x
 v2 91 66 w0 l1 m : vpgatherqd r:x, Vs:ymm/x, v:x
-v2 91 66 w1 l1 m : vpgatherqq r:ymm, Vs:ymm/ymm, v:ymm
 v2 91 66 w1 l0 m : vpgatherqq r:x, Vs:x/x, v:x
+v2 91 66 w1 l1 m : vpgatherqq r:ymm, Vs:ymm/ymm, v:ymm
 v2 92 66 w0 l0 m : vgatherdps r:x, Vs:x/x, v:x
 v2 92 66 w0 l1 m : vgatherdps r:ymm, Vs:ymm/ymm, v:ymm
-v2 92 66 w1 l1 m : vgatherdpd r:ymm, Vs:x/ymm, v:ymm
 v2 92 66 w1 l0 m : vgatherdpd r:x, Vs:x/x, v:x
+v2 92 66 w1 l1 m : vgatherdpd r:ymm, Vs:x/ymm, v:ymm
 v2 93 66 w0 l0 m : vgatherqps r:x, Vs:x/q, v:x
 v2 93 66 w0 l1 m : vgatherqps r:x, Vs:ymm/x, v:x
-v2 93 66 w1 l1 m : vgatherqpd r:ymm, Vs:ymm/ymm, v:ymm
 v2 93 66 w1 l0 m : vgatherqpd r:x, Vs:x/x, v:x
+v2 93 66 w1 l1 m : vgatherqpd r:ymm, Vs:ymm/ymm, v:ymm
 v2 96 66 w0 l0 : vfmaddsub132ps r:x, v:x, m:x
 v2 96 66 w0 l1 : vfmaddsub132ps r:ymm, v:ymm, m:ymm
-v2 96 66 w1 l1 : vfmaddsub132pd r:ymm, v:ymm, m:ymm
 v2 96 66 w1 l0 : vfmaddsub132pd r:x, v:x, m:x
+v2 96 66 w1 l1 : vfmaddsub132pd r:ymm, v:ymm, m:ymm
 v2 97 66 w0 l0 : vfmsubadd132ps r:x, v:x, m:x
 v2 97 66 w0 l1 : vfmsubadd132ps r:ymm, v:ymm, m:ymm
-v2 97 66 w1 l1 : vfmsubadd132pd r:ymm, v:ymm, m:ymm
 v2 97 66 w1 l0 : vfmsubadd132pd r:x, v:x, m:x
+v2 97 66 w1 l1 : vfmsubadd132pd r:ymm, v:ymm, m:ymm
 v2 98 66 w0 l0 : vfmadd132ps r:x, v:x, m:x
 v2 98 66 w0 l1 : vfmadd132ps r:ymm, v:ymm, m:ymm
-v2 98 66 w1 l1 : vfmadd132pd r:ymm, v:ymm, m:ymm
 v2 98 66 w1 l0 : vfmadd132pd r:x, v:x, m:x
+v2 98 66 w1 l1 : vfmadd132pd r:ymm, v:ymm, m:ymm
 v2 99 66 w0 : vfmadd132ss r:x, v:x, m:x/d
 v2 99 66 w1 : vfmadd132sd r:x, v:x, m:x/q
 v2 9a 66 w0 l0 : vfmsub132ps r:x, v:x, m:x
 v2 9a 66 w0 l1 : vfmsub132ps r:ymm, v:ymm, m:ymm
-v2 9a 66 w1 l1 : vfmsub132pd r:ymm, v:ymm, m:ymm
 v2 9a 66 w1 l0 : vfmsub132pd r:x, v:x, m:x
+v2 9a 66 w1 l1 : vfmsub132pd r:ymm, v:ymm, m:ymm
 v2 9b 66 w0 : vfmsub132ss r:x, v:x, m:x/d
 v2 9b 66 w1 : vfmsub132sd r:x, v:x, m:x/q
 v2 9c 66 w0 l0 : vfnmadd132ps r:x, v:x, m:x
 v2 9c 66 w0 l1 : vfnmadd132ps r:ymm, v:ymm, m:ymm
-v2 9c 66 w1 l1 : vfnmadd132pd r:ymm, v:ymm, m:ymm
 v2 9c 66 w1 l0 : vfnmadd132pd r:x, v:x, m:x
+v2 9c 66 w1 l1 : vfnmadd132pd r:ymm, v:ymm, m:ymm
 v2 9d 66 w0 : vfnmadd132ss r:x, v:x, m:x/d
 v2 9d 66 w1 : vfnmadd132sd r:x, v:x, m:x/q
 v2 9e 66 w0 l0 : vfnmsub132ps r:x, v:x, m:x
 v2 9e 66 w0 l1 : vfnmsub132ps r:ymm, v:ymm, m:ymm
-v2 9e 66 w1 l1 : vfnmsub132pd r:ymm, v:ymm, m:ymm
 v2 9e 66 w1 l0 : vfnmsub132pd r:x, v:x, m:x
+v2 9e 66 w1 l1 : vfnmsub132pd r:ymm, v:ymm, m:ymm
 v2 9f 66 w0 : vfnmsub132ss r:x, v:x, m:x/d
 v2 9f 66 w1 : vfnmsub132sd r:x, v:x, m:x/q
 v2 a6 66 w0 l0 : vfmaddsub213ps r:x, v:x, m:x
 v2 a6 66 w0 l1 : vfmaddsub213ps r:ymm, v:ymm, m:ymm
-v2 a6 66 w1 l1 : vfmaddsub213pd r:ymm, v:ymm, m:ymm
 v2 a6 66 w1 l0 : vfmaddsub213pd r:x, v:x, m:x
+v2 a6 66 w1 l1 : vfmaddsub213pd r:ymm, v:ymm, m:ymm
 v2 a7 66 w0 l0 : vfmsubadd213ps r:x, v:x, m:x
 v2 a7 66 w0 l1 : vfmsubadd213ps r:ymm, v:ymm, m:ymm
-v2 a7 66 w1 l1 : vfmsubadd213pd r:ymm, v:ymm, m:ymm
 v2 a7 66 w1 l0 : vfmsubadd213pd r:x, v:x, m:x
+v2 a7 66 w1 l1 : vfmsubadd213pd r:ymm, v:ymm, m:ymm
 v2 a8 66 w0 l0 : vfmadd213ps r:x, v:x, m:x
 v2 a8 66 w0 l1 : vfmadd213ps r:ymm, v:ymm, m:ymm
-v2 a8 66 w1 l1 : vfmadd213pd r:ymm, v:ymm, m:ymm
 v2 a8 66 w1 l0 : vfmadd213pd r:x, v:x, m:x
+v2 a8 66 w1 l1 : vfmadd213pd r:ymm, v:ymm, m:ymm
 v2 a9 66 w0 : vfmadd213ss r:x, v:x, m:x/d
 v2 a9 66 w1 : vfmadd213sd r:x, v:x, m:x/q
 v2 aa 66 w0 l0 : vfmsub213ps r:x, v:x, m:x
 v2 aa 66 w0 l1 : vfmsub213ps r:ymm, v:ymm, m:ymm
-v2 aa 66 w1 l1 : vfmsub213pd r:ymm, v:ymm, m:ymm
 v2 aa 66 w1 l0 : vfmsub213pd r:x, v:x, m:x
+v2 aa 66 w1 l1 : vfmsub213pd r:ymm, v:ymm, m:ymm
 v2 ab 66 w0 : vfmsub213ss r:x, v:x, m:x/d
 v2 ab 66 w1 : vfmsub213sd r:x, v:x, m:x/q
 v2 ac 66 w0 l0 : vfnmadd213ps r:x, v:x, m:x
 v2 ac 66 w0 l1 : vfnmadd213ps r:ymm, v:ymm, m:ymm
-v2 ac 66 w1 l1 : vfnmadd213pd r:ymm, v:ymm, m:ymm
 v2 ac 66 w1 l0 : vfnmadd213pd r:x, v:x, m:x
+v2 ac 66 w1 l1 : vfnmadd213pd r:ymm, v:ymm, m:ymm
 v2 ad 66 w0 : vfnmadd213ss r:x, v:x, m:x/d
 v2 ad 66 w1 : vfnmadd213sd r:x, v:x, m:x/q
 v2 ae 66 w0 l0 : vfnmsub213ps r:x, v:x, m:x
 v2 ae 66 w0 l1 : vfnmsub213ps r:ymm, v:ymm, m:ymm
-v2 ae 66 w1 l1 : vfnmsub213pd r:ymm, v:ymm, m:ymm
 v2 ae 66 w1 l0 : vfnmsub213pd r:x, v:x, m:x
+v2 ae 66 w1 l1 : vfnmsub213pd r:ymm, v:ymm, m:ymm
 v2 af 66 w0 : vfnmsub213ss r:x, v:x, m:x/d
 v2 af 66 w1 : vfnmsub213sd r:x, v:x, m:x/q
 v2 b6 66 w0 l0 : vfmaddsub231ps r:x, v:x, m:x
 v2 b6 66 w0 l1 : vfmaddsub231ps r:ymm, v:ymm, m:ymm
-v2 b6 66 w1 l1 : vfmaddsub231pd r:ymm, v:ymm, m:ymm
 v2 b6 66 w1 l0 : vfmaddsub231pd r:x, v:x, m:x
+v2 b6 66 w1 l1 : vfmaddsub231pd r:ymm, v:ymm, m:ymm
 v2 b7 66 w0 l0 : vfmsubadd231ps r:x, v:x, m:x
 v2 b7 66 w0 l1 : vfmsubadd231ps r:ymm, v:ymm, m:ymm
-v2 b7 66 w1 l1 : vfmsubadd231pd r:ymm, v:ymm, m:ymm
 v2 b7 66 w1 l0 : vfmsubadd231pd r:x, v:x, m:x
+v2 b7 66 w1 l1 : vfmsubadd231pd r:ymm, v:ymm, m:ymm
 v2 b8 66 w0 l0 : vfmadd231ps r:x, v:x, m:x
 v2 b8 66 w0 l1 : vfmadd231ps r:ymm, v:ymm, m:ymm
-v2 b8 66 w1 l1 : vfmadd231pd r:ymm, v:ymm, m:ymm
 v2 b8 66 w1 l0 : vfmadd231pd r:x, v:x, m:x
+v2 b8 66 w1 l1 : vfmadd231pd r:ymm, v:ymm, m:ymm
 v2 b9 66 w0 : vfmadd231ss r:x, v:x, m:x/d
 v2 b9 66 w1 : vfmadd231sd r:x, v:x, m:x/q
 v2 ba 66 w0 l0 : vfmsub231ps r:x, v:x, m:x
 v2 ba 66 w0 l1 : vfmsub231ps r:ymm, v:ymm, m:ymm
-v2 ba 66 w1 l1 : vfmsub231pd r:ymm, v:ymm, m:ymm
 v2 ba 66 w1 l0 : vfmsub231pd r:x, v:x, m:x
+v2 ba 66 w1 l1 : vfmsub231pd r:ymm, v:ymm, m:ymm
 v2 bb 66 w0 : vfmsub231ss r:x, v:x, m:x/d
 v2 bb 66 w1 : vfmsub231sd r:x, v:x, m:x/q
 v2 bc 66 w0 l0 : vfnmadd231ps r:x, v:x, m:x
 v2 bc 66 w0 l1 : vfnmadd231ps r:ymm, v:ymm, m:ymm
-v2 bc 66 w1 l1 : vfnmadd231pd r:ymm, v:ymm, m:ymm
 v2 bc 66 w1 l0 : vfnmadd231pd r:x, v:x, m:x
+v2 bc 66 w1 l1 : vfnmadd231pd r:ymm, v:ymm, m:ymm
 v2 bd 66 w0 : vfnmadd231ss r:x, v:x, m:x/d
 v2 bd 66 w1 : vfnmadd231sd r:x, v:x, m:x/q
 v2 be 66 w0 l0 : vfnmsub231ps r:x, v:x, m:x
 v2 be 66 w0 l1 : vfnmsub231ps r:ymm, v:ymm, m:ymm
-v2 be 66 w1 l1 : vfnmsub231pd r:ymm, v:ymm, m:ymm
 v2 be 66 w1 l0 : vfnmsub231pd r:x, v:x, m:x
+v2 be 66 w1 l1 : vfnmsub231pd r:ymm, v:ymm, m:ymm
 v2 bf 66 w0 : vfnmsub231ss r:x, v:x, m:x/d
 v2 bf 66 w1 : vfnmsub231sd r:x, v:x, m:x/q
-v2 cf 66 w0 l1 : vgf2p8mulb r:ymm, v:ymm, m:ymm
 v2 cf 66 w0 l0 : vgf2p8mulb r:x, v:x, m:x
+v2 cf 66 w0 l1 : vgf2p8mulb r:ymm, v:ymm, m:ymm
 v2 db 66 l0 : vaesimc r:x, m:x ; novvvv
-v2 dc 66 l1 : vaesenc r:ymm, v:ymm, m:ymm
 v2 dc 66 l0 : vaesenc r:x, v:x, m:x
-v2 dd 66 l1 : vaesenclast r:ymm, v:ymm, m:ymm
+v2 dc 66 l1 : vaesenc r:ymm, v:ymm, m:ymm
 v2 dd 66 l0 : vaesenclast r:x, v:x, m:x
-v2 de 66 l1 : vaesdec r:ymm, v:ymm, m:ymm
+v2 dd 66 l1 : vaesenclast r:ymm, v:ymm, m:ymm
 v2 de 66 l0 : vaesdec r:x, v:x, m:x
-v2 df 66 l1 : vaesdeclast r:ymm, v:ymm, m:ymm
+v2 de 66 l1 : vaesdec r:ymm, v:ymm, m:ymm
 v2 df 66 l0 : vaesdeclast r:x, v:x, m:x
+v2 df 66 l1 : vaesdeclast r:ymm, v:ymm, m:ymm
 v2 f7 66 mode32 l0 : shlx r:d, m:d, v:d
 v2 f5 f3 mode32 l0 : pext r:d, v:d, m:d
 v2 f7 f3 mode32 l0 : sarx r:d, m:d, v:d
@@ -666,27 +666,27 @@ v2 f6 f2 mode32 l0 : mulx r:d, v:d, m:d
 v2 f7 f2 mode32 l0 : shrx r:d, m:d, v:d
 v3 00 66 w1 l1 : vpermq r:ymm, m:ymm, i:b ; novvvv
 v3 01 66 w1 l1 : vpermpd r:ymm, m:ymm, i:b ; novvvv
-v3 02 66 w0 l1 : vpblendd r:ymm, v:ymm, m:ymm, i:b
 v3 02 66 w0 l0 : vpblendd r:x, v:x, m:x, i:b
-v3 04 66 w0 l1 : vpermilps r:ymm, m:ymm, i:b ; novvvv
+v3 02 66 w0 l1 : vpblendd r:ymm, v:ymm, m:ymm, i:b
 v3 04 66 w0 l0 : vpermilps r:x, m:x, i:b ; novvvv
-v3 05 66 w0 l1 : vpermilpd r:ymm, m:ymm, i:b ; novvvv
+v3 04 66 w0 l1 : vpermilps r:ymm, m:ymm, i:b ; novvvv
 v3 05 66 w0 l0 : vpermilpd r:x, m:x, i:b ; novvvv
+v3 05 66 w0 l1 : vpermilpd r:ymm, m:ymm, i:b ; novvvv
 v3 06 66 w0 l1 : vperm2f128 r:ymm, v:ymm, m:ymm, i:b
-v3 08 66 l1 : vroundps r:ymm, m:ymm, i:b ; novvvv
 v3 08 66 l0 : vroundps r:x, m:x, i:b ; novvvv
-v3 09 66 l1 : vroundpd r:ymm, m:ymm, i:b ; novvvv
+v3 08 66 l1 : vroundps r:ymm, m:ymm, i:b ; novvvv
 v3 09 66 l0 : vroundpd r:x, m:x, i:b ; novvvv
+v3 09 66 l1 : vroundpd r:ymm, m:ymm, i:b ; novvvv
 v3 0a 66 : vroundss r:x, v:x, m:x/d, i:b
 v3 0b 66 : vroundsd r:x, v:x, m:x/q, i:b
-v3 0c 66 l1 : vblendps r:ymm, v:ymm, m:ymm, i:b
 v3 0c 66 l0 : vblendps r:x, v:x, m:x, i:b
-v3 0d 66 l1 : vblendpd r:ymm, v:ymm, m:ymm, i:b
+v3 0c 66 l1 : vblendps r:ymm, v:ymm, m:ymm, i:b
 v3 0d 66 l0 : vblendpd r:x, v:x, m:x, i:b
-v3 0e 66 l1 : vpblendw r:ymm, v:ymm, m:ymm, i:b
+v3 0d 66 l1 : vblendpd r:ymm, v:ymm, m:ymm, i:b
 v3 0e 66 l0 : vpblendw r:x, v:x, m:x, i:b
-v3 0f 66 l1 : vpalignr r:ymm, v:ymm, m:ymm, i:b
+v3 0e 66 l1 : vpblendw r:ymm, v:ymm, m:ymm, i:b
 v3 0f 66 l0 : vpalignr r:x, v:x, m:x, i:b
+v3 0f 66 l1 : vpalignr r:ymm, v:ymm, m:ymm, i:b
 v3 14 66 w0 l0 : vpextrb m:d/b, r:x, i:b ; novvvv
 v3 15 66 w0 l0 : vpextrw m:d/w, r:x, i:b ; novvvv
 v3 16 66 w0 l0 : vpextrd m:d, r:x, i:b ; novvvv
@@ -694,8 +694,8 @@ v3 16 66 w1 l0 : vpextrq m:q, r:x, i:b ; novvvv
 v3 17 66 l0 : vextractps m:d, r:x, i:b ; novvvv
 v3 18 66 w0 l1 : vinsertf128 r:ymm, v:ymm, m:x, i:b
 v3 19 66 w0 l1 : vextractf128 m:x, r:ymm, i:b ; novvvv
-v3 1d 66 w0 l1 : vcvtps2ph m:x, r:ymm, i:b ; novvvv
 v3 1d 66 w0 l0 : vcvtps2ph m:x/q, r:x, i:b ; novvvv
+v3 1d 66 w0 l1 : vcvtps2ph m:x, r:ymm, i:b ; novvvv
 v3 20 66 w0 l0 : vpinsrb r:x, v:x, m:d/b, i:b
 v3 21 66 l0 : vinsertps r:x, v:x, m:x/d, i:b
 v3 22 66 w0 l0 : vpinsrd r:x, v:x, m:d, i:b
@@ -822,18 +822,18 @@ v1 2c f2 mode64 w0 : vcvttsd2si r:d, m:x/q ; novvvv
 v1 2c f2 mode64 w1 : vcvttsd2si r:q, m:x/q ; novvvv
 v1 2d f2 mode64 w0 : vcvtsd2si r:d, m:x/q ; novvvv
 v1 2d f2 mode64 w1 : vcvtsd2si r:q, m:x/q ; novvvv
-v2 f2 np mode64 w1 l0 : andn r:q, v:q, m:q
 v2 f2 np mode64 w0 l0 : andn r:d, v:d, m:d
-v2 f3 np mode64 w1 l0 /1 : blsr v:q, m:q
-v2 f3 np mode64 w1 l0 /2 : blsmsk v:q, m:q
-v2 f3 np mode64 w1 l0 /3 : blsi v:q, m:q
+v2 f2 np mode64 w1 l0 : andn r:q, v:q, m:q
 v2 f3 np mode64 w0 l0 /1 : blsr v:d, m:d
 v2 f3 np mode64 w0 l0 /2 : blsmsk v:d, m:d
 v2 f3 np mode64 w0 l0 /3 : blsi v:d, m:d
-v2 f5 np mode64 w1 l0 : bzhi r:q, m:q, v:q
+v2 f3 np mode64 w1 l0 /1 : blsr v:q, m:q
+v2 f3 np mode64 w1 l0 /2 : blsmsk v:q, m:q
+v2 f3 np mode64 w1 l0 /3 : blsi v:q, m:q
 v2 f5 np mode64 w0 l0 : bzhi r:d, m:d, v:d
-v2 f7 np mode64 w1 l0 : bextr r:q, m:q, v:q
+v2 f5 np mode64 w1 l0 : bzhi r:q, m:q, v:q
 v2 f7 np mode64 w0 l0 : bextr r:d, m:d, v:d
+v2 f7 np mode64 w1 l0 : bextr r:q, m:q, v:q
 v2 f7 66 mode64 w0 l0 : shlx r:d, m:d, v:d
 v2 f7 66 mode64 w1 l0 : shlx r:q, m:q, v:q
 v2 f5 f3 mode64 w0 l0 : pext r:d, v:d, m:d
@@ -858,10 +858,10 @@ x8 96 np w0 l0 : vpmacswd r:x, v:x, m:x, 4:x
 x8 97 np w0 l0 : vpmacsdql r:x, v:x, m:x, 4:x
 x8 9e np w0 l0 : vpmacsdd r:x, v:x, m:x, 4:x
 x8 9f np w0 l0 : vpmacsdqh r:x, v:x, m:x, 4:x
-x8 a2 np w0 l1 : vpcmov r:ymm, v:ymm, m:ymm, 4:ymm
 x8 a2 np w0 l0 : vpcmov r:x, v:x, m:x, 4:x
-x8 a2 np w1 l1 : vpcmov r:ymm, v:ymm, 4:ymm, m:ymm
+x8 a2 np w0 l1 : vpcmov r:ymm, v:ymm, m:ymm, 4:ymm
 x8 a2 np w1 l0 : vpcmov r:x, v:x, 4:x, m:x
+x8 a2 np w1 l1 : vpcmov r:ymm, v:ymm, 4:ymm, m:ymm
 x8 a3 np w0 l0 : vpperm r:x, v:x, m:x, 4:x
 x8 a3 np w1 l0 : vpperm r:x, v:x, 4:x, m:x
 x8 a6 np w0 l0 : vpmadcsswd r:x, v:x, m:x, 4:x
@@ -870,14 +870,14 @@ x8 c0 np w0 l0 : vprotb r:x, m:x, i:b ; novvvv
 x8 c1 np w0 l0 : vprotw r:x, m:x, i:b ; novvvv
 x8 c2 np w0 l0 : vprotd r:x, m:x, i:b ; novvvv
 x8 c3 np w0 l0 : vprotq r:x, m:x, i:b ; novvvv
-x8 cc np w0 l0 : vpcomb r:x, v:x, m:x, i:b
-x8 cd np w0 l0 : vpcomw r:x, v:x, m:x, i:b
-x8 ce np w0 l0 : vpcomd r:x, v:x, m:x, i:b
-x8 cf np w0 l0 : vpcomq r:x, v:x, m:x, i:b
-x8 ec np w0 l0 : vpcomub r:x, v:x, m:x, i:b
-x8 ed np w0 l0 : vpcomuw r:x, v:x, m:x, i:b
-x8 ee np w0 l0 : vpcomud r:x, v:x, m:x, i:b
-x8 ef np w0 l0 : vpcomuq r:x, v:x, m:x, i:b
+x8 cc np w0 l0 : vpcomb r:x, v:x, m:x, i:b ; vpcom
+x8 cd np w0 l0 : vpcomw r:x, v:x, m:x, i:b ; vpcom
+x8 ce np w0 l0 : vpcomd r:x, v:x, m:x, i:b ; vpcom
+x8 cf np w0 l0 : vpcomq r:x, v:x, m:x, i:b ; vpcom
+x8 ec np w0 l0 : vpcomub r:x, v:x, m:x, i:b ; vpcom
+x8 ed np w0 l0 : vpcomuw r:x, v:x, m:x, i:b ; vpcom
+x8 ee np w0 l0 : vpcomud r:x, v:x, m:x, i:b ; vpcom
+x8 ef np w0 l0 : vpcomuq r:x, v:x, m:x, i:b ; vpcom
 x9 01 np mode32 l0 /1 : blcfill v:d, m:d
 x9 01 np mode32 l0 /2 : blsfill v:d, m:d
 x9 01 np mode32 l0 /3 : blcs v:d, m:d
@@ -934,9 +934,9 @@ x9 db np w0 l0 : vphaddudq r:x, m:x ; novvvv
 x9 e1 np w0 l0 : vphsubbw r:x, m:x ; novvvv
 x9 e2 np w0 l0 : vphsubwd r:x, m:x ; novvvv
 x9 e3 np w0 l0 : vphsubdq r:x, m:x ; novvvv
-xa 10 np mode32 l0 : bextr r:d, m:d, i:b ; novvvv
-xa 12 np mode32 l0 /0 : lwpins v:d, m:d, i:b
-xa 12 np mode32 l0 /1 : lwpval v:d, m:d, i:b
+xa 10 np mode32 l0 : bextr r:d, m:d, i:d ; novvvv
+xa 12 np mode32 l0 /0 : lwpins v:d, m:d, i:d
+xa 12 np mode32 l0 /1 : lwpval v:d, m:d, i:d
 x9 01 np mode64 w0 l0 /1 : blcfill v:d, m:d
 x9 01 np mode64 w0 l0 /2 : blsfill v:d, m:d
 x9 01 np mode64 w0 l0 /3 : blcs v:d, m:d
@@ -959,10 +959,10 @@ x9 12 np mode64 w0 l0 /0 r : llwpcb R:d ; novvvv
 x9 12 np mode64 w0 l0 /1 r : slwpcb R:d ; novvvv
 x9 12 np mode64 w1 l0 /0 r : llwpcb R:q ; novvvv
 x9 12 np mode64 w1 l0 /1 r : slwpcb R:q ; novvvv
-xa 10 np mode64 w0 l0 : bextr r:d, m:d, i:b ; novvvv
-xa 10 np mode64 w1 l0 : bextr r:q, m:q, i:b ; novvvv
-xa 12 np mode64 w0 l0 /0 : lwpins v:d, m:d, i:b
-xa 12 np mode64 w0 l0 /1 : lwpval v:d, m:d, i:b
-xa 12 np mode64 w1 l0 /0 : lwpins v:q, m:d, i:b
-xa 12 np mode64 w1 l0 /1 : lwpval v:q, m:d, i:b
+xa 10 np mode64 w0 l0 : bextr r:d, m:d, i:d ; novvvv
+xa 10 np mode64 w1 l0 : bextr r:q, m:q, i:d ; novvvv
+xa 12 np mode64 w0 l0 /0 : lwpins v:d, m:d, i:d
+xa 12 np mode64 w0 l0 /1 : lwpval v:d, m:d, i:d
+xa 12 np mode64 w1 l0 /0 : lwpins v:q, m:d, i:d
+xa 12 np mode64 w1 l0 /1 : lwpval v:q, m:d, i:d
 "#;

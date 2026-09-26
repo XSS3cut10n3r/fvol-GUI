@@ -829,6 +829,74 @@ mod tests {
         assert_eq!(w.names().collect::<Vec<_>>(), ["rdi", "rsi", "rcx"]);
     }
 
+    /// Differential check of regs_access / implicit regs / detail operands / opcode against the
+    /// capstone detail references of `bench/scripts/disasm_detail_diff.py gen` (skipped when
+    /// absent; first 100k lines of the real-code corpora only — run
+    /// `examples/disasm_detail_diff cmp` for everything).
+    #[test]
+    fn disasm_detail_matches_capstone_corpora() {
+        use std::io::BufRead;
+        let dir = std::path::Path::new("/home/user/rs-vol/testdata/scratch/disasm/ref");
+        let names = |l: &RegList| l.names().collect::<Vec<_>>().join(",");
+        let unhex = |s: &str| -> Vec<u8> {
+            (0..s.len() / 2).filter_map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()).collect()
+        };
+        let mut bad = Vec::new();
+        let mut n = 0;
+        for name in ["real64", "real32"] {
+            let Ok(f) = std::fs::File::open(dir.join(format!("{name}.det"))) else {
+                eprintln!("{name}.det not found in {dir:?}; skipping");
+                continue;
+            };
+            for line in std::io::BufReader::new(f).lines().take(100_000) {
+                let Ok(line) = line else { break };
+                let p: Vec<&str> = line.split('\t').collect();
+                if p.len() < 17 {
+                    continue;
+                }
+                let mode = if p[1] == "64" { Mode::X86_64 } else { Mode::X86_32 };
+                let addr = u64::from_str_radix(p[2], 16).unwrap_or(0);
+                let Some(i) = decode(&unhex(p[3]), addr, mode) else {
+                    bad.push(format!("{name} {}: undecodable", p[3]));
+                    continue;
+                };
+                n += 1;
+                let (r, w) = i.regs_access();
+                let (ir, iw) = i.implicit_regs();
+                let opc: String = i.capstone_opcode().iter().map(|b| format!("{b:02x}")).collect();
+                let ops: Vec<String> = i
+                    .detail_operands()
+                    .iter()
+                    .map(|o| {
+                        let reg = |x: Reg| if x.is_none() { "-" } else { i.reg_name(x) };
+                        match o.op {
+                            Operand::Reg(x) => format!("r,{},{},{}", reg(x), o.size, o.access),
+                            Operand::Imm(v) => format!("i,{v},{},{}", o.size, o.access),
+                            Operand::Mem(m) => format!(
+                                "m,{},{},{},{},{},{},{},",
+                                reg(m.segment), reg(m.base), reg(m.index), m.scale, m.disp, o.size, o.access
+                            ),
+                            Operand::None => "?".into(),
+                        }
+                    })
+                    .collect();
+                // capstone's mem operands end with ",BCAST": compare without it
+                let cs_ops: Vec<String> = p[14]
+                    .split('|')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| if s.starts_with("m,") { s[..s.rfind(',').unwrap_or(s.len()) + 1].to_string() } else { s.to_string() })
+                    .collect();
+                let got = [opc, names(&ir), names(&iw), names(&r), names(&w), ops.join("|")];
+                let exp = [p[5], p[10], p[11], p[12], p[13], &cs_ops.join("|")];
+                if got.iter().zip(exp.iter()).any(|(g, e)| g != e) && bad.len() < 20 {
+                    bad.push(format!("{name} {} {} {}:\n  got {:?}\n  exp {:?}", p[3], p[15], p[16], got, exp));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} mismatches vs capstone detail (of {n}):\n{}", bad.len(), bad.join("\n"));
+        assert!(n >= 100_000 || !dir.join("real64.det").exists(), "only {n} instructions checked");
+    }
+
     #[test]
     fn disasm_regs_access_never_panics_on_random_bytes() {
         let mut s = 0x9E37_79B9_7F4A_7C15u64;
