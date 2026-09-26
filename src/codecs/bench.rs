@@ -486,6 +486,11 @@ fn codecs_enc_stream_file() {
             feed(&mut e);
             e.finish().unwrap().flush().unwrap();
         }
+        "xz" => {
+            let mut e = super::xz_enc::XzEncoder::new(out, level);
+            feed(&mut e);
+            e.finish().unwrap().flush().unwrap();
+        }
         _ => panic!("unknown streaming codec {codec}"),
     }
     let dt = t.elapsed().as_secs_f64();
@@ -511,6 +516,16 @@ fn encode(codec: &str, level: u32, data: &[u8]) -> Option<Vec<u8>> {
         "zlib" => super::deflate_enc::zlib_compress(data, level),
         "gzip" => super::gzip_enc::gzip_compress(data, &super::gzip_enc::GzipOptions::python(level, 0)),
         "bz2" => super::bzip2_enc::bzip2_compress(data, level),
+        "xz" => {
+            // CODECS_XZ_BLOCK overrides the block size (bytes).
+            let mut o = super::xz_enc::XzOptions::preset(level);
+            if let Some(b) = std::env::var("CODECS_XZ_BLOCK").ok().and_then(|v| v.parse().ok()) {
+                o.block_size = b;
+            }
+            let mut e = super::xz_enc::XzEncoder::with_options(Vec::new(), o);
+            std::io::Write::write_all(&mut e, data).unwrap();
+            e.finish().unwrap()
+        }
         _ => return None,
     })
 }
