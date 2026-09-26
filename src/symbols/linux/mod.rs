@@ -29,6 +29,7 @@
 //!
 //! `use crate::symbols::linux::prelude::*;` brings every extension trait into scope.
 
+pub mod bash;
 pub mod caps;
 pub mod elf;
 pub mod ext;
