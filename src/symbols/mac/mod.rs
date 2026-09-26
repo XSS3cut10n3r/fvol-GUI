@@ -22,6 +22,10 @@ use crate::error::{Error, Result};
 use crate::objects::{LayerRef, Obj};
 use crate::util::FxHashSet;
 
+pub mod files; // MacUtilities.files_descriptors_for_process
+pub mod net; // socket / inpcb / ifnet / sockaddr / sockaddr_dl extensions
+pub mod vm; // vm_map_entry get_vnode / get_path / is_suspicious, proc.get_process_memory_sections
+
 /// python `MacIntelStacker.virtual_to_physical_address` (ignores KASLR), on u64 with
 /// two's-complement wrap-around (python ints would go negative; the low 64 bits agree).
 pub fn virtual_to_physical_address(addr: u64) -> u64 {
