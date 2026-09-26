@@ -347,6 +347,9 @@ def main_gen(argv):
     pe_dirs = []
     quick = False
     only = None
+    seed = 20240601
+    jobs = min(8, os.cpu_count() or 1)
+    rand_mb = 16
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -358,12 +361,18 @@ def main_gen(argv):
             quick = True
         elif a == "--only":
             only = argv[i + 1].split(","); i += 1
+        elif a == "--seed":
+            seed = int(argv[i + 1]); i += 1
+        elif a == "--jobs":
+            jobs = int(argv[i + 1]); i += 1
+        elif a == "--rand-mb":
+            rand_mb = int(argv[i + 1]); i += 1
         i += 1
     if not pe_dirs:
         pe_dirs = [d for d in DEFAULT_PE if os.path.isdir(d)]
     os.makedirs(out, exist_ok=True)
-    rnd = random.Random(20240601)
-    with Pool(os.cpu_count()) as pool:
+    rnd = random.Random(seed)
+    with Pool(jobs) as pool:
         if only is None or "real" in only:
             jobs = gather_real(pe_dirs, quick)
             for bits in (64, 32):
@@ -372,7 +381,7 @@ def main_gen(argv):
                 ents = sorted(tot.values(), key=lambda e: -e[0])
                 write_ref(os.path.join(out, f"real{bits}.ref"), ents)
         if only is None or "rand" in only:
-            size = (1 << 20) if quick else (16 << 20)
+            size = (1 << 20) if quick else (rand_mb << 20)
             for bits in (64, 32):
                 jobs = []
                 for i in range(0, size, 1 << 16):

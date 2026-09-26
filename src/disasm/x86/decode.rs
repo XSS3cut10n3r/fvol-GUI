@@ -473,6 +473,14 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             Some(x) => x,
             None => return false,
         };
+        if node == 0 && st.vex == VEX_NONE && mand == 0 && pfx == 1 && has67 && map != MAP_1 {
+            // OPSIZE_ADSIZE context also inherits the prefix-less entries (via ADSIZE)
+            sel[SEL_PFX as usize] = 0;
+            node = match walk(t, root, &sel, have_modrm) {
+                Some(x) => x,
+                None => return false,
+            };
+        }
         if node == 0 && st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3 {
             // rounding / sae register forms: scalar (LIG) entries are listed under L=0
             sel[SEL_L as usize] = 0;
@@ -575,7 +583,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             st.w = false;
             st.mosz = 4;
         } else if flags & F_NOPFX != 0 {
-            if pfx >= 4 && !(m64 && map == MAP_0F && op & 0xF0 == 0x80) {
+            if pfx >= 4 && !(m64 && map == MAP_0F && (0x82..=0x8F).contains(&op)) {
                 // XS_OPSIZE / XD_OPSIZE contexts hold no prefix-less instructions
                 // (capstone quirk: except jcc rel32 in 64-bit mode)
                 return false;
@@ -700,7 +708,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         if let Operand::Imm(v) = out.operands[last] {
             let lim = if flags & F_CMP8 != 0 { 8 } else { 32 };
             // EVEX: capstone aliases masked compares by imm & 0x1f
-            let v = if st.vex == VEX_EVEX && st.evex_aaa != 0 { v & 0x1F } else { v };
+            let v = if st.vex == VEX_EVEX && (st.evex_aaa != 0 || (st.evex_b && has_mem)) { v & 0x1F } else { v };
             if (v as u64) < lim {
                 out.mnem = e.alias + v as u16;
                 out.op_count -= 1;
