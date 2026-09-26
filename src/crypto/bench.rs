@@ -19,15 +19,14 @@
 //! work).
 //!
 //! Two workloads, matching crypto_bench.c:
-//!   - bulk:  BULK_SIZE (1 MiB) buffer, processed BULK_REP_ITERS (20) times per
-//!            repetition reusing one key schedule / context set up before the loop
-//!            -- raw sustained throughput.
-//!   - small: SMALL_REP_ITERS (50,000) independent calls per repetition over a
-//!            SMALL_SIZE (32) byte buffer, each one paying full key-setup cost fresh
-//!            (`Aes::new` / `Des::new` / `Rc4::new` inside the loop) -- this is the
-//!            shape of the actual plugin workloads (hashdump/lsadump/cachedump
-//!            process a handful of 16-56 byte values per registry key, never
-//!            megabytes).
+//! - bulk: BULK_SIZE (1 MiB) buffer, processed BULK_REP_ITERS (20) times per
+//!   repetition reusing one key schedule / context set up before the loop -- raw
+//!   sustained throughput.
+//! - small: SMALL_REP_ITERS (50,000) independent calls per repetition over a
+//!   SMALL_SIZE (32) byte buffer, each one paying full key-setup cost fresh
+//!   (`Aes::new` / `Des::new` / `Rc4::new` inside the loop) -- this is the shape of
+//!   the actual plugin workloads (hashdump/lsadump/cachedump process a handful of
+//!   16-56 byte values per registry key, never megabytes).
 //!
 //! Each workload is repeated REPS times (env `CRYPTO_BENCH_REPS`, default 10) and the
 //! best repetition is reported as MB/s (ops/s) and as user-space core cycles per
@@ -66,7 +65,8 @@ impl Cycles {
             attr[0] = 136u64 << 32;
             attr[5] = (1 << 5) | (1 << 6);
             const SYS_PERF_EVENT_OPEN: i64 = 298;
-            let fd = unsafe { syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0i32, -1i32, -1i32, 0u64) };
+            let fd =
+                unsafe { syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0i32, -1i32, -1i32, 0u64) };
             Cycles(fd as i32)
         }
         #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
@@ -98,9 +98,18 @@ impl Bench {
             .filter(|&n: &usize| n > 0)
             .unwrap_or(10);
         let only = std::env::var("CRYPTO_BENCH_ONLY")
-            .map(|s| s.split(',').filter(|t| !t.is_empty()).map(String::from).collect())
+            .map(|s| {
+                s.split(',')
+                    .filter(|t| !t.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
-        Bench { reps, only, cyc: Cycles::open() }
+        Bench {
+            reps,
+            only,
+            cyc: Cycles::open(),
+        }
     }
 
     fn wanted(&self, name: &str) -> bool {
@@ -125,14 +134,22 @@ impl Bench {
     fn bulk(&self, name: &str, f: impl FnMut()) {
         let (s, c) = self.best(f);
         let bytes = (BULK_SIZE * BULK_REP_ITERS) as f64;
-        let cpb = if self.cyc.0 >= 0 { format!("{:8.3}", c / bytes) } else { format!("{:>8}", "-") };
+        let cpb = if self.cyc.0 >= 0 {
+            format!("{:8.3}", c / bytes)
+        } else {
+            format!("{:>8}", "-")
+        };
         println!("{name:16} bulk  {:10.1} MB/s   {cpb} c/B", bytes / 1e6 / s);
     }
 
     fn small(&self, name: &str, note: &str, f: impl FnMut()) {
         let (s, c) = self.best(f);
         let n = SMALL_REP_ITERS as f64;
-        let cpo = if self.cyc.0 >= 0 { format!("{:8.1}", c / n) } else { format!("{:>8}", "-") };
+        let cpo = if self.cyc.0 >= 0 {
+            format!("{:8.1}", c / n)
+        } else {
+            format!("{:>8}", "-")
+        };
         println!("{name:16} small {:10.0} ops/s  {cpo} c/op  ({note})", n / s);
     }
 }
@@ -156,7 +173,10 @@ fn bench_all() {
 
     // --- digests ---
     for (name, f) in [
-        ("MD5", (|d: &[u8]| md5::digest(d).to_vec()) as fn(&[u8]) -> Vec<u8>),
+        (
+            "MD5",
+            (|d: &[u8]| md5::digest(d).to_vec()) as fn(&[u8]) -> Vec<u8>,
+        ),
         ("SHA1", |d: &[u8]| sha1::digest(d).to_vec()),
         ("SHA256", |d: &[u8]| sha256::digest(d).to_vec()),
     ] {

@@ -251,8 +251,12 @@ mod x86 {
         unsafe {
             // RotWord(w3) / w3 broadcast to all four columns (ShiftRows then is a no-op,
             // so aesenclast(x, rcon) = SubWord(x) ^ rcon in every column).
-            let rot = _mm_setr_epi8(13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12);
-            let bcast = _mm_setr_epi8(12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15);
+            let rot = _mm_setr_epi8(
+                13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12,
+            );
+            let bcast = _mm_setr_epi8(
+                12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15,
+            );
             macro_rules! prefix_xor {
                 ($k:expr) => {{
                     let k = $k;
@@ -299,7 +303,8 @@ mod x86 {
                 }
                 macro_rules! odd {
                     ($i:expr) => {
-                        let t = _mm_aesenclast_si128(_mm_shuffle_epi8(a, bcast), _mm_setzero_si128());
+                        let t =
+                            _mm_aesenclast_si128(_mm_shuffle_epi8(a, bcast), _mm_setzero_si128());
                         b = _mm_xor_si128(prefix_xor!(b), t);
                         ks[$i] = b;
                     };
@@ -335,7 +340,10 @@ mod x86 {
         unsafe {
             dec[0] = enc[nr];
             for i in 1..nr {
-                _mm_storeu_si128(dec[i].as_mut_ptr().cast(), _mm_aesimc_si128(k128!(enc, nr - i)));
+                _mm_storeu_si128(
+                    dec[i].as_mut_ptr().cast(),
+                    _mm_aesimc_si128(k128!(enc, nr - i)),
+                );
             }
             dec[nr] = enc[0];
         }
@@ -618,7 +626,13 @@ mod x86 {
 
     /// ECB-encrypts `n` blocks from `inp` to `out` (may alias), 16 at a time.
     #[target_feature(enable = "vaes,avx2,aes,sse2")]
-    pub unsafe fn ecb_encrypt_vaes(enc: &Keys, nr: usize, mut inp: *const u8, mut out: *mut u8, mut n: usize) {
+    pub unsafe fn ecb_encrypt_vaes(
+        enc: &Keys,
+        nr: usize,
+        mut inp: *const u8,
+        mut out: *mut u8,
+        mut n: usize,
+    ) {
         unsafe {
             while n >= 16 {
                 let p = inp.cast::<__m256i>();
@@ -662,7 +676,13 @@ mod x86 {
 
     /// ECB-encrypts `n` blocks from `inp` to `out` (may alias), 4 xmm blocks at a time.
     #[target_feature(enable = "aes,sse2")]
-    pub unsafe fn ecb_encrypt_ni(enc: &Keys, nr: usize, mut inp: *const u8, mut out: *mut u8, mut n: usize) {
+    pub unsafe fn ecb_encrypt_ni(
+        enc: &Keys,
+        nr: usize,
+        mut inp: *const u8,
+        mut out: *mut u8,
+        mut n: usize,
+    ) {
         unsafe {
             while n >= 4 {
                 let p = inp.cast::<__m128i>();
@@ -703,7 +723,14 @@ mod x86 {
 
     /// CBC-encrypts `n` blocks from `inp` to `out` (may alias). Inherently serial.
     #[target_feature(enable = "aes,sse2")]
-    pub unsafe fn cbc_encrypt_ni(enc: &Keys, nr: usize, iv: &[u8; 16], mut inp: *const u8, mut out: *mut u8, n: usize) {
+    pub unsafe fn cbc_encrypt_ni(
+        enc: &Keys,
+        nr: usize,
+        iv: &[u8; 16],
+        mut inp: *const u8,
+        mut out: *mut u8,
+        n: usize,
+    ) {
         unsafe {
             let mut prev = _mm_loadu_si128(iv.as_ptr().cast());
             for _ in 0..n {
@@ -848,7 +875,14 @@ impl Aes {
     /// Safety: `inp` must be readable and `out` writable for `16 * n` bytes; they
     /// either don't overlap or are exactly equal.
     #[inline]
-    unsafe fn decrypt_raw(&self, chain: Chain, iv: &[u8; 16], inp: *const u8, out: *mut u8, n: usize) {
+    unsafe fn decrypt_raw(
+        &self,
+        chain: Chain,
+        iv: &[u8; 16],
+        inp: *const u8,
+        out: *mut u8,
+        n: usize,
+    ) {
         #[cfg(target_arch = "x86_64")]
         {
             // Safety: hw was verified by hw_level(); pointer contract forwarded.
@@ -956,7 +990,11 @@ impl Aes {
     /// *not* truncated back down to `data.len()` -- so the returned buffer's
     /// length is `data.len()` rounded up to the next multiple of 16.
     pub fn ecb_decrypt_with_iv(&self, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
-        let chain = if *iv == [0u8; 16] { Chain::None } else { Chain::FixedIv };
+        let chain = if *iv == [0u8; 16] {
+            Chain::None
+        } else {
+            Chain::FixedIv
+        };
         let whole = data.len() & !15;
         if whole == data.len() {
             // Common case (block-aligned input, which is every real plugin call).
@@ -1128,7 +1166,10 @@ mod tests {
     }
     /// Every implementation level this CPU can run, lowest first.
     fn levels() -> Vec<Hw> {
-        [Hw::Portable, Hw::Ni, Hw::Vaes].into_iter().filter(|&l| l <= hw_level()).collect()
+        [Hw::Portable, Hw::Ni, Hw::Vaes]
+            .into_iter()
+            .filter(|&l| l <= hw_level())
+            .collect()
     }
 
     // FIPS-197 Appendix B/C known-answer vectors.
@@ -1205,7 +1246,11 @@ mod tests {
         assert_eq!(out, aes.ecb_decrypt(&padded));
         let iv = [0x33u8; 16];
         let out_iv = aes.ecb_decrypt_with_iv(&iv, &data);
-        let expect: Vec<u8> = out.iter().enumerate().map(|(i, b)| b ^ iv[i % 16]).collect();
+        let expect: Vec<u8> = out
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ iv[i % 16])
+            .collect();
         assert_eq!(out_iv, expect);
     }
 

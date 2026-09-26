@@ -53,8 +53,8 @@ use crate::error::{Error, Result};
 
 const IP: [u8; 64] = [
     58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6,
-    64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
-    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+    64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61,
+    53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
 ];
 
 const FP: [u8; 64] = [
@@ -75,14 +75,14 @@ const P: [u8; 32] = [
 ];
 
 const PC1: [u8; 56] = [
-    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 27, 19, 11, 3,
-    60, 52, 44, 36, 63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37,
-    29, 21, 13, 5, 28, 20, 12, 4,
+    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60,
+    52, 44, 36, 63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29,
+    21, 13, 5, 28, 20, 12, 4,
 ];
 
 const PC2: [u8; 48] = [
-    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2, 41,
-    52, 31, 37, 47, 55, 30, 40, 51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
+    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2, 41, 52,
+    31, 37, 47, 55, 30, 40, 51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
 ];
 
 const SHIFTS: [u32; 16] = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
@@ -293,7 +293,6 @@ fn f(r: u32, k: u64) -> u32 {
     a ^ b
 }
 
-
 /// Encrypts (`DEC = false`) or decrypts `N` independent blocks together, one
 /// round at a time across all of them so their dependency chains overlap.
 #[inline(always)]
@@ -334,13 +333,18 @@ fn ecb<const DEC: bool>(rk: &[u64; 16], inp: &[u8], out: &mut [u8]) {
     let mut ic = inp.chunks_exact(32);
     let mut oc = out.chunks_exact_mut(32);
     for (i, o) in (&mut ic).zip(&mut oc) {
-        let b = std::array::from_fn(|k| u64::from_be_bytes(i[8 * k..8 * k + 8].try_into().unwrap()));
+        let b =
+            std::array::from_fn(|k| u64::from_be_bytes(i[8 * k..8 * k + 8].try_into().unwrap()));
         let r = crypt::<4, DEC>(rk, b);
         for k in 0..4 {
             o[8 * k..8 * k + 8].copy_from_slice(&r[k].to_be_bytes());
         }
     }
-    for (i, o) in ic.remainder().chunks_exact(8).zip(oc.into_remainder().chunks_exact_mut(8)) {
+    for (i, o) in ic
+        .remainder()
+        .chunks_exact(8)
+        .zip(oc.into_remainder().chunks_exact_mut(8))
+    {
         let [r] = crypt::<1, DEC>(rk, [u64::from_be_bytes(i.try_into().unwrap())]);
         o.copy_from_slice(&r.to_be_bytes());
     }
@@ -352,7 +356,8 @@ fn ecb<const DEC: bool>(rk: &[u64; 16], inp: &[u8], out: &mut [u8]) {
 fn ecb_in_place<const DEC: bool>(rk: &[u64; 16], buf: &mut [u8]) {
     let mut chunks = buf.chunks_exact_mut(32);
     for c in &mut chunks {
-        let b = std::array::from_fn(|k| u64::from_be_bytes(c[8 * k..8 * k + 8].try_into().unwrap()));
+        let b =
+            std::array::from_fn(|k| u64::from_be_bytes(c[8 * k..8 * k + 8].try_into().unwrap()));
         let r = crypt::<4, DEC>(rk, b);
         for k in 0..4 {
             c[8 * k..8 * k + 8].copy_from_slice(&r[k].to_be_bytes());
@@ -634,11 +639,17 @@ mod tests {
                 let data: Vec<u8> = (0..nblocks).flat_map(|_| next().to_be_bytes()).collect();
                 let enc: Vec<u8> = data
                     .chunks_exact(8)
-                    .flat_map(|c| reference_crypt(&key, u64::from_be_bytes(c.try_into().unwrap()), false).to_be_bytes())
+                    .flat_map(|c| {
+                        reference_crypt(&key, u64::from_be_bytes(c.try_into().unwrap()), false)
+                            .to_be_bytes()
+                    })
                     .collect();
                 let dec: Vec<u8> = data
                     .chunks_exact(8)
-                    .flat_map(|c| reference_crypt(&key, u64::from_be_bytes(c.try_into().unwrap()), true).to_be_bytes())
+                    .flat_map(|c| {
+                        reference_crypt(&key, u64::from_be_bytes(c.try_into().unwrap()), true)
+                            .to_be_bytes()
+                    })
                     .collect();
                 assert_eq!(des.ecb_encrypt(&data).unwrap(), enc);
                 assert_eq!(des.ecb_decrypt(&data).unwrap(), dec);

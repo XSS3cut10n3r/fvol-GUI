@@ -69,7 +69,11 @@ impl Rc4 {
                 s[i] = sj;
                 s[j as usize] = si;
                 let hit = j as usize == (i + 1) & 255;
-                let jn = std::hint::select_unpredictable(hit, j.wrapping_add(si as u8), j.wrapping_add(next as u8));
+                let jn = std::hint::select_unpredictable(
+                    hit,
+                    j.wrapping_add(si as u8),
+                    j.wrapping_add(next as u8),
+                );
                 si = std::hint::select_unpredictable(hit, si, next);
                 j = jn.wrapping_add(kn);
             }
@@ -177,7 +181,6 @@ mod tests {
         cipher.apply(b);
         assert_eq!(buf, ct);
     }
-
 
     // Textbook RC4 (byte table, `%` key index, load-after-store) -- the reference
     // for the scheduled KSA/PRGA above, over many keys, lengths and call splits.
