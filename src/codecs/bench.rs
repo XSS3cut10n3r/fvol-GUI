@@ -435,3 +435,56 @@ fn codecs_breakdown() {
         );
     }
 }
+
+/// Encoder under test: `codec` is deflate | zlib | gzip | bz2 | xz.
+fn encode(codec: &str, level: u32, data: &[u8]) -> Option<Vec<u8>> {
+    Some(match codec {
+        "deflate" => super::deflate_enc::deflate_compress(data, level),
+        "zlib" => super::deflate_enc::zlib_compress(data, level),
+        _ => return None,
+    })
+}
+
+/// Compression throughput of one file (the Rust side of `bench/refbench/codecs_enc_run.sh`):
+///
+/// ```text
+/// CODECS_ENC_FILE=f CODECS_ENC_CODEC=deflate CODECS_ENC_LEVEL=6 [CODECS_RUNS=3] [RSVOL_THREADS=1] \
+///   cargo test --release codecs_enc_bench_file -- --ignored --nocapture
+/// ```
+/// Prints `rust <codec> <level> <file> <in_bytes> <out_bytes> <best_ms> <MB/s> <threads>` (MB/s
+/// of input). The first result is round-tripped through our decoder.
+#[test]
+#[ignore]
+fn codecs_enc_bench_file() {
+    let (Ok(file), Ok(codec)) = (std::env::var("CODECS_ENC_FILE"), std::env::var("CODECS_ENC_CODEC")) else {
+        eprintln!("set CODECS_ENC_FILE and CODECS_ENC_CODEC");
+        return;
+    };
+    let level: u32 = std::env::var("CODECS_ENC_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+    let runs: usize = std::env::var("CODECS_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+    let data = std::fs::read(&file).unwrap();
+    let mut best = f64::MAX;
+    let mut out_len = 0;
+    for r in 0..runs {
+        let t = Instant::now();
+        let c = encode(&codec, level, &data).expect("unknown codec");
+        let dt = t.elapsed().as_secs_f64();
+        best = best.min(dt);
+        out_len = c.len();
+        if r == 0 {
+            let dec_codec = match codec.as_str() {
+                "bz2" | "xz" | "gzip" | "zlib" => codec.as_str(),
+                _ => "deflate",
+            };
+            let d = decode(dec_codec, &c).unwrap().expect("our decoder rejected the output");
+            assert!(d == data, "{file}: roundtrip mismatch");
+        }
+    }
+    println!(
+        "rust {codec} {level} {file} {} {out_len} {:.3} {:.1} {}",
+        data.len(),
+        best * 1e3,
+        data.len() as f64 / best / 1e6,
+        crate::util::par::threads()
+    );
+}

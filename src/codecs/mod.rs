@@ -21,6 +21,7 @@
 
 pub mod bzip2;
 pub mod crc;
+pub mod deflate_enc;
 pub mod gzip;
 pub mod inflate;
 pub mod lzma;
