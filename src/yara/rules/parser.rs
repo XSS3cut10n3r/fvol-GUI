@@ -877,7 +877,7 @@ impl<'a, 'c> Parser<'a, 'c> {
                 if !self.is_kw(Kw::Of) {
                     return self.unexpected("<of>");
                 }
-                self.of_expr(None)
+                self.of_expr()
             }
             Tok::StrId(id) => {
                 self.advance();
@@ -974,17 +974,13 @@ impl<'a, 'c> Parser<'a, 'c> {
             }
             Tok::Kw(Kw::Of) => {
                 self.for_expression_check(e)?;
-                return self.of_expr(Some(e));
+                return self.of_expr();
             }
             Tok::Char(b'%') => {
                 // Only reached for `primary % of` (binary() stopped before it).
-                self.advance();
-                self.check_type(e, &[Ty::Int], "%")?;
-                if !undef(e.ival) && !(1..=100).contains(&e.ival) {
-                    return self.sem("percentage must be between 1 and 100 (inclusive)");
-                }
+                self.advance(); // '%'
                 self.advance(); // `of`
-                return self.of_set(true);
+                return self.of_set(Some(e));
             }
             _ => return Ok(e),
         };
@@ -1019,21 +1015,40 @@ impl<'a, 'c> Parser<'a, 'c> {
     }
 
     /// `<quantifier already emitted> of <set> [in range | at expr]`.
-    fn of_expr(&mut self, _q: Option<Expr>) -> PResult<Expr> {
+    fn of_expr(&mut self) -> PResult<Expr> {
         self.advance(); // `of`
-        self.of_set(false)
+        self.of_set(None)
     }
 
-    fn of_set(&mut self, percent: bool) -> PResult<Expr> {
+    /// The `primary_expression '%' _OF_ ...` checks (run once the set is parsed).
+    fn percent_check(&mut self, e: Expr) -> PResult<()> {
+        self.check_type(e, &[Ty::Int], "%")?;
+        if !undef(e.ival) && !(1..=100).contains(&e.ival) {
+            return self.sem("percentage must be between 1 and 100 (inclusive)");
+        }
+        Ok(())
+    }
+
+    /// The set after `of`; `percent` = the percentage expression of `N% of`.
+    fn of_set(&mut self, percent: Option<Expr>) -> PResult<Expr> {
         let is_rule_set = self.is_char(b'(') && matches!(self.peek2(), Tok::Ident(_));
         if is_rule_set {
             let set = self.rule_set()?;
-            self.emit(if percent { Op::OfPercentRules(set) } else { Op::OfRules(set) });
+            match percent {
+                Some(e) => {
+                    self.percent_check(e)?;
+                    self.emit(Op::OfPercentRules(set));
+                }
+                None => {
+                    self.emit(Op::OfRules(set));
+                }
+            }
             return Ok(Expr::boolean());
         }
         let items = self.string_set()?;
         let set = self.add_set(&items);
-        if percent {
+        if let Some(e) = percent {
+            self.percent_check(e)?;
             self.emit(Op::OfPercentStrings(set));
             return Ok(Expr::boolean());
         }

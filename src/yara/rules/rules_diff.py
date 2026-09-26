@@ -395,21 +395,28 @@ class Gen:
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 2000
-    seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    rng = random.Random(seed)
-    g = Gen(rng)
     os.makedirs(WORK, exist_ok=True)
     cases_path = os.path.join(WORK, "rules_cases.tsv")
     out_path = os.path.join(WORK, "rules_out.tsv")
     cases = []
-    with open(cases_path, "w") as f:
+    if len(sys.argv) > 2 and sys.argv[1] == "--cases":
+        # Hand-written cases: a python literal list of source strings or
+        # (source, data) tuples.
+        for c in eval(open(sys.argv[2]).read()):  # trusted local test file
+            cases.append(c if isinstance(c, tuple) else (c, b"hello"))
+    else:
+        n = int(sys.argv[1]) if len(sys.argv) > 1 else 2000
+        seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        rng = random.Random(seed)
+        g = Gen(rng)
         for i in range(n):
             src = g.source()
             if rng.random() < 0.15:
                 src = g.mutate(src)
-            data = g.data()
-            cases.append((src, data))
+            cases.append((src, g.data()))
+    n = len(cases)
+    with open(cases_path, "w") as f:
+        for i, (src, data) in enumerate(cases):
             f.write("%d\t%s\t%s\n" % (i, src.encode().hex(), data.hex()))
     expected = [oracle(src, data) for src, data in cases]
     env = dict(os.environ, RSVOL_YARA_RULES_CASES=cases_path, RSVOL_YARA_RULES_OUT=out_path)
