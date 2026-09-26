@@ -95,12 +95,8 @@ fn run_line(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
                     r.check += out.len() as u64;
                     out.clear();
                 }
-                out.push('\n');
-                x86::push_addr(&mut out, addr);
-                out.push_str(":\t");
-                insn.write_mnemonic(&mut out);
-                out.push('\t');
-                insn.write_op_str(&mut out);
+                // the format_capstone line (same call as disasm::format_capstone_into)
+                insn.write_line(&mut out);
                 r.insns += 1;
                 pos += insn.size as usize;
             } else {

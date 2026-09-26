@@ -139,9 +139,18 @@ impl<'a> W<'a> {
     /// "0x" + lowercase hex digits.
     #[inline(always)]
     fn hex(&mut self, v: u64) {
-        let (d, k) = hex_digits(v);
         self.put(b"0x", 2);
-        self.put(&d, k);
+        let hi = (v >> 32) as u32;
+        if hi == 0 {
+            let (d, k) = hex8(v as u32);
+            self.put(&d, k);
+        } else {
+            // high part without leading zeros, then all 8 digits of the low part
+            let (d, k) = hex8(hi);
+            self.put(&d, k);
+            let (d, _) = hex8_full(v as u32);
+            self.put(&d, 8);
+        }
     }
     /// Small decimal (fast path for one digit).
     #[inline(always)]
@@ -192,23 +201,29 @@ impl Drop for W<'_> {
     }
 }
 
-/// Lowercase hex digits of `v`, most significant first, left-aligned in 16 bytes; + digit count.
-/// Branch-free: nibbles are spread to bytes with SWAR shifts, then mapped to ASCII.
+/// The 8 hex digits of `v` as ASCII, most significant first (byte 0), plus the number of
+/// significant digits (1..=8). Branch-free: nibbles are spread to bytes with SWAR shifts.
 #[inline(always)]
-fn hex_digits(v: u64) -> ([u8; 16], usize) {
-    const ONES: u128 = 0x0101_0101_0101_0101_0101_0101_0101_0101;
-    let k = ((64 - (v | 1).leading_zeros() + 3) >> 2) as usize; // 1..=16
-    let mut x = v as u128;
-    x = (x & 0xFFFF_FFFF) | ((x & 0xFFFF_FFFF_0000_0000) << 32);
-    x = (x & 0x0000_0000_0000_FFFF_0000_0000_0000_FFFF) | ((x & 0x0000_0000_FFFF_0000_0000_0000_FFFF_0000) << 16);
-    x = (x & 0x0000_00FF_0000_00FF_0000_00FF_0000_00FF) | ((x & 0x0000_FF00_0000_FF00_0000_FF00_0000_FF00) << 8);
-    x = (x & 0x000F_000F_000F_000F_000F_000F_000F_000F) | ((x & 0x00F0_00F0_00F0_00F0_00F0_00F0_00F0_00F0) << 4);
+fn hex8_full(v: u32) -> ([u8; 8], usize) {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    let k = ((32 - (v | 1).leading_zeros() + 3) >> 2) as usize; // 1..=8
+    let mut x = v as u64;
+    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
+    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
+    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
     // byte i = nibble i; '0'..'9' then 'a'..'f' (+0x27 when the nibble is > 9)
     let gt9 = ((x + ONES * 6) >> 4) & ONES;
     let a = x + ONES * 0x30 + gt9 * 0x27;
-    // most significant used nibble to byte 15, then byte-reverse: digits start at byte 0
-    let a = (a << (8 * (16 - k))).swap_bytes();
-    (a.to_le_bytes(), k)
+    (a.swap_bytes().to_le_bytes(), k)
+}
+
+/// Significant hex digits of `v` (no leading zeros), left-aligned in 8 bytes; + digit count.
+#[inline(always)]
+fn hex8(v: u32) -> ([u8; 8], usize) {
+    let (d, k) = hex8_full(v);
+    // drop the 8-k leading '0's: shift them out of the (big-endian ordered) bytes
+    let x = u64::from_be_bytes(d) << (8 * (8 - k));
+    (x.to_be_bytes(), k)
 }
 
 /// Append the full mnemonic (printed prefixes + base mnemonic).
@@ -216,6 +231,12 @@ pub(crate) fn write_mnemonic(insn: &Insn, out: &mut String) {
     // SAFETY: only ASCII is appended (see `W::put`).
     let mut w = W::new(unsafe { out.as_mut_vec() });
     w.room(ROOM);
+    mnemonic(&mut w, insn);
+}
+
+/// Prefix + mnemonic: at most 14 + 31 bytes advanced, 16 + 32 stored.
+#[inline(always)]
+fn mnemonic(w: &mut W, insn: &Insn) {
     let p = insn.pfx as usize & 15;
     w.put(&PFX.0[p], PFX.1[p] as usize);
     let t = super::tables::tables();
@@ -223,6 +244,20 @@ pub(crate) fn write_mnemonic(insn: &Insn, out: &mut String) {
         Some(m) => w.put(m, m[31] as usize),
         None => w.put(&[0u8; 1], 0),
     }
+}
+
+/// Append volatility's disassembly renderer line `"\n{address:#x}:\t{mnemonic}\t{op_str}"`.
+pub(crate) fn write_line(insn: &Insn, out: &mut String) {
+    // SAFETY: only ASCII is appended (see `W::put`).
+    let mut w = W::new(unsafe { out.as_mut_vec() });
+    // header: 1 + 18 (address) + 2 + 45 (mnemonic) + 1 bytes, well within ROOM
+    w.room(ROOM);
+    w.b(b'\n');
+    w.hex(insn.address);
+    w.s2(b":\t");
+    mnemonic(&mut w, insn);
+    w.b(b'\t');
+    op_str(&mut w, insn);
 }
 
 /// "0x..." lowercase hex.
@@ -291,6 +326,11 @@ fn write_mem(w: &mut W, m: &Mem, mode: Mode, moffs: bool) {
 pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
     // SAFETY: only ASCII is appended (see `W::put`).
     let mut w = W::new(unsafe { out.as_mut_vec() });
+    op_str(&mut w, insn);
+}
+
+#[inline(always)]
+fn op_str(w: &mut W, insn: &Insn) {
     let mut first = true;
     for k in 0..(insn.op_count as usize).min(insn.operands.len()) {
         w.room(ROOM);
@@ -329,7 +369,7 @@ pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
                     w.uimm(v as u64)
                 }
             }
-            Operand::Mem(ref m) => write_mem(&mut w, m, insn.mode, f & OF_MOFFS != 0),
+            Operand::Mem(ref m) => write_mem(w, m, insn.mode, f & OF_MOFFS != 0),
             Operand::None => {}
         }
         if k == 0 && insn.evex & 0x80 != 0 {
@@ -339,6 +379,29 @@ pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
             if insn.evex & 0x40 != 0 {
                 w.put(b" {z}", 4);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hex_matches_std() {
+        let mut vals: Vec<u64> = vec![0, 1, 9, 10, 15, 16, 0xff, 0x100, 0xFFFF_FFFF, 0x1_0000_0000, u64::MAX, 1 << 63];
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for sh in 0..64 {
+            vals.push(1u64 << sh);
+            vals.push((1u64 << sh).wrapping_sub(1));
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            vals.push(x >> sh);
+        }
+        let mut s = String::new();
+        for v in vals {
+            s.clear();
+            super::push_hex(&mut s, v);
+            assert_eq!(s, format!("{v:#x}"));
         }
     }
 }

@@ -37,12 +37,7 @@ pub fn format_capstone_into(data: &[u8], offset: u64, arch: &str, out: &mut Stri
         if !x86::decode_into(&data[pos..], addr, mode, &mut insn) {
             break;
         }
-        out.push('\n');
-        x86::push_addr(out, addr);
-        out.push_str(":\t");
-        insn.write_mnemonic(out);
-        out.push('\t');
-        insn.write_op_str(out);
+        insn.write_line(out);
         pos += insn.size as usize;
         addr = addr.wrapping_add(insn.size as u64);
     }

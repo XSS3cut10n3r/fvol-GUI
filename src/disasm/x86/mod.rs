@@ -189,6 +189,11 @@ impl Insn {
     pub fn write_op_str(&self, out: &mut String) {
         format::write_op_str(self, out)
     }
+    /// Append volatility's disassembly renderer line `"\n{address:#x}:\t{mnemonic}\t{op_str}"`.
+    #[inline]
+    pub fn write_line(&self, out: &mut String) {
+        format::write_line(self, out)
+    }
     /// Address of the next instruction.
     #[inline]
     pub fn next_address(&self) -> u64 {
