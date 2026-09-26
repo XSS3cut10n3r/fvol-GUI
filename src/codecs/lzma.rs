@@ -141,16 +141,16 @@ impl Props {
 // x86-64 range coder steps (asm templates)
 // ---------------------------------------------------------------------------------------
 //
-// Operands shared by the templates: {range} {code} (u32), {inp} (input pointer), {base}
-// (probability node array), {sym} (node index), {t0} {t1} scratch, {p0} {p1} the current and
-// next probability (the two alternate between steps so no moves are needed).
+// A bit is decoded as in the reference decoder's x86-64 asm: bound = (range >> 11) * prob is
+// left in {range}, {t0} = range - bound, {t1} = code, code -= bound; the carry of that
+// subtraction is the negated bit and cmov picks the right range/code. The chain per bit is
+// shr, imul, sub, cmov (6 cycles); everything else hangs off it. Bit trees load both
+// children of the current node before the bit is known and advance the node index with
+// `sbb sym, -1` one cycle after the flags, so the next probability is ready in time.
 //
-// A bit is decoded as: bound = (range >> 11) * prob is left in {range}, {t0} = range - bound,
-// {t1} = code, code -= bound; the carry of that subtraction is the negated bit and cmov picks
-// the right range/code (the reference decoder's x86-64 scheme). The chain per bit is
-// shr, imul, sub, cmov: 6 cycles; everything else hangs off it. The node index advances with
-// `sbb sym, -1` one cycle after the flags so the children of the next node are loaded (with a
-// scaled index) in time for the next-but-one bit.
+// Ports 0 and 6 (shifts, cmov, sbb, branches) are the bottleneck around that chain, so
+// probability updates are table loads (PROB_UPD, stored right in front of the probability
+// array and addressed relative to {probs}) instead of shift/cmov arithmetic.
 
 /// Normalization: shift in one input byte when range < 2^24.
 #[cfg(target_arch = "x86_64")]
@@ -168,45 +168,9 @@ macro_rules! norm {
     };
 }
 
-/// bound in {range}, range - bound in {t0}, old code in {t1}, code - bound in {code} (CF = !bit).
-#[cfg(target_arch = "x86_64")]
-macro_rules! calc {
-    ($p:literal) => {
-        concat!(
-            "mov {t0:e}, {range:e}\n",
-            "shr {range:e}, 11\n",
-            "imul {range:e}, {",
-            $p,
-            ":e}\n",
-            "sub {t0:e}, {range:e}\n",
-            "mov {t1:e}, {code:e}\n",
-            "sub {code:e}, {range:e}\n",
-        )
-    };
-}
-
-/// Probability update from CF (= !bit): p -= (p + (bit ? 0 : 31 - 2048)) >> 5, stored at
-/// byte offset {t1} of {base} (upper bits of the register are garbage afterwards).
-#[cfg(target_arch = "x86_64")]
-macro_rules! upd_store {
-    ($p:literal, $addr:literal) => {
-        concat!(
-            "shr {t0:e}, 5\n",
-            "sub {",
-            $p,
-            ":e}, {t0:e}\n",
-            "mov word ptr [",
-            $addr,
-            "], {",
-            $p,
-            ":x}\n",
-        )
-    };
-}
-
 /// Probability update table: PROB_UPD[2p + bit] = p after decoding `bit` with probability p
-/// (p + ((2048 - p) >> 5) for 0, p - (p >> 5) for 1). A load instead of shift/cmov keeps the
-/// update off ports 0/6, which the range coder chain needs.
+/// (p + ((2048 - p) >> 5) for 0, p - (p >> 5) for 1). Copied in front of every decoder's
+/// probabilities (entry 2p + bit at byte offset 4p + 2bit - 8192 from them).
 static PROB_UPD: [u16; 4096] = {
     let mut t = [0u16; 4096];
     let mut p = 0;
@@ -217,144 +181,6 @@ static PROB_UPD: [u16; 4096] = {
     }
     t
 };
-
-/// One bit of a bit tree at node {sym} (probability in $a, zero-extended): both children are
-/// loaded before the bit is known and the one taken lands in $b; {sym} becomes the child.
-/// The chain is shr, imul, sub, cmov; the four cmovs are the only port-0/6 work besides the
-/// shift and the normalization branch. The probability update is a table load indexed by
-/// (p, new sym & 1), off the critical path. $n0/$n1: the two candidate next nodes (for the
-/// last bit they include the caller's final offset); $kids: load the children or not.
-#[cfg(target_arch = "x86_64")]
-macro_rules! tree_bit {
-    ($a:literal, $sel:expr, $n0:literal, $n1:literal, $kids:expr) => {
-        concat!(
-            $kids,
-            "lea {t3:e}, [", $n0, "]\n",
-            "lea {t4:e}, [", $n1, "]\n",
-            norm!(),
-            "mov {t0:e}, {range:e}\n",
-            "shr {range:e}, 11\n",
-            "imul {range:e}, {", $a, ":e}\n",
-            "sub {t0:e}, {range:e}\n",
-            "mov {t1:e}, {code:e}\n",
-            "sub {t1:e}, {range:e}\n",
-            "cmovae {range:e}, {t0:e}\n",
-            "cmovae {t3:e}, {t4:e}\n",
-            $sel,
-            "cmovae {code:e}, {t1:e}\n",
-            "mov {t0:e}, {t3:e}\n",
-            "and {t0:e}, 1\n",
-            "lea {t0:e}, [{t0} + {", $a, "}*2]\n",
-            "movzx {t0:e}, word ptr [{tab} + {t0}*2]\n",
-            "mov word ptr [{base} + {sym}*2], {t0:x}\n",
-            "mov {sym:e}, {t3:e}\n",
-        )
-    };
-}
-
-/// First bit of a bit tree: node 1 (its probability loaded here), children 2 and 3.
-#[cfg(target_arch = "x86_64")]
-macro_rules! tree_first {
-    ($a:literal, $b:literal) => {
-        concat!("mov {sym:e}, 1\n", "movzx {", $a, ":e}, word ptr [{base} + 2]\n", tree_mid!($a, $b),)
-    };
-}
-
-#[cfg(target_arch = "x86_64")]
-macro_rules! tree_mid {
-    ($a:literal, $b:literal) => {
-        tree_bit!(
-            $a,
-            concat!("cmovae {", $b, ":e}, {t2:e}\n"),
-            "{sym} + {sym}",
-            "{sym} + {sym} + 1",
-            concat!(
-                "movzx {", $b, ":e}, word ptr [{base} + {sym}*4]\n",
-                "movzx {t2:e}, word ptr [{base} + {sym}*4 + 2]\n",
-            )
-        )
-    };
-}
-
-/// Last bit: {sym} = final node + {fa} (a const operand; must be even so that the new
-/// node's low bit is still the decoded bit).
-#[cfg(target_arch = "x86_64")]
-macro_rules! tree_last {
-    ($a:literal) => {
-        tree_bit!($a, "", "{sym} + {sym} + {fa}", "{sym} + {sym} + {fa} + 1", "")
-    };
-}
-
-/// Reverse tree, first bit: node 1, next candidates 2 and 3; {sym} = bits so far.
-#[cfg(target_arch = "x86_64")]
-macro_rules! rev_first {
-    ($a:literal, $b:literal) => {
-        concat!(
-            "movzx {", $a, ":e}, word ptr [{base} + 2]\n",
-            "xor {sym:e}, {sym:e}\n",
-            "movzx {", $b, ":e}, word ptr [{base} + 4]\n",
-            norm!(),
-            calc!($a),
-            "cmovae {range:e}, {t0:e}\n",
-            "movzx {t0:e}, word ptr [{base} + 6]\n",
-            "cmovae {", $b, ":e}, {t0:e}\n",
-            "lea {t0:e}, [{sym} + 1]\n",
-            "cmovb {code:e}, {t1:e}\n",
-            "cmovae {sym:e}, {t0:e}\n",
-            "lea {t0:e}, [{", $a, "} - 2017]\n",
-            "cmovae {t0:e}, {", $a, ":e}\n",
-            "shr {t0:e}, 5\n",
-            "sub {", $a, ":e}, {t0:e}\n",
-            "mov word ptr [{base} + 2], {", $a, ":x}\n",
-        )
-    };
-}
-
-/// Reverse tree, middle bit of weight $add: current node $dcur/2 + sym, next candidates
-/// $n0/2 + sym (bit 0) and $n1/2 + sym (bit 1).
-#[cfg(target_arch = "x86_64")]
-macro_rules! rev_mid {
-    ($a:literal, $b:literal, $add:literal, $dcur:literal, $n0:literal, $n1:literal) => {
-        concat!(
-            "movzx {", $b, ":e}, word ptr [{base} + {sym}*2 + ", $n0, "]\n",
-            norm!(),
-            calc!($a),
-            "cmovae {range:e}, {t0:e}\n",
-            "movzx {t0:e}, word ptr [{base} + {sym}*2 + ", $n1, "]\n",
-            "cmovae {", $b, ":e}, {t0:e}\n",
-            "lea {t0:e}, [{sym} + ", $add, "]\n",
-            "cmovb {code:e}, {t1:e}\n",
-            "mov {t1:e}, {sym:e}\n",
-            "cmovae {sym:e}, {t0:e}\n",
-            "lea {t0:e}, [{", $a, "} - 2017]\n",
-            "cmovae {t0:e}, {", $a, ":e}\n",
-            "shr {t0:e}, 5\n",
-            "sub {", $a, ":e}, {t0:e}\n",
-            "mov word ptr [{base} + {t1}*2 + ", $dcur, "], {", $a, ":x}\n",
-        )
-    };
-}
-
-/// Reverse tree, last bit of weight $add at node $dcur/2 + sym.
-#[cfg(target_arch = "x86_64")]
-macro_rules! rev_last {
-    ($a:literal, $add:literal, $dcur:literal) => {
-        concat!(
-            norm!(),
-            calc!($a),
-            "cmovae {range:e}, {t0:e}\n",
-            "lea {t0:e}, [{sym} + ", $add, "]\n",
-            "cmovb {code:e}, {t1:e}\n",
-            "mov {t1:e}, {sym:e}\n",
-            "cmovae {sym:e}, {t0:e}\n",
-            "lea {t0:e}, [{", $a, "} - 2017]\n",
-            "cmovae {t0:e}, {", $a, ":e}\n",
-            "shr {t0:e}, 5\n",
-            "sub {", $a, ":e}, {t0:e}\n",
-            "mov word ptr [{base} + {t1}*2 + ", $dcur, "], {", $a, ":x}\n",
-        )
-    };
-}
 
 // ---------------------------------------------------------------------------------------
 // x86-64: the whole symbol loop in one asm block (lc=3 lp=0 pb=2)
@@ -956,70 +782,48 @@ impl LzmaDecoder {
         // (both children loaded before the bit is known, node index advanced with sbb).
         #[cfg(target_arch = "x86_64")]
         macro_rules! tree {
-            ($base:expr, $fa:expr, $($steps:expr),+) => {{
+            ($base:expr, $steps:expr) => {{
                 let base: *mut u16 = $base;
                 let sym: usize;
-                // SAFETY: tree nodes lie inside the probability array; input reads stay
-                // within the INPUT_MARGIN slack.
+                // SAFETY: tree nodes lie inside the probability array (the update table in
+                // front of it); input reads stay within the INPUT_MARGIN slack.
                 unsafe {
                     core::arch::asm!(
-                        $($steps),+,
+                        $steps,
                         range = inout(reg) range,
                         code = inout(reg) code,
                         inp = inout(reg) inp,
                         base = in(reg) base,
-                        tab = in(reg) PROB_UPD.as_ptr(),
+                        probs = in(reg) probs,
                         sym = out(reg) sym,
                         t0 = out(reg) _,
                         t1 = out(reg) _,
-                        t2 = out(reg) _,
-                        t3 = out(reg) _,
-                        t4 = out(reg) _,
-                        p0 = out(reg) _,
-                        p1 = out(reg) _,
-                        fa = const $fa,
+                        a = out(reg) _,
+                        b = out(reg) _,
                         options(nostack),
                     )
                 };
                 sym
             }};
         }
+        // Trees of 3, 6, 8 bits under the node array at $base, result = final node + $fa;
+        // $sbb = -1 - $fa as a literal for the asm (the last step's sbb folds the offset in).
         #[cfg(target_arch = "x86_64")]
         macro_rules! tree3 {
-            ($base:expr, $fa:expr) => {
-                tree!($base, $fa, tree_first!("p0", "p1"), tree_mid!("p1", "p0"), tree_last!("p0"))
+            ($base:expr, $sbb:literal, $fa:expr) => {
+                tree!($base, tree3a!("{base}", $sbb))
             };
         }
         #[cfg(target_arch = "x86_64")]
         macro_rules! tree6 {
-            ($base:expr, $fa:expr) => {
-                tree!(
-                    $base,
-                    $fa,
-                    tree_first!("p0", "p1"),
-                    tree_mid!("p1", "p0"),
-                    tree_mid!("p0", "p1"),
-                    tree_mid!("p1", "p0"),
-                    tree_mid!("p0", "p1"),
-                    tree_last!("p1")
-                )
+            ($base:expr, $sbb:literal, $fa:expr) => {
+                tree!($base, tree6a!("{base}", $sbb))
             };
         }
         #[cfg(target_arch = "x86_64")]
         macro_rules! tree8 {
-            ($base:expr, $fa:expr) => {
-                tree!(
-                    $base,
-                    $fa,
-                    tree_first!("p0", "p1"),
-                    tree_mid!("p1", "p0"),
-                    tree_mid!("p0", "p1"),
-                    tree_mid!("p1", "p0"),
-                    tree_mid!("p0", "p1"),
-                    tree_mid!("p1", "p0"),
-                    tree_mid!("p0", "p1"),
-                    tree_last!("p1")
-                )
+            ($base:expr, $sbb:literal, $fa:expr) => {
+                tree!($base, tree8a!("{base}", $sbb, ""))
             };
         }
         // Portable bit trees: same node walk in plain Rust.
@@ -1036,19 +840,19 @@ impl LzmaDecoder {
         }
         #[cfg(not(target_arch = "x86_64"))]
         macro_rules! tree3 {
-            ($base:expr, $fa:expr) => {
+            ($base:expr, $sbb:literal, $fa:expr) => {
                 tree_n!($base, $fa, 3)
             };
         }
         #[cfg(not(target_arch = "x86_64"))]
         macro_rules! tree6 {
-            ($base:expr, $fa:expr) => {
+            ($base:expr, $sbb:literal, $fa:expr) => {
                 tree_n!($base, $fa, 6)
             };
         }
         #[cfg(not(target_arch = "x86_64"))]
         macro_rules! tree8 {
-            ($base:expr, $fa:expr) => {
+            ($base:expr, $sbb:literal, $fa:expr) => {
                 tree_n!($base, $fa, 8)
             };
         }
@@ -1062,10 +866,7 @@ impl LzmaDecoder {
                 // SAFETY: nodes 1..16 of the align array; input within the margin.
                 unsafe {
                     core::arch::asm!(
-                        rev_first!("p0", "p1"),
-                        rev_mid!("p1", "p0", "2", "4", "8", "12"),
-                        rev_mid!("p0", "p1", "4", "8", "16", "24"),
-                        rev_last!("p1", "8", "16"),
+                        rev4a!("{base}"),
                         range = inout(reg) range,
                         code = inout(reg) code,
                         inp = inout(reg) inp,
@@ -1073,8 +874,8 @@ impl LzmaDecoder {
                         sym = out(reg) sym,
                         t0 = out(reg) _,
                         t1 = out(reg) _,
-                        p0 = out(reg) _,
-                        p1 = out(reg) _,
+                        a = out(reg) _,
+                        b = out(reg) _,
                         options(nostack),
                     )
                 };
@@ -1172,11 +973,11 @@ impl LzmaDecoder {
                 // SAFETY: fixed layout offsets.
                 let c = unsafe { probs.add($coder) };
                 if is0!(unsafe { c.add(LEN_CHOICE) }) {
-                    tree3!(unsafe { c.add(LEN_LOW + ($ps << 3)) }, 2 - 8)
+                    tree3!(unsafe { c.add(LEN_LOW + ($ps << 3)) }, "5", 2 - 8)
                 } else if is0!(unsafe { c.add(LEN_CHOICE2) }) {
-                    tree3!(unsafe { c.add(LEN_MID + ($ps << 3)) }, 10 - 8)
+                    tree3!(unsafe { c.add(LEN_MID + ($ps << 3)) }, "-3", 10 - 8)
                 } else {
-                    tree8!(unsafe { c.add(LEN_HIGH) }, 18 - 256)
+                    tree8!(unsafe { c.add(LEN_HIGH) }, "237", 18 - 256)
                 }
             }};
         }
@@ -1200,7 +1001,7 @@ impl LzmaDecoder {
                 let sym;
                 if state < 7 {
                     stat!(0, 1);
-                    sym = tree8!(lp, -0x100);
+                    sym = tree8!(lp, "255", -0x100);
                 } else {
                     stat!(1, 1);
                     if rep0 >= p {
@@ -1250,7 +1051,7 @@ impl LzmaDecoder {
                 len = len!(LEN_CODER, pos_state);
                 state = if state < 7 { 7 } else { 10 };
                 let len_state = if len < 6 { len - 2 } else { 3 };
-                let slot = tree6!(unsafe { probs.add(DIST_SLOT + (len_state << 6)) }, -64);
+                let slot = tree6!(unsafe { probs.add(DIST_SLOT + (len_state << 6)) }, "63", -64);
                 let dist: u32 = if slot < 4 {
                     slot as u32
                 } else {

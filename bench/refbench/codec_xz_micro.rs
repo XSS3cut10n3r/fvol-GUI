@@ -275,6 +275,13 @@ fn main() {
                 }
             }
         }
+        Some("cat") => {
+            // cat FILE: the decoded output on stdout (compare with `xz -dc FILE`)
+            use std::io::Write;
+            let data = std::fs::read(&args[2]).unwrap();
+            let out = xz::decompress(&data).unwrap_or_else(|e| panic!("{}: {e}", args[2]));
+            std::io::stdout().lock().write_all(&out).unwrap();
+        }
         Some("loop") => {
             let secs: f64 = args[2].parse().unwrap();
             let data = std::fs::read(&args[3]).unwrap();
