@@ -3,7 +3,7 @@
 # Rust side (examples/disasm_bench.rs, release build), under the memory-capped job wrapper.
 #
 # Usage: bench/refbench/capstone_bench.sh [--rust] [CORPUS_DIR] [PASSES] [WORKLOADS]
-#   CORPUS_DIR  default /tmp/rsvol-disasm/bin (bench/scripts/disasm_bench_corpus.py output)
+#   CORPUS_DIR  default /home/user/rs-vol/testdata/scratch/disasm/ref/bin (bench/scripts/disasm_bench_corpus.py output)
 #   PASSES      best of N (default 5)
 #   WORKLOADS   comma list of text,line,detail,len (default all)
 set -e
@@ -12,10 +12,11 @@ repo=$(cd "$here/../.." && pwd)
 limit=/home/user/rs-vol/bench/scripts/limit.sh
 rust=0
 if [ "$1" = "--rust" ]; then rust=1; shift; fi
-dir=${1:-/tmp/rsvol-disasm/bin}
+dir=${1:-/home/user/rs-vol/testdata/scratch/disasm/ref/bin}
 passes=${2:-5}
 work=${3:-text,line,detail,len}
-out=${TMPDIR:-/tmp}/rsvol-capstone-bench
+out=/home/user/rs-vol/testdata/scratch/disasm/perf/capstone_bench
+mkdir -p "$(dirname "$out")"
 gcc -O3 -march=native -o "$out" "$here/capstone_bench.c" -lcapstone
 $limit -m 4G "$out" "$dir" "$passes" "$work"
 if [ $rust = 1 ]; then

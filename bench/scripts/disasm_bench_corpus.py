@@ -6,7 +6,7 @@ Usage (bench venv python, same sources as disasm_diff.py `gen` real corpora):
 
 Writes DIR/real32.bin, DIR/real64.bin (concatenated section bytes) and DIR/real32.idx,
 DIR/real64.idx (one line per section: `vaddr_hex<TAB>length`, in file order).  Default DIR is
-/tmp/rsvol-disasm/bin, default limit 48 MB per mode.  Sections are streamed to disk one at a
+/home/user/rs-vol/testdata/scratch/disasm/ref/bin, default limit 48 MB per mode.  Sections are streamed to disk one at a
 time.  Consumers (bench/refbench/capstone_bench.c, examples/disasm_bench.rs) linearly sweep each
 section, skipping one byte after an undecodable instruction.
 """
@@ -40,7 +40,7 @@ def files_in_order(pe_dirs):
 
 
 def main(argv):
-    out = "/tmp/rsvol-disasm/bin"
+    out = "/home/user/rs-vol/testdata/scratch/disasm/ref/bin"
     pe_dirs = []
     limit = 48 << 20
     i = 0

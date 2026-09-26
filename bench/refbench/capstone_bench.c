@@ -132,7 +132,7 @@ static result_t run(csh h, int w, const uint8_t *data, const chunk_t *ch, size_t
 }
 
 int main(int argc, char **argv) {
-    const char *dir = argc > 1 ? argv[1] : "/tmp/rsvol-disasm/bin";
+    const char *dir = argc > 1 ? argv[1] : "/home/user/rs-vol/testdata/scratch/disasm/ref/bin";
     int passes = argc > 2 ? atoi(argv[2]) : 5;
     const char *only = argc > 3 ? argv[3] : NULL; /* e.g. "text,len" */
     size_t line_cap = 1 << 20;
