@@ -271,6 +271,8 @@ pub struct Kallsyms {
     pub num_syms: Option<u64>,
     relative_base: Option<u64>,
     token_index: Vec<Option<u64>>,
+    /// the 256 decoded tokens of `kallsyms_token_table` (read once; see [`Token`])
+    tokens: OnceLock<Vec<Token>>,
     /// flat `_get_symbol_address_by_index` table
     addrs: OnceLock<Result<AddrTable>>,
     mod_bounds: OnceLock<Result<(u64, u64)>>,
@@ -280,6 +282,19 @@ pub struct Kallsyms {
 }
 
 const NONE_ADDR: u64 = u64::MAX;
+
+/// One `kallsyms_token_table` entry as python's byte-by-byte `_expand_symbol` reads it.
+enum Token {
+    /// `token_index[i]` is None (python raises a TypeError when the token is used)
+    NoIndex,
+    /// the bytes before the NUL; `tail`: the read error python hits after them (no NUL)
+    Bytes { bytes: Vec<u8>, tail: Option<Error> },
+    /// no NUL within the first MiB: expanded byte by byte from memory
+    Uncached(u64),
+}
+
+/// Tokens longer than this are not cached ([`Token::Uncached`]).
+const MAX_TOKEN: usize = 1 << 20;
 
 /// Every `_get_symbol_address_by_index(i)` (`NONE_ADDR` = python None), plus, when all are
 /// readable, the alias-run starts and next-greater indices that make python's
@@ -389,6 +404,7 @@ impl Kallsyms {
             num_syms,
             relative_base,
             token_index,
+            tokens: OnceLock::new(),
             addrs: OnceLock::new(),
             mod_bounds: OnceLock::new(),
             module_region: OnceLock::new(),
@@ -599,6 +615,32 @@ impl Kallsyms {
         self.expand_with(&mut names, &mut tokens, offset)
     }
 
+    /// The decoded token table (built on first use).
+    fn token_table(&self) -> &[Token] {
+        self.tokens.get_or_init(|| {
+            let tt = self.cfg.token_table_address;
+            let mut rd = PageReader::new(self.layer);
+            self.token_index
+                .iter()
+                .map(|ti| {
+                    let (Some(ti), Some(tt)) = (*ti, tt) else { return Token::NoIndex };
+                    let start = tt.wrapping_add(ti);
+                    let mut bytes = Vec::new();
+                    loop {
+                        if bytes.len() >= MAX_TOKEN {
+                            return Token::Uncached(start);
+                        }
+                        match rd.byte(start.wrapping_add(bytes.len() as u64)) {
+                            Ok(0) => return Token::Bytes { bytes, tail: None },
+                            Ok(c) => bytes.push(c),
+                            Err(e) => return Token::Bytes { bytes, tail: Some(e) },
+                        }
+                    }
+                })
+                .collect()
+        })
+    }
+
     fn expand_with(&self, names: &mut PageReader, tokens: &mut PageReader, offset: u64) -> Result<(KasSymbolBasic, u64)> {
         let base = self.cfg.names_address.ok_or_else(|| type_error("unsupported operand type(s) for +: 'NoneType' and 'int'"))?;
         let tt = self.cfg.token_table_address.ok_or_else(|| type_error("unsupported operand type(s) for +: 'NoneType' and 'int'"))?;
@@ -610,26 +652,44 @@ impl Kallsyms {
             pos = pos.wrapping_add(1);
             len = (upper << 7) | (len & 0x7F);
         }
+        let table = self.token_table();
         let mut sym_type: Option<String> = None;
         let mut name = String::new();
+        let mut push = |c: u8| -> Result<()> {
+            if c >= 0x80 {
+                return Err(Error::msg("UnicodeDecodeError: 'utf-8' codec can't decode byte"));
+            }
+            if sym_type.is_none() {
+                sym_type = Some((c as char).to_string());
+            } else {
+                name.push(c as char);
+            }
+            Ok(())
+        };
         for _ in 0..len {
             let tii = names.byte(pos)?;
             pos = pos.wrapping_add(1);
-            let ti = self.token_index[tii as usize].ok_or_else(|| type_error("unsupported operand type(s) for +: 'int' and 'NoneType'"))?;
-            let mut tpos = tt.wrapping_add(ti);
-            loop {
-                let c = tokens.byte(tpos)?;
-                tpos = tpos.wrapping_add(1);
-                if c == 0 {
-                    break;
+            match &table[tii as usize] {
+                Token::NoIndex => return Err(type_error("unsupported operand type(s) for +: 'int' and 'NoneType'")),
+                Token::Bytes { bytes, tail } => {
+                    for &c in bytes {
+                        push(c)?;
+                    }
+                    if let Some(e) = tail {
+                        return Err(clone_err(e));
+                    }
                 }
-                if c >= 0x80 {
-                    return Err(Error::msg("UnicodeDecodeError: 'utf-8' codec can't decode byte"));
-                }
-                if sym_type.is_none() {
-                    sym_type = Some((c as char).to_string());
-                } else {
-                    name.push(c as char);
+                Token::Uncached(start) => {
+                    let _ = tt;
+                    let mut tpos = *start;
+                    loop {
+                        let c = tokens.byte(tpos)?;
+                        tpos = tpos.wrapping_add(1);
+                        if c == 0 {
+                            break;
+                        }
+                        push(c)?;
+                    }
                 }
             }
         }
