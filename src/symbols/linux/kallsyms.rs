@@ -41,6 +41,14 @@ use crate::objects::{LayerRef, Module, Obj};
 use crate::util::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Largest plausible `kallsyms_num_syms`. Real kernels have well under a million core symbols;
+/// a value above this is corruption (a smeared / garbage `kallsyms_num_syms`). python has no
+/// such bound -- `get_core_symbols` does `for sym_idx in range(self._kallsyms_num_syms)`, so a
+/// corrupted count of, say, 1.8 billion makes python loop billions of times and hang forever.
+/// rsvol gives up on the affected enumeration instead (DESIGN "never hang on malformed memory";
+/// where python would hang forever, stop cleanly). Used by every count-driven loop below.
+const MAX_PLAUSIBLE_SYMS: u64 = 16 << 20;
+
 /// A reproducible copy of an [`Error`] (errors are cached by lazily built tables and re-raised
 /// on every use, like python re-evaluating a failing cached property).
 fn clone_err(e: &Error) -> Error {
@@ -454,7 +462,7 @@ impl Kallsyms {
     /// The flat address table (built once; `None` when `num_syms` is unknown or implausible).
     fn addr_table(&self) -> Option<&Result<AddrTable>> {
         let n = self.num_syms?;
-        if n > 16 << 20 {
+        if n > MAX_PLAUSIBLE_SYMS {
             return None;
         }
         Some(self.addrs.get_or_init(|| {
@@ -1136,6 +1144,14 @@ impl Kallsyms {
                 return;
             }
         };
+        // A corrupted `kallsyms_num_syms` (e.g. 1.8 billion) must not drive the sequential walk
+        // below `for idx in start..n`, which python does unbounded (`range(num_syms)`) and would
+        // hang on forever. `core_offsets`/`addr_table` already give up at this bound; core
+        // enumeration does too, skipping what cannot be trusted instead of looping billions of
+        // times. Real kernels never come close (< ~10^6 symbols).
+        if n > MAX_PLAUSIBLE_SYMS {
+            return;
+        }
         let (mut start, mut off) = (0u64, 0u64);
         if let Some(offsets) = self.core_offsets(n) {
             const CHUNK: usize = 2048;
@@ -1213,7 +1229,7 @@ impl Kallsyms {
     /// unreadable, or no `kallsyms_names`).
     fn core_offsets(&self, n: u64) -> Option<Vec<u64>> {
         let names_base = self.cfg.names_address?;
-        if n > 16 << 20 {
+        if n > MAX_PLAUSIBLE_SYMS {
             return None;
         }
         let mut rd = PageReader::new(self.layer);
@@ -1488,6 +1504,10 @@ impl Kallsyms {
             }
         } else {
             let n = self.num_syms()?;
+            // implausible count = corruption; python scans `range(num_syms)` unbounded and hangs.
+            if n > MAX_PLAUSIBLE_SYMS {
+                return Ok(None);
+            }
             let mut names = PageReader::new(self.layer);
             let mut tokens = PageReader::new(self.layer);
             let mut off = 0u64;
@@ -1651,5 +1671,99 @@ mod tests_lookup {
             }
         }
         assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests_robustness {
+    //! Regression: a corrupted `kallsyms_num_syms` must not drive an unbounded loop.
+    //!
+    //! Found by the fuzzer (`bench/scripts/fuzz_images.py`): a noble-lime mutant whose
+    //! `kallsyms_num_syms` was garbaged to 1,852,554,667 made `linux.kallsyms.Kallsyms` hang
+    //! (the timeout fired). python has no bound either -- `get_core_symbols` does
+    //! `for sym_idx in range(self._kallsyms_num_syms)` -- so it would loop ~1.8 billion times
+    //! and hang forever; rsvol gives up on the enumeration at [`MAX_PLAUSIBLE_SYMS`] instead.
+    use super::*;
+    use crate::layers::FileLayer;
+    use crate::objects::Module;
+    use crate::symbols::TableRef;
+    use crate::symbols::isf::{BuildOptions, build_blob};
+    use crate::symbols::table::{Blob, SymbolTable};
+
+    // Minimal Linux-ish ISF with just the symbols/types Kallsyms::new touches.
+    const ISF: &str = r#"{
+      "metadata": {"format": "6.2.0"},
+      "enums": {},
+      "base_types": {
+        "unsigned int": {"kind": "int", "size": 4, "signed": false, "endian": "little"},
+        "unsigned long": {"kind": "int", "size": 8, "signed": false, "endian": "little"},
+        "pointer": {"kind": "int", "size": 8, "signed": false, "endian": "little"},
+        "unsigned char": {"kind": "char", "size": 1, "signed": false, "endian": "little"},
+        "void": {"kind": "void", "size": 0, "signed": false, "endian": "little"}
+      },
+      "user_types": {
+        "kernel_symbol": {"kind": "struct", "size": 16, "fields": {
+          "value_offset": {"offset": 0, "type": {"kind": "base", "name": "unsigned int"}},
+          "name_offset": {"offset": 4, "type": {"kind": "base", "name": "unsigned int"}}
+        }}
+      },
+      "symbols": {
+        "kallsyms_num_syms":    {"address": 256,  "type": {"kind": "base", "name": "unsigned int"}},
+        "kallsyms_token_index": {"address": 512,  "type": {"kind": "base", "name": "unsigned char"}},
+        "kallsyms_token_table": {"address": 2048, "type": {"kind": "base", "name": "unsigned char"}},
+        "kallsyms_names":       {"address": 4096, "type": {"kind": "base", "name": "unsigned char"}}
+      }
+    }"#;
+
+    fn leak_table() -> TableRef {
+        let blob = build_blob(ISF.as_bytes(), &BuildOptions::default()).expect("build_blob");
+        let t = SymbolTable::from_blob(Blob::Owned(blob), "t", "u").expect("from_blob");
+        Box::leak(Box::new(t))
+    }
+
+    fn leak_layer() -> LayerRef {
+        // a tiny raw image: every kallsyms symbol address is readable (all zeros)
+        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-fuzz-{}", std::process::id()));
+        std::fs::write(&p, vec![0u8; 8192]).unwrap();
+        let l = FileLayer::open(&p).unwrap();
+        let _ = std::fs::remove_file(&p); // the mmap keeps the mapping alive
+        Box::leak(Box::new(l))
+    }
+
+    /// An implausibly large `num_syms` makes core enumeration and `lookup_name` return
+    /// immediately (bounded) instead of looping billions of times.
+    #[test]
+    fn huge_num_syms_does_not_hang() {
+        let vm = Module::new(leak_layer(), leak_table(), 0);
+        let mut kas = Kallsyms::new(&vm).expect("Kallsyms::new");
+        // the exact value the fuzzer's mutant produced, plus the extremes
+        for n in [1_852_554_667u64, MAX_PLAUSIBLE_SYMS + 1, 1u64 << 40, u64::MAX] {
+            kas.num_syms = Some(n);
+            let t = std::time::Instant::now();
+            let mut rows = 0usize;
+            kas.for_each_core_symbol(&mut |r| {
+                rows += r.is_ok() as usize;
+                rows < 1_000_000 // stop early if the guard ever regresses, so the test can't hang
+            });
+            assert_eq!(rows, 0, "num_syms={n}: core enumeration should be skipped, not looped");
+            assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "num_syms={n}: took too long");
+        }
+    }
+
+    /// A plausible count does not trip the guard: `num_syms = 0` enumerates zero symbols
+    /// through the normal path (no wholesale skip), and the bound is far above any real kernel.
+    #[test]
+    fn plausible_num_syms_is_allowed() {
+        assert!(MAX_PLAUSIBLE_SYMS >= 1 << 20, "bound must exceed any real kernel");
+        let vm = Module::new(leak_layer(), leak_table(), 0);
+        let mut kas = Kallsyms::new(&vm).expect("Kallsyms::new");
+        kas.num_syms = Some(0);
+        let mut rows = 0usize;
+        kas.for_each_core_symbol(&mut |_| {
+            rows += 1;
+            true
+        });
+        assert_eq!(rows, 0);
     }
 }
