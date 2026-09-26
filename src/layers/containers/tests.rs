@@ -563,7 +563,13 @@ fn malformed_containers_never_panic() {
 #[test]
 #[ignore]
 fn container_bench() {
-    let Ok(dir) = std::env::var("RSVOL_LAYER_BENCH") else { return };
+    // RSVOL_LAYER_BENCH=DIR (containers.py make) and/or RSVOL_LAYER_IMAGES=img1,img2 (real
+    // images: random pages drawn from their mapping())
+    let dir = std::env::var("RSVOL_LAYER_BENCH").ok();
+    let images = std::env::var("RSVOL_LAYER_IMAGES").ok();
+    if dir.is_none() && images.is_none() {
+        return;
+    }
     unsafe extern "C" {
         fn sched_setaffinity(pid: i32, size: usize, mask: *const u64) -> i32;
     }
@@ -578,7 +584,21 @@ fn container_bench() {
         mask[cpu % 1024 / 64] = 1 << (cpu % 64);
         set_affinity(&mask);
     }
-    let dir = PathBuf::from(dir);
+    let mut inputs: Vec<(String, PathBuf, Option<PathBuf>)> = Vec::new();
+    if let Some(dir) = &dir {
+        let dir = PathBuf::from(dir);
+        for name in ["lime", "elf", "crash64_bitmap", "vmware", "avml", "qemu"] {
+            if let Some(main) = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).find(|p| {
+                p.file_stem().and_then(|s| s.to_str()) == Some(name) && !matches!(p.extension().and_then(|e| e.to_str()), Some("addrs" | "vmss"))
+            }) {
+                inputs.push((name.to_string(), main, Some(dir.join(format!("{name}.addrs")))));
+            }
+        }
+    }
+    for img in images.iter().flat_map(|s| s.split(',')).filter(|s| !s.is_empty()) {
+        let p = PathBuf::from(img);
+        inputs.push((p.file_name().unwrap().to_string_lossy().into_owned(), p, None));
+    }
     let reps = 5;
     let best = |f: &mut dyn FnMut()| -> f64 {
         let mut b = f64::MAX;
@@ -589,21 +609,45 @@ fn container_bench() {
         }
         b
     };
-    for name in ["lime", "elf", "crash64_bitmap", "vmware", "avml", "qemu"] {
-        let Some(main) = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).find(|p| {
-            p.file_stem().and_then(|s| s.to_str()) == Some(name) && !matches!(p.extension().and_then(|e| e.to_str()), Some("addrs" | "vmss"))
-        }) else {
-            continue;
-        };
-        let file = open(&main);
+    for (name, main, addrs) in &inputs {
+        let file = open(main);
         let t = std::time::Instant::now();
-        let layer = stack_with(file, &StackOptions { location: Some(&main), stackers: None }).unwrap().layer;
+        let layer = stack_with(file, &StackOptions { location: Some(main), stackers: None }).unwrap().layer;
         let t_open = t.elapsed().as_secs_f64();
-        let pages: Vec<u64> = std::fs::read(dir.join(format!("{name}.addrs")))
-            .unwrap()
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-            .collect();
+        let pages: Vec<u64> = match addrs {
+            Some(a) => std::fs::read(a).unwrap().chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect(),
+            None => {
+                // 100k random whole pages of the mapped runs
+                let mut starts = Vec::new();
+                layer.mapping(0, layer.max_address().saturating_add(1), &mut |m| {
+                    let first = m.offset.div_ceil(0x1000) * 0x1000;
+                    let end = (m.offset + m.len) & !0xfff;
+                    if end > first {
+                        starts.push((first, (end - first) / 0x1000));
+                    }
+                    true
+                });
+                let total: u64 = starts.iter().map(|s| s.1).sum();
+                let mut cum = Vec::with_capacity(starts.len());
+                let mut acc = 0;
+                for s in &starts {
+                    acc += s.1;
+                    cum.push(acc);
+                }
+                let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+                (0..100_000)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        let k = x % total;
+                        let i = cum.partition_point(|&c| c <= k);
+                        let before = if i == 0 { 0 } else { cum[i - 1] };
+                        starts[i].0 + (k - before) * 0x1000
+                    })
+                    .collect()
+            }
+        };
         // 8-byte accesses at pseudo-random offsets inside the random pages
         let small: Vec<u64> = pages.iter().enumerate().map(|(i, &p)| p + ((i as u64).wrapping_mul(0x9e37_79b9) & 0xff8)).collect();
         let n = pages.len() as f64;
