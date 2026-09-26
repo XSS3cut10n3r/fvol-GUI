@@ -58,6 +58,9 @@ const HEADER: usize = 64;
 pub const MAX_TOTAL_BYTES: u64 = 256 << 20;
 /// Atoms bigger than this are not written (not worth caching).
 const MAX_ATOM_BYTES: usize = 64 << 20;
+/// A sweep stops recording (the scan goes on, uncached) beyond this many matches: bounds the
+/// memory of pathological queries (a very common needle over a huge layer).
+const MAX_RECORDS: usize = 16 << 20;
 
 /// What a scanner's `prescan` computes (see [`Scanner::cache_query`]). The description must be
 /// exact: the cache answers a scan with matches derived from it, and the scanner's `finish`
@@ -993,11 +996,19 @@ where
     let sweep = Sweep { inner: scanner, lits: Literals::new(&plan.lits), pages: plan.pages, derive: plan.derive };
     let mut rec: Vec<Groups> = (0..nlits + sweep.pages.len()).map(|_| Groups::default()).collect();
     let mut ok = true;
+    let mut total = 0usize;
     let mut stopped = false;
     scan::execute(layer, &sweep, secs, |h| match h {
         Rec::Raw(cs, m) => {
-            for &(rel, id) in m.iter() {
-                ok &= rec[id as usize].push(cs, rel, None);
+            if ok {
+                for &(rel, id) in m.iter() {
+                    ok &= rec[id as usize].push(cs, rel, None);
+                }
+                total += m.len();
+                if total > MAX_RECORDS {
+                    ok = false;
+                    rec = Vec::new();
+                }
             }
             true
         }
@@ -1164,8 +1175,14 @@ where
     let mut stopped = false;
     scan::execute(layer, &OpaqueSweep { inner: scanner }, secs, |h| match h {
         Rec::Raw(cs, m) => {
-            for &(rel, tag) in m.iter() {
-                ok &= g.push(cs, rel, Some(tag));
+            if ok {
+                for &(rel, tag) in m.iter() {
+                    ok &= g.push(cs, rel, Some(tag));
+                }
+                if g.rels.len() > MAX_RECORDS {
+                    ok = false;
+                    g = Groups::default();
+                }
             }
             true
         }
