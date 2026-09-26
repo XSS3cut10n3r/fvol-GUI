@@ -562,12 +562,16 @@ fn parse_spec(j: &Json, run: &Run, types: &[crate::renderers::ColType], app: &Ar
         }
     }
     if let Some(r) = j.get("range")
-        && let Some(c) = r.get("col")
+        && !matches!(r, Json::Null)
     {
-        let c = col(c)?;
+        let cols: Vec<usize> = match (r.get("cols"), r.get("col")) {
+            (Some(Json::Arr(a)), _) => a.iter().map(col).collect::<Result<_, _>>()?,
+            (_, Some(c)) => vec![col(c)?],
+            _ => return Err("range needs col or cols".into()),
+        };
         let from = r.get("from").and_then(|x| x.as_str()).unwrap_or("").as_bytes().to_vec();
         let to = r.get("to").and_then(|x| x.as_str()).unwrap_or("").as_bytes().to_vec();
-        spec.range = Some((c, from, to));
+        spec.range = Some((cols, from, to));
     }
     if let Some(Json::Bool(t)) = j.get("tree") {
         spec.tree = *t;
@@ -767,14 +771,19 @@ fn stream_rows(app: &Arc<App>, run: Arc<Run>, req: &Request) -> Response {
 }
 
 fn hist(run: &Arc<Run>, req: &Request) -> Response {
-    let col = qint(req, "col").unwrap_or(-1);
     let vid = qint(req, "view").unwrap_or(0).max(0) as u64;
     let buckets = qint(req, "buckets").unwrap_or(120).clamp(1, 2000) as usize;
     let view = if vid == 0 { None } else { find_view(run, vid) };
     let d = run.read();
-    if col < 0 || col as usize >= d.table.ncols {
+    // col=N, col=2,3,4 or col=all (every DateTime column)
+    let cols: Vec<usize> = match req.param("col").unwrap_or("") {
+        "all" => d.types.iter().enumerate().filter(|(_, t)| **t == crate::renderers::ColType::DateTime).map(|(i, _)| i).collect(),
+        s => s.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).filter(|&c| c < d.table.ncols).collect(),
+    };
+    if cols.is_empty() {
         return err(422, "bad column");
     }
+    let by = qint(req, "by").filter(|b| *b >= 0 && (*b as usize) < d.table.ncols).map(|b| b as usize);
     let ident;
     let v = match &view {
         Some(v) => v.as_ref(),
@@ -784,14 +793,32 @@ fn hist(run: &Arc<Run>, req: &Request) -> Response {
         }
     };
     let mut w = W::new();
-    match table::histogram(&d.table, v, col as usize, buckets) {
+    let window = match (req.param("from").and_then(|x| x.parse::<f64>().ok()), req.param("to").and_then(|x| x.parse::<f64>().ok())) {
+        (Some(a), Some(b)) => Some((a, b)),
+        _ => None,
+    };
+    match table::histogram(&d.table, v, &cols, buckets, by, 6, window) {
         None => {
             w.obj().kb("empty", true).end_obj();
         }
-        Some((lo, hi, counts)) => {
-            w.obj().key("min").f(lo).key("max").f(hi).key("counts").arr();
-            for c in counts {
-                w.u(c as u64);
+        Some(h) => {
+            w.obj().key("min").f(h.lo).key("max").f(h.hi).ku("below", h.below).ku("above", h.above).kb("focused", h.focused).key("counts").arr();
+            for c in &h.counts {
+                w.u(*c as u64);
+            }
+            w.end_arr();
+            w.key("cats").arr();
+            for c in &h.cats {
+                w.sb(c);
+            }
+            w.end_arr();
+            w.key("stacks").arr();
+            for s in &h.stacks {
+                w.arr();
+                for c in s {
+                    w.u(*c as u64);
+                }
+                w.end_arr();
             }
             w.end_arr().end_obj();
         }

@@ -392,8 +392,8 @@ pub struct ViewSpec {
     pub filters: Vec<(usize, Filter)>,
     /// (column, descending)
     pub sort: Vec<(usize, bool)>,
-    /// (column, from, to) inclusive text range over a DateTime column
-    pub range: Option<(usize, Vec<u8>, Vec<u8>)>,
+    /// (columns, from, to): inclusive text range over DateTime columns (any of them in range)
+    pub range: Option<(Vec<usize>, Vec<u8>, Vec<u8>)>,
     pub cmp: Option<CmpSpec>,
     /// keep tree order and show ancestors of matching rows
     pub tree: bool,
@@ -438,12 +438,15 @@ fn row_matches(t: &Table, types: &[ColType], spec: &ViewSpec, r: usize) -> (bool
             return (false, false);
         }
     }
-    if let Some((c, from, to)) = &spec.range {
-        if *c >= t.ncols || t.kind(r, *c) != K_TEXT {
-            return (false, false);
-        }
-        let s = t.cell(r, *c);
-        if (!from.is_empty() && s < from.as_slice()) || (!to.is_empty() && s > to.as_slice()) {
+    if let Some((cols, from, to)) = &spec.range {
+        let inside = cols.iter().any(|&c| {
+            if c >= t.ncols || t.kind(r, c) != K_TEXT {
+                return false;
+            }
+            let s = t.cell(r, c);
+            (from.is_empty() || s >= from.as_slice()) && (to.is_empty() || s <= to.as_slice())
+        });
+        if !inside {
             return (false, false);
         }
     }
@@ -708,40 +711,144 @@ pub fn parse_cli_time(s: &[u8]) -> Option<f64> {
     Some((days * 86400 + h * 3600 + mi * 60 + se) as f64 + frac)
 }
 
-/// Histogram of a DateTime column over a view: (min, max, counts).
-pub fn histogram(t: &Table, v: &View, col: usize, buckets: usize) -> Option<(f64, f64, Vec<u32>)> {
-    if col >= t.ncols {
+/// A time histogram: bucket counts, optionally split by category.
+pub struct Hist {
+    pub lo: f64,
+    pub hi: f64,
+    /// total per bucket
+    pub counts: Vec<u32>,
+    /// category names (the most frequent ones; the rest are "other")
+    pub cats: Vec<Vec<u8>>,
+    /// per bucket, per category (cats.len() + 1 for "other"), when stacking
+    pub stacks: Vec<Vec<u32>>,
+    /// timestamps before / after the axis window
+    pub below: u64,
+    pub above: u64,
+    /// the axis was narrowed to the bulk of the data (outliers such as 1601-01-01)
+    pub focused: bool,
+}
+
+/// Histogram of the timestamps in DateTime columns `cols` over a view (every timestamp counts,
+/// so a row with four dates contributes four events), optionally stacked by the text of
+/// column `by` (its `top` most frequent values).
+///
+/// The axis spans `window` when given; otherwise all the data, unless a few outliers (1601 /
+/// 1970 epochs, garbage) would squash everything into one bar: then it spans the 0.5–99.5th
+/// percentiles and the outliers are only counted (`below` / `above`).
+pub fn histogram(t: &Table, v: &View, cols: &[usize], buckets: usize, by: Option<usize>, top: usize, window: Option<(f64, f64)>) -> Option<Hist> {
+    let cols: Vec<usize> = cols.iter().copied().filter(|&c| c < t.ncols).collect();
+    if cols.is_empty() {
         return None;
     }
-    let mut times: Vec<f64> = Vec::new();
+    let by = by.filter(|&b| b < t.ncols);
+    // (time, category id)
+    let mut ev: Vec<(f64, u32)> = Vec::new();
+    let mut cat_ids: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
+    let mut cat_names: Vec<Vec<u8>> = Vec::new();
     for i in 0..v.total {
         if v.mark(i) & M_CONTEXT != 0 {
             continue;
         }
         let r = v.row(i);
-        if r >= t.rows() || t.kind(r, col) != K_TEXT {
+        if r >= t.rows() {
             continue;
         }
-        if let Some(x) = parse_cli_time(t.cell(r, col)) {
-            times.push(x);
+        let mut cat = 0u32;
+        let mut have_cat = false;
+        for &c in &cols {
+            if t.kind(r, c) != K_TEXT {
+                continue;
+            }
+            if let Some(x) = parse_cli_time(t.cell(r, c)) {
+                if !have_cat {
+                    if let Some(b) = by {
+                        let mut nb = NumBuf::default();
+                        let name = t.text(r, b, &mut nb);
+                        cat = match cat_ids.get(name) {
+                            Some(&id) => id,
+                            None => {
+                                let id = cat_names.len() as u32;
+                                cat_ids.insert(name.to_vec(), id);
+                                cat_names.push(name.to_vec());
+                                id
+                            }
+                        };
+                    }
+                    have_cat = true;
+                }
+                ev.push((x, cat));
+            }
         }
     }
-    if times.is_empty() {
+    if ev.is_empty() {
         return None;
     }
     let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-    for &x in &times {
+    for &(x, _) in &ev {
         lo = lo.min(x);
         hi = hi.max(x);
     }
-    let buckets = buckets.clamp(1, 2000);
-    let mut counts = vec![0u32; buckets];
-    let span = (hi - lo).max(1e-6);
-    for &x in &times {
-        let b = (((x - lo) / span) * buckets as f64) as usize;
-        counts[b.min(buckets - 1)] += 1;
+    let mut focused = false;
+    match window {
+        Some((a, b)) if b > a => {
+            lo = a;
+            hi = b;
+        }
+        _ => {
+            let mut ts: Vec<f64> = ev.iter().map(|e| e.0).collect();
+            let n = ts.len();
+            let q = |ts: &mut Vec<f64>, p: f64| {
+                let k = ((n - 1) as f64 * p) as usize;
+                *ts.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
+            };
+            let (qa, qb) = (q(&mut ts, 0.005), q(&mut ts, 0.995));
+            if qb > qa && (qb - qa) < 0.2 * (hi - lo) {
+                lo = qa;
+                hi = qb;
+                focused = true;
+            }
+        }
     }
-    Some((lo, hi, counts))
+    let buckets = buckets.clamp(1, 2000);
+    let span = (hi - lo).max(1e-6);
+    let bucket = |x: f64| ((((x - lo) / span) * buckets as f64) as usize).min(buckets - 1);
+    let mut counts = vec![0u32; buckets];
+    let (mut below, mut above) = (0u64, 0u64);
+    ev.retain(|&(x, _)| {
+        if x < lo {
+            below += 1;
+            false
+        } else if x > hi {
+            above += 1;
+            false
+        } else {
+            true
+        }
+    });
+    for &(x, _) in &ev {
+        counts[bucket(x)] += 1;
+    }
+    let (mut cats, mut stacks) = (Vec::new(), Vec::new());
+    if by.is_some() {
+        // the `top` most frequent categories keep their identity, the rest fold into "other"
+        let mut freq = vec![0u64; cat_names.len()];
+        for &(_, c) in &ev {
+            freq[c as usize] += 1;
+        }
+        let mut order: Vec<usize> = (0..cat_names.len()).collect();
+        order.sort_by(|&a, &b| freq[b].cmp(&freq[a]).then_with(|| cat_names[a].cmp(&cat_names[b])));
+        let keep = order.len().min(top);
+        let mut slot = vec![keep as u32; cat_names.len()];
+        for (k, &c) in order.iter().take(keep).enumerate() {
+            slot[c] = k as u32;
+        }
+        cats = order.iter().take(keep).map(|&c| cat_names[c].clone()).collect();
+        stacks = vec![vec![0u32; keep + 1]; buckets];
+        for &(x, c) in &ev {
+            stacks[bucket(x)][slot[c as usize] as usize] += 1;
+        }
+    }
+    Some(Hist { lo, hi, counts, cats, stacks, below, above, focused })
 }
 
 // ------------------------------------------------------------------------------------------

@@ -145,13 +145,13 @@ try:
       const vt = pane.querySelector('.vt')._vt;
       const q = pane.querySelector('input.q');
       const t0 = performance.now();
-      q.value = '0x7ff';
+      q.value = '0x7ff6';
       q.dispatchEvent(new Event('input'));
       while (!(vt.view && vt.rowAt(0))) await new Promise(r => setTimeout(r, 5));
       vt.render();
-      return { ms: performance.now() - t0, rows: vt.total };
+      return { ms: performance.now() - t0, rows: vt.total, view: vt.viewMs };
     })()""")
-    print(f"type a filter -> filtered rows on screen (incl. 180 ms debounce): {res['ms']:.0f} ms ({res['rows']:,} matching rows)")
+    print(f"type a filter -> filtered rows on screen (incl. 180 ms debounce): {res['ms']:.0f} ms ({res['rows']:,} matching rows, server view {res['view']} ms)")
     c.eval(f"location.hash = 'plugin/windows.pslist.PsList'")
     c.wait("document.querySelector('#panes > .pane:not([hidden]) .vt-row:not(.loading)')", 30)
     res = c.eval("""(() => {

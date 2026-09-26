@@ -161,6 +161,29 @@ def timeline():
     shot("08-timeline")
 
 
+@step("timeliner")
+def timeliner():
+    c.eval("location.hash = 'plugin/timeliner.Timeliner'")
+    c.wait("document.querySelector('#panes > .pane:not([hidden]) .hist svg rect')", 120)
+    c.pump(0.8)
+    shot("15-timeliner")
+    # brush the busiest stretch: drag across the middle fifth of the chart
+    # brush around the busiest bar: the burst an analyst would zoom into
+    box = c.eval("""(() => { const svg = document.querySelector('#panes > .pane:not([hidden]) .hist svg'); const r = svg.getBoundingClientRect();
+      let best = null; for (const b of svg.querySelectorAll('rect.b')) { const q = b.getBoundingClientRect(); if (!best || q.height > best.height) best = q; }
+      return [r.left, r.top, r.width, r.height, best.left + best.width / 2]; })()""")
+    y = box[1] + box[3] / 2
+    x0, x1 = max(box[0] + 1, box[4] - 12), box[4] + 12  # may run past the edge: the brush clamps
+    c.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x0, "y": y, "button": "left", "clickCount": 1})
+    for k in range(1, 11):
+        c.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x0 + (x1 - x0) * k / 10, "y": y, "button": "left"})
+    c.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x1, "y": y, "button": "left", "clickCount": 1})
+    c.pump(1.5)
+    c.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": box[0] + box[2] * 0.5, "y": box[1] + box[3] - 4})
+    c.pump(0.5)
+    shot("16-timeliner-range")
+
+
 @step("light")
 def light():
     c.eval("localStorage.setItem('rsvol.theme', 'light')")

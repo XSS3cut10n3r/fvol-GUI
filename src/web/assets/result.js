@@ -65,9 +65,10 @@ export class ResultPanel {
   update(r) {
     this.run = r;
     this.table.update(r);
-    const hasTime = (r.cols || []).some(c => c.type === 'DateTime');
-    this.timeBtn.hidden = !hasTime;
-    if (this.hist && (r.status === 'done' || this.table.total % 50 === 0)) this.loadHist();
+    const nTime = (r.cols || []).filter(c => c.type === 'DateTime').length;
+    this.timeBtn.hidden = !nTime;
+    if (this.hist === undefined && nTime > 1 && /timeliner/i.test(r.plugin) && r.status === 'done') this.toggleHist(true);
+    if (this.hist && r.status === 'done' && this.histDoneSeq !== r.seq) { this.histDoneSeq = r.seq; this.loadHist(); }
     this.updateCount();
     if (this.o.onUpdate) this.o.onUpdate(r);
   }
@@ -188,74 +189,137 @@ export class ResultPanel {
   }
 
   // ---------------------------------------------------------------- time histogram
-  toggleHist() {
-    this.hist = !this.hist;
+  toggleHist(force) {
+    this.hist = force ?? !this.hist;
     this.histBox.hidden = !this.hist;
+    this.timeBtn.setAttribute('aria-pressed', String(!!this.hist));
     if (this.hist) this.loadHist();
     else if (this.table.range) this.table.setRange(null);
   }
 
+  /** Time histogram of the result: every timestamp of the chosen DateTime column(s), optionally
+   * stacked by a text column (e.g. timeliner's Plugin). Drag to filter the table to a range. */
   async loadHist() {
     const cols = this.table.cols;
     const timeCols = cols.map((c, i) => [c, i]).filter(([c]) => c.type === 'DateTime');
     if (!timeCols.length) return;
-    if (this.histCol === undefined || !timeCols.some(([, i]) => i === this.histCol)) this.histCol = timeCols[0][1];
-    const w = Math.max(40, Math.floor((this.histBox.clientWidth || 800) / 5));
+    const textCols = cols.map((c, i) => [c, i]).filter(([c]) => c.type === 'Str');
+    if (this.histCol === undefined) this.histCol = timeCols.length > 1 ? 'all' : String(timeCols[0][1]);
+    if (this.histBy === undefined) {
+      const pc = textCols.find(([c]) => /^(Plugin|Source|Type|Process|ImageFileName|COMM)$/i.test(c.name));
+      this.histBy = pc && timeCols.length > 1 ? String(pc[1]) : '';
+    }
+    const w = Math.max(40, Math.floor((this.histBox.clientWidth || 800) / 6));
+    const gen = (this.histGen = (this.histGen || 0) + 1);
     let h;
-    try { h = await api(`runs/${this.runId}/hist?col=${this.histCol}&view=0&buckets=${Math.min(300, w)}`); } catch (e) { return; }
-    clear(this.histBox);
-    const sel = el('select.input', { 'aria-label': 'Time column', style: { height: '20px', fontSize: '10px' } });
-    for (const [c, i] of timeCols) sel.append(el('option', { value: i, text: c.name, selected: i === this.histCol }));
-    sel.addEventListener('change', () => { this.histCol = +sel.value; this.table.setRange(null); this.loadHist(); });
-    const label = el('span', { text: this.table.range ? `${this.table.range.from.slice(0, 19)} → ${this.table.range.to.slice(0, 19)}` : 'drag to select a time range' });
-    const clearBtn = el('button.linkbtn', { type: 'button', text: 'clear', hidden: !this.table.range, on: { click: () => { this.table.setRange(null); this.loadHist(); } } });
-    this.histBox.append(el('div.hl', {}, label, clearBtn, sel));
-    if (h.empty) { this.histBox.append(el('div.muted', { text: 'No timestamps in this column.', style: { paddingTop: '14px', fontSize: '11px' } })); return; }
-    const NS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(NS, 'svg');
-    const n = h.counts.length;
-    const max = Math.max(...h.counts, 1);
-    svg.setAttribute('viewBox', `0 0 ${n} 42`);
-    svg.setAttribute('preserveAspectRatio', 'none');
-    svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', `Histogram of ${cols[this.histCol].name}`);
-    const span = h.max - h.min || 1;
+    try {
+      // a brushed range zooms the axis into it (the table is filtered to it too)
+      const win = this.table.range ? `&from=${parseTime(this.table.range.from)}&to=${parseTime(this.table.range.to)}` : '';
+      h = await api(`runs/${this.runId}/hist?col=${this.histCol}&view=${this.table.range ? 0 : this.table.view}&buckets=${Math.min(240, w)}${this.histBy ? '&by=' + this.histBy : ''}${win}`);
+    } catch (e) { return; }
+    if (gen !== this.histGen) return;
+    const box = this.histBox;
+    clear(box);
+    box.classList.toggle('tall', !!(h.cats && h.cats.length));
+    // controls: one row above the chart
+    const selCol = el('select.input', { 'aria-label': 'Time column' });
+    if (timeCols.length > 1) selCol.append(el('option', { value: 'all', text: 'all time columns', selected: this.histCol === 'all' }));
+    for (const [c, i] of timeCols) selCol.append(el('option', { value: String(i), text: c.name, selected: String(i) === this.histCol }));
+    selCol.addEventListener('change', () => { this.histCol = selCol.value; this.table.setRange(null); this.loadHist(); });
+    const selBy = el('select.input', { 'aria-label': 'Stack by' }, el('option', { value: '', text: 'no stacking' }));
+    for (const [c, i] of textCols) selBy.append(el('option', { value: String(i), text: 'by ' + c.name, selected: String(i) === this.histBy }));
+    selBy.addEventListener('change', () => { this.histBy = selBy.value; this.loadHist(); });
     const r = this.table.range;
+    const label = el('span.rl', { text: r ? `${r.from.slice(0, 19)} → ${r.to.slice(0, 19)}` : 'drag across the chart to zoom in and filter' });
+    const clearBtn = el('button.linkbtn', { type: 'button', text: 'zoom out', hidden: !r, on: { click: () => { this.table.setRange(null); this.loadHist(); } } });
+    box.append(el('div.hl', {}, selCol, textCols.length ? selBy : null, label, clearBtn));
+    if (h.empty) { box.append(el('div.muted', { text: 'No timestamps in this column.', style: { padding: '10px 0', fontSize: '11px' } })); return; }
+    const n = h.counts.length;
+    const stacked = h.cats && h.cats.length > 0;
+    if (!h.counts.some(Boolean)) {
+      box.append(el('div.muted', { text: `No timestamps in this range (${fmtCount(h.below)} earlier, ${fmtCount(h.above)} later).`, style: { padding: '14px 0', fontSize: '11px' } }));
+      return;
+    }
+    const max = Math.max(...h.counts, 1);
+    const span = h.max - h.min || 1;
+    const H = stacked ? 70 : 42;
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+    const svg = mk('svg', { viewBox: `0 0 ${n} ${H}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': `Timeline of ${this.histCol === 'all' ? 'all time columns' : cols[+this.histCol].name}: ${h.counts.reduce((a, b) => a + b, 0)} timestamps` });
+    svg.style.height = H + 'px';
     const rf = r ? parseTime(r.from) : null, rt = r ? parseTime(r.to) : null;
-    h.counts.forEach((c, i) => {
-      if (!c) return;
-      const bh = Math.max(1.5, Math.sqrt(c / max) * 40);
-      const rect = document.createElementNS(NS, 'rect');
-      rect.setAttribute('x', i + 0.1); rect.setAttribute('width', 0.8);
-      rect.setAttribute('y', 42 - bh); rect.setAttribute('height', bh);
+    // sqrt scale keeps small bursts visible next to big ones
+    const scale = c => (c ? Math.max(1.5, Math.sqrt(c / max) * (H - 2)) : 0);
+    for (let i = 0; i < n; i++) {
+      const c = h.counts[i];
+      if (!c) continue;
       const t0 = h.min + (i / n) * span;
-      rect.setAttribute('class', 'b' + (r && t0 >= rf - span / n && t0 <= rt ? ' in' : ''));
-      const tt = document.createElementNS(NS, 'title');
-      tt.textContent = `${fmtTime(t0)} — ${c} row${c > 1 ? 's' : ''}`;
-      rect.append(tt);
-      svg.append(rect);
-    });
-    const brush = document.createElementNS(NS, 'rect');
-    brush.setAttribute('class', 'brush'); brush.setAttribute('y', 0); brush.setAttribute('height', 42); brush.setAttribute('width', 0);
+      const inRange = r && t0 + span / n >= rf && t0 <= rt;
+      const total = scale(c);
+      if (stacked) {
+        // segments proportional within the bar, bottom = most frequent category
+        let y = H;
+        const parts = h.stacks[i];
+        parts.forEach((pc, k) => {
+          if (!pc) return;
+          const hh = (pc / c) * total;
+          y -= hh;
+          svg.append(mk('rect', { x: i + 0.12, width: 0.76, y, height: Math.max(0.3, hh - 0.25), class: `b s${k < h.cats.length ? k + 1 : 'o'}${r && !inRange ? ' out' : ''}` }));
+        });
+      } else {
+        svg.append(mk('rect', { x: i + 0.12, width: 0.76, y: H - total, height: total, class: 'b' + (inRange ? ' in' : '') }));
+      }
+    }
+    const brush = mk('rect', { class: 'brush', y: 0, height: H, width: 0 });
     svg.append(brush);
-    let x0 = null;
+    const tip = el('div.htip', { hidden: true, role: 'tooltip' });
     const toX = e => { const b = svg.getBoundingClientRect(); return Math.max(0, Math.min(n, ((e.clientX - b.left) / b.width) * n)); };
-    svg.addEventListener('mousedown', e => { x0 = toX(e); brush.setAttribute('x', x0); brush.setAttribute('width', 0); });
-    svg.addEventListener('mousemove', e => { if (x0 === null) return; const x = toX(e); brush.setAttribute('x', Math.min(x, x0)); brush.setAttribute('width', Math.abs(x - x0)); });
+    let x0 = null;
+    svg.addEventListener('mousedown', e => { x0 = toX(e); brush.setAttribute('x', x0); brush.setAttribute('width', 0); tip.hidden = true; });
+    svg.addEventListener('mousemove', e => {
+      const x = toX(e);
+      if (x0 !== null) { brush.setAttribute('x', Math.min(x, x0)); brush.setAttribute('width', Math.abs(x - x0)); return; }
+      const i = Math.min(n - 1, Math.floor(x));
+      const c = h.counts[i];
+      if (!c) { tip.hidden = true; return; }
+      const t0 = h.min + (i / n) * span;
+      clear(tip);
+      tip.append(el('b', { text: `${fmtTime(t0)} – ${fmtTime(t0 + span / n).slice(11)} UTC` }), el('div', { text: `${fmtCount(c)} timestamp${c > 1 ? 's' : ''}` }));
+      if (stacked) {
+        h.stacks[i].map((pc, k) => [pc, k]).filter(([pc]) => pc).sort((a, b) => b[0] - a[0]).slice(0, 7).forEach(([pc, k]) => {
+          tip.append(el('div.tr', {}, el('i', { class: `sw s${k < h.cats.length ? k + 1 : 'o'}` }), el('span', { text: k < h.cats.length ? h.cats[k] : 'other' }), el('span.n', { text: fmtCount(pc) })));
+        });
+      }
+      const bb = box.getBoundingClientRect();
+      tip.hidden = false;
+      tip.style.left = Math.min(bb.width - 240, Math.max(0, e.clientX - bb.left + 12)) + 'px';
+      tip.style.top = (e.clientY - bb.top + 14) + 'px';
+    });
+    svg.addEventListener('mouseleave', e => { tip.hidden = true; if (x0 !== null) up(e); });
     const up = e => {
       if (x0 === null) return;
       const x = toX(e);
       const a = Math.min(x, x0), b = Math.max(x, x0);
       x0 = null;
-      if (b - a < 0.3) { this.table.setRange(null); this.loadHist(); return; }
+      if (b - a < 0.3) { if (this.table.range) { this.table.setRange(null); this.loadHist(); } return; }
       const from = fmtTime(h.min + (a / n) * span), to = fmtTime(h.min + (b / n) * span + 1);
-      this.table.setRange({ col: this.histCol, from, to });
+      const rcols = this.histCol === 'all' ? timeCols.map(([, i]) => i) : [+this.histCol];
+      this.table.setRange({ cols: rcols, from, to });
       label.textContent = `${from} → ${to}`;
       clearBtn.hidden = false;
+      this.loadHist();
     };
     svg.addEventListener('mouseup', up);
-    svg.addEventListener('mouseleave', e => { if (x0 !== null) up(e); });
-    this.histBox.append(svg, el('div.axis', {}, el('span', { text: fmtTime(h.min) }), el('span', { text: fmtTime(h.min + span / 2) }), el('span', { text: fmtTime(h.max) })));
+    const outl = (n2, side) => (n2 ? el('span.out', { title: side === 'below' ? 'timestamps before the axis (outliers such as 1601-01-01 are left out of the scale)' : 'timestamps after the axis', text: side === 'below' ? `‹ ${fmtCount(n2)} earlier` : `${fmtCount(n2)} later ›` }) : null);
+    box.append(svg, tip, el('div.axis', {}, el('span', {}, outl(h.below, 'below'), fmtTime(h.min) + ' UTC'), el('span', { text: fmtTime(h.min + span / 2) }), el('span', {}, fmtTime(h.max), outl(h.above, 'above'))));
+    if (stacked) {
+      const totals = new Array(h.cats.length + 1).fill(0);
+      for (const st of h.stacks) st.forEach((c, k) => { totals[k] += c; });
+      const legend = el('div.legend', { 'aria-label': 'Legend' });
+      h.cats.forEach((name, k) => { if (totals[k]) legend.append(el('span.li', {}, el('i', { class: `sw s${k + 1}` }), name, el('span.n', { text: fmtCount(totals[k]) }))); });
+      if (totals[h.cats.length]) legend.append(el('span.li', {}, el('i', { class: 'sw so' }), 'other', el('span.n', { text: fmtCount(totals[h.cats.length]) })));
+      box.append(legend);
+    }
   }
 
   destroy() { this.off(); this.table.destroy(); }

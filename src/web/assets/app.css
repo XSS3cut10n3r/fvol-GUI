@@ -421,14 +421,39 @@ button.chip:hover { border-color: var(--accent); color: var(--text); }
 .rv-body { flex: 1 1 auto; min-height: 0; display: flex; position: relative; border-top: 1px solid var(--line); }
 .rv-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 
-/* histogram strip */
-.hist { flex: none; height: 64px; margin: 0; padding: 6px 14px 4px; border-bottom: 1px solid var(--line); background: var(--panel); position: relative; user-select: none; }
-.hist svg { width: 100%; height: 42px; display: block; cursor: crosshair; }
+/* timeline strip (categorical slots from the validated reference palette; dark steps below) */
+:root {
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --so: #4b545d;
+}
+:root[data-theme="light"] {
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --so: #b5ab96;
+}
+.hist { flex: none; margin: 0; padding: 6px 14px 6px; border-bottom: 1px solid var(--line); background: var(--panel); position: relative; user-select: none; }
+.hist svg { width: 100%; display: block; cursor: crosshair; }
 .hist rect.b { fill: var(--muted); }
 .hist rect.b.in { fill: var(--accent); }
-.hist rect.brush { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
-.hist .axis { display: flex; justify-content: space-between; font-size: 9.5px; color: var(--muted); margin-top: 2px; }
-.hist .hl { position: absolute; right: 14px; top: 4px; font-size: var(--fs-xs); color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.hist rect.b.s1, .sw.s1 { fill: var(--s1); background: var(--s1); }
+.hist rect.b.s2, .sw.s2 { fill: var(--s2); background: var(--s2); }
+.hist rect.b.s3, .sw.s3 { fill: var(--s3); background: var(--s3); }
+.hist rect.b.s4, .sw.s4 { fill: var(--s4); background: var(--s4); }
+.hist rect.b.s5, .sw.s5 { fill: var(--s5); background: var(--s5); }
+.hist rect.b.s6, .sw.s6 { fill: var(--s6); background: var(--s6); }
+.hist rect.b.so, .sw.so { fill: var(--so); background: var(--so); }
+.hist rect.b.out { opacity: .3; }
+.hist rect.brush { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.hist .axis { display: flex; justify-content: space-between; font-size: 9.5px; color: var(--muted); margin-top: 3px; }
+.hist .axis .out { color: var(--accent); margin: 0 8px; }
+.hist .hl { display: flex; gap: 8px; align-items: center; font-size: var(--fs-xs); color: var(--muted); margin-bottom: 5px; }
+.hist .hl select { height: 22px; font-size: var(--fs-xs); padding: 0 4px; }
+.hist .hl .rl { margin-left: auto; }
+.hist .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 5px; font-size: var(--fs-xs); color: var(--text2); }
+.hist .legend .li { display: inline-flex; align-items: center; gap: 5px; }
+.hist .legend .n, .htip .n { color: var(--muted); }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.htip { position: absolute; z-index: 6; min-width: 200px; max-width: 320px; padding: 7px 9px; background: var(--raise2); border: 1px solid var(--line2); border-radius: 4px; box-shadow: var(--shadow); font-size: var(--fs-xs); color: var(--text); pointer-events: none; }
+.htip b { font-weight: 700; display: block; margin-bottom: 2px; }
+.htip .tr { display: grid; grid-template-columns: 12px 1fr auto; gap: 6px; align-items: center; }
+.rv-bar .btn[aria-pressed="true"] { color: var(--accent); border-color: var(--line2); }
 
 /* ---------------------------------------------------------------- virtual table */
 .vt { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; outline: none; }

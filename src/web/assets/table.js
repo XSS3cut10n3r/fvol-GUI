@@ -86,7 +86,7 @@ export class VirtualTable {
       // filtered/sorted views are snapshots: refresh at most once a second while rows arrive
       const wait = finishedNow ? 0 : Math.max(0, 1000 - (Date.now() - this.lastViewAt));
       clearTimeout(this.viewTimer);
-      this.viewTimer = setTimeout(() => this.buildView(), wait);
+      this.viewTimer = setTimeout(() => this.buildView(false), wait);
     }
     this.renderFoot();
   }
@@ -124,7 +124,9 @@ export class VirtualTable {
     };
   }
 
-  async buildView() {
+  /** Rebuild the server-side view. `reset`: the spec changed, so go back to the top (a
+   * refresh because more rows arrived keeps the position). */
+  async buildView(reset = true) {
     if (!this.built) return;
     const gen = ++this.gen;
     this.lastViewAt = Date.now();
@@ -142,6 +144,7 @@ export class VirtualTable {
       this.viewMs = r.ms;
       this.pages.clear();
       this.inflight.clear();
+      if (reset) { this.scroll.scrollTop = 0; this.cur.row = 0; }
       if (this.cur.row >= this.total) this.cur.row = Math.max(0, this.total - 1);
       this.markFilterErrors(null);
       this.layout();
