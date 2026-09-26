@@ -45,6 +45,19 @@ static PFX_CLASS: [u8; 256] = {
     t
 };
 
+/// ModRM byte -> its mod==3 / reg / rm selector fields, pre-packed at SEL_MOD / SEL_REG / SEL_RM.
+static MODRM_SEL: [u64; 256] = {
+    let mut t = [0u64; 256];
+    let mut m = 0;
+    while m < 256 {
+        t[m] = ((m >> 6 == 3) as u64) << (4 * SEL_MOD)
+            | (((m >> 3) & 7) as u64) << (4 * SEL_REG)
+            | ((m & 7) as u64) << (4 * SEL_RM);
+        m += 1;
+    }
+    t
+};
+
 /// Opcode bytes that start a 0F escape or a VEX / EVEX / XOP prefix.
 static ESC_BYTE: [bool; 256] = {
     let mut t = [false; 256];
@@ -160,8 +173,9 @@ fn decode_prefixed(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
 }
 
 /// The decoder. `NOLEG = true` is the common-case instantiation: it hands any instruction with a
-/// legacy (non-REX) prefix to the `false` one, so all legacy prefix state is compile-time
-/// constant there and the prefix rules below fold away. Same source for both.
+/// legacy (non-REX) prefix or a C4/C5/62/8F first opcode byte to the `false` one, so all legacy
+/// prefix and VEX/EVEX/XOP state is compile-time constant there and those rules fold away.
+/// Same source for both.
 /// `FULL = false` (insn_len) only needs validity + length: operand values are not stored.
 #[inline(always)]
 fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
@@ -283,6 +297,11 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
     let b = st.byte().unwrap_or(0);
     // one table lookup rules out all escape / vector-prefix bytes for most opcodes
     let esc = ESC_BYTE[b as usize];
+    if NOLEG && esc && b != 0x0F {
+        // VEX / EVEX / XOP candidates also take the general instantiation, so st.vex is a
+        // constant VEX_NONE here and all vector-extension state folds away
+        return decode_prefixed(data, addr, mode, out);
+    }
     let map: usize;
     let op: u8;
     let mut pfx: usize; // mandatory prefix selector value
@@ -515,13 +534,8 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
     } else {
         let modrm_pos = st.pos;
         let (mm, have_modrm) = if modrm_pos < n { (d[modrm_pos], true) } else { (0, false) };
-        let sz = |s: u8| -> u64 {
-            match s {
-                2 => 0,
-                4 => 1,
-                _ => 2,
-            }
-        };
+        // operand / address size selector value: 2 -> 0, 4 -> 1, 8 -> 2
+        let sz = |s: u8| -> u64 { (s >> 2) as u64 };
         let root = node;
         if root != 0 && root & LEAF == 0 {
             // decision node: selector values packed 4 bits each, in SEL_* order (built only when
@@ -533,9 +547,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
                 | (w as u64) << (4 * SEL_W)
                 | (if evex_rc { 2 } else { st.l as u64 }) << (4 * SEL_L)
                 | (st.evex_b as u64) << (4 * SEL_B)
-                | ((mm >> 6 == 3) as u64) << (4 * SEL_MOD)
-                | (((mm >> 3) & 7) as u64) << (4 * SEL_REG)
-                | ((mm & 7) as u64) << (4 * SEL_RM)
+                | MODRM_SEL[mm as usize]
                 | ((st.rex & 1) as u64) << (4 * SEL_REXB)
                 | sz(osz_def) << (4 * SEL_O)
                 | sz(osz_d64) << (4 * SEL_D)
