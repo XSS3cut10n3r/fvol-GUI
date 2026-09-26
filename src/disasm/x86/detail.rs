@@ -297,7 +297,7 @@ fn bare_mem_size(insn: &Insn, p: &Prefixes, ops: &[Operand]) -> u8 {
                 6
             }
         }
-        "bndldx" | "bndstx" => 16,
+        "bndldx" | "bndstx" | "bndcl" | "bndcu" | "bndcn" => 16,
         _ => {
             let _ = p;
             0
@@ -355,6 +355,14 @@ pub(crate) fn cs_operands(insn: &Insn) -> DetailOps {
                 } else if spec.src != tables::S_IMM {
                     // literal 1 of shifts
                     if first { 1 } else { op0_size }
+                } else if first && insn.base_mnemonic() == "push" {
+                    if p.has66 {
+                        2
+                    } else if m64 {
+                        8
+                    } else {
+                        4
+                    }
                 } else if first {
                     match spec.cls {
                         tables::I_U8 if out.n == 0 => 1,
@@ -368,19 +376,16 @@ pub(crate) fn cs_operands(insn: &Insn) -> DetailOps {
                                 4
                             }
                         }
+                        tables::I_LO4 => 1,
                         _ => {
                             if out.n > 0 {
                                 op0_size
-                            } else if m64 {
-                                if p.has66 { 2 } else { 8 }
-                            } else if p.has66 {
-                                2
                             } else {
-                                4
+                                branch_size
                             }
                         }
                     }
-                } else if spec.cls == tables::I_U8 {
+                } else if spec.cls == tables::I_U8 || spec.cls == tables::I_LO4 {
                     1
                 } else {
                     op0_size

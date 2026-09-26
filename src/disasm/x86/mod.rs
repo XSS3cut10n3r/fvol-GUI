@@ -7,6 +7,7 @@
 //!   / operand-size selectors), so decoding is a handful of indexed loads per instruction.
 
 mod access;
+mod access_spec;
 mod decode;
 mod detail;
 mod format;
@@ -17,7 +18,7 @@ mod spec_vex;
 mod spec_evex;
 mod tables;
 
-pub use access::{RegList, MAX_REGS};
+pub use access::{learn_features, RegList, MAX_REGS};
 pub use detail::{reg_name, DetailOp, DetailOps, CS_AC_READ, CS_AC_WRITE, MAX_DETAIL_OPS};
 pub use regs::Reg;
 

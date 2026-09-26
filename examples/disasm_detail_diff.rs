@@ -307,6 +307,245 @@ fn bench(path: &str) {
     }
 }
 
+// ----------------------------------------------------------------------------- learner
+
+/// capstone register name -> spec token (flags / native-size GPR tokens / literal).
+fn symbolize(name: &str, m64: bool) -> String {
+    const N64: [&str; 8] = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"];
+    const N32: [&str; 8] = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
+    const TOK: [&str; 8] = ["*ax", "*cx", "*dx", "*bx", "*sp", "*bp", "*si", "*di"];
+    if name == "eflags" || name == "rflags" {
+        return "flags".into();
+    }
+    let nat = if m64 { &N64 } else { &N32 };
+    if let Some(i) = nat.iter().position(|n| *n == name) {
+        return TOK[i].into();
+    }
+    if (m64 && name == "rip") || (!m64 && name == "eip") {
+        return "*ip".into();
+    }
+    name.into()
+}
+
+/// A rule value: "acc | reads | writes" (with native tokens) -> literal renderings -> weight.
+type Lits = HashMap<String, u64>;
+type Feats = [String; 7];
+
+/// Feature order used by the decision procedure (indices into `learn_features`):
+/// operand kinds, printed prefix, full signature, mode, prefix context, address size, opcode.
+const ORDER: [usize; 7] = [0, 3, 1, 2, 6, 4, 5];
+const FEAT_PREFIX: [&str; 7] = ["k:", "s:", "", "p:", "", "o:", "c:"];
+
+struct Learner {
+    // mnemonic -> features -> native value -> literal value -> weight
+    data: HashMap<String, HashMap<Feats, HashMap<String, Lits>>>,
+    conflicts: Vec<String>,
+}
+
+type Key<'a> = (&'a Feats, &'a HashMap<String, Lits>);
+
+fn merged(keys: &[Key]) -> HashMap<String, Lits> {
+    let mut m: HashMap<String, Lits> = HashMap::new();
+    for (_, c) in keys {
+        for (nat, lits) in c.iter() {
+            let e = m.entry(nat.clone()).or_default();
+            for (l, w) in lits {
+                *e.entry(l.clone()).or_insert(0) += w;
+            }
+        }
+    }
+    m
+}
+
+/// Majority native value and its rendering (the literal form when unambiguous).
+fn default_of(total: &HashMap<String, Lits>) -> (String, String) {
+    let mut v: Vec<(&String, u64)> = total.iter().map(|(k, l)| (k, l.values().sum())).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let nat = v[0].0.clone();
+    let lits = &total[&nat];
+    let text = if lits.len() == 1 { lits.keys().next().unwrap().clone() } else { nat.clone() };
+    (nat, text)
+}
+
+impl Learner {
+    /// Greedy decision-list construction: at each node split on the feature that leaves the
+    /// least weight outside its partitions' majority values (ties: fewest partitions that need
+    /// their own rules, then the preferred feature order), recurse into partitions whose values
+    /// differ from the node default, and finish with the node default rule.
+    fn emit(
+        &mut self,
+        mn: &str,
+        conds: &mut Vec<(usize, String)>,
+        keys: &[Key],
+        used: u32,
+        parent_default: Option<&str>,
+        out: &mut Vec<String>,
+    ) {
+        let total = merged(keys);
+        let (dnat, dtext) = default_of(&total);
+        if total.len() > 1 {
+            // (impurity, rules needed, order index, feature, partitions)
+            let mut best: Option<(u64, usize, usize, usize, Vec<(String, Vec<Key>)>)> = None;
+            for (oi, &f) in ORDER.iter().enumerate() {
+                if used & (1 << f) != 0 {
+                    continue;
+                }
+                let mut parts: Vec<(String, Vec<Key>)> = Vec::new();
+                for k in keys {
+                    let fv = &k.0[f];
+                    match parts.iter_mut().find(|p| &p.0 == fv) {
+                        Some(p) => p.1.push(*k),
+                        None => parts.push((fv.clone(), vec![*k])),
+                    }
+                }
+                if parts.len() < 2 {
+                    continue;
+                }
+                let mut imp = 0u64;
+                let mut need = 0usize;
+                for (_, part) in &parts {
+                    let pt = merged(part);
+                    let ws: Vec<u64> = pt.values().map(|l| l.values().sum()).collect();
+                    let tot: u64 = ws.iter().sum();
+                    let mx = *ws.iter().max().unwrap_or(&0);
+                    imp += tot - mx;
+                    if !(pt.len() == 1 && pt.contains_key(&dnat)) {
+                        need += 1;
+                    }
+                }
+                let cand = (imp, need, oi);
+                if best.as_ref().is_none_or(|b| cand < (b.0, b.1, b.2)) {
+                    best = Some((imp, need, oi, f, parts));
+                }
+            }
+            match best {
+                Some((_, _, _, f, mut parts)) => {
+                    parts.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (fv, part) in &parts {
+                        let pt = merged(part);
+                        if pt.len() == 1 && pt.contains_key(&dnat) {
+                            continue;
+                        }
+                        conds.push((f, fv.clone()));
+                        self.emit(mn, conds, part, used | (1 << f), Some(&dtext), out);
+                        conds.pop();
+                    }
+                }
+                None => {
+                    let mut v: Vec<(&String, u64)> = total.iter().map(|(k, l)| (k, l.values().sum())).collect();
+                    v.sort_by(|a, b| b.1.cmp(&a.1));
+                    self.conflicts.push(format!("# CONFLICT {mn} {:?}: {:?}", conds, v));
+                }
+            }
+        }
+        if parent_default != Some(dtext.as_str()) {
+            out.push(rule_text(mn, conds, &dtext));
+        }
+    }
+}
+
+fn rule_text(mn: &str, conds: &[(usize, String)], v: &str) -> String {
+    let mut s = mn.to_string();
+    let has_full = conds.iter().any(|c| c.0 == 1);
+    let mut cs: Vec<&(usize, String)> = conds.iter().collect();
+    cs.sort_by_key(|c| c.0);
+    for (lvl, fv) in cs {
+        if *lvl == 0 && has_full {
+            continue;
+        }
+        s.push(' ');
+        s.push_str(FEAT_PREFIX[*lvl]);
+        s.push_str(fv);
+    }
+    s.push_str(" = ");
+    s.push_str(v);
+    s
+}
+
+fn learn(dir: &str, only: Option<Vec<String>>) {
+    let names = only.unwrap_or_else(|| {
+        ["real64", "real32", "sweep64", "sweep32"].iter().map(|s| s.to_string()).collect()
+    });
+    let mut l = Learner { data: HashMap::new(), conflicts: Vec::new() };
+    let mut insn = Insn::default();
+    let (mut n, mut skipped) = (0u64, 0u64);
+    for name in &names {
+        let Ok(f) = std::fs::File::open(format!("{dir}/{name}.det")) else {
+            eprintln!("missing {name}.det");
+            continue;
+        };
+        let wt: u64 = if name.starts_with("real") { 4 } else { 1 };
+        for line in std::io::BufReader::new(f).lines() {
+            let line = line.unwrap();
+            let p: Vec<&str> = line.split('\t').collect();
+            if p.len() < 17 {
+                continue;
+            }
+            let mode = if p[1] == "64" { Mode::X86_64 } else { Mode::X86_32 };
+            let addr = u64::from_str_radix(p[2], 16).unwrap_or(0);
+            let win = unhex(p[3]);
+            if !x86::decode_into(&win, addr, mode, &mut insn)
+                || insn.size as usize != p[4].parse::<usize>().unwrap_or(0)
+                || ops_string(&insn, false) != norm_cs(p[14], false)
+            {
+                skipped += 1;
+                continue;
+            }
+            n += 1;
+            let m64 = mode == Mode::X86_64;
+            let acc: String = if p[14].is_empty() {
+                "-".into()
+            } else {
+                p[14]
+                    .split('|')
+                    .map(|o| {
+                        let f: Vec<&str> = o.split(',').collect();
+                        if f[0] == "m" { f[7] } else { f[3] }
+                    })
+                    .collect()
+            };
+            let list = |s: &str, nat: bool| {
+                s.split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(|x| if nat { symbolize(x, m64) } else if x == "eflags" || x == "rflags" { "flags".into() } else { x.to_string() })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let nat = format!("{acc} | {} | {}", list(p[10], true), list(p[11], true));
+            let lit = format!("{acc} | {} | {}", list(p[10], false), list(p[11], false));
+            let feats = x86::learn_features(&insn);
+            *l.data
+                .entry(insn.base_mnemonic().to_string())
+                .or_default()
+                .entry(feats)
+                .or_default()
+                .entry(nat)
+                .or_default()
+                .entry(lit)
+                .or_insert(0) += wt;
+        }
+    }
+    eprintln!("learn: {n} instructions, {skipped} skipped (decode/shape mismatch)");
+    let mut mns: Vec<String> = l.data.keys().cloned().collect();
+    mns.sort();
+    let mut lines = Vec::new();
+    for mn in &mns {
+        let d = l.data.remove(mn).unwrap();
+        let mut keys: Vec<Key> = d.iter().collect();
+        keys.sort_by(|a, b| a.0.cmp(b.0));
+        let mut out = Vec::new();
+        l.emit(mn, &mut Vec::new(), &keys, 0, None, &mut out);
+        lines.extend(out);
+    }
+    for c in &l.conflicts {
+        println!("{c}");
+    }
+    for s in &lines {
+        println!("{s}");
+    }
+    eprintln!("learn: {} rules for {} mnemonics, {} conflicts", lines.len(), mns.len(), l.conflicts.len());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut only = None;
@@ -334,6 +573,7 @@ fn main() {
     match args.get(1).map(|s| s.as_str()) {
         Some("cmp") => cmp(args.get(2).map_or("/tmp/rsvol-disasm", |s| s.as_str()), only, show, cats),
         Some("bench") => bench(args.get(2).expect("path")),
+        Some("learn") => learn(args.get(2).map_or("/tmp/rsvol-disasm", |s| s.as_str()), only),
         _ => eprintln!("usage: disasm_detail_diff cmp DIR [--only a,b] [--show N] | bench FILE.det"),
     }
 }
