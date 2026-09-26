@@ -218,7 +218,8 @@ never checked for changes on the server.
 
 A decompressed image is stored with its key: the image location and the canonical path, size and
 modification time of the compressed file. When the compressed file changes, the next run
-decompresses it again and deletes the old copy. The copy is as big as the uncompressed image.
+decompresses it again and deletes the old copy, and copies of compressed files that no longer
+exist are deleted whenever an image is decompressed. A copy is as big as the uncompressed image.
 
 When python volatility3 has run on this machine, rsvol reads its identifier cache (never writes
 it; `--cache-path` selects it as for python) instead of reading every symbol file on the search

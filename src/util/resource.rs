@@ -183,7 +183,8 @@ fn decompressed(dir: &Path, src: &Path, url: &str, chain: &[Codec]) -> Result<Pa
 }
 
 /// Removes from `dir` the entries of an earlier version of the location whose names start
-/// with `prefix` (its source file changed), and temporary files of processes that are gone.
+/// with `prefix` (its source file changed), entries whose source file is gone, and
+/// temporary files of processes that are gone.
 fn remove_stale(dir: &Path, prefix: &str) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
@@ -192,7 +193,19 @@ fn remove_stale(dir: &Path, prefix: &str) {
         let stale = match n.rsplit_once(".tmp") {
             // "<stem>.img.tmp<pid>", "<stem>.stage<i>.tmp<pid>": the writer died
             Some((_, pid)) => pid.parse::<u32>().is_ok_and(|p| p != std::process::id() && !Path::new(&format!("/proc/{p}")).exists()),
-            None => n.starts_with(prefix),
+            None if n.starts_with(prefix) => true,
+            None => match n.strip_suffix(".key") {
+                // the compressed file was deleted or moved: its copy is garbage
+                Some(stem) => {
+                    let src = std::fs::read_to_string(e.path()).ok().and_then(|k| k.lines().find_map(|l| l.strip_prefix("path=").map(PathBuf::from)));
+                    let gone = src.is_some_and(|p| !p.exists());
+                    if gone {
+                        let _ = std::fs::remove_file(dir.join(format!("{stem}.img")));
+                    }
+                    gone
+                }
+                None => false,
+            },
         };
         if stale {
             let _ = std::fs::remove_file(e.path());
@@ -367,14 +380,17 @@ mod tests {
         let d = dir.join("stale");
         std::fs::create_dir_all(&d).unwrap();
         let me = std::process::id();
-        for n in ["aa-1.img", "aa-1.key", "bb-2.img", "bb-2.img.tmp4000000000", "cc.stage0.tmp4000000001", "cc.tmp1x"] {
+        for n in ["aa-1.img", "aa-1.key", "bb-2.img", "bb-2.img.tmp4000000000", "cc.stage0.tmp4000000001", "cc.tmp1x", "dd-4.img"] {
             std::fs::write(d.join(n), b"").unwrap();
         }
         std::fs::write(d.join(format!("bb-3.img.tmp{me}")), b"").unwrap();
+        // bb-2's source exists, dd-4's is gone
+        std::fs::write(d.join("bb-2.key"), format!("version=1\npath={}\nlength=0\n", raw.display())).unwrap();
+        std::fs::write(d.join("dd-4.key"), format!("version=1\npath={}\nlength=0\n", dir.join("gone.gz").display())).unwrap();
         remove_stale(&d, "aa-");
         let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
         left.sort();
-        assert_eq!(left, ["bb-2.img".to_string(), format!("bb-3.img.tmp{me}"), "cc.tmp1x".to_string()]);
+        assert_eq!(left, ["bb-2.img".to_string(), "bb-2.key".to_string(), format!("bb-3.img.tmp{me}"), "cc.tmp1x".to_string()]);
         // xz blocks decoded into a mapping of the output file (blocks over 64 MiB)
         let (src, dst) = (dir.join("a.raw.xz"), dir.join("mapped.out"));
         assert_eq!(decompress_file_with(Codec::Xz, &src, &dst, 0).unwrap(), data.len() as u64);

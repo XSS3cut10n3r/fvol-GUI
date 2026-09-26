@@ -79,8 +79,9 @@ vol -f memory.raw.xz windows.psscan.PsScan     # later runs: no decompression
 - xz files with several blocks, such as those from `xz -T0`, bzip2 files and gzip files with
   several members, such as those from `bgzip`, decompress on all cores. A single-member gzip
   file, such as the output of plain `gzip`, is one stream and decompresses on one core.
-- The copy is kept until the compressed file changes (size or modification time) or until
-  `--clear-cache`.
+- The copy is kept until `--clear-cache`, or until the next decompression after the compressed
+  file changed (size or modification time) or was deleted. `RSVOL_CACHE` moves the cache to a
+  disk with more room.
 - `.vmem` detection uses the name as given, as python does, so a compressed `x.vmem.gz` is
   read as a raw image without its `.vmss`.
 
