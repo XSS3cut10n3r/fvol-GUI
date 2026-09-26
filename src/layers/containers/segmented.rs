@@ -11,8 +11,9 @@
 //!   or coincide (equal starts: the later one wins) and no mapped offset reaches the end of
 //!   the base, python's lookup equals "the last segment starting at or before the address owns
 //!   it". The list is then normalised once into a flat, sorted, non-overlapping run table,
-//!   adjacent compatible runs are merged, and lookups are a last-hit check plus a binary
-//!   search. A read inside one raw run is a single memcpy from the mmap.
+//!   adjacent compatible runs are merged, and lookups are a binary search (small tables) or
+//!   one bucket of a read-only index (large ones). A read inside one raw run is a single
+//!   memcpy from the mmap.
 //! * EXACT: anything else (unsorted QEMU page lists, overlapping ELF/crash segments, ...) runs
 //!   python's bisect over the original list order and python's mapping loop, so even the
 //!   position-dependent results python gives for such inputs are reproduced.
