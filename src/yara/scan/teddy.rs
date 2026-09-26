@@ -31,9 +31,9 @@ pub struct Teddy {
     m: usize,
     lo: [[u8; 16]; MAX_WINDOW],
     hi: [[u8; 16]; MAX_WINDOW],
-    /// `members[bucket_off[b]..bucket_off[b+1]]` are the ids of bucket `b`.
+    /// `members[bucket_off[b]..bucket_off[b+1]]` are the patterns of bucket `b`.
     bucket_off: [u32; NB + 1],
-    members: Vec<u32>,
+    members: Vec<Member>,
 }
 
 /// Nibble projection of a bucket position: (low nibbles, high nibbles) as bitmasks.
@@ -55,42 +55,102 @@ impl Nib {
     fn union(self, o: Nib) -> Nib {
         Nib { lo: self.lo | o.lo, hi: self.hi | o.hi }
     }
-    /// Estimated probability that a memory byte falls in the accepted product set.
-    fn freq(self, table: &[[f64; 16]; 16]) -> f64 {
-        if self.lo == 0xffff && self.hi == 0xffff {
-            return 1.0;
-        }
-        let mut f = 0.0;
-        for h in 0..16 {
-            if self.hi >> h & 1 != 0 {
-                for l in 0..16 {
-                    if self.lo >> l & 1 != 0 {
-                        f += table[h][l];
-                    }
-                }
-            }
-        }
-        f
-    }
 }
 
 const ALL: Nib = Nib { lo: 0xffff, hi: 0xffff };
 
-fn bucket_cost(b: &[Nib; MAX_WINDOW], m: usize, table: &[[f64; 16]; 16]) -> f64 {
-    let mut c = 1.0;
-    for n in b.iter().take(m) {
-        c *= n.freq(table);
-    }
-    c
+
+/// Fast weighted sum over a nibble-product set: `A[h][lo & 0xff] + B[h][lo >> 8]`.
+struct NibTable {
+    a: Vec<[f64; 256]>,
+    b: Vec<[f64; 256]>,
 }
+
+impl NibTable {
+    fn new() -> NibTable {
+        let mut a = vec![[0.0; 256]; 16];
+        let mut b = vec![[0.0; 256]; 16];
+        for h in 0..16 {
+            for m in 0..256usize {
+                for l in 0..8 {
+                    if m >> l & 1 != 0 {
+                        a[h][m] += BYTE_FREQ[h << 4 | l] as f64 / (1u64 << 20) as f64;
+                        b[h][m] += BYTE_FREQ[h << 4 | (l + 8)] as f64 / (1u64 << 20) as f64;
+                    }
+                }
+            }
+        }
+        NibTable { a, b }
+    }
+
+    fn freq(&self, n: Nib) -> f64 {
+        if n.lo == 0xffff && n.hi == 0xffff {
+            return 1.0;
+        }
+        let (la, lb) = ((n.lo & 0xff) as usize, (n.lo >> 8) as usize);
+        let mut f = 0.0;
+        let mut hs = n.hi;
+        while hs != 0 {
+            let h = hs.trailing_zeros() as usize;
+            hs &= hs - 1;
+            f += self.a[h][la] + self.b[h][lb];
+        }
+        f
+    }
+
+    fn prob(&self, w: &[Nib; MAX_WINDOW], m: usize) -> f64 {
+        w.iter().take(m).map(|&n| self.freq(n)).product()
+    }
+}
+
+fn union(a: &[Nib; MAX_WINDOW], b: &[Nib; MAX_WINDOW]) -> [Nib; MAX_WINDOW] {
+    let mut u = *a;
+    for j in 0..MAX_WINDOW {
+        u[j] = u[j].union(b[j]);
+    }
+    u
+}
+
+/// Exact window test run on each bucket member before reporting it:
+/// `(word | fold) & mask == val` on the 4 bytes at the candidate position.
+#[derive(Clone, Copy, Debug, Default)]
+struct Member {
+    id: u32,
+    val: u32,
+    fold: u32,
+    mask: u32,
+}
+
+impl Member {
+    fn new(id: u32, w: &[ByteSet]) -> Member {
+        let (mut val, mut fold, mut mask) = (0u32, 0u32, 0u32);
+        for (j, s) in w.iter().take(MAX_WINDOW).enumerate() {
+            let v: Vec<u8> = s.iter().collect();
+            let sh = 8 * j;
+            match v.len() {
+                1 => {
+                    val |= (v[0] as u32) << sh;
+                    mask |= 0xff << sh;
+                }
+                2 if v[0] ^ v[1] == 0x20 => {
+                    val |= ((v[0] | 0x20) as u32) << sh;
+                    fold |= 0x20 << sh;
+                    mask |= 0xff << sh;
+                }
+                _ => {}
+            }
+        }
+        Member { id, val, fold, mask }
+    }
+}
+
+/// Relative cost of a bucket hit per member (inline window test) vs the hit itself.
+const MEMBER_COST: f64 = 0.5;
 
 impl Teddy {
     /// `windows[i]` is the window of pattern id `ids[i]` (1..=4 non-empty byte sets).
     pub fn new(windows: &[Vec<ByteSet>], ids: &[u32]) -> Teddy {
-        let mut table = [[0.0f64; 16]; 16];
-        for b in 0..256 {
-            table[b >> 4][b & 15] = BYTE_FREQ[b] as f64 / (1u64 << 20) as f64;
-        }
+        let nt = NibTable::new();
         let m = windows.iter().map(|w| w.len().clamp(1, MAX_WINDOW)).max().unwrap_or(1);
         let nibs: Vec<[Nib; MAX_WINDOW]> = windows
             .iter()
@@ -102,58 +162,46 @@ impl Teddy {
                 a
             })
             .collect();
-        let own: Vec<f64> = nibs.iter().map(|n| bucket_cost(n, m, &table)).collect();
-        // Greedy assignment, most expensive (least selective) windows first.
-        let mut order: Vec<usize> = (0..windows.len()).collect();
-        order.sort_by(|&a, &b| own[b].partial_cmp(&own[a]).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b)));
-        let mut bk: [Option<[Nib; MAX_WINDOW]>; NB] = [None; NB];
-        let mut assign: Vec<Vec<u32>> = vec![Vec::new(); NB];
-        for &i in &order {
-            let mut best = 0usize;
+        // Agglomerative clustering into NB buckets: repeatedly merge the two clusters
+        // whose union adds the least expected work (hit probability x member count).
+        let cost = |n: &[Nib; MAX_WINDOW], k: usize| nt.prob(n, m) * (1.0 + MEMBER_COST * k as f64);
+        let mut clusters: Vec<([Nib; MAX_WINDOW], Vec<usize>)> = Vec::new();
+        for (i, n) in nibs.iter().enumerate() {
+            match clusters.iter_mut().find(|c| c.0 == *n) {
+                Some(c) => c.1.push(i),
+                None => clusters.push((*n, vec![i])),
+            }
+        }
+        while clusters.len() > NB {
+            let mut best = (0usize, 1usize);
             let mut best_delta = f64::INFINITY;
-            for (b, slot) in bk.iter().enumerate() {
-                let delta = match slot {
-                    None => own[i],
-                    Some(cur) => {
-                        let mut u = *cur;
-                        for j in 0..MAX_WINDOW {
-                            u[j] = u[j].union(nibs[i][j]);
-                        }
-                        // Scale by the number of patterns sharing the bucket: every
-                        // candidate costs one verification per member.
-                        let k = assign[b].len() as f64;
-                        bucket_cost(&u, m, &table) * (k + 1.0) - bucket_cost(cur, m, &table) * k
+            for a in 0..clusters.len() {
+                for b in a + 1..clusters.len() {
+                    let u = union(&clusters[a].0, &clusters[b].0);
+                    let delta = cost(&u, clusters[a].1.len() + clusters[b].1.len())
+                        - cost(&clusters[a].0, clusters[a].1.len())
+                        - cost(&clusters[b].0, clusters[b].1.len());
+                    if delta < best_delta {
+                        best_delta = delta;
+                        best = (a, b);
                     }
-                };
-                if delta < best_delta {
-                    best_delta = delta;
-                    best = b;
                 }
             }
-            bk[best] = Some(match bk[best] {
-                None => nibs[i],
-                Some(cur) => {
-                    let mut u = cur;
-                    for j in 0..MAX_WINDOW {
-                        u[j] = u[j].union(nibs[i][j]);
-                    }
-                    u
-                }
-            });
-            assign[best].push(ids[i]);
+            let (a, b) = best;
+            let cb = clusters.swap_remove(b);
+            clusters[a].0 = union(&clusters[a].0, &cb.0);
+            clusters[a].1.extend(cb.1);
         }
         let mut lo = [[0u8; 16]; MAX_WINDOW];
         let mut hi = [[0u8; 16]; MAX_WINDOW];
-        for (b, slot) in bk.iter().enumerate() {
-            if let Some(n) = slot {
-                for j in 0..MAX_WINDOW {
-                    for x in 0..16 {
-                        if n[j].lo >> x & 1 != 0 {
-                            lo[j][x] |= 1 << b;
-                        }
-                        if n[j].hi >> x & 1 != 0 {
-                            hi[j][x] |= 1 << b;
-                        }
+        for (b, (n, _)) in clusters.iter().enumerate() {
+            for j in 0..MAX_WINDOW {
+                for x in 0..16 {
+                    if n[j].lo >> x & 1 != 0 {
+                        lo[j][x] |= 1 << b;
+                    }
+                    if n[j].hi >> x & 1 != 0 {
+                        hi[j][x] |= 1 << b;
                     }
                 }
             }
@@ -162,22 +210,25 @@ impl Teddy {
         let mut members = Vec::new();
         for b in 0..NB {
             bucket_off[b] = members.len() as u32;
-            members.extend_from_slice(&assign[b]);
+            if let Some((_, list)) = clusters.get(b) {
+                for &i in list {
+                    members.push(Member::new(ids[i], &windows[i]));
+                }
+            }
         }
         bucket_off[NB] = members.len() as u32;
         Teddy { m, lo, hi, bucket_off, members }
     }
 
-    /// Estimated fraction of haystack positions that produce a candidate.
+    /// Estimated fraction of haystack positions that produce a bucket hit.
     pub fn estimated_rate(&self) -> f64 {
-        let mut table = [[0.0f64; 16]; 16];
-        for b in 0..256 {
-            table[b >> 4][b & 15] = BYTE_FREQ[b] as f64 / (1u64 << 20) as f64;
-        }
+        let nt = NibTable::new();
         let mut total = 0.0;
         for b in 0..NB {
+            if self.bucket_off[b + 1] == self.bucket_off[b] {
+                continue;
+            }
             let mut n = [ALL; MAX_WINDOW];
-            let mut any = false;
             for (j, nj) in n.iter_mut().enumerate() {
                 let mut lo = 0u16;
                 let mut hi = 0u16;
@@ -189,28 +240,37 @@ impl Teddy {
                         hi |= 1 << x;
                     }
                 }
-                any |= lo != 0;
                 *nj = Nib { lo, hi };
             }
-            if any {
-                total += bucket_cost(&n, self.m, &table) * (self.bucket_off[b + 1] - self.bucket_off[b]) as f64;
-            }
+            total += nt.prob(&n, self.m);
         }
         total
     }
 
     #[inline(always)]
-    fn bucket(&self, b: usize) -> &[u32] {
+    fn bucket(&self, b: usize) -> &[Member] {
         &self.members[self.bucket_off[b] as usize..self.bucket_off[b + 1] as usize]
     }
 
     #[inline(always)]
-    fn emit<F: FnMut(usize, u32)>(&self, q: usize, mut bits: u8, f: &mut F) {
+    fn emit<F: FnMut(usize, u32)>(&self, hay: &[u8], q: usize, mut bits: u8, f: &mut F) {
+        let x = match hay.get(q..q + 4) {
+            Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            None => {
+                let mut w = [0u8; 4];
+                for (j, v) in w.iter_mut().enumerate() {
+                    *v = hay.get(q + j).copied().unwrap_or(0);
+                }
+                u32::from_le_bytes(w)
+            }
+        };
         while bits != 0 {
             let b = bits.trailing_zeros() as usize;
             bits &= bits - 1;
-            for &id in self.bucket(b) {
-                f(q, id);
+            for mb in self.bucket(b) {
+                if (x | mb.fold) & mb.mask == mb.val {
+                    f(q, mb.id);
+                }
             }
         }
     }
@@ -247,7 +307,7 @@ impl Teddy {
                         }
                     };
                     for &c in &cands[..k.min(CAND_CAP)] {
-                        self.emit((c >> 8) as usize, c as u8, &mut f);
+                        self.emit(hay, (c >> 8) as usize, c as u8, &mut f);
                     }
                     if next == q {
                         break;
@@ -259,7 +319,7 @@ impl Teddy {
         while q < to {
             let bits = self.scalar_bits(hay, q);
             if bits != 0 {
-                self.emit(q, bits, &mut f);
+                self.emit(hay, q, bits, &mut f);
             }
             q += 1;
         }

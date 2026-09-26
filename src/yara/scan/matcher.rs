@@ -436,10 +436,12 @@ impl Matcher {
         let mut st = 0u32;
         let mut raw = 0usize;
         let mut verified = 0usize;
+        let mut winok = 0usize;
         let mut per = vec![0usize; self.pats.len()];
         self.raw.run(data, 0, data.len(), &mut st, |q, p| {
             raw += 1;
             per[p as usize] += 1;
+            winok += self.pats[p as usize].window_ok(data, q) as usize;
             let pat = &self.pats[p as usize];
             if let Some(s) = q.checked_sub(pat.w as usize) {
                 let (a, e) = (pat.off as usize, (pat.off + pat.len) as usize);
@@ -460,11 +462,12 @@ impl Matcher {
             })
             .collect();
         format!(
-            "top windows {}\nraw: {} pats, {}, {} candidates, {} verified; diff: {} pats, {}",
+            "top windows {}\nraw: {} pats, {}, {} candidates, {} window ok, {} verified; diff: {} pats, {}",
             top.join(" "),
             self.pats.len(),
             kind(&self.raw),
             raw,
+            winok,
             verified,
             self.dpats.len(),
             kind(&self.diff)

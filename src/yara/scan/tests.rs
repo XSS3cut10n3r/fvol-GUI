@@ -276,6 +276,24 @@ fn yara_scan_difftest() {
             Ok(mt) => {
                 let mut out = Vec::new();
                 mt.scan(&data, &mut out);
+                if std::env::var("RSVOL_YARA_REF").is_ok() {
+                    // Cross-check hex/regex strings against the protocol reference.
+                    for (i, d) in defs.iter().enumerate() {
+                        let rs = match &d.kind {
+                            StringKind::Hex(src) => re_string::ReString::new_hex(src, &d.mods, d.fixed_offset),
+                            StringKind::Regex { src, nocase, dotall } => {
+                                re_string::ReString::new_regex(src, *nocase, *dotall, &d.mods, d.fixed_offset)
+                            }
+                            StringKind::Text(_) => continue,
+                        };
+                        if let Ok(rs) = rs {
+                            let r = re_string::scan_reference(&rs, &data);
+                            if r != out[i] {
+                                eprintln!("{} string {i}: matcher differs from scan_reference", f[0]);
+                            }
+                        }
+                    }
+                }
                 let mut parts = Vec::new();
                 for (i, v) in out.iter().enumerate() {
                     if v.is_empty() {
