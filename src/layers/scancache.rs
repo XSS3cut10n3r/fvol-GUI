@@ -133,11 +133,10 @@ fn key_hash(b: &[u8]) -> u64 {
         h ^ (h >> 33)
     }
     let mut h = fmix(0x9e37_79b9_7f4a_7c15 ^ b.len() as u64);
-    let mut words = b.chunks_exact(8);
-    for w in &mut words {
-        h = fmix(h ^ u64::from_le_bytes(w.try_into().unwrap()));
+    let (words, rest) = b.as_chunks::<8>();
+    for w in words {
+        h = fmix(h ^ u64::from_le_bytes(*w));
     }
-    let rest = words.remainder();
     if !rest.is_empty() {
         let mut w = [0u8; 8];
         w[..rest.len()].copy_from_slice(rest);
