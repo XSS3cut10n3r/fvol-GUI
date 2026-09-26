@@ -71,23 +71,42 @@ fn gather_vmcs_structures() -> Vec<([u8; 4], String, TableRef)> {
     out
 }
 
+/// The `_VMCS` members python's checks read, resolved once per structure table (python looks
+/// them up on every page; `m()` on a probe at 0, rebased per page, gives the same objects).
+/// `None` when the type or a member is missing: python then raises on every page (skipped).
+struct VmcsMembers {
+    link: Obj,
+    host_cr4: Obj,
+    guest_cr3: Obj,
+    host_cr3: Obj,
+    guest_cr4: Obj,
+    ept: Obj,
+}
+
+fn vmcs_members(layer: &'static dyn Layer, table: TableRef) -> Option<VmcsMembers> {
+    let probe = Obj::named(Space::on(layer, table), "_VMCS", 0).ok()?;
+    let m = |n: &str| probe.m(n).ok();
+    Some(VmcsMembers { link: m("vmcs_link_ptr")?, host_cr4: m("host_cr4")?, guest_cr3: m("guest_cr3")?, host_cr3: m("host_cr3")?, guest_cr4: m("guest_cr4")?, ept: m("ept")? })
+}
+
 /// python `_verify_vmcs_page` + the row: `None` = python skipped the page (a failed test or an
 /// InvalidAddressException / AttributeError). Any failed test skips the page (python 3.11+:
 /// every non-empty `VMCSTest` flag combination has a `name`), and so does any later read error,
 /// so the checks stop at the first failure.
-fn check(layer: &'static dyn Layer, table: TableRef, off: u64) -> Option<(u64, u64)> {
+fn check(layer: &'static dyn Layer, m: Option<&VmcsMembers>, off: u64) -> Option<(u64, u64)> {
+    let m = m?;
+    let at = |o: &Obj| Obj { sp: o.sp, ty: o.ty, addr: off.wrapping_add(o.addr) & o.sp.layer_mask };
     let r = (|| -> Result<Option<(u64, u64)>> {
-        let vmcs = Obj::named(Space::on(layer, table), "_VMCS", off)?;
-        let failed = layer.read_vec(off + 4, 4)? != [0, 0, 0, 0]
-            || vmcs.m("vmcs_link_ptr")?.int()? != 0xFFFF_FFFF_FFFF_FFFF
-            || vmcs.m("host_cr4")?.int()? & (1 << 13) == 0
-            || vmcs.m("guest_cr3")?.int()? == 0
-            || vmcs.m("host_cr3")?.int()? == 0
-            || vmcs.m("guest_cr4")?.int()? & 0xFFFF_FFFF_FF88_9000 != 0;
+        let failed = layer.read_array::<4>(off + 4)? != [0, 0, 0, 0]
+            || at(&m.link).int()? != 0xFFFF_FFFF_FFFF_FFFF
+            || at(&m.host_cr4).int()? & (1 << 13) == 0
+            || at(&m.guest_cr3).int()? == 0
+            || at(&m.host_cr3).int()? == 0
+            || at(&m.guest_cr4).int()? & 0xFFFF_FFFF_FF88_9000 != 0;
         if failed {
             return Ok(None);
         }
-        Ok(Some((vmcs.m("ept")?.int()? as u64, vmcs.m("guest_cr3")?.int()? as u64)))
+        Ok(Some((at(&m.ept).int()? as u64, at(&m.guest_cr3).int()? as u64)))
     })();
     r.ok().flatten()
 }
@@ -168,11 +187,13 @@ impl Plugin for Vmscan {
             });
             per_chunk.concat()
         });
+        let members: Vec<Option<VmcsMembers>> = structures.iter().map(|s| vmcs_members(layer, s.2)).collect();
         let check_one = |i: usize| {
             let (start, ps, si) = raw[i];
-            structures.get(si as usize).and_then(|s| check(layer, s.2, start + ps))
+            members.get(si as usize).and_then(|m| check(layer, m.as_ref(), start + ps))
         };
-        // a few us per hit: threads pay off beyond a few hundred hits
+        // each hit's first read faults a new page of the image mapping (~2 us): overlap the
+        // faults on all cores unless there are only a few hits
         let checked: Vec<Option<(u64, u64)>> =
             if raw.len() < 256 { (0..raw.len()).map(check_one).collect() } else { crate::util::par::par_map(raw.len(), check_one) };
         for (&(start, ps, si), c) in raw.iter().zip(checked) {
