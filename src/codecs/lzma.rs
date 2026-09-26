@@ -373,6 +373,21 @@ macro_rules! rev_last {
 //   DIST_SLOT 864, DIST_SPECIAL 1376, ALIGN 1604, LEN_CODER 1636, REP_LEN_CODER 2664,
 //   LITERAL 3692; in a length coder: CHOICE 0, CHOICE2 2, LOW 4, MID 260, HIGH 516.
 
+/// Profiling marker (`--cfg lzma_marks`): a nop with displacement 0x7700 + $n that tools
+/// use to split the asm loop into regions.
+#[cfg(all(target_arch = "x86_64", lzma_marks))]
+macro_rules! mark {
+    ($n:literal) => {
+        concat!("nop dword ptr [rax + 0x77", $n, "]\n")
+    };
+}
+#[cfg(all(target_arch = "x86_64", not(lzma_marks)))]
+macro_rules! mark {
+    ($n:literal) => {
+        ""
+    };
+}
+
 /// Branchy bit with the probability at [$addr]: falls through on 0 (range and the
 /// probability already updated), jumps to $one on 1, where `bit1!($addr)` must follow.
 /// Leaves the bound in {t0} and the old probability in {a} for `bit1!`.
@@ -516,46 +531,68 @@ macro_rules! tree8a {
     };
 }
 
-/// Matched-literal step (the reference decoder's offset scheme): {sym} node, {t3} offset
-/// (0x100 while the decoded bits equal the match byte's, else 0), {t2} match byte (shifted
-/// left once per bit), {b} match bit. $last: omit the next-bit preparation.
+/// Literal-with-match-byte step while all earlier bits equalled the match byte's ({t2}):
+/// node {sym} = the match byte's prefix, probability at 0x100 + match bit * 0x100 + node.
+/// $sh: 7 - bit position. The next node assumes the bit matches (so no address depends on
+/// the decoding); on a mismatch the plain-tree node is {sym} ^ 1 and the code jumps to $miss.
 #[cfg(target_arch = "x86_64")]
-macro_rules! mstep {
-    ($nonlast1:expr, $nonlast2:expr) => {
+macro_rules! mlit {
+    ($sh:literal, $miss:literal) => {
         concat!(
-            "add {sym:e}, {t3:e}\n",
-            "and {b:e}, {t3:e}\n",
-            "add {sym:e}, {b:e}\n",
-            "movzx {a:e}, word ptr [{base} + {sym}*2]\n",
-            "add {sym:e}, {sym:e}\n",
-            $nonlast1,
+            "mov {t3:e}, {t2:e}\n",
+            "shr {t3:e}, ", $sh, "\n",
+            "and {t3:e}, 1\n",
+            "mov {t1:e}, {t3:e}\n",
+            "shl {t1:e}, 8\n",
+            "lea {t1:e}, [{t1} + {sym} + 0x100]\n",
+            "movzx {a:e}, word ptr [{base} + {t1}*2]\n",
             norm!(),
             "mov {t0:e}, {range:e}\n",
             "shr {range:e}, 11\n",
             "imul {range:e}, {a:e}\n",
             "sub {t0:e}, {range:e}\n",
-            "mov {t1:e}, {code:e}\n",
+            "mov {b:e}, {code:e}\n",
             "sub {code:e}, {range:e}\n",
             "cmovae {range:e}, {t0:e}\n",
-            "cmovb {code:e}, {t1:e}\n",
-            "mov {t1:e}, {sym:e}\n",
-            $nonlast2,
-            "sbb {sym:e}, -1\n",
-            "mov {t0:e}, {sym:e}\n",
-            "and {t0:e}, 1\n",
-            "lea {t0:e}, [{t0} + {a}*2]\n",
+            "cmovb {code:e}, {b:e}\n",
+            "sbb {b:e}, {b:e}\n",
+            "inc {b:e}\n",
+            "lea {t0:e}, [{b} + {a}*2]\n",
             "movzx {t0:e}, word ptr [{probs} + {t0}*2 - 8192]\n",
-            "and {sym:e}, 0x1FF\n",
-            "mov word ptr [{base} + {t1}], {t0:x}\n",
+            "mov word ptr [{base} + {t1}*2], {t0:x}\n",
+            "lea {sym:e}, [{t3} + {sym}*2]\n",
+            "cmp {b:e}, {t3:e}\n",
+            "jne ", $miss, "f\n",
         )
     };
 }
+
+/// Last bit of a literal with match byte (still matching so far): {sym} = 0x100 + byte.
 #[cfg(target_arch = "x86_64")]
-macro_rules! mstep_mid {
+macro_rules! mlit_last {
     () => {
-        mstep!(
-            concat!("xor {t3:e}, {b:e}\n", "add {t2:e}, {t2:e}\n"),
-            concat!("cmovae {t3:e}, {b:e}\n", "mov {b:e}, {t2:e}\n")
+        concat!(
+            "mov {t3:e}, {t2:e}\n",
+            "and {t3:e}, 1\n",
+            "mov {t1:e}, {t3:e}\n",
+            "shl {t1:e}, 8\n",
+            "lea {t1:e}, [{t1} + {sym} + 0x100]\n",
+            "movzx {a:e}, word ptr [{base} + {t1}*2]\n",
+            norm!(),
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {a:e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {b:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+            "cmovae {range:e}, {t0:e}\n",
+            "cmovb {code:e}, {b:e}\n",
+            "sbb {b:e}, {b:e}\n",
+            "inc {b:e}\n",
+            "lea {t0:e}, [{b} + {a}*2]\n",
+            "movzx {t0:e}, word ptr [{probs} + {t0}*2 - 8192]\n",
+            "mov word ptr [{base} + {t1}*2], {t0:x}\n",
+            "lea {sym:e}, [{b} + {sym}*2]\n",
         )
     };
 }
@@ -1349,6 +1386,7 @@ impl LzmaDecoder {
             core::arch::asm!(
                 // ---- symbol loop ----
                 "20:",
+                mark!("01"),
                 "cmp {op}, qword ptr [{ctx} + 8]",
                 "jae 90f",
                 "cmp {inp}, qword ptr [{ctx}]",
@@ -1361,17 +1399,37 @@ impl LzmaDecoder {
                 "add {t1:e}, {t2:e}",
                 bit!("{probs} + {t1}*2", "40f"),
                 // ---- literal ----
+                mark!("02"),
                 "mov {t0}, qword ptr [{ctx} + 72]",
                 "imul {t0:e}, {t0:e}, 0x600",
                 "lea {base}, [{probs} + {t0} + 3692]",
                 "mov {t2}, qword ptr [{ctx} + 64]",
                 "cmp {t2:e}, 7",
                 "jae 30f",
-                tree8a!(
-                    "{base}",
-                    "255",
-                    concat!("mov {t2:e}, {sym:e}\n", "and {t2:e}, 7\n", "mov qword ptr [{ctx} + 72], {t2}\n")
-                ),
+                // 8-bit tree; labels 31..37: entry at depth 1..7 (node in {sym}, its
+                // probability in {b} for odd depths, {a} for even ones), used by the
+                // literal with match byte once a bit differs from the match byte.
+                tfirst!("{base}"),
+                tstep!("{base}", "a", "b"),
+                "31:",
+                tstep!("{base}", "b", "a"),
+                "32:",
+                tstep!("{base}", "a", "b"),
+                "33:",
+                // the next literal's context: this byte's top three bits
+                "mov {t2:e}, {sym:e}",
+                "and {t2:e}, 7",
+                "mov qword ptr [{ctx} + 72], {t2}",
+                tstep!("{base}", "b", "a"),
+                "34:",
+                tstep!("{base}", "a", "b"),
+                "35:",
+                tstep!("{base}", "b", "a"),
+                "36:",
+                tstep!("{base}", "a", "b"),
+                "37:",
+                tlast!("{base}", "b", "255"),
+                "38:",
                 "mov byte ptr [{op}], {sym:l}",
                 "inc {op}",
                 "mov {t2}, qword ptr [{ctx} + 64]",
@@ -1380,6 +1438,7 @@ impl LzmaDecoder {
                 "jmp 20b",
                 // ---- literal with match byte ----
                 "30:",
+                mark!("03"),
                 "mov {t0}, qword ptr [{ctx} + 32]",
                 "mov {t1}, {op}",
                 "sub {t1}, qword ptr [{ctx} + 16]",
@@ -1387,29 +1446,54 @@ impl LzmaDecoder {
                 "jae 95f",
                 "neg {t0}",
                 "movzx {t2:e}, byte ptr [{op} + {t0} - 1]",
-                "add {t2:e}, {t2:e}",
-                "mov {b:e}, {t2:e}",
-                "mov {t3:e}, 0x100",
-                "mov {sym:e}, 1",
-                mstep_mid!(),
-                mstep_mid!(),
-                mstep_mid!(),
-                "mov {t0:e}, {sym:e}",
-                "and {t0:e}, 7",
+                // While the decoded bits equal the match byte's, the nodes follow the match
+                // byte: their addresses do not depend on the decoding, so the loads run
+                // ahead. The top three bits usually match (context of the next literal).
+                "mov {t0:e}, {t2:e}",
+                "shr {t0:e}, 5",
                 "mov qword ptr [{ctx} + 72], {t0}",
-                mstep_mid!(),
-                mstep_mid!(),
-                mstep_mid!(),
-                mstep_mid!(),
-                mstep!("", ""),
-                "mov byte ptr [{op}], {sym:l}",
-                "inc {op}",
-                "mov {t2}, qword ptr [{ctx} + 64]",
-                "movzx {t2:e}, byte ptr [{ctx} + {t2} + 104]",
-                "mov qword ptr [{ctx} + 64], {t2}",
-                "jmp 20b",
+                "mov {sym:e}, 1",
+                mlit!("7", "80"),
+                mlit!("6", "81"),
+                mlit!("5", "82"),
+                mlit!("4", "83"),
+                mlit!("3", "84"),
+                mlit!("2", "85"),
+                mlit!("1", "86"),
+                mlit_last!(),
+                "jmp 38b",
+                // first differing bit at position i: continue the plain tree at depth i + 1
+                "80:",
+                "xor {sym:e}, 1",
+                "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                "jmp 31b",
+                "81:",
+                "xor {sym:e}, 1",
+                "movzx {a:e}, word ptr [{base} + {sym}*2]",
+                "jmp 32b",
+                "82:",
+                "xor {sym:e}, 1",
+                "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                "jmp 33b",
+                "83:",
+                "xor {sym:e}, 1",
+                "movzx {a:e}, word ptr [{base} + {sym}*2]",
+                "jmp 34b",
+                "84:",
+                "xor {sym:e}, 1",
+                "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                "jmp 35b",
+                "85:",
+                "xor {sym:e}, 1",
+                "movzx {a:e}, word ptr [{base} + {sym}*2]",
+                "jmp 36b",
+                "86:",
+                "xor {sym:e}, 1",
+                "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                "jmp 37b",
                 // ---- match ----
                 "40:",
+                mark!("04"),
                 bit1!("{probs} + {t1}*2"),
                 "mov {t2}, qword ptr [{ctx} + 64]",
                 bit!("{probs} + {t2}*2 + 384", "50f"),
@@ -1418,6 +1502,7 @@ impl LzmaDecoder {
                 len_dec!("1636", "41", "42", "43"),
                 "mov qword ptr [{ctx} + 96], {sym}",
                 // distance slot: tree at DIST_SLOT + min(len - 2, 3) * 64
+                mark!("05"),
                 "lea {t0:e}, [{sym} - 2]",
                 "mov {t1:e}, 3",
                 "cmp {t0:e}, 3",
@@ -1436,6 +1521,7 @@ impl LzmaDecoder {
                 "mov {t3:e}, {sym:e}",
                 "and {t3:e}, 1",
                 "or {t3:e}, 2",
+                mark!("06"),
                 "44:",
                 "add {t3:e}, {t3:e}",
                 "lea {t1:e}, [{t3} + 1]",
@@ -1448,6 +1534,7 @@ impl LzmaDecoder {
                 "dec {t2:e}",
                 "jnz 44b",
                 "shl {t3:e}, 4",
+                mark!("07"),
                 rev4a!("{probs} + 1604"),
                 "add {sym:e}, {t3:e}",
                 "cmp {sym:e}, -1",
@@ -1455,6 +1542,7 @@ impl LzmaDecoder {
                 "jmp 48f",
                 // slot 4..13: reverse tree of (slot >> 1) - 1 bits
                 "46:",
+                mark!("08"),
                 "mov {t2:e}, {sym:e}",
                 "shr {t2:e}, 1",
                 "dec {t2:e}",
@@ -1489,6 +1577,7 @@ impl LzmaDecoder {
                 "add {sym:e}, dword ptr [{ctx} + 168]",
                 // rep3..rep1 shift, rep0 = distance
                 "48:",
+                mark!("09"),
                 "mov {t0}, qword ptr [{ctx} + 48]",
                 "mov qword ptr [{ctx} + 56], {t0}",
                 "mov {t0}, qword ptr [{ctx} + 40]",
@@ -1500,6 +1589,7 @@ impl LzmaDecoder {
                 "jmp 60f",
                 // ---- rep match ----
                 "50:",
+                mark!("10"),
                 bit1!("{probs} + {t2}*2 + 384"),
                 bit!("{probs} + {t2}*2 + 408", "52f"),
                 "mov {t1}, {op}",
@@ -1554,10 +1644,12 @@ impl LzmaDecoder {
                 "55:",
                 "movzx {t0:e}, byte ptr [{ctx} + {t2} + 128]",
                 "mov qword ptr [{ctx} + 64], {t0}",
+                mark!("11"),
                 len_dec!("2664", "57", "58", "59"),
                 "mov qword ptr [{ctx} + 96], {sym}",
                 // ---- copy len ([ctx + 96]) bytes from distance rep0 + 1 ----
                 "60:",
+                mark!("12"),
                 "mov {t0}, qword ptr [{ctx} + 32]",
                 "mov {t1}, {op}",
                 "sub {t1}, qword ptr [{ctx} + 16]",
@@ -1623,6 +1715,7 @@ impl LzmaDecoder {
                 "jnz 76b",
                 // ---- exits: status 0 limit, 1 input, 2 end marker, 3 bad distance ----
                 "90:",
+                mark!("13"),
                 "xor {t0:e}, {t0:e}",
                 "jmp 99f",
                 "91:",
