@@ -58,6 +58,9 @@ struct St<'a> {
     asz: u8,
     seg: u8, // segment register id or 0
     disp8n: u8, // EVEX compressed disp8 scale
+    has66: bool,
+    mosz: u8, // operand size used for memory size keywords
+    is4: u8,
     vsib: u8,   // VSIB index register class (0 = normal SIB)
 }
 
@@ -182,6 +185,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         seg: seg_reg(segp),
         disp8n: 1,
         vsib: 0,
+        has66,
+        mosz: 4,
+        is4: 0,
     };
 
     // ------------------------------------------------------------------ opcode / vector prefixes
@@ -385,6 +391,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     // ------------------------------------------------------------------ table walk
     let mut node = if map == MAP_3DN { 1 } else { t.roots[map][op as usize] };
     let mut entry_idx: usize = 0;
+    let mut fallback = false;
     if map == MAP_3DN {
         // 3DNow!: operands first, the opcode is the trailing byte.
         node = 0;
@@ -428,6 +435,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 Some(x) => x,
                 None => return false,
             };
+            fallback = true;
         }
         if node == 0 {
             return false;
@@ -495,6 +503,22 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
 
     if flags & F_NOVVVV != 0 && st.vvvv != 0 && st.vex != VEX_NONE {
         return false;
+    }
+    st.has66 = has66;
+    st.mosz = st.osz;
+    if st.vex == VEX_NONE && map != MAP_1 {
+        // capstone prints the memory size of the LLVM instruction variant matched for the
+        // prefix context, while GPR registers follow the prefixes.
+        if fallback {
+            st.w = false;
+            st.mosz = 4;
+        } else if flags & F_NOPFX != 0 {
+            if pfx >= 4 {
+                st.mosz = 4;
+            }
+        } else if pfx == 1 && rexw {
+            st.mosz = 2;
+        }
     }
 
     // EVEX decorations / validity
@@ -749,13 +773,13 @@ fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
         K_X => MemSize::Xmmword,
         K_YMM => MemSize::Ymmword,
         K_ZMM => MemSize::Zmmword,
-        K_V => match st.osz {
+        K_V => match st.mosz {
             2 => MemSize::Word,
             4 => MemSize::Dword,
             _ => MemSize::Qword,
         },
         K_Z => {
-            if st.osz == 2 {
+            if st.has66 {
                 MemSize::Word
             } else {
                 MemSize::Dword
@@ -1061,6 +1085,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     Some(v) => v,
                     None => return false,
                 };
+                st.is4 = b;
                 let num = if m64 { b >> 4 } else { (b >> 4) & 7 };
                 Operand::Reg(Reg(reg_for(st, s.cls, num)))
             }
@@ -1109,6 +1134,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                         Some(v) => (v as i64, false),
                         None => return false,
                     },
+                    I_LO4 => ((st.is4 & 0x0F) as i64, false),
                     I_W4 => match st.le(4) {
                         Some(v) => ((v & 0xFFFF) as i64, false),
                         None => return false,

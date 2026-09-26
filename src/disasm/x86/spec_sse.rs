@@ -312,6 +312,7 @@ pub(crate) const SPEC: &str = r#"
 0f 8d : jge j:z ; bnd f64 relq
 0f 8e : jle j:z ; bnd f64 relq
 0f 8f : jg j:z ; bnd f64 relq
+0f 82-8f mode64 6f3|6f2 : INVALID
 # ------------------------------------------------------------------ 0F 90-9F setcc
 0f 90 : seto m:b
 0f 91 : setno m:b

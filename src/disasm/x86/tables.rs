@@ -108,6 +108,7 @@ pub(crate) const I_U32: u8 = 8;
 pub(crate) const I_S16: u8 = 9; // imm16 sign-extended, printed signed
 pub(crate) const I_ZS: u8 = 10; // imm16/32 sign-extended, printed signed
 pub(crate) const I_W4: u8 = 11; // 4 immediate bytes consumed, low 16 bits printed (capstone quirk)
+pub(crate) const I_LO4: u8 = 12; // low nibble of the is4 byte (no byte consumed)
 
 // memory keyword (mk)
 pub(crate) const K_DEF: u8 = 0; // derived from the register class
@@ -176,6 +177,7 @@ pub(crate) const F_NOZ: u64 = 1 << 32; // EVEX.z must be 0
 pub(crate) const F_NOBR: u64 = 1 << 33; // EVEX.b must be 0 (register form)
 pub(crate) const F_NOBM: u64 = 1 << 34; // EVEX.b must be 0 (memory form)
 pub(crate) const F_BCST_QB: u64 = 1 << 35; // {1toN} by qword, printed "byte ptr", disp8 unscaled
+pub(crate) const F_NOPFX: u64 = 1 << 36; // (computed) entry has no mandatory-prefix constraint
 
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Entry {
@@ -485,6 +487,7 @@ fn parse_op(tok: &str) -> Result<OpSpec, String> {
                 "ws" => I_S16,
                 "zs" => I_ZS,
                 "w4" => I_W4,
+                "lo4" => I_LO4,
                 _ => return Err(bad()),
             },
             S_REL => match cls_s {
@@ -661,6 +664,9 @@ impl Builder {
                 }
             }
             e.alias = first;
+        }
+        if sel[SEL_PFX as usize] == full(SEL_PFX as usize) {
+            e.flags |= F_NOPFX;
         }
         let idx = self.entries.len() as u16;
         self.entries.push(e);

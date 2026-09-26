@@ -515,6 +515,9 @@ def emit(table):
                 fl = list(flags)
                 if mn in ("vcmpps", "vcmppd", "vcmpss", "vcmpsd"):
                     fl.append("cmp32")
+                if mn in ("vpermil2ps", "vpermil2pd"):
+                    # the imm8 is the low nibble of the is4 byte (no extra byte)
+                    toks = tuple("i:lo4" if t == "i:b" else t for t in toks)
                 line = f"{MAPNAME[(k, mm)]} {op:02x} {PP[pp]} {' '.join(s)} : {mn} {', '.join(toks)}".rstrip()
                 if fl:
                     line += " ; " + " ".join(fl)
