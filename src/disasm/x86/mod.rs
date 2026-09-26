@@ -6,13 +6,16 @@
 //!   dense per-map `[u32; 256]` roots plus small decision nodes (prefix / W / L / mod / reg / rm
 //!   / operand-size selectors), so decoding is a handful of indexed loads per instruction.
 
+#[allow(dead_code)]
 mod decode;
 mod format;
+#[allow(dead_code)]
 pub mod regs;
 mod spec_legacy;
 mod spec_sse;
 mod spec_vex;
 mod spec_evex;
+#[allow(dead_code)]
 mod tables;
 
 pub use regs::Reg;

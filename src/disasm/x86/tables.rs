@@ -764,10 +764,3 @@ fn build() -> Tables {
     Tables { mnems: b.mnems, entries: b.entries, roots, nodes }
 }
 
-/// Spec validation errors (for tests).
-#[cfg(test)]
-pub(crate) fn check_spec() -> Vec<String> {
-    let t = tables();
-    let _ = t;
-    Vec::new()
-}
