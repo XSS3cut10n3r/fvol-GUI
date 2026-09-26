@@ -25,7 +25,10 @@ Grammar (one record per line, fields separated by TAB, '#' starts a comment line
   constraints: '-' or space separated: tie:<a>=<b>,... | neq:<lsbA>,<lsbB> | neq31:<lsbA>,<lsbB>
                (neq fields are 5 bits wide)
 
+  F cond                                 32-bit ARM condition folding (see src/disasm/arm64/engine.rs)
+
   generators (functions of the whole instruction word):
+    reglist <lsb>           ARM register list "{r0, r4, lr}" of the 16-bit mask at lsb
     sysreg <lsb>            s<op0>_<op1>_c<crn>_c<crm>_<op2> of the 16-bit field at lsb
     bitmask <lsb> <size> <style>   AArch64 logical immediate N:immr:imms (imms at lsb,
                                     immr at lsb+6, N at lsb+12) of element size `size`
@@ -64,7 +67,13 @@ def decode_bitmask(n, immr, imms, regsize):
     return v
 
 
+ARM_GPR = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "sb", "sl", "fp", "ip", "sp", "lr", "pc"]
+
+
 def gen_value(gen, args, w):
+    if gen == "reglist":
+        m = (w >> int(args[0])) & 0xFFFF
+        return "{" + ", ".join(ARM_GPR[i] for i in range(16) if m >> i & 1) + "}"
     if gen == "sysreg":
         e = (w >> int(args[0])) & 0xFFFF
         return "s%d_%d_c%d_c%d_%d" % (e >> 14, (e >> 11) & 7, (e >> 7) & 15, (e >> 3) & 15, e & 7)
@@ -192,7 +201,7 @@ class Emitter:
         from arm_learn import set_table_index
         words = [set_table_index(klass["value"], bits, p31, x) for x in range(len(tab))]
         best = None
-        cands = [("const", ["!O"]), ("const", ["!I"])]
+        cands = [("const", ["!O"]), ("const", ["!I"]), ("reglist", ["0"])]
         for lsb in (5, 0):
             cands.append(("sysreg", [str(lsb)]))
         for lsb in (10, 5):
@@ -226,7 +235,7 @@ class Emitter:
             return "%%n %s %s %d %s %s%%" % (at["prefix"] or "-", at["style"], at["pc"], field_text(at), exc_text(at))
         if k == "table":
             name = self.table(at, klass)
-            idx = ",".join(str(b) for b in at["bits"])
+            idx = ",".join(str(b) for b in at["bits"]) or "-"
             if at.get("p31"):
                 idx += "/" + ",".join(str(b) if isinstance(b, int) else "%d:%d" % tuple(b) for b in at["p31"])
             return "%%t %s %s%%" % (name, idx or "-")
@@ -354,11 +363,14 @@ class TextSpec:
     def __init__(self, text):
         self.tables = {}
         self.classes = []   # (mask, value, handler or None, mnem, ops, cons)
+        self.fold_cond = False
         for line in text.split("\n"):
             if not line or line.startswith("#"):
                 continue
             f = line.split("\t")
-            if f[0] == "T":
+            if f[0] == "F" and f[1] == "cond":
+                self.fold_cond = True
+            elif f[0] == "T":
                 self.tables[f[1]] = ("dense", [self.entry(x) for x in f[3].split("|")])
             elif f[0] == "G":
                 rules = []
@@ -411,7 +423,7 @@ class TextSpec:
                             p31.append([int(a), int(wd)])
                         else:
                             p31.append(int(x))
-                bits = [] if idx == "-" else [int(x) for x in idx.split(",")]
+                bits = [] if idx in ("-", "") else [int(x) for x in idx.split(",")]
                 ops.append(("table", f[1], bits, p31))
             else:
                 raise ValueError(p)
@@ -481,6 +493,16 @@ class TextSpec:
         self._index = idx
 
     def render(self, w, addr=A0):
+        r, matched = self.render_direct(w, addr)
+        if not matched and self.fold_cond and (w >> 28) < 14:
+            r2, m2 = self.render_direct((w & 0x0FFFFFFF) | 0xE0000000, addr)
+            if r2 is not None:
+                from arm_learn import cond_insert
+                return cond_insert(r2, w >> 28)
+            return None
+        return r
+
+    def render_direct(self, w, addr=A0):
         if getattr(self, "_index", None) is None:
             self.build_index()
         for ci in self._index.get((w >> 21) & 0x7FF, []):
@@ -491,6 +513,6 @@ class TextSpec:
             if r is OTHER:
                 continue
             if r is INVALID:
-                return None
-            return r
-        return None
+                return None, True
+            return r, True
+        return None, False

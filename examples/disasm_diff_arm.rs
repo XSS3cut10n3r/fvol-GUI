@@ -26,6 +26,7 @@ fn word_addr(w: u32) -> u64 {
 fn render(arch: &str, w: u32, addr: u64, out: &mut String) -> bool {
     match arch {
         "arm64" => disasm::arm64::render_word(w, addr, out),
+        "arm" => disasm::arm::render_word(w, addr, out),
         _ => false,
     }
 }

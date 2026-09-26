@@ -25,6 +25,7 @@ bits (refined over random members so that one special value, e.g. offset 0, does
 field into opcode bits), the others are opcode bits.  Atom dependencies come from which atom
 changes when a bit flips; atom models are fitted (linear) or enumerated (tables).
 """
+import bisect
 import json
 import random
 import re
@@ -440,29 +441,57 @@ class Spec:
         self.classes = []
         self._index = None
 
+    @staticmethod
+    def pkey(k):
+        """Priority order: effective priority (specificity + bump) first."""
+        return (-(popcount(k.mask) + k.prio), k.mask, k.value)
+
+    @staticmethod
+    def buckets(k):
+        m = (k.mask >> 21) & 0x7FF
+        v = (k.value >> 21) & 0x7FF
+        free = [i for i in range(11) if not (m >> i) & 1]
+        for x in range(1 << len(free)):
+            key = v
+            for j, b in enumerate(free):
+                if x >> j & 1:
+                    key |= 1 << b
+            yield key
+
     def add(self, k):
         self.classes.append(k)
-        self._index = None
+        if self._index is not None:
+            ci = len(self.classes) - 1
+            kk = self.pkey(k)
+            for b in self.buckets(k):
+                lst = self._index.setdefault(b, [])
+                bisect.insort(lst, ci, key=lambda c: self.pkey(self.classes[c]) if c != ci else kk)
+
+    def set_prio(self, k, prio):
+        """Change a class priority, keeping the index ordered."""
+        if self._index is None:
+            k.prio = prio
+            return
+        ci = self.classes.index(k)
+        for b in self.buckets(k):
+            lst = self._index.get(b)
+            if lst and ci in lst:
+                lst.remove(ci)
+        k.prio = prio
+        kk = self.pkey(k)
+        for b in self.buckets(k):
+            lst = self._index.setdefault(b, [])
+            bisect.insort(lst, ci, key=lambda c: self.pkey(self.classes[c]) if c != ci else kk)
 
     def order(self):
-        self.classes.sort(key=lambda k: (-(k.prio), -popcount(k.mask), k.mask, k.value))
+        self.classes.sort(key=self.pkey)
+        self._index = None
 
     def build_index(self):
         self.order()
         idx = {}
         for ci, k in enumerate(self.classes):
-            # bucket on bits 31:21
-            m = (k.mask >> 21) & 0x7FF
-            v = (k.value >> 21) & 0x7FF
-            free = [i for i in range(11) if not (m >> i) & 1]
-            if len(free) > 11:
-                free = free
-            n = 1 << len(free)
-            for x in range(n):
-                key = v
-                for j, b in enumerate(free):
-                    if x >> j & 1:
-                        key |= 1 << b
+            for key in self.buckets(k):
                 idx.setdefault(key, []).append(ci)
         self._index = idx
 
@@ -473,6 +502,16 @@ class Spec:
 
     def render(self, w, addr=A0):
         """-> (text or None, class index or None)"""
+        r, ci = self.render_direct(w, addr)
+        if ci is None and self.arch == "arm" and (w >> 28) < 14:
+            # condition folding: render the AL twin and insert the condition suffix
+            r2, ci2 = self.render_direct((w & 0x0FFFFFFF) | 0xE0000000, addr)
+            if r2 is not None:
+                return cond_insert(r2, w >> 28), ci2
+            return None, None
+        return r, ci
+
+    def render_direct(self, w, addr=A0):
         for ci in self.candidates(w):
             k = self.classes[ci]
             if (w & k.mask) != k.value:
@@ -500,6 +539,19 @@ class Spec:
 
 def oracle_text(t):
     return None if t is None else t[0] + "\t" + t[1]
+
+
+ARM_CONDS = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"]
+
+
+def cond_insert(text, c):
+    """Insert ARM condition suffix c into 'mnemonic\tops' before the first '.' of the mnemonic."""
+    tab = text.find("\t")
+    if tab < 0:
+        tab = len(text)
+    dot = text.find(".", 0, tab)
+    pos = dot if dot >= 0 else tab
+    return text[:pos] + ARM_CONDS[c] + text[pos:]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -572,6 +624,8 @@ class Learner:
         for x in range(len(cand)):
             for y in range(x + 1, len(cand)):
                 i, j = cand[x], cand[y]
+                if ((seed >> i) ^ (seed >> j)) & 1:
+                    continue    # tied bits are equal in the seed
                 if self.same(seed ^ (1 << i) ^ (1 << j), sh):
                     pairs.append((i, j))
         if not pairs:
@@ -730,10 +784,43 @@ class Learner:
             k.atoms.append(at)
         self.find_constraints(k, sh, members)
         bad = self.validate(k, sh)
+        if k._foreign:
+            self.add_guard(k, sh, members, deps, followers)
         return k, bad
+
+    def add_guard(self, k, sh, members, deps, followers):
+        """The class renders words whose printed form differs (e.g. a keyword that disappears
+        for some values of otherwise unused bits): add an invisible table atom over the bits no
+        atom depends on, mapping the foreign combinations to OTHER / INVALID."""
+        used = 0
+        for d in deps:
+            used |= d
+        dc = [b for b in bits_of(~k.mask & ~used & ~followers & 0xFFFFFFFF)]
+        if not dc or len(dc) > 10:
+            return
+        tab = []
+        for x in range(1 << len(dc)):
+            entry = None
+            other = False
+            for m0 in members[:4]:
+                w = self.dep(m0, dc, x)
+                t = self.O(w)
+                if t is None:
+                    continue
+                if self.shape(t) != sh:
+                    other = True
+                    continue
+                entry = ""
+                break
+            tab.append(entry if entry is not None else (OTHER if other else INVALID))
+        if all(e == "" for e in tab):
+            return
+        k.atoms.append({"k": "table", "bits": dc, "tab": tab})
+        k.seps = tuple(k.seps) + ("",)
 
     def validate(self, k, sh, n=160):
         bad = []
+        k._foreign = []
         free = ~k.mask & 0xFFFFFFFF
         tests = []
         for _ in range(n):
@@ -747,6 +834,9 @@ class Learner:
         for w in tests:
             t = self.O(w)
             if t is None or self.shape(t) != sh:
+                r = k.render(w)
+                if r is not OTHER and r is not INVALID and r != oracle_text(t):
+                    k._foreign.append(w)
                 continue
             if k.render(w) != oracle_text(t):
                 bad.append(w)

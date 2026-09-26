@@ -100,6 +100,7 @@ enum Table {
 enum Gen {
     Const,
     Sysreg(u8),
+    Reglist(u8),
     Bitmask { lsb: u8, size: u8, style: u8 },
 }
 
@@ -415,7 +416,7 @@ impl Engine {
                     None => (f[2], ""),
                 };
                 let mut nbits = 0u8;
-                if bits != "-" {
+                if bits != "-" && !bits.is_empty() {
                     for b in bits.split(',') {
                         self.idx_bits.push(b.parse().ok()?);
                         nbits += 1;
@@ -492,6 +493,7 @@ impl Engine {
                 let (generator, default) = match f[3] {
                     "const" => (Gen::Const, if args.first() == Some(&"!I") { E_INVALID } else { E_OTHER }),
                     "sysreg" => (Gen::Sysreg(args.first().and_then(|x| x.parse().ok()).unwrap_or(5)), 0),
+                    "reglist" => (Gen::Reglist(args.first().and_then(|x| x.parse::<u8>().ok()).unwrap_or(0) & 31), 0),
                     "bitmask" => {
                         let lsb = args.first().and_then(|x| x.parse().ok()).unwrap_or(10);
                         let size = args.get(1).and_then(|x| x.parse().ok()).unwrap_or(64);
@@ -869,6 +871,22 @@ impl Engine {
                                     Gen::Const => *default,
                                     Gen::Sysreg(lsb) => {
                                         push_sysreg(out, (w >> lsb) & 0xFFFF);
+                                        continue;
+                                    }
+                                    Gen::Reglist(lsb) => {
+                                        let m = (w >> lsb) & 0xFFFF;
+                                        out.push('{');
+                                        let mut first = true;
+                                        for (i, name) in ARM_GPR.iter().enumerate() {
+                                            if m & (1 << i) != 0 {
+                                                if !first {
+                                                    out.push_str(", ");
+                                                }
+                                                first = false;
+                                                out.push_str(name);
+                                            }
+                                        }
+                                        out.push('}');
                                         continue;
                                     }
                                     Gen::Bitmask { lsb, size, style } => {

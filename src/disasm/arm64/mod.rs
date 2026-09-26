@@ -16,7 +16,12 @@ fn engine() -> &'static Engine {
     E.get_or_init(|| Engine::compile(spec_data::SPEC, HANDLERS))
 }
 
-const HANDLERS: &[(&str, Handler)] = &[("bitfield", h_bitfield)];
+const HANDLERS: &[(&str, Handler)] = &[("bitfield", h_bitfield), ("invalid", h_invalid)];
+
+/// Encodings capstone rejects inside a region another class would claim.
+fn h_invalid(_w: u32, _addr: u64, _out: &mut String) -> Res {
+    Res::Invalid
+}
 
 // ------------------------------------------------------------------------------------------
 // handlers
