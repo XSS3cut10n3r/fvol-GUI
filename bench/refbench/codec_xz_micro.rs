@@ -33,6 +33,15 @@ pub mod crc;
 pub mod lzma;
 #[path = "../../src/codecs/xz.rs"]
 pub mod xz;
+// what lzma.rs / xz.rs reach outside the three codec files: the streaming sink (writer
+// thread) and the file mappings
+#[path = "../../src/codecs/sink.rs"]
+pub mod sink;
+#[path = "../../src/util/mmap.rs"]
+pub mod util_mmap;
+pub mod util {
+    pub use super::util_mmap as mmap;
+}
 
 pub(crate) fn try_zeroed(n: usize) -> crate::error::Result<Vec<u8>> {
     if n == 0 {
