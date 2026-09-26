@@ -129,6 +129,9 @@ def learn_word(cfg, spec, L, O, w, keys, stats, depth=0):
                     k = add_class(spec, k, keys, stats)
                     ensure_wins(spec, k, w, None)
                     return True
+            # narrower region around w itself
+            if learn_invalid(cfg, spec, L, O, w, ci, keys, stats):
+                return True
             stats["false_valid"] += 1
             return False
     if exp is None:
@@ -360,8 +363,45 @@ def cmd_explain(cfg, args):
                 print("       cons", k.cons)
 
 
+def cmd_prune(cfg, args):
+    """Drop classes that do not improve correctness on their own region (sampled): for 32-bit
+    ARM, condition-specific classes whose words the AL-class folding renders at least as well,
+    and invalid classes that the remaining classes make redundant."""
+    path = args[0]
+    spec = load_or_new(cfg, path)
+    O = Oracle(cfg.name)
+    rnd = random.Random(55)
+    spec.build_index()
+    removed = 0
+    cands = []
+    for k in spec.classes:
+        if k.handler and k.handler != "invalid":
+            continue
+        c = (k.value >> 28) & 15
+        if cfg.fold_cond and (k.mask >> 28) == 15 and c < 14:
+            cands.append(k)
+        elif k.handler == "invalid":
+            cands.append(k)
+    for k in cands:
+        free = ~k.mask & 0xFFFFFFFF
+        tests = [k.seed] + [(k.value | (rnd.getrandbits(32) & free)) & 0xFFFFFFFF for _ in range(48)]
+        exp = [oracle_text(O(w)) for w in tests]
+        with_k = sum(1 for w, e in zip(tests, exp) if spec.render(w)[0] == e)
+        k.disabled = True
+        without_k = sum(1 for w, e in zip(tests, exp) if spec.render(w)[0] == e)
+        if without_k >= with_k:
+            removed += 1
+        else:
+            k.disabled = False
+    spec.classes = [k for k in spec.classes if not getattr(k, "disabled", False)]
+    spec.order()
+    spec.save(path)
+    print("prune: %d candidates, %d removed, %d classes left" % (len(cands), removed, len(spec.classes)),
+          file=sys.stderr)
+
+
 COMMANDS = {"learn": cmd_learn, "explore": cmd_explore, "check": cmd_check, "emit": cmd_emit,
-            "stats": cmd_stats, "explain": cmd_explain}
+            "stats": cmd_stats, "explain": cmd_explain, "prune": cmd_prune}
 
 
 def main(cfg, argv):

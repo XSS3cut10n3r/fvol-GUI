@@ -35,4 +35,7 @@ if [ ${#EXTRA[@]} -gt 0 ]; then
   $PY "$GEN" learn "$SPEC" "${EXTRA[@]}"
 fi
 $PY "$GEN" explore "$SPEC" --rounds 6
+if [ "$ARCH" = arm ]; then
+  $PY "$GEN" prune "$SPEC"
+fi
 $PY "$GEN" emit "$SPEC" "$OUT"

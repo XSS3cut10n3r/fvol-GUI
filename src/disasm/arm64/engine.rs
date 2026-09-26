@@ -97,6 +97,8 @@ enum Gen {
     Const,
     Sysreg(u8),
     Reglist(u8),
+    /// VFP register list: b's' or b'd'
+    VfpList(u8),
     Bitmask { lsb: u8, size: u8, style: u8 },
 }
 
@@ -335,7 +337,13 @@ impl Engine {
         while i > 0 && bytes[i - 1].is_ascii_digit() {
             i -= 1;
         }
-        if i > 0 && i < s.len() && (bytes[i - 1] == b'+' || bytes[i - 1] == b'-') {
+        // a trailing base "+N" / "-N" always follows a digit (a sign after ':' or '*' belongs to
+        // a negative coefficient or scale)
+        if i > 1
+            && i < s.len()
+            && (bytes[i - 1] == b'+' || bytes[i - 1] == b'-')
+            && bytes[i - 2].is_ascii_digit()
+        {
             // make sure this is not part of a segment like "5:19" (':' precedes digits there)
             let v: i64 = s[i..].parse().ok()?;
             f.base = if bytes[i - 1] == b'-' { -v } else { v };
@@ -499,6 +507,14 @@ impl Engine {
                     "const" => (Gen::Const, if args.first() == Some(&"!I") { E_INVALID } else { E_OTHER }),
                     "sysreg" => (Gen::Sysreg(args.first().and_then(|x| x.parse().ok()).unwrap_or(5)), 0),
                     "reglist" => (Gen::Reglist(args.first().and_then(|x| x.parse::<u8>().ok()).unwrap_or(0) & 31), 0),
+                    "vfplist" => (
+                        Gen::VfpList(match args.first() {
+                            Some(&"s") => b's',
+                            Some(&"a") => b'a',
+                            _ => b'd',
+                        }),
+                        0,
+                    ),
                     "bitmask" => {
                         let lsb = args.first().and_then(|x| x.parse().ok()).unwrap_or(10);
                         let size = args.get(1).and_then(|x| x.parse().ok()).unwrap_or(64);
@@ -900,6 +916,36 @@ impl Engine {
                                     Gen::Const => *default,
                                     Gen::Sysreg(lsb) => {
                                         push_sysreg(out, (w >> lsb) & 0xFFFF);
+                                        continue;
+                                    }
+                                    Gen::VfpList(kind) => {
+                                        let kind = match kind {
+                                            b'a' if (w >> 8) & 1 != 0 => b'd',
+                                            b'a' => b's',
+                                            k => k,
+                                        };
+                                        let (vd, d, imm8) = ((w >> 12) & 15, (w >> 22) & 1, w & 0xFF);
+                                        let (first, mut n) =
+                                            if kind == b's' { ((vd << 1) | d, imm8) } else { ((d << 4) | vd, imm8 >> 1) };
+                                        // capstone's clamping of unpredictable counts
+                                        if n == 0 || first + n > 32 || (kind == b'd' && n > 16) {
+                                            if first + n > 32 {
+                                                n = 32 - first;
+                                            }
+                                            n = n.max(1);
+                                            if kind == b'd' {
+                                                n = n.min(16);
+                                            }
+                                        }
+                                        out.push('{');
+                                        for i in 0..n {
+                                            if i != 0 {
+                                                out.push_str(", ");
+                                            }
+                                            out.push(kind as char);
+                                            push_dec(out, (first + i) as u64);
+                                        }
+                                        out.push('}');
                                         continue;
                                     }
                                     Gen::Reglist(lsb) => {

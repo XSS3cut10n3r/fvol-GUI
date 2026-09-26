@@ -514,7 +514,7 @@ class Spec:
     def render_direct(self, w, addr=A0):
         for ci in self.candidates(w):
             k = self.classes[ci]
-            if (w & k.mask) != k.value:
+            if (w & k.mask) != k.value or getattr(k, "disabled", False):
                 continue
             r = k.render(w, addr)
             if r is OTHER:

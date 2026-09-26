@@ -29,6 +29,10 @@ Grammar (one record per line, fields separated by TAB, '#' starts a comment line
 
   generators (functions of the whole instruction word):
     reglist <lsb>           ARM register list "{r0, r4, lr}" of the 16-bit mask at lsb
+    vfplist s|d|a           VFP register list of VLDM/VSTM (first register from Vd/D, count
+                            from imm8: s: first = Vd:D, n = imm8; d: first = D:Vd, n = imm8/2;
+                            a: s or d from bit 8; clamped: n=0 -> 1, cut at register 31,
+                            d lists at most 16 registers)
     sysreg <lsb>            s<op0>_<op1>_c<crn>_c<crm>_<op2> of the 16-bit field at lsb
     bitmask <lsb> <size> <style>   AArch64 logical immediate N:immr:imms (imms at lsb,
                                     immr at lsb+6, N at lsb+12) of element size `size`
@@ -70,10 +74,33 @@ def decode_bitmask(n, immr, imms, regsize):
 ARM_GPR = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "sb", "sl", "fp", "ip", "sp", "lr", "pc"]
 
 
+def vfp_list(w, kind):
+    """VLDM/VSTM/VPUSH/VPOP register list.  kind 'a': single/double from bit 8 (sz).
+    s: first = Vd:D, n = imm8; d: first = D:Vd, n = imm8/2.  Unpredictable counts are clamped
+    the way capstone prints them: n = 0 -> 1, a list running past register 31 is cut at 31,
+    d lists hold at most 16 registers."""
+    if kind == "a":
+        kind = "d" if (w >> 8) & 1 else "s"
+    vd, d, imm8 = (w >> 12) & 15, (w >> 22) & 1, w & 0xFF
+    if kind == "s":
+        first, n = (vd << 1) | d, imm8
+        if n == 0 or first + n > 32:
+            n = 32 - first if first + n > 32 else n
+            n = max(1, n)
+    else:
+        first, n = (d << 4) | vd, imm8 >> 1
+        if n == 0 or n > 16 or first + n > 32:
+            n = 32 - first if first + n > 32 else n
+            n = min(16, max(1, n))
+    return "{" + ", ".join("%s%d" % (kind, first + i) for i in range(n)) + "}"
+
+
 def gen_value(gen, args, w):
     if gen == "reglist":
         m = (w >> int(args[0])) & 0xFFFF
         return "{" + ", ".join(ARM_GPR[i] for i in range(16) if m >> i & 1) + "}"
+    if gen == "vfplist":
+        return vfp_list(w, args[0])
     if gen == "sysreg":
         e = (w >> int(args[0])) & 0xFFFF
         return "s%d_%d_c%d_c%d_%d" % (e >> 14, (e >> 11) & 7, (e >> 7) & 15, (e >> 3) & 15, e & 7)
@@ -201,14 +228,33 @@ class Emitter:
         from arm_learn import set_table_index
         words = [set_table_index(klass["value"], bits, p31, x) for x in range(len(tab))]
         best = None
-        cands = [("const", ["!O"]), ("const", ["!I"]), ("reglist", ["0"])]
+        cands = [("const", ["!O"]), ("const", ["!I"]), ("reglist", ["0"]), ("vfplist", ["a"]),
+                 ("vfplist", ["s"]), ("vfplist", ["d"])]
         for lsb in (5, 0):
             cands.append(("sysreg", [str(lsb)]))
         for lsb in (10, 5):
             for size in (64, 32):
                 for st in BITMASK_STYLES:
                     cands.append(("bitmask", [str(lsb), str(size), st]))
+        # a generator may only depend on the table index bits and the class's fixed bits
+        known = klass["mask"]
+        for b in bits:
+            known |= 1 << b
+        for p in p31:
+            start, wd = (p, 5) if isinstance(p, int) else p
+            known |= ((1 << wd) - 1) << start
+
+        def deps(gen, args):
+            if gen == "sysreg" or gen == "reglist":
+                return 0xFFFF << int(args[0])
+            if gen == "bitmask":
+                return 0x1FFF << int(args[0])
+            if gen == "vfplist":
+                return 0x0040F0FF | (0x100 if args[0] == "a" else 0)
+            return 0
         for gen, args in cands:
+            if deps(gen, args) & 0xFFFFFFFF & ~known:
+                continue
             if gen == "const":
                 c = OTHER if args[0] == "!O" else INVALID
                 pred = [c] * len(tab)
@@ -319,9 +365,12 @@ def emit_text(classes, header=""):
 
 def parse_field(txt):
     base = 0
-    m = re.match(r"^(.*?)([+-]\d+)?$", txt)
-    core = m.group(1)
-    if m.group(2):
+    # a trailing base "+N"/"-N" always follows a digit (never ':' or '*', which belong to a
+    # negative coefficient / scale)
+    m = re.match(r"^(.*[0-9])([+-][0-9]+)$", txt)
+    core = txt
+    if m:
+        core = m.group(1)
         base = int(m.group(2))
     if core.startswith("L"):
         coef = []
