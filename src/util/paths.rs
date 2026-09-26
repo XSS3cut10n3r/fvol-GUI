@@ -167,9 +167,36 @@ pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(unquote(rest)))
 }
 
+/// python's traceback line when `ResourceAccessor().open(url)` cannot read a local `file://`
+/// URL (a strings file, a YARA rule file): urllib wraps the OSError in a URLError.
+pub fn py_urlopen_error(url: &str, e: &std::io::Error) -> String {
+    let path = file_uri_to_path(url).map_or_else(|| url.to_string(), |p| p.to_string_lossy().into_owned());
+    let errno = e.raw_os_error().unwrap_or(0);
+    // io::Error displays as "<strerror> (os error N)"
+    let text = e.to_string();
+    let strerror = text.strip_suffix(&format!(" (os error {errno})")).unwrap_or(&text);
+    format!("urllib.error.URLError: <urlopen error [Errno {errno}] {strerror}: '{path}'>")
+}
+
+/// [`py_urlopen_error`] for a failed resource read (other errors pass through).
+pub fn resource_error(url: &str, e: crate::error::Error) -> crate::error::Error {
+    match e {
+        crate::error::Error::Io(io) if url.starts_with("file:") => crate::error::Error::Msg(py_urlopen_error(url, &io)),
+        e => e,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn urlopen_error_text() {
+        let e = std::fs::read("/nonexistent/rsvol/strings.txt").unwrap_err();
+        assert_eq!(
+            py_urlopen_error("file:///nonexistent/rsvol/strings.txt", &e),
+            "urllib.error.URLError: <urlopen error [Errno 2] No such file or directory: '/nonexistent/rsvol/strings.txt'>"
+        );
+    }
     #[test]
     fn uri() {
         assert_eq!(

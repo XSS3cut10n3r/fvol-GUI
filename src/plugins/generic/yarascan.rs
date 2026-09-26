@@ -36,7 +36,7 @@ pub fn rules_from_config(cfg: &Config) -> Option<Rules> {
     let file_src = if cfg.get_str("yara_string").is_none() {
         cfg.get_str("yara_file").map(|u| {
             let path = crate::util::paths::file_uri_to_path(u).unwrap_or_else(|| std::path::PathBuf::from(u));
-            std::fs::read(&path).unwrap_or_else(|e| panic!("FileNotFoundError: {e}: '{u}'"))
+            std::fs::read(&path).unwrap_or_else(|e| panic!("{}", crate::util::paths::py_urlopen_error(u, &e)))
         })
     } else {
         None

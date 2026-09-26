@@ -32,12 +32,13 @@ pub fn yarascan_option_requirements() -> Vec<Requirement> {
 
 /// python `YaraScan.process_yara_options(dict(config))` (None = no rules given).
 pub fn rules_from_config(cfg: &Config) -> Result<Option<Rules>> {
-    let compile_err = |e: crate::yara::rules::CompileError| Error::msg(format!("yara.SyntaxError: {}", e.msg));
+    // str(yara.SyntaxError) is "line N: msg"
+    let compile_err = |e: crate::yara::rules::CompileError| Error::msg(format!("yara.SyntaxError: {e}"));
     if let Some(s) = cfg.get_str("yara_string") {
         return process_yara_options(Some(s), None, cfg.get_bool("insensitive"), cfg.get_bool("wide")).map_err(compile_err);
     }
     if let Some(url) = cfg.get_str("yara_file") {
-        let src = crate::symbols::store::IsfLocation::Url(url.to_string()).read()?;
+        let src = crate::symbols::store::IsfLocation::Url(url.to_string()).read().map_err(|e| crate::util::paths::resource_error(url, e))?;
         return process_yara_options(None, Some(&src), false, false).map_err(compile_err);
     }
     if cfg.get_str("yara_compiled_file").is_some() {
@@ -221,5 +222,22 @@ impl Plugin for VadYaraScan {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// python's traceback line for a bad rule is `yara.SyntaxError: line N: msg` (the line
+    /// number was missing, and vmayarascan printed `RuntimeError: yara: ...`).
+    #[test]
+    fn syntax_error_text_like_yara_python() {
+        let mut cfg = Config::default();
+        cfg.set("yara_string", crate::plugins::ConfigValue::Str("{ZZ}".into()));
+        let e = rules_from_config(&cfg).err().unwrap().to_string();
+        assert!(e.starts_with("yara.SyntaxError: line 1: "), "{e}");
+        let e = crate::plugins::linux::vmayarascan::yara_rules_from_config(&cfg).err().unwrap().to_string();
+        assert!(e.starts_with("yara.SyntaxError: line 1: "), "{e}");
     }
 }

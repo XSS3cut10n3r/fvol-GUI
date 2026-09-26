@@ -185,7 +185,7 @@ impl Plugin for Strings {
             Column::new("Result", ColType::Str),
         ])?;
         let url = cfg.get_str("strings_file").ok_or_else(|| Error::msg("strings_file is required"))?;
-        let data = IsfLocation::Url(url.to_string()).read()?;
+        let data = IsfLocation::Url(url.to_string()).read().map_err(|e| crate::util::paths::resource_error(url, e))?;
         // python: readline() loop, unparsable lines are logged (stderr) and skipped
         let mut lines: Vec<(u128, &[u8])> = Vec::new();
         let mut rest: &[u8] = &data;

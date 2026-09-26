@@ -47,7 +47,7 @@ pub fn yara_rules_from_config(cfg: &Config) -> Result<Option<Rules>> {
     let file_src;
     let file = match (cfg.get_str("yara_string"), cfg.get_str("yara_file")) {
         (None, Some(url)) => {
-            file_src = crate::symbols::store::IsfLocation::Url(url.to_string()).read()?;
+            file_src = crate::symbols::store::IsfLocation::Url(url.to_string()).read().map_err(|e| crate::util::paths::resource_error(url, e))?;
             Some(&file_src[..])
         }
         _ => None,
@@ -55,7 +55,8 @@ pub fn yara_rules_from_config(cfg: &Config) -> Result<Option<Rules>> {
     if cfg.get_str("yara_string").is_none() && file.is_none() && cfg.get_str("yara_compiled_file").is_some() {
         return Err(Error::msg("yara compiled rule files (--yara-compiled-file) are not supported"));
     }
-    Ok(process_yara_options(cfg.get_str("yara_string"), file, cfg.get_bool("insensitive"), cfg.get_bool("wide"))?)
+    process_yara_options(cfg.get_str("yara_string"), file, cfg.get_bool("insensitive"), cfg.get_bool("wide"))
+        .map_err(|e| Error::msg(format!("yara.SyntaxError: {e}")))
 }
 
 /// python `LayerDataRenderer.render_bytes(LayerData(layer, offset, length))` with the CLI's
