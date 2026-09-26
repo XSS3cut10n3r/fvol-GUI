@@ -75,7 +75,7 @@ impl Plugin for RegExScan {
         ]
     }
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        let p = super::primary::primary(ctx, "Memory layer for the kernel")?;
+        let p = super::primary::primary_intel(ctx, "Memory layer for the kernel")?;
         let pattern = cfg.get_str("pattern").unwrap_or("").as_bytes().to_vec();
         let maxsize = cfg.get_int("maxsize").unwrap_or(MAXSIZE_DEFAULT);
         out.begin(vec![Column::new("Offset", ColType::Hex), Column::new("Text", ColType::Str), Column::new("Hex", ColType::Bytes)])?;

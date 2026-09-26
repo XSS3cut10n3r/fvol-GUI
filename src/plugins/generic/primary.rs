@@ -51,6 +51,16 @@ pub fn physical(ctx: &Context, description: &str) -> Result<LayerRef> {
     ctx.physical().map_err(|_| unsatisfied(description))
 }
 
+/// `TranslationLayerRequirement(name="primary", architectures=["Intel32", "Intel64"])`: only an
+/// Intel layer satisfies it (configwriter, regexscan, yarascan).
+pub fn primary_intel(ctx: &Context, description: &str) -> Result<Primary> {
+    let p = primary(ctx, description)?;
+    if p.intel.is_none() {
+        return Err(unsatisfied(description));
+    }
+    Ok(p)
+}
+
 /// Per-image cache of "this OS stacker found nothing" (the core caches only successful
 /// discoveries), keyed like the core's caches by the ISF search path fingerprint of that OS
 /// and `--stackers`, so e.g. a Windows image does not pay for the Linux/Mac banner scans on

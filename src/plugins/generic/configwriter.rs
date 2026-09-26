@@ -38,7 +38,7 @@ impl Plugin for ConfigWriter {
         vec![Requirement::flag("extra", "Outputs whole configuration tree")]
     }
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        let p = super::primary::primary(ctx, "Memory layer for the kernel")?;
+        let p = super::primary::primary_intel(ctx, "Memory layer for the kernel")?;
         let extra = cfg.get_bool("extra");
         let mut items = Items::new();
         let filename = if extra {

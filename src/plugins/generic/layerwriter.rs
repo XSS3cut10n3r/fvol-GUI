@@ -58,6 +58,12 @@ pub fn context_layers(ctx: &Context, description: &str) -> Result<Vec<NamedLayer
         .zip(flat)
         .map(|(e, l)| (e.depth, NamedLayer { name: e.name.clone(), class: e.class, layer: l, mapped: metadata(l).mapped.is_some() }))
         .collect();
+    if p.intel.is_none() {
+        // no OS layer: the stacker names the top container layer after the requirement
+        if let Some(top) = v.iter_mut().find(|x| x.0 == 0) {
+            top.1.name = "primary".into();
+        }
+    }
     v.sort_by(|a, b| b.0.cmp(&a.0));
     let mut out: Vec<NamedLayer> = v.into_iter().map(|(_, l)| l).collect();
     if p.intel.is_some() {

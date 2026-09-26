@@ -24,9 +24,12 @@ const PAGE: u64 = 0x1000;
 /// python `Vmscan._gather_vmcs_structures`: (revision id signature, table name, table); a
 /// later table with the same revision id wins, like python's dict.
 fn gather_vmcs_structures() -> Vec<([u8; 4], String, TableRef)> {
+    // the embedded ISFs stand in for python's install dirs only when those are absent
+    let have_py = crate::symbols::store::python_install().is_some();
     let locs: Vec<IsfLocation> = crate::symbols::symbol_path()
         .all()
         .into_iter()
+        .filter(|l| !(have_py && matches!(l, IsfLocation::Embedded { .. })))
         .filter(|l| {
             let u = l.url();
             let path = u.rsplit_once('!').map_or(u.as_str(), |(_, m)| m);

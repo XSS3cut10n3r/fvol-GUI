@@ -116,7 +116,7 @@ impl Plugin for YaraScan {
         yarascan_option_requirements()
     }
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        let p = super::primary::primary(ctx, "Memory layer for the kernel")?;
+        let p = super::primary::primary_intel(ctx, "Memory layer for the kernel")?;
         out.begin(vec![
             Column::new("Offset", ColType::Hex),
             Column::new("Rule", ColType::Str),
