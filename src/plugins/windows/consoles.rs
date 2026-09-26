@@ -7,8 +7,7 @@
 
 use crate::context::{Context, WinKernel};
 use crate::error::{Error, Result};
-use crate::layers::scan::{BytesScanner, scan, scan_each_progressive};
-use crate::layers::LayerExt;
+use crate::layers::scan::{BytesScanner, scan};
 use crate::objects::util::array_to_string;
 use crate::objects::{LayerRef, Obj, Space};
 use crate::plugins::windows::registry::hivelist::{hive_at, list_hive_objects, registry_process};
@@ -421,277 +420,30 @@ pub fn create_conhost_symbol_table(ctx: &Context, k: &WinKernel, conhost_layer: 
 }
 
 // ------------------------------------------------------------------------------------------
-// minimal verinfo (only reached for builds 17763 / 20348 / 22621)
+// verinfo (only reached for builds 17763 / 20348 / 22621): the shared windows.verinfo helpers
 // ------------------------------------------------------------------------------------------
-// TODO(dedupe): owned by W2b (verinfo)
 
-/// python `VerInfo.find_version_info(context, layer_name, filename)`: find
-/// `"OriginalFilename\0" + filename` (utf-16be, python's choice) in the physical layer and
-/// read the file version after the `VS_FIXEDFILEINFO` signature within the 0x500 bytes
-/// before it (python's `find(sig) + 4 >= 0` is always true: without a signature the words at
-/// offset 3 are used).
+/// python `VerInfo.find_version_info(context, layer_name, filename)`: (FV1, FV2, FV3, FV4).
 pub fn find_version_info(layer: LayerRef, filename: &str) -> Result<Option<(i128, i128, i128, i128)>> {
-    let needle: Vec<u8> = format!("OriginalFilename\0{filename}").encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
-    let mut first = None;
-    scan_each_progressive(layer, &BytesScanner::new(&needle), |h| *h, |h| {
-        first = Some(h);
-        false
-    });
-    let Some(offset) = first else { return Ok(None) };
-    if offset < 0x500 {
-        return Err(Error::invalid(offset.wrapping_sub(0x500)));
-    }
-    let data = layer.read_vec(offset - 0x500, 0x500)?;
-    let at = crate::layers::scan::find(&data, b"\xbd\x04\xef\xfe").map(|i| i as i64).unwrap_or(-1) + 4;
-    let s = data.get(at as usize..at as usize + 20).filter(|s| s.len() == 20).ok_or_else(|| py_exception("struct.error: unpack requires a buffer of 20 bytes"))?;
-    let w = |o: usize| u16::from_le_bytes([s[o], s[o + 1]]) as i128;
-    // "<IHHHHHHHH": struct_version, FV2, FV1, FV4, FV3, ...
-    Ok(Some((w(6), w(4), w(10), w(8))))
+    Ok(crate::plugins::windows::verinfo::find_version_info_one(layer, filename)
+        .map_err(|e| if e.is_invalid_address() { e } else { py_exception(e.to_string()) })?
+        .map(|(a, b, c, d)| (a as i128, b as i128, c as i128, d as i128)))
 }
 
-/// python `VerInfo.get_version_information(context, pe_table, layer, base)`: rebuild the PE
-/// (`dos_header.reconstruct()`), then what `pefile` does to find `VS_FIXEDFILEINFO[0]` in the
-/// resource directory; returns the product version. No version resource -> an
-/// `AttributeError` (python: `pe.VS_FIXEDFILEINFO` missing).
+/// python `VerInfo.get_version_information(context, pe_table, layer, base)` with consoles'
+/// view of the exceptions: `InvalidAddressException` / `AttributeError` come back as errors
+/// ([`is_attribute_or_type_error`]), anything else (python's ValueError, PEFormatError, ...)
+/// is uncaught.
 pub fn get_version_information(ctx: &Context, layer: LayerRef, base: u64) -> Result<(i128, i128, i128, i128)> {
+    use crate::plugins::windows::verinfo::VersionError;
     let pe_table = ctx.load_isf("windows/pe")?;
-    let dos = Obj::named(Space::on(layer, pe_table), "_IMAGE_DOS_HEADER", base)?;
-    let (pieces, err) = crate::symbols::windows::pe::reconstruct(&dos);
-    match err {
-        // python: ValueError (bad signatures, sizes) is not caught by consoles
-        Some(e) if e.is_invalid_address() => return Err(e),
-        Some(e) => return Err(py_exception(format!("ValueError: {e}"))),
-        None => {}
-    }
-    // io.BytesIO: seek + write
-    let size = pieces.iter().map(|(o, d)| *o as usize + d.len()).max().unwrap_or(0);
-    let mut data = vec![0u8; size];
-    for (o, d) in &pieces {
-        data[*o as usize..*o as usize + d.len()].copy_from_slice(d);
-    }
-    let fixed = pefile::first_fixed_file_info(&data).ok_or_else(|| Error::Symbol("AttributeError: 'PE' object has no attribute 'VS_FIXEDFILEINFO'".into()))?;
-    let (ms, ls) = (fixed.0 as i128, fixed.1 as i128);
-    Ok((ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF))
-}
-
-/// The part of `pefile` that `pefile.PE(data=..., fast_load=True)` +
-/// `parse_data_directories([RESOURCE])` + `VS_FIXEDFILEINFO[0]` need, on a reconstructed
-/// image (sections at `PointerToRawData == VirtualAddress`).
-mod pefile {
-    const MAX_RESOURCE_DEPTH: u32 = 32;
-    const MAX_ALLOWED_ENTRIES: u32 = 4096;
-    const MAX_RESOURCE_ENTRIES: u32 = 0x8000;
-    const RT_VERSION: u32 = 16;
-
-    struct Section {
-        va: u64,
-        raw_ptr: u64,
-        raw_size: u64,
-        vsize: u64,
-        next_va: Option<u64>,
-    }
-
-    struct Pe<'a> {
-        data: &'a [u8],
-        sections: Vec<Section>,
-        total_entries: u32,
-        fixed: Vec<(u32, u32)>,
-    }
-
-    struct Entry {
-        id: u32,
-        dir: Option<Vec<Entry>>,
-        data: Option<(u32, u32)>,
-    }
-
-    fn u16_at(d: &[u8], o: usize) -> Option<u32> {
-        d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u32)
-    }
-    fn u32_at(d: &[u8], o: usize) -> Option<u32> {
-        d.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    impl<'a> Pe<'a> {
-        fn section(&self, rva: u64) -> Option<&Section> {
-            self.sections.iter().find(|s| {
-                let mut size = if (self.data.len() as u64).saturating_sub(s.raw_ptr) < s.raw_size { s.vsize } else { s.raw_size.max(s.vsize) };
-                if let Some(n) = s.next_va {
-                    if n > s.va && s.va + size > n {
-                        size = n - s.va;
-                    }
-                }
-                s.va <= rva && rva < s.va + size
-            })
-        }
-        /// pefile `get_data(rva, length)` (None = PEFormatError).
-        fn get_data(&self, rva: u64, len: u64) -> Option<&'a [u8]> {
-            let n = self.data.len() as u64;
-            match self.section(rva) {
-                Some(s) => {
-                    let off = rva - s.va + s.raw_ptr;
-                    let end = (off + len).min(s.raw_ptr + s.raw_size).min(n);
-                    Some(if off >= end { &[] } else { &self.data[off as usize..end as usize] })
-                }
-                None if rva < n => Some(&self.data[rva as usize..(rva + len).min(n) as usize]),
-                None => None,
-            }
-        }
-        fn offset_from_rva(&self, rva: u64) -> Option<u64> {
-            match self.section(rva) {
-                Some(s) => Some(rva - s.va + s.raw_ptr),
-                None if rva < self.data.len() as u64 => Some(rva),
-                None => None,
-            }
-        }
-
-        /// `parse_resources_directory`
-        fn parse_dir(&mut self, rva: u64, base_rva: u64, level: u32, dirs: &mut Vec<u64>) -> Option<Vec<Entry>> {
-            if level > MAX_RESOURCE_DEPTH {
-                return None;
-            }
-            let d = self.get_data(rva, 16)?;
-            if d.len() < 16 {
-                return None;
-            }
-            let n = u16_at(d, 12)? + u16_at(d, 14)?;
-            if n > MAX_ALLOWED_ENTRIES {
-                return None;
-            }
-            self.total_entries += n;
-            if self.total_entries > MAX_RESOURCE_ENTRIES {
-                return None;
-            }
-            let mut rva = rva + 16;
-            let mut entries: Vec<Entry> = Vec::new();
-            let mut last_name: Option<(u64, u64)> = None;
-            for _ in 0..n {
-                let Some(e) = self.get_data(rva, 8).filter(|e| e.len() >= 8) else { break };
-                let (name, off) = (u32_at(e, 0)?, u32_at(e, 4)?);
-                if name & 0x8000_0000 != 0 {
-                    let ustr = base_rva + (name & 0x7FFF_FFFF) as u64;
-                    let len = self.get_data(ustr, 2).filter(|b| b.len() >= 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u64).unwrap_or(0);
-                    if let Some((b, e)) = last_name {
-                        if b < ustr && e >= ustr {
-                            break;
-                        }
-                    }
-                    last_name = Some((ustr, ustr + len));
-                }
-                let target = base_rva + (off & 0x7FFF_FFFF) as u64;
-                let entry = if off & 0x8000_0000 != 0 {
-                    if dirs.contains(&target) {
-                        break;
-                    }
-                    dirs.push(target);
-                    let sub = self.parse_dir(target, base_rva, level + 1, dirs);
-                    dirs.pop();
-                    let Some(sub) = sub else { break };
-                    Entry { id: name & 0xFFFF, dir: Some(sub), data: None }
-                } else {
-                    let Some(de) = self.get_data(target, 16).filter(|b| b.len() >= 16) else { break };
-                    Entry { id: name & 0xFFFF, dir: None, data: Some((u32_at(de, 0)?, u32_at(de, 4)?)) }
-                };
-                let is_version = level == 0 && entry.id == RT_VERSION;
-                entries.push(entry);
-                if is_version {
-                    let langs: Vec<(u32, u32)> = entries
-                        .last()
-                        .and_then(|e| e.dir.as_ref())
-                        .and_then(|d| d.first())
-                        .and_then(|e| e.dir.as_ref())
-                        .map(|d| d.iter().filter_map(|l| l.data).collect())
-                        .unwrap_or_default();
-                    for (data_rva, size) in langs {
-                        self.parse_version_information(data_rva as u64, size as u64);
-                    }
-                }
-                rva += 8;
-            }
-            Some(entries)
-        }
-
-        /// `parse_version_information` up to `VS_FIXEDFILEINFO`.
-        fn parse_version_information(&mut self, rva: u64, size: u64) {
-            let Some(start) = self.offset_from_rva(rva) else { return };
-            let n = self.data.len() as u64;
-            let raw = &self.data[start.min(n) as usize..(start + size).min(n) as usize];
-            if raw.len() < 6 {
-                return;
-            }
-            let ustr = rva + 6;
-            let section_end = self.section(ustr).map(|s| s.va + s.raw_size.max(s.vsize));
-            let max_chars = match section_end {
-                Some(e) => e.saturating_sub(ustr) >> 1,
-                None => 1 << 16,
-            };
-            if max_chars == 0 {
-                return;
-            }
-            let Some(first) = self.get_data(ustr, 2) else { return };
-            let _ = first;
-            let Some(bytes) = self.get_data(ustr, max_chars * 2) else { return };
-            let mut name = Vec::new();
-            for c in bytes.chunks_exact(2) {
-                let u = u16::from_le_bytes([c[0], c[1]]);
-                if u == 0 {
-                    break;
-                }
-                name.push(u);
-            }
-            if String::from_utf16_lossy(&name) != "VS_VERSION_INFO" || name.len() != 15 {
-                return;
-            }
-            // dword_align(6 + 2 * (15 + 1), OffsetToData)
-            let fixed_off = (((6 + 32 + rva + 3) & 0xFFFF_FFFC) - (rva & 0xFFFF_FFFC)) as usize;
-            let Some(f) = raw.get(fixed_off..fixed_off + 52) else { return };
-            self.fixed.push((u32_at(f, 16).unwrap_or(0), u32_at(f, 20).unwrap_or(0)));
-        }
-    }
-
-    /// `(ProductVersionMS, ProductVersionLS)` of the first `VS_FIXEDFILEINFO`, if any.
-    pub fn first_fixed_file_info(data: &[u8]) -> Option<(u32, u32)> {
-        let lfanew = u32_at(data, 0x3c)? as usize;
-        let nt = lfanew;
-        if u32_at(data, nt)? != 0x4550 {
-            return None;
-        }
-        let nsec = u16_at(data, nt + 6)? as usize;
-        let opt_size = u16_at(data, nt + 20)? as usize;
-        let opt = nt + 24;
-        let magic = u16_at(data, opt)?;
-        let (nrva_off, dd_off) = match magic {
-            0x20b => (108, 112),
-            0x10b => (92, 96),
-            _ => return None,
-        };
-        let nrva = u32_at(data, opt + nrva_off)?.min(0x10);
-        if nrva <= 2 {
-            return None;
-        }
-        let res_rva = u32_at(data, opt + dd_off + 16)? as u64;
-        if res_rva == 0 {
-            return None;
-        }
-        let mut sections = Vec::new();
-        let sec0 = opt + opt_size;
-        for i in 0..nsec {
-            let s = sec0 + i * 40;
-            let Some(h) = data.get(s..s + 40) else { break };
-            sections.push(Section {
-                vsize: u32_at(h, 8)? as u64,
-                va: u32_at(h, 12)? as u64,
-                raw_size: u32_at(h, 16)? as u64,
-                raw_ptr: u32_at(h, 20)? as u64,
-                next_va: None,
-            });
-        }
-        for i in 0..sections.len() {
-            sections[i].next_va = sections.get(i + 1).map(|s| s.va);
-        }
-        let mut pe = Pe { data, sections, total_entries: 0, fixed: Vec::new() };
-        let mut dirs = vec![res_rva];
-        pe.parse_dir(res_rva, res_rva, 0, &mut dirs);
-        pe.fixed.first().copied()
+    match crate::plugins::windows::verinfo::get_version_information(pe_table, Some(layer), base) {
+        Ok((a, b, c, d)) => Ok((a as i128, b as i128, c as i128, d as i128)),
+        Err(VersionError::Invalid(e)) => Err(e),
+        Err(VersionError::Attribute) => Err(Error::Symbol("AttributeError: 'PE' object has no attribute 'VS_FIXEDFILEINFO'".into())),
+        Err(VersionError::Type) => Err(Error::Symbol("TypeError: Layer must be a string not None".into())),
+        Err(VersionError::Value(m)) => Err(py_exception(format!("ValueError: {m}"))),
+        Err(VersionError::Fatal(e)) => Err(py_exception(e.to_string())),
     }
 }
 
