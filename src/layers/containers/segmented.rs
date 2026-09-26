@@ -11,8 +11,9 @@
 //!   or coincide (equal starts: the later one wins) and no mapped offset reaches the end of
 //!   the base, python's lookup equals "the last segment starting at or before the address owns
 //!   it". The list is then normalised once into a flat, sorted, non-overlapping run table,
-//!   adjacent compatible runs are merged, and lookups are a last-hit check plus a binary
-//!   search. A read inside one raw run is a single memcpy from the mmap.
+//!   adjacent compatible runs are merged, and lookups are a binary search (small tables) or
+//!   one bucket of a read-only index (large ones). A read inside one raw run is a single
+//!   memcpy from the mmap.
 //! * EXACT: anything else (unsorted QEMU page lists, overlapping ELF/crash segments, ...) runs
 //!   python's bisect over the original list order and python's mapping loop, so even the
 //!   position-dependent results python gives for such inputs are reproduced.
@@ -29,7 +30,6 @@ use crate::codecs::snappy;
 use crate::error::{Error, Result};
 use crate::layers::file::FileLayer;
 use crate::layers::{Layer, Mapping};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 const KIND_MASK: u64 = 3 << 62;
@@ -121,22 +121,72 @@ impl BlockCache {
     }
 }
 
+/// O(1) run lookup for large FAST tables (QEMU/Xen page lists, crash bitmaps, AVML frames):
+/// the address space `[base, base + (buckets << shift))` is cut into equal buckets and
+/// `first[b]` is the first run ending after bucket `b` starts, so a lookup is one bucket load
+/// and a search over the (usually one or two) runs in `first[b]..=first[b + 1]`. Read-only,
+/// so concurrent readers share it without contention.
+struct RunIndex {
+    base: u64,
+    shift: u32,
+    /// `buckets + 1` entries; the last is `runs.len()`.
+    first: Box<[u32]>,
+}
+
+/// Tables up to this many runs are binary searched directly (a few probes in one or two
+/// cache lines).
+const INDEX_MIN_RUNS: usize = 16;
+
+impl RunIndex {
+    fn build(runs: &[Run]) -> Option<RunIndex> {
+        if runs.len() <= INDEX_MIN_RUNS || runs.len() >= u32::MAX as usize {
+            return None;
+        }
+        let base = runs[0].start;
+        let span = runs[runs.len() - 1].end - base;
+        // about two buckets per run, at least a page per bucket
+        let per = (span / (2 * runs.len() as u64)).max(1);
+        let shift = (64 - (per - 1).leading_zeros()).max(12);
+        let buckets = usize::try_from((span >> shift) + 1).ok()?;
+        let mut first = Vec::with_capacity(buckets + 1);
+        let mut i = 0usize;
+        for b in 0..buckets as u64 {
+            let start = base + (b << shift);
+            while i < runs.len() && runs[i].end <= start {
+                i += 1;
+            }
+            first.push(i as u32);
+        }
+        first.push(runs.len() as u32);
+        Some(RunIndex { base, shift, first: first.into_boxed_slice() })
+    }
+}
+
 pub struct SegmentedLayer {
     name: &'static str,
     lower: Arc<dyn Layer>,
     file: Option<Arc<FileLayer>>,
+    /// `file`'s mapped bytes (pointer, length), kept alive by `file`: one load instead of
+    /// three dependent ones on every raw read.
+    file_data: (*const u8, usize),
     /// Bytes addressable in the lower layer (python `maximum_address + 1`).
     base_len: u64,
     /// FAST mode table (empty in EXACT mode).
     runs: Box<[Run]>,
+    /// FAST mode lookup acceleration for large tables.
+    index: Option<RunIndex>,
     /// EXACT mode: python's list. None in FAST mode.
     exact: Option<Box<[PySeg]>>,
     max_addr: u64,
-    hint: AtomicUsize,
     blocks: Box<[Block]>,
     codec: Codec,
     cache: Option<BlockCache>,
 }
+
+// SAFETY: `file_data` points into the read-only mapping owned by `file` (an Arc kept for the
+// layer's lifetime); everything else is Send + Sync.
+unsafe impl Send for SegmentedLayer {}
+unsafe impl Sync for SegmentedLayer {}
 
 /// How python reads a segment's source.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -249,15 +299,17 @@ impl SegmentedLayer {
             );
         }
         let cache = if blocks.is_empty() { None } else { Some(BlockCache::new()) };
+        let file_data = base.file.as_ref().map_or((std::ptr::null(), 0), |f| (f.data().as_ptr(), f.data().len()));
         SegmentedLayer {
             name,
             lower: base.layer.clone(),
             file: base.file.clone(),
+            file_data,
             base_len,
+            index: RunIndex::build(&runs),
             runs: runs.into_boxed_slice(),
             exact,
             max_addr,
-            hint: AtomicUsize::new(0),
             blocks: blocks.into_boxed_slice(),
             codec,
             cache,
@@ -286,36 +338,18 @@ impl SegmentedLayer {
     // ----------------------------------------------------------------------------- FAST mode
 
     /// Index of the run containing `addr` (Ok) or of the first run starting after it (Err).
+    /// No shared mutable state (a last-hit hint written by every reader made concurrent
+    /// lookups bounce its cache line between cores).
     #[inline(always)]
     fn find(&self, addr: u64) -> std::result::Result<usize, usize> {
-        let runs = &self.runs[..];
-        let h = self.hint.load(Ordering::Relaxed);
-        if let Some(r) = runs.get(h)
-            && addr >= r.start
-        {
-            if addr < r.end {
-                return Ok(h);
-            }
-            match runs.get(h + 1) {
-                None => return Err(h + 1),
-                Some(r2) => {
-                    if addr < r2.start {
-                        return Err(h + 1);
-                    }
-                    if addr < r2.end {
-                        self.hint.store(h + 1, Ordering::Relaxed);
-                        return Ok(h + 1);
-                    }
-                }
-            }
-        }
-        let i = runs.partition_point(|r| r.start <= addr);
-        if i > 0 && addr < runs[i - 1].end {
-            self.hint.store(i - 1, Ordering::Relaxed);
-            Ok(i - 1)
-        } else {
-            Err(i)
-        }
+        find_run(&self.runs, self.index.as_ref(), addr)
+    }
+
+    /// The mapped file bytes (empty when the lower layer is not the file).
+    #[inline(always)]
+    fn file_bytes(&self) -> &[u8] {
+        // SAFETY: points into the mapping kept alive by `self.file` (or is null/0)
+        if self.file_data.0.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(self.file_data.0, self.file_data.1) } }
     }
 
     // ---------------------------------------------------------------------------- EXACT mode
@@ -435,8 +469,8 @@ impl SegmentedLayer {
         match r.src & KIND_MASK {
             KIND_RAW => {
                 let lo = Self::raw_off(r, a).ok_or(a)?;
-                if let Some(f) = &self.file {
-                    let data = f.data();
+                if self.file.is_some() {
+                    let data = self.file_bytes();
                     if let Ok(l) = usize::try_from(lo)
                         && let Some(end) = l.checked_add(out.len())
                         && end <= data.len()
@@ -505,26 +539,34 @@ impl SegmentedLayer {
             };
         }
         let slot = &cache.slots[bi % CACHE_SLOTS];
-        let mut g = slot.lock().unwrap_or_else(PoisonError::into_inner);
-        let g = &mut *g;
-        if g.idx != bi {
-            g.idx = usize::MAX;
-            g.st = snappy::Partial::start(comp).map_err(|_| ())?;
-            if g.st.ulen != ulen {
-                return Err(());
+        let mut buf = {
+            let mut g = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let g = &mut *g;
+            if g.idx == bi {
+                // hit: the prefix is there, or resume decoding it in place
+                if g.st.op < need && snappy::decompress_continue(comp, &mut g.buf[..ulen], &mut g.st, need).is_err() {
+                    g.idx = usize::MAX;
+                    return Err(());
+                }
+                out.copy_from_slice(&g.buf[inner..need]);
+                return Ok(());
             }
-            if g.buf.len() < ulen {
-                g.buf.resize(ulen, 0);
-            }
-            g.idx = bi;
-        }
-        if g.st.op < need
-            && snappy::decompress_continue(comp, &mut g.buf[..ulen], &mut g.st, need).is_err()
-        {
+            // miss: decode without holding the slot (concurrent readers of other blocks
+            // mapping to this slot do not wait for us), then install the result
             g.idx = usize::MAX;
+            std::mem::take(&mut g.buf)
+        };
+        let mut st = snappy::Partial::start(comp).map_err(|_| ())?;
+        if st.ulen != ulen {
             return Err(());
         }
-        out.copy_from_slice(&g.buf[inner..need]);
+        if buf.len() < ulen {
+            buf.resize(ulen, 0);
+        }
+        snappy::decompress_continue(comp, &mut buf[..ulen], &mut st, need).map_err(|_| ())?;
+        out.copy_from_slice(&buf[inner..need]);
+        let mut g = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        *g = Slot { idx: bi, st, buf };
         Ok(())
     }
 
@@ -567,7 +609,7 @@ impl SegmentedLayer {
         match r.src & KIND_MASK {
             KIND_RAW => {
                 let lo = usize::try_from(Self::raw_off(r, addr)?).ok()?;
-                self.file.as_ref()?.data().get(lo..lo.checked_add(len)?)
+                self.file_bytes().get(lo..lo.checked_add(len)?)
             }
             KIND_FILL if r.src & 0xff == 0 && len <= ZEROS.len() => Some(&ZEROS[..len]),
             _ => None,
@@ -583,6 +625,30 @@ impl SegmentedLayer {
             return None;
         }
         Some((lo, (r.end - addr).min(self.base_len - lo)))
+    }
+}
+
+/// Index of the run of `runs` containing `addr` (Ok) or of the first run starting after it
+/// (Err); large tables go through their bucket index.
+#[inline(always)]
+fn find_run(runs: &[Run], index: Option<&RunIndex>, addr: u64) -> std::result::Result<usize, usize> {
+    let (lo, hi) = match index {
+        Some(ix) => {
+            let Some(off) = addr.checked_sub(ix.base) else { return Err(0) };
+            let b = (off >> ix.shift) as usize;
+            if b + 1 >= ix.first.len() {
+                return Err(runs.len());
+            }
+            // the run holding addr (if any) is the first in first[b]..=first[b + 1] ending
+            // after addr
+            (ix.first[b] as usize, (ix.first[b + 1] as usize + 1).min(runs.len()))
+        }
+        None => (0, runs.len()),
+    };
+    let i = lo + runs[lo..hi].partition_point(|r| r.end <= addr);
+    match runs.get(i) {
+        Some(r) if r.start <= addr => Ok(i),
+        _ => Err(i),
     }
 }
 
@@ -762,5 +828,65 @@ impl Layer for SegmentedLayer {
         }
         let i = self.find(addr).ok()?;
         self.run_translate(&self.runs[i], addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bucket index finds exactly what a scan of the table finds, for dense, sparse,
+    /// clustered and huge-span layouts, at run edges and outside every run.
+    #[test]
+    fn run_index_matches_scan() {
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for layout in 0..40 {
+            let n = [17usize, 100, 1000, 5000][layout % 4];
+            let mut runs = Vec::with_capacity(n);
+            let mut at = match layout % 3 {
+                0 => 0,
+                1 => next() % (1 << 40),
+                _ => u64::MAX / 2,
+            };
+            for k in 0..n {
+                let gap = match (layout / 4) % 5 {
+                    0 => 0,
+                    1 => 0x1000 * (next() % 3),
+                    2 => next() % 100,
+                    3 => if k % 50 == 0 { next() % (1 << 36) } else { next() % 64 },
+                    _ => next() % (1 << 44),
+                };
+                let len = match layout % 2 {
+                    0 => 0x1000,
+                    _ => 1 + next() % 0x3000,
+                };
+                let start = at + gap;
+                runs.push(Run { start, end: start + len, src: 0 });
+                at = start + len;
+            }
+            let index = RunIndex::build(&runs).expect("large table");
+            let scan = |a: u64| -> std::result::Result<usize, usize> {
+                let i = runs.iter().position(|r| r.end > a).unwrap_or(runs.len());
+                if i < runs.len() && runs[i].start <= a { Ok(i) } else { Err(i) }
+            };
+            let mut probes = vec![0, u64::MAX, runs[0].start.wrapping_sub(1), at, at - 1];
+            for r in &runs {
+                probes.extend([r.start, r.end - 1, r.end, r.start.wrapping_sub(1)]);
+            }
+            for _ in 0..2000 {
+                probes.push(runs[0].start + next() % (at - runs[0].start + 0x10000));
+            }
+            for a in probes {
+                assert_eq!(find_run(&runs, Some(&index), a), scan(a), "layout {layout} addr {a:#x}");
+                assert_eq!(find_run(&runs, None, a), scan(a), "layout {layout} addr {a:#x} (no index)");
+            }
+        }
+        assert!(RunIndex::build(&[Run { start: 0, end: 1, src: 0 }]).is_none());
     }
 }
