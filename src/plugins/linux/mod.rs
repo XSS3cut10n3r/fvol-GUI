@@ -3,12 +3,19 @@
 use crate::plugins::Plugin;
 
 pub mod bash;
+pub mod boottime;
 pub mod capabilities;
+pub mod ebpf;
 pub mod elfs;
 pub mod envars;
+pub mod iomem;
+pub mod kallsyms;
+pub mod kmsg;
 pub mod kthreads;
 pub mod library_list;
+pub mod lsmod;
 pub mod malware;
+pub mod module_extract;
 pub mod pidhashtable;
 pub mod proc;
 pub mod psaux;
@@ -17,8 +24,10 @@ pub mod pslist;
 pub mod psscan;
 pub mod pstree;
 pub mod ptrace;
+pub mod tracing;
 pub mod vmaregexscan;
 pub mod vmayarascan;
+pub mod vmcoreinfo;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&bash::Bash);
@@ -40,4 +49,36 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&vmayarascan::VmaYaraScan);
     v.push(&pscallstack::PsCallStack);
     v.push(&kthreads::Kthreads);
+    // L2: kernel / rootkit-detection plugins
+    v.push(&boottime::Boottime);
+    v.push(&ebpf::Ebpf);
+    v.push(&iomem::IOMem);
+    v.push(&kallsyms::Kallsyms);
+    v.push(&kmsg::Kmsg);
+    v.push(&lsmod::Lsmod);
+    v.push(&module_extract::ModuleExtract);
+    v.push(&vmcoreinfo::VMCoreInfo);
+    v.push(&malware::check_afinfo::CheckAfinfo);
+    v.push(&malware::check_afinfo::CheckAfinfoDeprecated);
+    v.push(&malware::check_creds::CheckCreds);
+    v.push(&malware::check_creds::CheckCredsDeprecated);
+    v.push(&malware::check_idt::CheckIdt);
+    v.push(&malware::check_idt::CheckIdtDeprecated);
+    v.push(&malware::check_modules::CheckModules);
+    v.push(&malware::check_modules::CheckModulesDeprecated);
+    v.push(&malware::check_syscall::CheckSyscall);
+    v.push(&malware::check_syscall::CheckSyscallDeprecated);
+    v.push(&malware::hidden_modules::HiddenModules);
+    v.push(&malware::hidden_modules::HiddenModulesDeprecated);
+    v.push(&malware::keyboard_notifiers::KeyboardNotifiers);
+    v.push(&malware::keyboard_notifiers::KeyboardNotifiersDeprecated);
+    v.push(&malware::modxview::Modxview);
+    v.push(&malware::modxview::ModxviewDeprecated);
+    v.push(&malware::netfilter::Netfilter);
+    v.push(&malware::netfilter::NetfilterDeprecated);
+    v.push(&malware::tty_check::TtyCheck);
+    v.push(&malware::tty_check::TtyCheckDeprecated);
+    v.push(&tracing::ftrace::CheckFtrace);
+    v.push(&tracing::perf_events::PerfEvents);
+    v.push(&tracing::tracepoints::CheckTracepoints);
 }
