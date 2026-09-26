@@ -83,6 +83,53 @@ pub fn container_tree(ctx: &Context, prefix: &str, extra: bool) -> Result<Items>
     Ok(out)
 }
 
+/// The `swap_layers` tree WinSwapLayers gives an Intel layer at `prefix` (`<layer>.swap_layers`)
+/// in `build_configuration()` order: the count, each swap layer's name, then each swap layer's
+/// file layer. python counts every `--single-swap-locations` entry but configures only those
+/// `URIRequirement.location_from_file` accepts (an existing file, or a URL).
+fn swap_items(ctx: &Context, prefix: &str) -> Items {
+    swap_items_ordered(ctx, prefix, false)
+}
+
+/// [`swap_items`]; `extra`: in `context.config` order (WinSwapLayers sets each swap layer's name
+/// before the count).
+fn swap_items_ordered(ctx: &Context, prefix: &str, extra: bool) -> Items {
+    let count = (format!("{prefix}.number_of_elements"), Json::Int(ctx.opts.swap_locations.len() as i128));
+    let mut out = Vec::new();
+    if !extra {
+        out.push(count.clone());
+    }
+    let layers: Vec<(usize, String)> = ctx
+        .opts
+        .swap_locations
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.is_empty())
+        .filter_map(|(i, l)| {
+            let scheme = l.split_once(':').map(|(s, _)| s).filter(|s| s.len() > 1 && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)));
+            match scheme {
+                Some("file") => crate::util::paths::file_uri_to_path(l).filter(|p| p.exists()).map(|_| (i, l.clone())),
+                Some(_) => Some((i, l.clone())),
+                None => {
+                    let p = std::path::absolute(l).ok()?;
+                    p.exists().then(|| (i, crate::util::paths::path_to_file_uri(&p)))
+                }
+            }
+        })
+        .collect();
+    for (i, _) in &layers {
+        out.push((format!("{prefix}.swap_layers{i}"), s(format!("swap_layers{i}"))));
+    }
+    if extra {
+        out.push(count);
+    }
+    for (i, url) in layers {
+        out.push((format!("{prefix}.swap_layers{i}.location"), s(url)));
+        out.push((format!("{prefix}.swap_layers{i}.class"), s(layer_class_path("FileLayer"))));
+    }
+    out
+}
+
 /// (page_map_offset, kernel_virtual_offset, kernel_banner) of the primary Intel layer as
 /// python's OS stackers record them.
 fn intel_params(ctx: &Context, p: &Primary) -> Result<(u64, Option<u64>, Option<String>)> {
@@ -111,7 +158,6 @@ pub fn primary_tree(ctx: &Context, p: &Primary, prefix: &str, extra: bool, swap:
     };
     let (dtb, kvo, banner) = intel_params(ctx, p)?;
     let class = s(layer_class_path(crate::layers::Layer::class_name(intel)));
-    let nswap = ctx.opts.swap_locations.len() as i128;
     if !extra && swap {
         out.push((format!("{prefix}.swap_layers"), Json::Bool(true)));
     }
@@ -131,7 +177,7 @@ pub fn primary_tree(ctx: &Context, p: &Primary, prefix: &str, extra: bool, swap:
     }
     out.extend(container_tree(ctx, &format!("{prefix}.memory_layer"), extra)?);
     if swap {
-        out.push((format!("{prefix}.swap_layers.number_of_elements"), Json::Int(nswap)));
+        out.extend(swap_items_ordered(ctx, &format!("{prefix}.swap_layers"), extra));
     }
     Ok(out)
 }
@@ -162,7 +208,7 @@ pub fn kernel_tree(ctx: &Context, plugin: &str, prefix: &str) -> Result<Items> {
     out.push((format!("{l}.page_map_offset"), Json::Int(dtb as i128)));
     if swap {
         out.push((format!("{l}.swap_layers"), Json::Bool(true)));
-        out.push((format!("{l}.swap_layers.number_of_elements"), Json::Int(ctx.opts.swap_locations.len() as i128)));
+        out.extend(swap_items(ctx, &format!("{l}.swap_layers")));
     }
     out.push((format!("{prefix}.offset"), Json::Int(offset as i128)));
     out.push((format!("{prefix}.symbol_table_name.class"), s(format!("volatility3.framework.symbols.{sym_class}"))));
@@ -176,5 +222,61 @@ pub fn kernel_tree(ctx: &Context, plugin: &str, prefix: &str) -> Result<Items> {
     }
     out.push((format!("{prefix}.symbol_table_name.isf_url"), s(url)));
     out.push((format!("{prefix}.symbol_table_name.symbol_mask"), Json::Int(table.symbol_mask() as i128)));
+    Ok(out)
+}
+
+/// python `plugin.build_configuration()` of the plugin registered as `plugin` after the
+/// automagics ran, as the CLI saves it (`--save-config`): every requirement of python's
+/// requirement list ([`crate::plugins::pyreqs`]), in order:
+///   * `ModuleRequirement` / `TranslationLayerRequirement`: the constructed kernel module's /
+///     layer's own tree under the requirement's name (the name itself is not recorded);
+///   * every other requirement: its configured value (`user`: command line, `-c` file, `-e`),
+///     else the value python's plugin constructor records, the requirement's default, when
+///     that is not `None`. An optional `ListRequirement` without a value or default is `[]`
+///     once python's `ConstructionMagic` walked the requirements, which it does exactly when a
+///     required layer or module has yet to be built.
+///
+/// `any_os_stacker`: the stackers were chosen for another plugin (timeliner runs its plugins
+/// with the stackers of its own, generic, category) instead of this plugin's category.
+///
+/// A requirement the automagics cannot satisfy is python's `UnsatisfiedException` (the CLI
+/// reports it before anything is written). timeliner's own `build_configuration()` records
+/// nothing (python warns "Unable to record configuration data for the timeliner plugin").
+pub fn plugin_configuration(ctx: &Context, plugin: &str, user: &crate::plugins::Config, any_os_stacker: bool) -> Result<Items> {
+    use crate::plugins::pyreqs::{self, PyKind};
+    let mut out = Items::new();
+    if plugin == "timeliner.Timeliner" {
+        return Ok(out);
+    }
+    let Some(reqs) = pyreqs::requirements(plugin) else { return Ok(out) };
+    let category = match plugin.split('.').next() {
+        Some(c @ ("windows" | "linux" | "mac")) => c,
+        _ => "",
+    };
+    let walked = reqs.iter().any(|r| !r.optional && matches!(r.kind, PyKind::Module | PyKind::Layer | PyKind::Symbols | PyKind::Other));
+    for r in reqs {
+        match r.kind {
+            PyKind::Module => out.extend(kernel_tree(ctx, plugin, r.name)?),
+            PyKind::Layer => {
+                let stackers = if any_os_stacker { "" } else { category };
+                let p = super::primary::primary_for_category(ctx, stackers, &r.description)?;
+                if r.needs_intel() && p.intel.is_none() {
+                    return Err(crate::plugins::unsatisfied_described(&[(r.name, crate::plugins::UnsatKind::Layer, &r.description)]));
+                }
+                // WinSwapLayers (excluded for linux / mac plugins) gives Intel layers swap_layers
+                out.extend(primary_tree(ctx, &p, r.name, false, !matches!(category, "linux" | "mac"))?);
+            }
+            PyKind::Symbols | PyKind::Other => {}
+            _ => {
+                let v = match user.get(r.name) {
+                    Some(v) => crate::cli::cv_to_json(v),
+                    None if r.default != Json::Null => r.default.clone(),
+                    None if r.kind == PyKind::List && walked => Json::Arr(Vec::new()),
+                    None => continue,
+                };
+                out.push((r.name.to_string(), v));
+            }
+        }
+    }
     Ok(out)
 }
