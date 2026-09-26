@@ -10,7 +10,7 @@
 use crate::error::{Error, Result};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{Receiver, SyncSender};
 
 /// Where a streaming decoder puts its output.
 pub trait Sink {
@@ -142,10 +142,7 @@ impl Sink for FileSink {
             return Ok(());
         }
         // a recycled buffer (or a new one) of the same capacity continues the output
-        let mut next = match self.back.try_recv() {
-            Ok(b) => b,
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => Vec::new(),
-        };
+        let mut next = self.back.try_recv().unwrap_or_default();
         next.clear();
         if next.capacity() < buf.capacity() {
             next.try_reserve_exact(buf.capacity()).map_err(|_| Error::Msg("out of memory".into()))?;

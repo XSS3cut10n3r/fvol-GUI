@@ -142,39 +142,34 @@ fn decompressed(dir: &Path, src: &Path, url: &str, chain: &[Codec]) -> Result<Pa
     {
         return Ok(data);
     }
-    std::fs::create_dir_all(dir).map_err(|e| Error::Msg(format!("cannot create {}: {e}", dir.display())))?;
-    // older decompressions of this location (the file changed since)
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            if e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix) && !n.contains(".tmp")) {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
+    let where_ = |e: Error| Error::Msg(format!("{e} (decompressing into {}; RSVOL_CACHE selects another directory)", dir.display()));
+    std::fs::create_dir_all(dir).map_err(|e| where_(Error::Msg(format!("cannot create the directory: {e}"))))?;
+    remove_stale(dir, &prefix);
     let pid = std::process::id();
     let tmp = dir.join(format!("{stem}.img.tmp{pid}"));
-    let mut stage_in: Option<PathBuf> = None;
+    // outputs written so far (the input of the next stage last)
+    let mut written: Vec<PathBuf> = Vec::new();
     let res = (|| -> Result<u64> {
         let mut len = 0;
         for (i, &codec) in chain.iter().enumerate() {
             let out = if i + 1 == chain.len() { tmp.clone() } else { dir.join(format!("{stem}.stage{i}.tmp{pid}")) };
-            let input = stage_in.as_deref().unwrap_or(src);
-            len = decompress_file(codec, input, &out)?;
-            if let Some(prev) = stage_in.replace(out) {
-                let _ = std::fs::remove_file(prev);
+            let input = written.last().cloned().unwrap_or_else(|| src.to_path_buf());
+            written.push(out.clone());
+            len = decompress_file(codec, &input, &out)?;
+            if i > 0 {
+                // the previous stage's output was this stage's input
+                let _ = std::fs::remove_file(&input);
             }
         }
         Ok(len)
     })();
-    // the last stage's output is `tmp`; earlier stages' outputs are gone already
     let len = match res {
         Ok(len) => len,
         Err(e) => {
-            if let Some(p) = stage_in {
+            for p in written {
                 let _ = std::fs::remove_file(p);
             }
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
+            return Err(where_(e));
         }
     };
     std::fs::rename(&tmp, &data).map_err(|e| {
@@ -186,23 +181,51 @@ fn decompressed(dir: &Path, src: &Path, url: &str, chain: &[Codec]) -> Result<Pa
     Ok(data)
 }
 
+/// Removes from `dir` the entries of an earlier version of the location whose names start
+/// with `prefix` (its source file changed), and temporary files of processes that are gone.
+fn remove_stale(dir: &Path, prefix: &str) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let Some(n) = name.to_str() else { continue };
+        let stale = match n.rsplit_once(".tmp") {
+            // "<stem>.img.tmp<pid>", "<stem>.stage<i>.tmp<pid>": the writer died
+            Some((_, pid)) => pid.parse::<u32>().is_ok_and(|p| p != std::process::id() && !Path::new(&format!("/proc/{p}")).exists()),
+            None => n.starts_with(prefix),
+        };
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Decompresses file `src` into a new file `dst`; returns the decompressed size.
 fn decompress_file(codec: Codec, src: &Path, dst: &Path) -> Result<u64> {
+    decompress_file_with(codec, src, dst, crate::codecs::xz::FILE_BUF_MAX)
+}
+
+/// [`decompress_file`]; xz blocks bigger than `xz_buf_max` are decoded into a mapping.
+fn decompress_file_with(codec: Codec, src: &Path, dst: &Path, xz_buf_max: usize) -> Result<u64> {
     let io = |p: &Path, e: std::io::Error| Error::Msg(format!("{}: {e}", p.display()));
     let f = std::fs::File::open(src).map_err(|e| io(src, e))?;
     let map = crate::util::mmap::Mmap::map(&f).map_err(|e| io(src, e))?;
     map.advise(0, map.len(), crate::util::mmap::MADV_SEQUENTIAL);
     let input = map.as_slice();
-    let out = std::fs::File::create(dst).map_err(|e| io(dst, e))?;
+    // readable too: big xz blocks are decoded into a shared mapping of the file
+    let out = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(dst).map_err(|e| io(dst, e))?;
     let what = match codec {
         Codec::Xz => "xz",
         Codec::Bzip2 => "bzip2",
         Codec::Gzip => "gzip",
     };
     let fail = |e: Error| Error::Msg(format!("cannot decompress {} ({what}): {e}", src.display()));
+    // python's BZ2File and LZMAFile (unlike GzipFile and bz2.decompress) fail on an empty file
+    if input.is_empty() && codec != Codec::Gzip {
+        return Err(fail(Error::Msg("Compressed file ended before the end-of-stream marker was reached".into())));
+    }
     // python's LZMAFile reads both .xz and legacy .lzma data (FORMAT_AUTO: .xz by its magic)
     if codec == Codec::Xz && crate::codecs::xz::is_xz(input) {
-        return crate::codecs::xz::decompress_to_file(input, &out).map_err(fail);
+        return crate::codecs::xz::decompress_to_file_with(input, &out, xz_buf_max).map_err(fail);
     }
     let mut sink = crate::codecs::sink::FileSink::new(out)?;
     let n = match codec {
@@ -327,8 +350,34 @@ mod tests {
         let bad = dir.join("b.raw.xz");
         std::fs::write(&bad, b"not xz at all").unwrap();
         assert!(open(&paths::path_to_file_uri(&bad), &bad).is_err());
+        // empty: python's GzipFile reads nothing, BZ2File and LZMAFile raise EOFError
+        for (name, ok) in [("e.raw.gz", true), ("e.raw.bz2", false), ("e.raw.xz", false)] {
+            let p = dir.join(name);
+            std::fs::write(&p, b"").unwrap();
+            let r = open(&paths::path_to_file_uri(&p), &p);
+            assert_eq!(r.is_ok(), ok, "{name}");
+            if let Ok(out) = r {
+                assert_eq!(std::fs::metadata(out).unwrap().len(), 0);
+            }
+        }
         let left: Vec<_> = std::fs::read_dir(cache.join(CACHE_SUBDIR)).unwrap().flatten().map(|e| e.file_name()).collect();
         assert!(left.iter().all(|n| !n.to_string_lossy().contains(".tmp")), "{left:?}");
+        // stale entries: an older version of a location, temporary files of dead writers
+        let d = dir.join("stale");
+        std::fs::create_dir_all(&d).unwrap();
+        let me = std::process::id();
+        for n in ["aa-1.img", "aa-1.key", "bb-2.img", "bb-2.img.tmp4000000000", "cc.stage0.tmp4000000001", "cc.tmp1x"] {
+            std::fs::write(d.join(n), b"").unwrap();
+        }
+        std::fs::write(d.join(format!("bb-3.img.tmp{me}")), b"").unwrap();
+        remove_stale(&d, "aa-");
+        let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["bb-2.img".to_string(), format!("bb-3.img.tmp{me}"), "cc.tmp1x".to_string()]);
+        // xz blocks decoded into a mapping of the output file (blocks over 64 MiB)
+        let (src, dst) = (dir.join("a.raw.xz"), dir.join("mapped.out"));
+        assert_eq!(decompress_file_with(Codec::Xz, &src, &dst, 0).unwrap(), data.len() as u64);
+        assert_eq!(std::fs::read(&dst).unwrap(), data);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

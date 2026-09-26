@@ -341,20 +341,21 @@ pub fn decompress_reuse(data: &[u8], buf: &mut Vec<u8>, parallel: bool) -> Resul
 
 /// Blocks up to this size are decoded into a per-thread buffer and written with `pwrite`;
 /// bigger ones (a single-block file) straight into a writable mapping of the output file.
-const FILE_BUF_MAX: usize = 64 << 20;
+pub(crate) const FILE_BUF_MAX: usize = 64 << 20;
 /// Memory the per-thread buffers may use together (limits the threads for big blocks).
 const FILE_BUF_BUDGET: usize = 1 << 30;
 
 /// [`decompress`] into `file` (from offset 0; it is resized to the output size) without
 /// holding the output in memory: multi-block files are decoded in parallel, each thread
 /// decoding one block at a time into its own buffer and writing it at the block's offset.
-/// Returns the decompressed size.
+/// `file` must be open for reading and writing (blocks over 64 MiB are decoded into a
+/// shared mapping of it). Returns the decompressed size.
 pub fn decompress_to_file(data: &[u8], file: &std::fs::File) -> Result<u64> {
     decompress_to_file_with(data, file, FILE_BUF_MAX)
 }
 
 /// [`decompress_to_file`] with blocks bigger than `buf_max` decoded into a mapping.
-fn decompress_to_file_with(data: &[u8], file: &std::fs::File, buf_max: usize) -> Result<u64> {
+pub(crate) fn decompress_to_file_with(data: &[u8], file: &std::fs::File, buf_max: usize) -> Result<u64> {
     use std::os::unix::fs::FileExt;
     let (blocks, total) = scan(data)?;
     let io = |e: std::io::Error| Error::Msg(format!("cannot write the decompressed file: {e}"));
@@ -616,6 +617,44 @@ mod tests {
         let f = std::fs::File::create(dir.join("bad")).unwrap();
         assert!(decompress_to_file(&bad, &f).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Throughput of [`decompress_to_file`] against decoding alone:
+    /// `RSVOL_XZ_BENCH=<file.xz> RSVOL_XZ_BENCH_OUT=<scratch file on disk>`
+    /// `cargo test --profile fast codecs_xz_file_throughput -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn codecs_xz_file_throughput() {
+        let p = std::env::var("RSVOL_XZ_BENCH").expect("RSVOL_XZ_BENCH");
+        let f = std::fs::File::open(&p).unwrap();
+        let map = crate::util::mmap::Mmap::map(&f).unwrap();
+        let data = map.as_slice();
+        let (blocks, total) = scan(data).unwrap();
+        let t = std::time::Instant::now();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) {
+                s.spawn(|| {
+                    let mut buf = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(b) = blocks.get(i) else { break };
+                        buf.resize(buf.len().max(b.out_len), 0);
+                        decode_block(data, b, &mut buf[..b.out_len]).unwrap();
+                    }
+                });
+            }
+        });
+        let d = t.elapsed().as_secs_f64();
+        eprintln!("{} blocks, {total} bytes: decode only {d:.3}s = {:.0} MB/s", blocks.len(), total as f64 / d / 1e6);
+        let out = std::env::var("RSVOL_XZ_BENCH_OUT").expect("RSVOL_XZ_BENCH_OUT");
+        let o = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&out).unwrap();
+        let t = std::time::Instant::now();
+        decompress_to_file(data, &o).unwrap();
+        let d = t.elapsed().as_secs_f64();
+        eprintln!("decompress_to_file {d:.3}s = {:.0} MB/s", total as f64 / d / 1e6);
+        drop(o);
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]
