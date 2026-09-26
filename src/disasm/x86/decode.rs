@@ -124,10 +124,16 @@ impl St<'_> {
         if self.pos + size > self.n {
             return None;
         }
-        let mut v = 0u64;
-        for k in 0..size {
-            v |= (self.d[self.pos + k] as u64) << (8 * k);
-        }
+        let v = if let Some(w) = self.data.get(self.pos..).and_then(|x| x.first_chunk::<8>()) {
+            // one 8-byte load, masked to `size` (1..=8) bytes
+            u64::from_le_bytes(*w) & u64::MAX.checked_shr(64u32.saturating_sub(8 * size as u32)).unwrap_or(0)
+        } else {
+            let mut v = 0u64;
+            for k in 0..size {
+                v |= (self.d[self.pos + k] as u64) << (8 * k);
+            }
+            v
+        };
         self.pos += size;
         Some(v)
     }
@@ -151,6 +157,14 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         Mode::X86_64 => decode_impl::<true, true, true>(data, addr, mode, out),
         Mode::X86_32 => decode_impl::<true, false, true>(data, addr, mode, out),
     }
+}
+
+/// `decode_into` for a mode known at compile time, fully inlined (for decode loops such as
+/// the renderer's, which then pay no call / mode dispatch per instruction).
+#[inline(always)]
+pub(crate) fn decode_mode<const M64: bool>(data: &[u8], addr: u64, out: &mut Insn) -> bool {
+    let mode = if M64 { Mode::X86_64 } else { Mode::X86_32 };
+    decode_impl::<true, M64, true>(data, addr, mode, out)
 }
 
 /// Length-only decode: the same decoder instantiated into a local scratch `Insn`, so the

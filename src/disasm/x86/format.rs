@@ -261,6 +261,24 @@ fn mnemonic(w: &mut W, insn: &Insn) {
     }
 }
 
+/// Renderer lines for consecutive instructions from the start of `data` until the first
+/// undecodable one (the decoder is inlined into this loop); returns (bytes consumed, lines).
+pub(crate) fn write_lines<const M64: bool>(data: &[u8], address: u64, out: &mut String) -> (usize, usize) {
+    let mut insn = Insn::default();
+    let mut pos = 0usize;
+    let mut count = 0usize;
+    while pos < data.len() {
+        let addr = address.wrapping_add(pos as u64);
+        if !super::decode::decode_mode::<M64>(&data[pos..], addr, &mut insn) {
+            break;
+        }
+        write_line(&insn, out);
+        pos += insn.size as usize;
+        count += 1;
+    }
+    (pos, count)
+}
+
 /// Append volatility's disassembly renderer line `"\n{address:#x}:\t{mnemonic}\t{op_str}"`.
 pub(crate) fn write_line(insn: &Insn, out: &mut String) {
     // SAFETY: only ASCII is appended (see `W::put`).

@@ -233,6 +233,17 @@ pub fn insn_len(data: &[u8], mode: Mode) -> usize {
     decode::insn_len(data, mode)
 }
 
+/// Append volatility's renderer lines (`Insn::write_line`) for consecutive instructions from the
+/// start of `data` (located at `address`) until the first undecodable one; returns (bytes
+/// consumed, instructions written). This is `format_capstone`'s loop, with the decoder
+/// specialized for `mode`.
+pub fn write_lines(data: &[u8], address: u64, mode: Mode, out: &mut String) -> (usize, usize) {
+    match mode {
+        Mode::X86_64 => format::write_lines::<true>(data, address, out),
+        Mode::X86_32 => format::write_lines::<false>(data, address, out),
+    }
+}
+
 /// Iterator over consecutive instructions, stopping at the first undecodable one
 /// (exactly like capstone's `Cs.disasm`).
 pub struct Iter<'a> {

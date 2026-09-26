@@ -30,17 +30,7 @@ pub fn format_capstone_into(data: &[u8], offset: u64, arch: &str, out: &mut Stri
         "intel64" => Mode::X86_64,
         _ => return,
     };
-    let mut pos = 0usize;
-    let mut addr = offset;
-    let mut insn = Insn::default();
-    while pos < data.len() {
-        if !x86::decode_into(&data[pos..], addr, mode, &mut insn) {
-            break;
-        }
-        insn.write_line(out);
-        pos += insn.size as usize;
-        addr = addr.wrapping_add(insn.size as u64);
-    }
+    x86::write_lines(data, offset, mode, out);
 }
 
 #[cfg(test)]

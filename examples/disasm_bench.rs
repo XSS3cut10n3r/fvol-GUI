@@ -81,32 +81,30 @@ fn run_text(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
 
 #[inline(never)]
 fn run_line(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
+    // format_capstone's loop (x86::write_lines, which stops at the first undecodable
+    // instruction); like capstone's side, the sweep then skips one byte and continues
     const CAP: usize = 1 << 20;
     let mut r = Res::default();
-    let mut insn = Insn::default();
     let mut out = String::with_capacity(CAP);
     for c in chunks {
         let buf = &data[c.off..c.off + c.len];
         r.bytes += c.len as u64;
         let mut pos = 0usize;
-        out.clear();
         while pos < buf.len() {
-            let addr = c.addr.wrapping_add(pos as u64);
-            if x86::decode_into(&buf[pos..], addr, mode, &mut insn) {
-                if out.len() + 512 > CAP {
-                    r.check += out.len() as u64;
-                    out.clear();
-                }
-                // the format_capstone line (same call as disasm::format_capstone_into)
-                insn.write_line(&mut out);
-                r.insns += 1;
-                pos += insn.size as usize;
-            } else {
+            let (n, k) = x86::write_lines(&buf[pos..], c.addr.wrapping_add(pos as u64), mode, &mut out);
+            r.insns += k as u64;
+            pos += n;
+            if pos < buf.len() {
                 r.bad += 1;
                 pos += 1;
             }
+            if out.len() > CAP {
+                r.check += out.len() as u64;
+                out.clear();
+            }
         }
         r.check += out.len() as u64;
+        out.clear();
     }
     r
 }
