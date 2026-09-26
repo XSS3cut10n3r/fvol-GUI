@@ -753,8 +753,13 @@ impl Layer for IntelLayer {
     }
 
     fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
-        // Runs mapped to swap layers are omitted (the trait's `mapped` refers to `lower()`).
+        // Runs mapped to swap layers are omitted (the trait's `mapped` refers to `lower()`);
+        // `mapping_targets` includes them.
         self.mapping_with_targets(addr, len, &mut |m, t| if t == Target::Phys { f(m) } else { true });
+    }
+
+    fn mapping_targets(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping, &dyn Layer) -> bool) {
+        self.mapping_with_targets(addr, len, &mut |m, t| f(m, self.target_layer(t)));
     }
 
     fn lower(&self) -> Option<&Arc<dyn Layer>> {
