@@ -15,15 +15,28 @@ use crate::symbols::windows::{WinExt, pe};
 
 pub struct VerInfo;
 
-/// How python's `VerInfo.get_version_information` failed.
+/// How python's `VerInfo.get_version_information` failed, by python exception type (callers
+/// catch different sets: verinfo catches all but [`VersionError::Fatal`], consoles only
+/// `InvalidAddressException`, `TypeError` and `AttributeError`).
 #[derive(Debug)]
 pub enum VersionError {
-    /// `InvalidAddressException` / `ValueError` / `TypeError` / `AttributeError`: the
-    /// exceptions verinfo turns into UnreadableValue (TypeError: no session layer).
-    Caught,
-    /// Anything else python does not catch (`PEFormatError`, `OverflowError`,
-    /// `ZeroDivisionError`): the plugin dies with a traceback.
+    /// `InvalidAddressException` while reconstructing the image.
+    Invalid(Error),
+    /// `ValueError` from `reconstruct()` (bad signatures, oversized image / sections).
+    Value(String),
+    /// `TypeError`: no layer (python passes `None` when no session layer maps a module).
+    Type,
+    /// `AttributeError`: no `VS_FIXEDFILEINFO` (or pefile's own AttributeError).
+    Attribute,
+    /// `PEFormatError`, `OverflowError`, `ZeroDivisionError`: nobody catches these.
     Fatal(Error),
+}
+
+impl VersionError {
+    /// The exceptions windows.verinfo turns into UnreadableValue.
+    pub fn caught_by_verinfo(&self) -> bool {
+        !matches!(self, VersionError::Fatal(_))
+    }
 }
 
 /// python `VerInfo.get_version_information(context, pe_table_name, layer_name, base_address)`:
@@ -31,20 +44,29 @@ pub enum VersionError {
 /// PE at `base` (reconstructed like `IMAGE_DOS_HEADER.reconstruct()` and parsed like
 /// `pefile.PE(fast_load=True)` + the resource directory). Reads only the pages it needs.
 pub fn get_version_information(pe_table: TableRef, layer: Option<LayerRef>, base: u64) -> std::result::Result<(u16, u16, u16, u16), VersionError> {
-    let Some(layer) = layer else { return Err(VersionError::Caught) }; // TypeError
+    let Some(layer) = layer else { return Err(VersionError::Type) };
     let dos = Obj::named(Space::on(layer, pe_table), "_IMAGE_DOS_HEADER", base).map_err(VersionError::Fatal)?;
     let (view, err) = pe::reconstruct_view(&dos);
-    if let Some(e) = err {
-        return Err(if e.is_invalid_or_value() { VersionError::Caught } else { VersionError::Fatal(Error::msg(e.to_string())) });
+    match err {
+        None => {}
+        Some(pe::ReconError::Invalid(e)) => return Err(VersionError::Invalid(e)),
+        Some(pe::ReconError::Value(m)) => return Err(VersionError::Value(m)),
+        Some(e) => return Err(VersionError::Fatal(Error::msg(e.to_string()))),
     }
     let pe = match PeFile::parse(&view) {
         Ok(p) => p,
-        Err(PeError::Attribute(_)) => return Err(VersionError::Caught),
+        Err(PeError::Attribute(_)) => return Err(VersionError::Attribute),
         Err(e) => return Err(VersionError::Fatal(Error::msg(e.to_string()))),
     };
     let fixed = pe.parse_version_info();
-    let v = fixed.first().ok_or(VersionError::Caught)?; // AttributeError: no VS_FIXEDFILEINFO
+    let v = fixed.first().ok_or(VersionError::Attribute)?;
     Ok(((v.product_version_ms >> 16) as u16, v.product_version_ms as u16, (v.product_version_ls >> 16) as u16, v.product_version_ls as u16))
+}
+
+/// python `VerInfo.find_version_info(context, layer_name, filename)` (one file name; see
+/// [`find_version_info`]).
+pub fn find_version_info_one(layer: LayerRef, filename: &str) -> Result<Option<(u16, u16, u16, u16)>> {
+    find_version_info(layer, &[filename.to_string()]).pop().unwrap_or(Ok(None))
 }
 
 /// python `VerInfo.find_version_info(context, layer_name, filename)` for several file names
@@ -82,17 +104,51 @@ pub fn find_version_info(layer: LayerRef, names: &[String]) -> Vec<Result<Option
         .map(|hit| {
             let Some(offset) = hit else { return Ok(None) };
             let data = crate::layers::LayerExt::read_vec(layer, offset.wrapping_sub(0x500), 0x500)?;
-            // data.find(sig) + len(sig): -1 + 4 when missing (python then reads at 3)
-            let at = crate::layers::scan::find(&data, b"\xbd\x04\xef\xfe").map(|p| p as i64).unwrap_or(-1) + 4;
-            let at = at as usize;
-            if at + 20 > data.len() {
-                return Err(Error::msg("struct.error: unpack requires a buffer of 20 bytes"));
-            }
-            let h = |i: usize| u16::from_le_bytes([data[at + 4 + i * 2], data[at + 5 + i * 2]]);
-            // struct_version, FV2, FV1, FV4, FV3, ... -> (FV1, FV2, FV3, FV4)
-            Ok(Some((h(1), h(0), h(3), h(2))))
+            parse_fixed_file_info(&data).map(Some)
         })
         .collect()
+}
+
+/// The (FV1, FV2, FV3, FV4) python's `find_version_info` unpacks (`"<IHHHHHHHH"`) after the
+/// `VS_FIXEDFILEINFO` signature in the 0x500 bytes before a hit. Python quirk: without a
+/// signature `data.find(sig) + 4 == 3` is still ">= 0", so the words at offset 3 are used;
+/// too little data is python's `struct.error`.
+pub fn parse_fixed_file_info(data: &[u8]) -> Result<(u16, u16, u16, u16)> {
+    let at = crate::layers::scan::find(data, b"\xbd\x04\xef\xfe").map(|p| p as i64).unwrap_or(-1) + 4;
+    let at = at as usize;
+    if at + 20 > data.len() {
+        return Err(Error::msg("struct.error: unpack requires a buffer of 20 bytes"));
+    }
+    let h = |i: usize| u16::from_le_bytes([data[at + 4 + i * 2], data[at + 5 + i * 2]]);
+    // struct_version, FV2, FV1, FV4, FV3, ... -> (FV1, FV2, FV3, FV4)
+    Ok((h(1), h(0), h(3), h(2)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_fixed_file_info;
+
+    #[test]
+    fn fixed_file_info() {
+        // after the signature python unpacks "<IHHHHHHHH": struct_version, FV2, FV1, FV4, FV3, ...
+        let mut data = vec![0u8; 0x500];
+        let at = 0x100;
+        data[at..at + 4].copy_from_slice(b"\xbd\x04\xef\xfe");
+        let fields: [u16; 10] = [0, 1, 3, 6, 19935, 9600, 3, 6, 19935, 9600];
+        for (i, v) in fields.iter().enumerate() {
+            data[at + 4 + 2 * i..at + 6 + 2 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        // dwStrucVersion = 0x00010000, FileVersionMS = (6 << 16) | 3, LS = (9600 << 16) | 19935
+        assert_eq!(parse_fixed_file_info(&data).unwrap(), (6, 3, 9600, 19935));
+        // python quirk: no signature -> data.find() + 4 == 3, unpack from offset 3
+        let mut data = vec![0u8; 0x500];
+        data[3 + 8..3 + 10].copy_from_slice(&7u16.to_le_bytes());
+        assert_eq!(parse_fixed_file_info(&data).unwrap(), (0, 0, 0, 7));
+        // signature too close to the end: struct.error
+        let mut data = vec![0u8; 0x500];
+        data[0x4f0..0x4f4].copy_from_slice(b"\xbd\x04\xef\xfe");
+        assert!(parse_fixed_file_info(&data).is_err());
+    }
 }
 
 fn version_values(v: std::result::Result<(u16, u16, u16, u16), ()>) -> [Value; 4] {
@@ -174,13 +230,17 @@ impl Plugin for VerInfo {
         for (i, v) in versions.into_iter().enumerate() {
             match v {
                 Ok(t) => vals.push(Ok(t)),
-                Err(VersionError::Caught) => {
+                Err(e) if e.caught_by_verinfo() => {
                     vals.push(Err(()));
                     if let (true, Value::Str(n)) = (extensive, &mods[i].name) {
                         want.push((i, n.clone()));
                     }
                 }
-                Err(VersionError::Fatal(e)) => {
+                Err(e) => {
+                    let e = match e {
+                        VersionError::Fatal(e) => e,
+                        e => Error::msg(format!("{e:?}")),
+                    };
                     // python dies at this module: emit the rows before it first
                     for (j, r) in vals.iter().enumerate() {
                         let mut row = vec![Value::NotApplicable, Value::NotApplicable, Value::Int(mods[j].base as i128), mods[j].name.clone()];
@@ -252,8 +312,10 @@ impl Plugin for VerInfo {
                         Ok(b) => {
                             let v = match get_version_information(pe_table, Some(pl), b) {
                                 Ok(t) => Ok(t),
-                                Err(VersionError::Caught) => Err(()),
+                                // (InvalidAddressException, ValueError, AttributeError)
+                                Err(VersionError::Invalid(_) | VersionError::Value(_) | VersionError::Attribute) => Err(()),
                                 Err(VersionError::Fatal(e)) => return Err(e),
+                                Err(e) => return Err(Error::msg(format!("{e:?}"))),
                             };
                             (Value::Int(b as i128), v)
                         }

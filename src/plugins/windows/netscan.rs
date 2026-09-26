@@ -8,9 +8,7 @@
 
 use crate::context::{Context, WinKernel};
 use crate::error::{Error, Result};
-use crate::layers::LayerExt;
-use crate::layers::scan::{BytesScanner, scan_each as layer_scan_each};
-use crate::objects::{LayerRef, Obj};
+use crate::objects::Obj;
 use crate::plugins::windows::info::{get_kuser_structure, get_version_structure};
 use crate::plugins::windows::poolscanner::{PoolConstraint, generate_pool_scan_each, pool_type};
 use crate::plugins::{Config, Plugin, Requirement, TimeKind, TimelineEvent};
@@ -71,42 +69,6 @@ const X64_VERSIONS: &[(Ver, &str)] = &[
     ((10, 0, 20348, 0), "netscan-win10-20348-x64"),
 ];
 
-/// python `verinfo.VerInfo.find_version_info(context, layer_name, filename)`: the first
-/// utf-16be `"OriginalFilename\0" + filename` in `layer`, then the `VS_FIXEDFILEINFO`
-/// signature within the 0x500 bytes before it; returns (FV1, FV2, FV3, FV4).
-/// Like python, a missing signature still "matches" (`data.find(sig) + 4 >= 0`), and an
-/// unreadable preamble / short structure raises.
-// TODO(dedupe): owned by W2b (verinfo)
-fn find_version_info(layer: LayerRef, filename: &str) -> Result<Option<(u16, u16, u16, u16)>> {
-    const PREAMBLE_MAX_DISTANCE: u64 = 0x500;
-    let needle: Vec<u8> = format!("OriginalFilename\0{filename}").encode_utf16().flat_map(|c| c.to_be_bytes()).collect();
-    let mut first = None;
-    layer_scan_each(layer, &BytesScanner::new(&needle), None, |off| {
-        first = Some(off);
-        false
-    });
-    let Some(offset) = first else { return Ok(None) };
-    if offset < PREAMBLE_MAX_DISTANCE {
-        return Err(Error::invalid(offset.wrapping_sub(PREAMBLE_MAX_DISTANCE)));
-    }
-    let data = layer.read_vec(offset - PREAMBLE_MAX_DISTANCE, PREAMBLE_MAX_DISTANCE as usize)?;
-    parse_fixed_file_info(&data).map(Some)
-}
-
-/// The (FV1, FV2, FV3, FV4) python's `find_version_info` unpacks from the preamble `data`.
-fn parse_fixed_file_info(data: &[u8]) -> Result<(u16, u16, u16, u16)> {
-    let sig = b"\xbd\x04\xef\xfe";
-    let verinfo_offset = match data.windows(4).position(|w| w == sig) {
-        Some(i) => i + 4,
-        None => 3, // python: -1 + len(sig)
-    };
-    let s = data.get(verinfo_offset..verinfo_offset + 20).ok_or_else(|| Error::msg("struct.error: unpack requires a buffer of 20 bytes"))?;
-    let h = |i: usize| u16::from_le_bytes([s[i], s[i + 1]]);
-    // "<IHHHHHHHH": struct_version, FV2, FV1, FV4, FV3, PV2, PV1, PV4, PV3
-    let (fv2, fv1, fv4, fv3) = (h(4), h(6), h(8), h(10));
-    Ok((fv1, fv2, fv3, fv4))
-}
-
 /// python `NetScan.determine_tcpip_version(context, kernel_module_name)`: the netscan ISF
 /// file name for this kernel and whether python uses `network.win10_x64_class_types`.
 pub fn determine_tcpip_version(k: &WinKernel) -> Result<(&'static str, bool)> {
@@ -129,7 +91,7 @@ pub fn determine_tcpip_version(k: &WinKernel) -> Result<(&'static str, bool)> {
     }
     let os = (nt_major_version, nt_minor_version, vers_minor_version);
     if version_dict.iter().any(|((a, b, c, d), _)| (*a, *b, *c) == os && *d != 0) {
-        if let Some(ver) = find_version_info(k.phys, "tcpip.sys")? {
+        if let Some(ver) = crate::plugins::windows::verinfo::find_version_info_one(k.phys, "tcpip.sys")? {
             tcpip_mod_version = ver.3 as i128;
         }
     }
@@ -406,28 +368,6 @@ impl Plugin for NetScan {
 mod tests {
     use super::*;
     use crate::context::GlobalOptions;
-
-    #[test]
-    fn fixed_file_info() {
-        // after the signature python unpacks "<IHHHHHHHH": struct_version, FV2, FV1, FV4, FV3, ...
-        let mut data = vec![0u8; 0x500];
-        let at = 0x100;
-        data[at..at + 4].copy_from_slice(b"\xbd\x04\xef\xfe");
-        let fields: [u16; 10] = [0, 1, 3, 6, 19935, 9600, 3, 6, 19935, 9600];
-        for (i, v) in fields.iter().enumerate() {
-            data[at + 4 + 2 * i..at + 6 + 2 * i].copy_from_slice(&v.to_le_bytes());
-        }
-        // dwStrucVersion = 0x00010000, FileVersionMS = (6 << 16) | 3, LS = (9600 << 16) | 19935
-        assert_eq!(parse_fixed_file_info(&data).unwrap(), (6, 3, 9600, 19935));
-        // python quirk: no signature -> data.find() + 4 == 3, unpack from offset 3
-        let mut data = vec![0u8; 0x500];
-        data[3 + 8..3 + 10].copy_from_slice(&7u16.to_le_bytes());
-        assert_eq!(parse_fixed_file_info(&data).unwrap(), (0, 0, 0, 7));
-        // signature too close to the end: struct.error
-        let mut data = vec![0u8; 0x500];
-        data[0x4f0..0x4f4].copy_from_slice(b"\xbd\x04\xef\xfe");
-        assert!(parse_fixed_file_info(&data).is_err());
-    }
 
     /// `RSVOL_BENCH_IMG=... cargo test --profile fast net_timelines -- --ignored --nocapture`:
     /// print netscan's and netstat's timeline events (python `generate_timeline`), to diff
