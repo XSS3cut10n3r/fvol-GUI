@@ -35,6 +35,19 @@ pub fn list_modules(k: &WinKernel) -> Vec<Result<Obj>> {
     }
 }
 
+/// python `Modules.get_kernel_space_start(context, kernel)`: the value of `MmSystemRangeStart`
+/// (0xFFFF800000000000 / 0x80000000 when it is paged out), masked to the kernel layer.
+pub fn get_kernel_space_start(k: &WinKernel) -> Result<u64> {
+    let (ty, default) = if k.table.is_64bit() { ("unsigned long long", 0xFFFF_8000_0000_0000u64) } else { ("unsigned long", 0x8000_0000) };
+    let off = k.get_symbol("MmSystemRangeStart")?.address;
+    let start = match k.object(ty, off).and_then(|o| o.u64()) {
+        Ok(v) => v,
+        Err(e) if e.is_invalid_address() => default,
+        Err(e) => return Err(e),
+    };
+    Ok(start & k.vlayer.address_mask())
+}
+
 /// python `Modules.get_session_layers(context, kernel, pids)`: one process layer per session.
 pub fn get_session_layers(k: &WinKernel, pids: &[i128]) -> Result<Vec<LayerRef>> {
     let filter = super::pslist::pid_filter(pids);

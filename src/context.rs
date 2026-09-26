@@ -467,6 +467,155 @@ mod bench {
         }
     }
 
+    /// Render `rows` with the quick renderer (plus the version banner) and diff them against a
+    /// python reference file.
+    fn assert_rendered_like(name: &str, cols: Vec<crate::renderers::Column>, rows: Vec<Vec<crate::renderers::Value>>, refp: &str) {
+        let mut out: Vec<u8> = b"Volatility 3 Framework 2.28.2\n".to_vec();
+        {
+            let mut r = crate::renderers::text::create("quick", &mut out, Default::default()).unwrap();
+            r.begin(cols).unwrap();
+            for row in rows {
+                r.row(0, row).unwrap();
+            }
+            r.finish().unwrap();
+        }
+        let reference = std::fs::read(refp).unwrap();
+        if out != reference {
+            let a = String::from_utf8_lossy(&out);
+            let b = String::from_utf8_lossy(&reference);
+            for (i, (x, y)) in a.lines().zip(b.lines()).enumerate() {
+                assert_eq!(x, y, "{name}: line {i} differs");
+            }
+            panic!("{name}: length differs: ours {} lines, ref {} lines", a.lines().count(), b.lines().count());
+        }
+        println!("{name} via core API: byte-identical ({} bytes)", out.len());
+    }
+
+    /// API proof for the named-object helpers (`ObjectsExt`) on top of the pool scanner:
+    /// windows.symlinkscan, windows.mutantscan and windows.driverscan rebuilt from the core API
+    /// are byte-identical to python's output on the main image.
+    #[test]
+    #[ignore]
+    fn object_scans_via_core_api() {
+        use crate::plugins::windows::poolscanner::{builtin_constraints, generate_pool_scan_each};
+        use crate::renderers::{ColType, Column, Value};
+        use crate::symbols::windows::objects::is_name_info_value_error;
+        use crate::symbols::windows::prelude::*;
+        let ctx = Context::new(GlobalOptions { file: Some("/home/user/cbc2/task2/memory-dirty.raw".into()), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let refdir = "/home/user/rs-vol/bench/ref/py";
+        let skip = |e: &Error| is_name_info_value_error(e) || e.is_invalid_address();
+
+        // symlinkscan
+        let mut rows = Vec::new();
+        generate_pool_scan_each(&ctx, k, k.table, &builtin_constraints(k.table.name(), &[b"Sym\xe2", b"Symb"]), |h| {
+            let link = h.object;
+            let from = match link.get_link_name() {
+                Ok(n) => n,
+                Err(e) if skip(&e) => return Ok(true),
+                Err(e) => return Err(e),
+            };
+            let to = match link.m("LinkTarget").and_then(|t| t.get_string()) {
+                Ok(n) => n,
+                Err(e) if e.is_invalid_address() => return Ok(true),
+                Err(e) => return Err(e),
+            };
+            rows.push(vec![Value::Int(link.addr as i128), link.get_create_time()?, Value::Str(from), Value::Str(to)]);
+            Ok(true)
+        })
+        .unwrap();
+        let cols = vec![Column::new("Offset", ColType::Hex), Column::new("CreateTime", ColType::DateTime), Column::new("From Name", ColType::Str), Column::new("To Name", ColType::Str)];
+        assert_rendered_like("symlinkscan", cols, rows, &format!("{refdir}/windows.symlinkscan.SymlinkScan.txt"));
+
+        // mutantscan
+        let mut rows = Vec::new();
+        generate_pool_scan_each(&ctx, k, k.table, &builtin_constraints(k.table.name(), &[b"Mut\xe1", b"Muta"]), |h| {
+            let name = match h.object.mutant_name() {
+                Ok(n) => Value::Str(n),
+                Err(e) if skip(&e) => Value::NotApplicable,
+                Err(e) => return Err(e),
+            };
+            rows.push(vec![Value::Int(h.object.addr as i128), name]);
+            Ok(true)
+        })
+        .unwrap();
+        let cols = vec![Column::new("Offset", ColType::Hex), Column::new("Name", ColType::Str)];
+        assert_rendered_like("mutantscan", cols, rows, &format!("{refdir}/windows.mutantscan.MutantScan.txt"));
+
+        // driverscan
+        let start_off = k.offset_of("_DRIVER_OBJECT", "DriverStart").unwrap();
+        let kstart = crate::plugins::windows::modules::get_kernel_space_start(k).unwrap();
+        let mut rows = Vec::new();
+        generate_pool_scan_each(&ctx, k, k.table, &builtin_constraints(k.table.name(), &[b"Dri\xf6", b"Driv"]), |h| {
+            let d = h.object;
+            if !d.layer().is_valid(d.addr + start_off, 8) {
+                return Ok(true);
+            }
+            let ds = d.m("DriverStart")?.u64()?;
+            if !(ds == 0 || ds > kstart) {
+                return Ok(true);
+            }
+            let driver_name = match d.get_driver_name() {
+                Ok(n) => Some(n),
+                Err(e) if skip(&e) => None,
+                Err(e) => return Err(e),
+            };
+            let opt = |r: Result<String>| match r {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if e.is_invalid_address() => Ok(None),
+                Err(e) => Err(e),
+            };
+            let service_key = opt(d.m("DriverExtension").and_then(|x| x.deref()).and_then(|x| x.m("ServiceKeyName")).and_then(|x| x.get_string()))?;
+            let name = opt(d.m("DriverName").and_then(|x| x.get_string()))?;
+            let truthy = |s: &Option<String>| s.as_ref().is_some_and(|s| !s.is_empty());
+            if !truthy(&driver_name) && !truthy(&service_key) && !truthy(&name) {
+                return Ok(true);
+            }
+            let v = |s: Option<String>| if truthy(&s) { Value::Str(s.unwrap()) } else { Value::NotAvailable };
+            rows.push(vec![
+                Value::Int(d.addr as i128),
+                Value::Int(ds as i128),
+                Value::Int(d.m("DriverSize")?.int()?),
+                v(service_key),
+                v(driver_name),
+                v(name),
+            ]);
+            Ok(true)
+        })
+        .unwrap();
+        let cols = vec![
+            Column::new("Offset", ColType::Hex),
+            Column::new("Start", ColType::Hex),
+            Column::new("Size", ColType::Hex),
+            Column::new("Service Key", ColType::Str),
+            Column::new("Driver Name", ColType::Str),
+            Column::new("Name", ColType::Str),
+        ];
+        assert_rendered_like("driverscan", cols, rows, &format!("{refdir}/windows.driverscan.DriverScan.txt"));
+
+        // FILE_OBJECT.file_name_with_device for every File handle python's windows.handles
+        // printed (Offset = object body on the kernel layer, Name = file_name_with_device)
+        let handles = std::fs::read_to_string(format!("{refdir}/windows.handles.Handles.txt")).unwrap();
+        let mut n = 0;
+        for line in handles.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 7 || f[4] != "File" {
+                continue;
+            }
+            let off = u64::from_str_radix(f[2].trim_start_matches("0x"), 16).unwrap();
+            let fo = k.object_abs("_FILE_OBJECT", off).unwrap();
+            let ours = match fo.file_name_with_device().unwrap() {
+                Value::Str(s) => s,
+                Value::Unreadable => "-".to_string(),
+                v => panic!("{v:?}"),
+            };
+            assert_eq!(ours, f[6..].join("\t"), "file_name_with_device at {off:#x}");
+            assert!(fo.access_string().unwrap().len() == 6);
+            n += 1;
+        }
+        println!("file_name_with_device: {n} handle names identical");
+    }
+
     /// The TLB fast path of multi-page `is_valid` answers exactly like python's `_mapping`
     /// walk: random ranges (1 byte .. 64 pages) around mapped/unmapped boundaries of the
     /// windows kernel, windows process layers and a linux ELF-core kernel (segmented phys).

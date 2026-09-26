@@ -13,6 +13,7 @@
 pub mod cache;
 pub mod ext;
 pub mod kdbg;
+pub mod objects;
 pub mod pdb;
 pub mod pe;
 pub mod pool;
@@ -26,6 +27,8 @@ pub use ext::{ListIter, WinExt, process_layer};
 pub mod prelude {
     pub use super::cache::CacheExt;
     pub use super::ext::WinExt;
+    pub use super::objects::ObjectsExt;
+    pub use super::pool::PoolExt;
     pub use super::token::{KtimerExt, TokenExt};
     pub use super::vad::VadExt;
 }
