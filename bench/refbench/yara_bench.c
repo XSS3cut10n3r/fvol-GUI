@@ -1,6 +1,6 @@
 /* libyara reference harness for rsvol's YARA engine (src/yara/rules + src/yara/scan).
  *
- * For every rule file given (bench/refbench/yara_cases/*.yar, the SAME text the rust
+ * For every rule file given (bench/refbench/yara_cases/NAME.yar, the SAME text the rust
  * driver compiles): compile time (yr_compiler_create + add_string + get_rules, best of
  * 10) and yr_rules_scan_mem over an mmapped window of the memory image (best of REPS,
  * single thread, default flags + REPORT_RULES_MATCHING, i.e. what yara-python's

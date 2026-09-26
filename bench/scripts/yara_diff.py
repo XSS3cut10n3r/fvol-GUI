@@ -384,6 +384,17 @@ FIXED_VALID = [
     'rule set_a { condition: filesize > 0 } rule set_b { condition: true } rule set_c { condition: any of (set_a, set_b) }',
     'rule wset_a { condition: false } rule wset_b { condition: true } rule wset_c { condition: 1 of (wset_*) }',
     'global global rule gg { condition: true } rule after_gg { condition: true }',  # yara accepts it
+    # ---- lexical: comments, layout, hex spelling, escapes
+    'rule lx_comments\n{\n  // line comment\n  meta:\n    a = "x" /* block */\n  strings:\n    $a = "Microsoft" /* inline */ wide // trailing\n'
+    '    $b = { 4D 5A // in hex\n      90 00 /* block in hex */ }\n  condition:\n    /* before */ $a or $b // end\n}',
+    'rule lx_hex_lower { strings: $a = { 4d 5a 9? ?0 } condition: $a }',
+    'rule lx_hex_nospace { strings: $a = {4D5A9000} condition: $a }',
+    'rule lx_hex_tight_alt { strings: $a = {50 45(4C 01|64 86)} condition: $a }',
+    r'rule lx_esc_r { strings: $a = "\r\n" condition: $a }',
+    r'rule lx_esc_upper { strings: $a = "\x4D\x5A" condition: $a }',
+    'rule lx_unicode_meta { meta: s = "café" condition: true }',
+    'rule lx_no_space_cond{strings:$a="abc"condition:#a>0}',
+    '/* leading comment */ rule lx_lead { condition: true } // trailing comment',
     'rule mix : t { meta: m = 1 strings: $a = "Microsoft" wide ascii $b = { 4D 5A } $c = /kernel3[0-9]/ condition: any of them }',
 ]
 
@@ -1233,7 +1244,7 @@ def main():
             seen.add(cid)
             shown += 1
             srcs = cases[cid][0]
-            src = " || ".join(("[%s] " % ns if ns != "default" else "") + s for ns, s in srcs)
+            src = " || ".join(("[%s] " % ns if ns != "default" else "") + s.replace("\n", "\\n") for ns, s in srcs)
             m = re.search(r"data=(\S+)", detail)
             dd = ""
             if m:
