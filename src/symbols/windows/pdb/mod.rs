@@ -5,8 +5,8 @@
 //!
 //! Public API:
 //!   * [`pdb_to_isf_json`] / [`pdb_to_isf_json_named`] — python `PdbReader(...).get_json()`
-//!     + `json.dumps(indent=2, sort_keys=True)`, byte-identical except for the producer
-//!     datetime;
+//!     followed by `json.dumps(indent=2, sort_keys=True)`, byte-identical except for the
+//!     producer datetime;
 //!   * [`download_pdb`] / [`download_and_convert`] — python `PdbRetreiver` /
 //!     `PDBUtility.download_pdb_isf` (curl is used for HTTPS);
 //!   * [`pe_codeview_info`] — python `PDBUtility.get_guid_from_mz` over raw image bytes;

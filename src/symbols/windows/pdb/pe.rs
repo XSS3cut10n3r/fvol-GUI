@@ -171,7 +171,7 @@ pub fn pe_codeview_info(image: &[u8]) -> Option<CodeViewInfo> {
     // pefile RVA -> offset helpers
     let fa_adj = |v: u64| if file_alignment < 0x200 { v } else { (v / 0x200) * 0x200 };
     let sa = if section_alignment < 0x1000 { file_alignment } else { section_alignment };
-    let va_adj = |v: u64| if sa != 0 && v % sa != 0 { sa * (v / sa) } else { v };
+    let va_adj = |v: u64| if sa != 0 && !v.is_multiple_of(sa) { sa * (v / sa) } else { v };
     let contains = |i: usize, rva: u64| -> bool {
         let s = &sections[i];
         let ptr_adj = fa_adj(s.raw_ptr as u64);
@@ -193,9 +193,8 @@ pub fn pe_codeview_info(image: &[u8]) -> Option<CodeViewInfo> {
     };
     // pefile `get_data(rva, length)`
     let get_data = |rva: u64, length: u64| -> Vec<u8> {
-        for i in 0..sections.len() {
+        for (i, s) in sections.iter().enumerate() {
             if contains(i, rva) {
-                let s = &sections[i];
                 let offset = rva.wrapping_sub(va_adj(s.va as u64)).wrapping_add(fa_adj(s.raw_ptr as u64));
                 let mut end = offset.wrapping_add(length);
                 let raw_end = s.raw_ptr as u64 + s.raw_size as u64;
@@ -418,8 +417,8 @@ impl PdbNameScan {
 
     pub fn next(&mut self, layer: &dyn Layer, hit: &RsdsMatch) -> PdbScanResult {
         let mz = find_mz_before(layer, hit.offset, self.page_size, self.min_pfn, self.maximum_invalid_count);
-        if self.page_size != 0 {
-            self.min_pfn = hit.offset / self.page_size;
+        if let Some(pfn) = hit.offset.checked_div(self.page_size) {
+            self.min_pfn = pfn;
         }
         PdbScanResult {
             GUID: hit.guid.clone(),

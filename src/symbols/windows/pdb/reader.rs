@@ -475,11 +475,11 @@ impl Hasher for Fx {
     fn write(&mut self, bytes: &[u8]) {
         const K: u64 = 0x517c_c1b7_2722_0a95;
         let mut h = self.0;
-        let mut c = bytes.chunks_exact(8);
-        for w in &mut c {
-            h = (h.rotate_left(5) ^ u64::from_le_bytes(w.try_into().unwrap())).wrapping_mul(K);
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
         }
-        for &x in c.remainder() {
+        for &x in rest {
             h = (h.rotate_left(5) ^ x as u64).wrapping_mul(K);
         }
         self.0 = h;
@@ -1572,48 +1572,60 @@ fn sort_last_ids<'n>(sb: &mut SortBuf, n: usize, ids: Option<&[u32]>, key: impl 
     refine(v, 0, &key, &mut sb.order);
 }
 
-/// [`sort_last`] for large inputs: indices are bucketed by first byte (a stable counting
-/// pass), contiguous bucket ranges are sorted on up to `threads` threads, and the results
-/// are concatenated in bucket order.
+/// [`sort_last`] for large inputs (sample sort): splitter keys taken from a sorted sample
+/// cut the key space into `threads` ranges of similar size, every index is assigned to its
+/// range (equal keys always land in the same range), the ranges are sorted in parallel and
+/// concatenated.
 fn sort_last_par<'n>(n: usize, key: impl Fn(usize) -> &'n [u8] + Sync, threads: usize) -> Option<Vec<u32>> {
     if n < 16384 || threads <= 1 {
         let mut sb = SortBuf::default();
         sort_last(&mut sb, n, &key);
         return Some(sb.order);
     }
-    // bucket 0: empty names (they sort first), 1 + b: names starting with byte b
-    let bucket = |i: usize| key(i).first().map_or(0, |&b| b as usize + 1);
-    let mut start = [0usize; 258];
-    for i in 0..n {
-        start[bucket(i) + 1] += 1;
+    #[inline]
+    fn prefix(s: &[u8]) -> u64 {
+        let mut b = [0u8; 8];
+        let l = s.len().min(8);
+        b[..l].copy_from_slice(&s[..l]);
+        u64::from_be_bytes(b)
     }
-    for b in 0..257 {
-        start[b + 1] += start[b];
+    // (prefix, full key) ordering == byte order of the full keys (names have no NUL)
+    let cmp = |pa: u64, a: &[u8], pb: u64, b: &[u8]| pa.cmp(&pb).then_with(|| a.cmp(b));
+    let m = (64 * threads).min(n);
+    let mut sample: Vec<usize> = (0..m).map(|i| i * n / m).collect();
+    sample.sort_unstable_by(|&a, &b| key(a).cmp(key(b)));
+    let splitters: Vec<(u64, &[u8])> = (1..threads)
+        .map(|j| {
+            let k = key(sample[j * m / threads]);
+            (prefix(k), k)
+        })
+        .collect();
+    // range of every index: number of splitters <= key
+    let mut part = vec![0u8; n];
+    let mut count = vec![0usize; threads];
+    for (i, p) in part.iter_mut().enumerate() {
+        let k = key(i);
+        let pk = prefix(k);
+        let r = splitters.partition_point(|&(ps, s)| cmp(ps, s, pk, k).is_le());
+        *p = r as u8;
+        count[r] += 1;
     }
-    let mut fill = start;
+    let mut start = vec![0usize; threads + 1];
+    for r in 0..threads {
+        start[r + 1] = start[r] + count[r];
+    }
+    let mut fill = start.clone();
     let mut ids = vec![0u32; n];
-    for i in 0..n {
-        let b = bucket(i);
-        ids[fill[b]] = i as u32;
-        fill[b] += 1;
+    for (i, &p) in part.iter().enumerate() {
+        ids[fill[p as usize]] = i as u32;
+        fill[p as usize] += 1;
     }
-    // split into `threads` groups of whole buckets holding ~n/threads ids each
-    let mut cuts = vec![0usize];
-    for b in 1..=257 {
-        let target = n * cuts.len() / threads;
-        if start[b] >= target && cuts.len() < threads && start[b] > *cuts.last().unwrap() {
-            cuts.push(start[b]);
-        }
-    }
-    cuts.push(n);
     let ids = &ids;
     let key = &key;
     let parts: Option<Vec<Vec<u32>>> = std::thread::scope(|scope| {
-        let jobs: Vec<_> = cuts
-            .windows(2)
-            .skip(1)
-            .map(|w| {
-                let (a, b) = (w[0], w[1]);
+        let jobs: Vec<_> = (1..threads)
+            .map(|r| {
+                let (a, b) = (start[r], start[r + 1]);
                 scope.spawn(move || {
                     let mut sb = SortBuf::default();
                     sort_last_ids(&mut sb, 0, Some(&ids[a..b]), key);
@@ -1622,7 +1634,7 @@ fn sort_last_par<'n>(n: usize, key: impl Fn(usize) -> &'n [u8] + Sync, threads: 
             })
             .collect();
         let mut sb = SortBuf::default();
-        sort_last_ids(&mut sb, 0, Some(&ids[cuts[0]..cuts[1]]), key);
+        sort_last_ids(&mut sb, 0, Some(&ids[start[0]..start[1]]), key);
         let mut parts = vec![sb.order];
         // join every helper (an unjoined panicked scoped thread would make `scope` panic)
         let results: Vec<Option<Vec<u32>>> = jobs.into_iter().map(|j| j.join().ok()).collect();
@@ -1631,9 +1643,8 @@ fn sort_last_par<'n>(n: usize, key: impl Fn(usize) -> &'n [u8] + Sync, threads: 
         }
         Some(parts)
     });
-    let parts = parts?;
     let mut out = Vec::with_capacity(n);
-    for p in parts {
+    for p in parts? {
         out.extend_from_slice(&p);
     }
     Some(out)

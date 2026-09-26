@@ -106,7 +106,7 @@ impl<'a> Msf<'a> {
             let ok = data.starts_with(magic) && string_terminates(&data[magic.len()..]);
             if ok {
                 let ps = fi32(ps_off)?;
-                if !(ps < 0x100 || ps > 128 * 0x10000) {
+                if (0x100..=128 * 0x10000).contains(&ps) {
                     found = Some((ps, sis_off, hdr_size));
                     break;
                 }
@@ -159,7 +159,7 @@ impl<'a> Msf<'a> {
             // every page number must be readable from the root stream
             let bytes = root.read(current_offset, list_size * 4)?;
             let pages =
-                bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
             current_offset = end;
             streams.push(Some(StreamDesc { size: size as u64, pages }));
         }
