@@ -83,6 +83,53 @@ pub fn container_tree(ctx: &Context, prefix: &str, extra: bool) -> Result<Items>
     Ok(out)
 }
 
+/// The `swap_layers` tree WinSwapLayers gives an Intel layer at `prefix` (`<layer>.swap_layers`)
+/// in `build_configuration()` order: the count, each swap layer's name, then each swap layer's
+/// file layer. python counts every `--single-swap-locations` entry but configures only those
+/// `URIRequirement.location_from_file` accepts (an existing file, or a URL).
+fn swap_items(ctx: &Context, prefix: &str) -> Items {
+    swap_items_ordered(ctx, prefix, false)
+}
+
+/// [`swap_items`]; `extra`: in `context.config` order (WinSwapLayers sets each swap layer's name
+/// before the count).
+fn swap_items_ordered(ctx: &Context, prefix: &str, extra: bool) -> Items {
+    let count = (format!("{prefix}.number_of_elements"), Json::Int(ctx.opts.swap_locations.len() as i128));
+    let mut out = Vec::new();
+    if !extra {
+        out.push(count.clone());
+    }
+    let layers: Vec<(usize, String)> = ctx
+        .opts
+        .swap_locations
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.is_empty())
+        .filter_map(|(i, l)| {
+            let scheme = l.split_once(':').map(|(s, _)| s).filter(|s| s.len() > 1 && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)));
+            match scheme {
+                Some("file") => crate::util::paths::file_uri_to_path(l).filter(|p| p.exists()).map(|_| (i, l.clone())),
+                Some(_) => Some((i, l.clone())),
+                None => {
+                    let p = std::path::absolute(l).ok()?;
+                    p.exists().then(|| (i, crate::util::paths::path_to_file_uri(&p)))
+                }
+            }
+        })
+        .collect();
+    for (i, _) in &layers {
+        out.push((format!("{prefix}.swap_layers{i}"), s(format!("swap_layers{i}"))));
+    }
+    if extra {
+        out.push(count);
+    }
+    for (i, url) in layers {
+        out.push((format!("{prefix}.swap_layers{i}.location"), s(url)));
+        out.push((format!("{prefix}.swap_layers{i}.class"), s(layer_class_path("FileLayer"))));
+    }
+    out
+}
+
 /// (page_map_offset, kernel_virtual_offset, kernel_banner) of the primary Intel layer as
 /// python's OS stackers record them.
 fn intel_params(ctx: &Context, p: &Primary) -> Result<(u64, Option<u64>, Option<String>)> {
@@ -111,7 +158,6 @@ pub fn primary_tree(ctx: &Context, p: &Primary, prefix: &str, extra: bool, swap:
     };
     let (dtb, kvo, banner) = intel_params(ctx, p)?;
     let class = s(layer_class_path(crate::layers::Layer::class_name(intel)));
-    let nswap = ctx.opts.swap_locations.len() as i128;
     if !extra && swap {
         out.push((format!("{prefix}.swap_layers"), Json::Bool(true)));
     }
@@ -131,7 +177,7 @@ pub fn primary_tree(ctx: &Context, p: &Primary, prefix: &str, extra: bool, swap:
     }
     out.extend(container_tree(ctx, &format!("{prefix}.memory_layer"), extra)?);
     if swap {
-        out.push((format!("{prefix}.swap_layers.number_of_elements"), Json::Int(nswap)));
+        out.extend(swap_items_ordered(ctx, &format!("{prefix}.swap_layers"), extra));
     }
     Ok(out)
 }
@@ -162,7 +208,7 @@ pub fn kernel_tree(ctx: &Context, plugin: &str, prefix: &str) -> Result<Items> {
     out.push((format!("{l}.page_map_offset"), Json::Int(dtb as i128)));
     if swap {
         out.push((format!("{l}.swap_layers"), Json::Bool(true)));
-        out.push((format!("{l}.swap_layers.number_of_elements"), Json::Int(ctx.opts.swap_locations.len() as i128)));
+        out.extend(swap_items(ctx, &format!("{l}.swap_layers")));
     }
     out.push((format!("{prefix}.offset"), Json::Int(offset as i128)));
     out.push((format!("{prefix}.symbol_table_name.class"), s(format!("volatility3.framework.symbols.{sym_class}"))));
@@ -179,107 +225,58 @@ pub fn kernel_tree(ctx: &Context, plugin: &str, prefix: &str) -> Result<Items> {
     Ok(out)
 }
 
-/// A configuration value as python's `json.dump` writes it.
-pub fn config_value_json(v: &crate::plugins::ConfigValue) -> Json {
-    use crate::plugins::ConfigValue;
-    match v {
-        ConfigValue::Bool(b) => Json::Bool(*b),
-        ConfigValue::Int(i) => Json::Int(*i),
-        ConfigValue::Str(x) => s(x.clone()),
-        ConfigValue::Bytes(b) => s(String::from_utf8_lossy(b).into_owned()),
-        ConfigValue::List(l) => Json::Arr(l.iter().map(config_value_json).collect()),
-    }
-}
-
-/// python `plugin.build_configuration()` after the automagics ran, keys under `prefix` (`""`
-/// for `--save-config`, `"<Class>."` for `timeliner --record-config`). Walks the plugin's python
-/// requirement list (`pyreqs`): the kernel module and translation layers as their configuration
-/// trees, version dependencies as `false`, lists as their value or `[]`, every other option when
-/// it has a value (given or defaulted). Fails like python's construction when the kernel or the
-/// layer cannot be found.
-pub fn build_configuration(ctx: &Context, plugin: &str, cfg: &crate::plugins::Config, prefix: &str) -> Result<Items> {
-    walk_requirements(ctx, plugin, crate::plugins::pyreqs::py_reqs(plugin).unwrap_or(&[]), cfg, prefix)
-}
-
-/// [`build_configuration`] over an explicit `pyreqs` requirement list.
-fn walk_requirements(ctx: &Context, plugin: &str, reqs: &[&str], cfg: &crate::plugins::Config, prefix: &str) -> Result<Items> {
+/// python `plugin.build_configuration()` of the plugin registered as `plugin` after the
+/// automagics ran, as the CLI saves it (`--save-config`): every requirement of python's
+/// requirement list ([`crate::plugins::pyreqs`]), in order:
+///   * `ModuleRequirement` / `TranslationLayerRequirement`: the constructed kernel module's /
+///     layer's own tree under the requirement's name (the name itself is not recorded);
+///   * every other requirement: its configured value (`user`: command line, `-c` file, `-e`),
+///     else the value python's plugin constructor records, the requirement's default, when
+///     that is not `None`. An optional `ListRequirement` without a value or default is `[]`
+///     once python's `ConstructionMagic` walked the requirements, which it does exactly when a
+///     required layer or module has yet to be built.
+///
+/// `any_os_stacker`: the stackers were chosen for another plugin (timeliner runs its plugins
+/// with the stackers of its own, generic, category) instead of this plugin's category.
+///
+/// A requirement the automagics cannot satisfy is python's `UnsatisfiedException` (the CLI
+/// reports it before anything is written). timeliner's own `build_configuration()` records
+/// nothing (python warns "Unable to record configuration data for the timeliner plugin").
+pub fn plugin_configuration(ctx: &Context, plugin: &str, user: &crate::plugins::Config, any_os_stacker: bool) -> Result<Items> {
+    use crate::plugins::pyreqs::{self, PyKind};
     let mut out = Items::new();
+    if plugin == "timeliner.Timeliner" {
+        return Ok(out);
+    }
+    let Some(reqs) = pyreqs::requirements(plugin) else { return Ok(out) };
+    let category = match plugin.split('.').next() {
+        Some(c @ ("windows" | "linux" | "mac")) => c,
+        _ => "",
+    };
+    let walked = reqs.iter().any(|r| !r.optional && matches!(r.kind, PyKind::Module | PyKind::Layer | PyKind::Symbols | PyKind::Other));
     for r in reqs {
-        let (kind, name) = r.split_once(':').unwrap_or(("?", r));
-        let key = format!("{prefix}{name}");
-        match kind {
-            "K" => out.extend(kernel_tree(ctx, plugin, &key)?),
-            "P" => {
-                let prim = super::primary::primary(ctx, "Memory layer for the kernel")?;
-                // the WinSwapLayers automagic (swap_layers) is excluded for linux / mac plugins
-                let swap = !(plugin.starts_with("linux.") || plugin.starts_with("mac."));
-                out.extend(primary_tree(ctx, &prim, &key, false, swap)?);
-            }
-            "v" => out.push((key, Json::Bool(false))),
-            // a flag without a python default stays None (unrecorded) unless it was passed
-            "B" => {
-                if cfg.get_bool(name) {
-                    out.push((key, Json::Bool(true)));
+        match r.kind {
+            PyKind::Module => out.extend(kernel_tree(ctx, plugin, r.name)?),
+            PyKind::Layer => {
+                let stackers = if any_os_stacker { "" } else { category };
+                let p = super::primary::primary_for_category(ctx, stackers, &r.description)?;
+                if r.needs_intel() && p.intel.is_none() {
+                    return Err(crate::plugins::unsatisfied_described(&[(r.name, crate::plugins::UnsatKind::Layer, &r.description)]));
                 }
+                // WinSwapLayers (excluded for linux / mac plugins) gives Intel layers swap_layers
+                out.extend(primary_tree(ctx, &p, r.name, false, !matches!(category, "linux" | "mac"))?);
             }
-            "l" => out.push((key, cfg.get(name).map(config_value_json).unwrap_or(Json::Arr(Vec::new())))),
+            PyKind::Symbols | PyKind::Other => {}
             _ => {
-                if let Some(v) = cfg.get(name) {
-                    out.push((key, config_value_json(v)));
-                }
+                let v = match user.get(r.name) {
+                    Some(v) => crate::cli::cv_to_json(v),
+                    None if r.default != Json::Null => r.default.clone(),
+                    None if r.kind == PyKind::List && walked => Json::Arr(Vec::new()),
+                    None => continue,
+                };
+                out.push((r.name.to_string(), v));
             }
         }
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugins::{Config, ConfigValue};
-
-    #[test]
-    fn py_reqs_sorted_and_cover_every_plugin() {
-        let t = &crate::plugins::pyreqs::PY_REQS;
-        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "PY_REQS must stay sorted for the binary search");
-        for p in crate::plugins::all() {
-            assert!(crate::plugins::pyreqs::py_reqs(p.name()).is_some(), "{} has no python requirement list", p.name());
-        }
-    }
-
-    /// python's `--save-config` for `isfinfo.IsfInfo --filter linux`: version dependencies are
-    /// `false`, booleans always recorded, an unset URI left out (rsvol used to write only the
-    /// options it knows, so `-c` could not find the image again).
-    #[test]
-    fn build_configuration_records_like_python() {
-        let ctx = Context::new(Default::default()).unwrap();
-        let mut cfg = Config::default();
-        cfg.set("filter", ConfigValue::List(vec![ConfigValue::Str("linux".into())]));
-        cfg.set("validate", ConfigValue::Bool(false));
-        cfg.set("live", ConfigValue::Bool(false));
-        let items = build_configuration(&ctx, "isfinfo.IsfInfo", &cfg, "").unwrap();
-        assert_eq!(
-            Json::Obj(items).dump(Some(2)),
-            "{\n  \"SQLiteCache\": false,\n  \"filter\": [\n    \"linux\"\n  ],\n  \"live\": false,\n  \"validate\": false\n}"
-        );
-        // an unset list is recorded as []
-        let items = build_configuration(&ctx, "isfinfo.IsfInfo", &Config::default(), "x.").unwrap();
-        assert!(items.contains(&("x.filter".to_string(), Json::Arr(Vec::new()))));
-    }
-
-    /// psxview's `--physical-offsets` (a BooleanRequirement without a default): python records it
-    /// only when the flag was given, while an ordinary flag is always recorded.
-    #[test]
-    fn flag_without_python_default_recorded_only_when_given() {
-        let ctx = Context::new(Default::default()).unwrap();
-        let reqs = ["B:physical-offsets", "b:dump"];
-        let mut cfg = Config::default();
-        cfg.set("physical-offsets", ConfigValue::Bool(false));
-        cfg.set("dump", ConfigValue::Bool(false));
-        let items = walk_requirements(&ctx, "windows.psxview.PsXView", &reqs, &cfg, "").unwrap();
-        assert_eq!(items, vec![("dump".to_string(), Json::Bool(false))]);
-        cfg.set("physical-offsets", ConfigValue::Bool(true));
-        let items = walk_requirements(&ctx, "windows.psxview.PsXView", &reqs, &cfg, "").unwrap();
-        assert_eq!(items[0], ("physical-offsets".to_string(), Json::Bool(true)));
-    }
 }

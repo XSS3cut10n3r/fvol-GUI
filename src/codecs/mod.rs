@@ -82,6 +82,30 @@ pub(crate) fn try_zeroed(n: usize) -> crate::error::Result<Vec<u8>> {
         if p.is_null() {
             return Err(crate::error::Error::Msg(format!("cannot allocate {n} bytes")));
         }
+        advise_huge(p, n);
         Ok(Vec::from_raw_parts(p, n, n))
+    }
+}
+
+/// Ask for transparent huge pages on a big fresh output buffer before it is first written (a
+/// 64 MB decompressed ISF is 16k page faults otherwise, ~30 with 2 MiB pages; systems whose THP
+/// mode is `madvise` only use them on request). Advisory only.
+pub(crate) fn advise_huge(p: *mut u8, n: usize) {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+        }
+        const PAGE: usize = 4096;
+        const MADV_HUGEPAGE: i32 = 14;
+        if n < 8 << 20 {
+            return;
+        }
+        let start = (p as usize).next_multiple_of(PAGE);
+        let end = (p as usize + n) & !(PAGE - 1);
+        if end > start {
+            // SAFETY: the page-aligned inside of an allocation this process owns; advisory
+            unsafe { madvise(start as *mut u8, end - start, MADV_HUGEPAGE) };
+        }
     }
 }

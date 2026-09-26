@@ -200,12 +200,18 @@ files downloaded by either tool are shared.
 | Symbol file identifier index       | `~/.cache/rsvol/identifiers.cache`              | Finds the ISF for a kernel banner or PDB without rereading |
 | python's identifier cache (read)   | `~/.cache/volatility3/identifier.cache`         | Seeds the identifier index, and picks python's ISF        |
 | Kernel discovery results           | `~/.cache/rsvol/automagic/`                     | Warm runs skip the DTB, KDBG and banner scans              |
+| Windows ISF choices                | `~/.cache/rsvol/isfchoice/`                     | Warm runs skip the identifier index for Windows PDBs       |
 | Raw scan hits                      | `~/.cache/rsvol/scan/`, capped at 256 MiB       | Scanning plugins replay hits instead of rereading memory   |
 | `isfinfo --live` results           | `~/.cache/rsvol/isfinfo.cache`                  | Warm `isfinfo` runs parse no files                         |
 | Downloads                          | `~/.cache/rsvol/data_<SHA512>.cache`            | Remote images and `-u` files are downloaded once           |
 | Decompressed images                | `~/.cache/rsvol/decompressed/`                  | A `.gz`, `.bz2` or `.xz` image is decompressed once        |
 | Downloaded Windows PDBs            | `~/.cache/volatility3/data_<SHA512>.cache`      | Kept where python keeps them, and shared with python       |
 | Converted Windows PDBs             | `~/.cache/volatility3/symbols/windows/`         | Shared with python volatility3                             |
+
+A binary symbol table is written after the run that first loads its ISF. For a big ISF, such as
+a Linux kernel's, that run resolves only the types and symbols it uses, and a helper process
+started after its output is complete writes the table in the background, at idle priority,
+while the run exits: `ps` shows it as `rsvol-isfb-helper`. Concurrent runs build a table once.
 
 A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
 directory where the file can be created, as python does: normally
@@ -227,18 +233,24 @@ When python volatility3 has run on this machine, rsvol reads its identifier cach
 it; `--cache-path` selects it as for python) instead of reading every symbol file on the search
 path. It takes python's entries exactly as python's own cache update would keep them and reads
 only the files python would read again, so a first run with a large symbol pack costs
-milliseconds instead of hundreds. When several ISFs carry the same banner, for example `x.json`
-next to `x.json.xz`, rsvol loads the one python would load. Set `RSVOL_NO_PY_IDENT_SEED=1` to
-build the index from the symbol files alone.
+milliseconds instead of hundreds. When several ISFs carry the same Linux or macOS banner or the
+same Windows PDB GUID and age, for example `x.json` next to `x.json.xz`, or a kernel ISF both in
+volatility3's `symbols` directory and in `~/.cache/volatility3/symbols`, python loads the one
+its cache lists last, and so does rsvol. Without python's cache, or with `--clear-cache`, which
+makes python start a new one, rsvol takes the one python's new cache would list last. The
+answer for a Windows PDB is kept in `~/.cache/rsvol/isfchoice/` until python's cache or a
+directory on the search path changes. Set `RSVOL_NO_PY_IDENT_SEED=1` to build the index from
+the symbol files alone, in search path order.
 
 To empty the caches, run any plugin with `--clear-cache` or delete the directory. Like python's
 `--clear-cache`, which deletes every `*.cache` file in its cache directory, downloads included,
 rsvol's deletes every `*.cache` file in `~/.cache/rsvol`: downloads, the identifier index and the
-`isfinfo` cache. It also removes the symbol tables, the kernel discovery results, the scan
-results and the decompressed images. It deletes nothing outside `~/.cache/rsvol`, so converted
-PDBs and python's own cache stay. Where python's `--clear-cache` would have deleted a file in its
-own cache, rsvol ignores that file for the run: it does not read python's identifier cache, and
-it downloads a needed PDB again.
+`isfinfo` cache. It also removes the symbol tables, the kernel discovery results, the Windows
+ISF choices, the scan results and the decompressed images. It deletes nothing outside
+`~/.cache/rsvol`, so converted PDBs and python's own cache stay. Where python's `--clear-cache`
+would have deleted a file in its own cache, rsvol ignores that file for the run: it does not read
+python's identifier cache but chooses ISFs as python's new one would, and it downloads a needed
+PDB again.
 
 ```bash
 vol --clear-cache -f <IMAGE> windows.info.Info
@@ -273,7 +285,9 @@ same contents. If you modify an image in place and restore its timestamp, clear 
 | `RSVOL_NO_SIMD=1`        | Use the scalar search kernels for scanning instead of AVX2.                         |
 | `RSVOL_TRACE=1`          | Print timing spans to stderr.                                                       |
 | `RSVOL_VOL3_ROOT=<DIR>`  | Use the symbol directories of the python volatility3 checkout at `<DIR>`.           |
-| `RSVOL_NO_PY_IDENT_SEED=1` | Do not seed the identifier index from python's identifier cache.                  |
+| `RSVOL_NO_PY_IDENT_SEED=1` | Build the identifier index without python's identifier cache, in search path order. |
+| `RSVOL_LAZY_ISF=0`       | Build every symbol table in full before the plugin runs.                            |
+| `RSVOL_DEFERRED_ISFB=<M>` | How the binary table of a lazily loaded ISF is written: `helper` (default), `thread` (by the run itself, before it exits) or `off`. |
 
 ## Verification
 
@@ -311,6 +325,21 @@ gates.
     order of a python run with `PYTHONHASHSEED=0`; set that variable when you compare.
   - Sets of integers, as in `psxview` and `pstree`, iterate in a fixed order in CPython. rsvol
     reproduces that order exactly, so these plugins match without any setting.
+  - When several ISFs on the search path carry the same kernel banner or PDB identifier, python
+    loads the one its identifier cache lists last. A cache python builds from scratch (its
+    first run, or `--clear-cache`) lists new files in the order of a python `set` of their
+    URLs, which depends on the randomized string hashing. rsvol follows an existing python
+    cache exactly, and for a new one reproduces a python run with `PYTHONHASHSEED=0`.
+- **Loading a configuration with `-c`.** rsvol takes the plugin options, the image location and
+  the swap files from the file and finds the kernel in the image again, where python builds the
+  layers and the symbol table the file describes. A file written by `--save-config`, by python
+  or by rsvol, for the same image and symbol files gives the same output either way, but a file
+  edited by hand to name another DTB, kernel offset or ISF is not followed.
+- **`timeliner.Timeliner --record-config`** records each plugin that ran with the configuration
+  `--save-config` would write for it. python's timeliner builds its plugins in one shared
+  configuration, where plugins with the same class name, such as `windows.pslist.PsList` and
+  `linux.pslist.PsList`, share one subtree and a layer stacked for one plugin is reused by the
+  next, so its `config.json` can hold a few more keys, for example the other plugin's options.
 - **Plugin discovery order.** python runs the `timeliner.Timeliner` plugins and lists
   `frameworkinfo.FrameworkInfo` components in the directory order of its installation, which
   depends on the file system. rsvol uses the order of the reference installation, so python on

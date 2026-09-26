@@ -8,13 +8,14 @@
 //!     python plugin's `get_requirements()` so `--help` output matches argparse.
 //!     Hidden/complex python requirements (kernel ModuleRequirement, TranslationLayer,
 //!     SymbolTable, PluginRequirement, VersionRequirement) are NOT listed; plugins obtain
-//!     kernel/layers/symbols lazily from the `Context`.
+//!     kernel/layers/symbols lazily from the `Context`. (python's complete lists, which saved
+//!     configurations need, are data generated from python: [`pyreqs`].)
 //!   * `run()` writes columns then rows into the sink (see `renderers` contract).
 
 pub mod generic;
-pub mod pyreqs;
 pub mod linux;
 pub mod mac;
+pub mod pyreqs;
 pub mod windows;
 
 use crate::context::Context;

@@ -580,14 +580,17 @@ pub fn usable_plugins(filter: &[String]) -> Vec<&'static dyn Plugin> {
 }
 
 /// `--record-config`: python writes `config.json` (`json.dump(total_config, sort_keys=True,
-/// indent=2)`) with every constructed plugin's `build_configuration()` under `<Class>.`.
+/// indent=2)`) with every constructed plugin's `build_configuration()` under `<Class>.`. The
+/// plugins run with their defaults and with timeliner's (generic) stacker choice.
 fn record_config(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Result<()> {
     use crate::cli::json::Json;
     let mut items: super::pyconfig::Items = Vec::new();
+    let defaults = crate::plugins::Config::default();
     for p in plugins {
         let class = p.name().rsplit('.').next().unwrap_or("");
-        let cfg = crate::plugins::default_config(*p);
-        items.extend(super::pyconfig::build_configuration(ctx, p.name(), &cfg, &format!("{class}."))?);
+        for (k, v) in super::pyconfig::plugin_configuration(ctx, p.name(), &defaults, true)? {
+            items.push((format!("{class}.{k}"), v));
+        }
     }
     let (mut f, _) = ctx.create_output_file("config.json")?;
     f.write_all(Json::Obj(items).dump(Some(2)).as_bytes())?;

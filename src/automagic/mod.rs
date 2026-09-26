@@ -52,15 +52,20 @@ pub fn banner_hint(phys: &dyn Layer, prefix: &[u8], sep: &[u8]) -> Option<Vec<u8
         at = Some(h);
         false
     });
+    banner_hint_at(phys, at?, prefix, sep)
+}
+
+/// [`banner_hint`] from a known occurrence of `prefix` at `at`.
+pub fn banner_hint_at(phys: &dyn Layer, at: u64, prefix: &[u8], sep: &[u8]) -> Option<Vec<u8>> {
     let mut buf = [0u8; 128];
-    phys.read_padded(at?, &mut buf);
+    phys.read_padded(at, &mut buf);
     let rest = &buf[prefix.len()..];
     let tok = rest.iter().position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+' | b'~')))?;
     if tok == 0 || !rest[tok..].starts_with(sep) {
         return None;
     }
     let n = prefix.len() + tok + sep.len();
-    crate::util::trace::note(|| format!("banner hint at {:#x}: {:?}", at.unwrap_or(0), String::from_utf8_lossy(&buf[..n])));
+    crate::util::trace::note(|| format!("banner hint at {at:#x}: {:?}", String::from_utf8_lossy(&buf[..n])));
     Some(buf[..n].to_vec())
 }
 
@@ -92,7 +97,7 @@ pub mod cache {
     }
 
     /// Bump when the cached automagic semantics change.
-    const CACHE_VERSION: u32 = 2;
+    const CACHE_VERSION: u32 = 3;
 
     /// Read cached `key=value` pairs for `image` / `kind` (None: absent, or another key).
     pub fn load(image: &Path, kind: &str) -> Option<Vec<(String, String)>> {

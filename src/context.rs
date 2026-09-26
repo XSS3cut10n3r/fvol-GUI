@@ -121,8 +121,8 @@ impl Context {
         }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         symbols::set_remote_isf_url(opts.remote_isf_url.clone(), opts.offline);
-        // the identifier index is seeded from python's identifier cache (python --clear-cache
-        // deletes that first)
+        // the identifier index is python's identifier cache as python updates it (after
+        // --clear-cache, which deletes it, the one python builds from scratch)
         symbols::store::set_python_identifier_cache(
             (!opts.clear_cache).then(|| symbols::pycache::db_path(opts.cache_path.as_deref())),
         );

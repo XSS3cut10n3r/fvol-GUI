@@ -45,6 +45,10 @@ unsafe extern "C" {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+    // a detached helper building a symbol table blob (see symbols::store::finish_deferred)
+    if let Some(spec) = std::env::var_os(symbols::store::HELPER_ENV) {
+        std::process::exit(symbols::store::run_helper(&spec));
+    }
     // std::sys::pal::unix::init: sanitize_standard_fds + reset_sigpipe
     const POLLNVAL: i32 = 0x20;
     const O_RDWR: i32 = 2;
@@ -65,6 +69,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // background cache writes finish after the output, before exit
     use std::io::Write;
     let _ = std::io::stdout().flush();
+    // the output is complete: now the blobs of lazily loaded symbol tables
+    symbols::store::finish_deferred();
     util::bg::join_all();
     std::process::exit(code)
 }

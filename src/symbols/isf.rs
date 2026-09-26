@@ -32,7 +32,7 @@ pub struct BuildOptions {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Desc<'a> {
+pub(crate) struct Desc<'a> {
     kind: Cow<'a, str>,
     name: Option<Cow<'a, str>>,
     base: Option<Cow<'a, str>>,
@@ -41,7 +41,7 @@ struct Desc<'a> {
     bit_length: i128,
     /// subtype (pointer/array) or type (bitfield)
     sub: Option<u32>,
-    /// the fused builder's descriptor identity (entry of its `{` in the structural index)
+    /// the fused builder's descriptor identity (position of its `{` in the document)
     id: u32,
 }
 
@@ -54,10 +54,10 @@ struct BaseDef<'a> {
     endian: Cow<'a, str>,
 }
 
-struct EnumDef<'a> {
-    name: Cow<'a, str>,
-    base: Cow<'a, str>,
-    constants: Vec<(Cow<'a, str>, i128)>,
+pub(crate) struct EnumDef<'a> {
+    pub(crate) name: Cow<'a, str>,
+    pub(crate) base: Cow<'a, str>,
+    pub(crate) constants: Vec<(Cow<'a, str>, i128)>,
 }
 
 struct FieldDef<'a> {
@@ -139,7 +139,7 @@ fn parse_base<'a, P: Pull<'a>>(p: &mut P) -> Result<BaseDef<'a>> {
 }
 
 /// One `enums` member value.
-fn parse_enum<'a, P: Pull<'a>>(p: &mut P, name: Cow<'a, str>) -> Result<EnumDef<'a>> {
+pub(crate) fn parse_enum<'a, P: Pull<'a>>(p: &mut P, name: Cow<'a, str>) -> Result<EnumDef<'a>> {
     let mut e = EnumDef { name, base: Cow::Borrowed(""), constants: Vec::new() };
     p.object(|p, k| {
         match k.as_ref() {
@@ -1019,7 +1019,7 @@ struct Out<'s> {
     meta: String,
 }
 
-fn user_kind_code(kind: &str) -> u32 {
+pub(crate) fn user_kind_code(kind: &str) -> u32 {
     match kind {
         "union" => 1,
         "class" => 2,
@@ -1738,7 +1738,7 @@ pub fn load_table(json: &[u8], name: &str, url: &str, opts: &BuildOptions) -> Re
 /// Handles well-formed ISFs whose sections each appear once with unique member names; returns
 /// `None` for anything else (repeated names or sections, unexpected shapes, invalid JSON), and
 /// the caller takes the reference path, which also produces the errors.
-mod fast {
+pub(crate) mod fast {
     use super::*;
     use crate::util::jsonidx::Walker;
     use std::ops::Range;
@@ -1771,8 +1771,17 @@ mod fast {
         holders: FxHashMap<u32, Ty>,
     }
 
-    impl<'a> Local<'a> {
+    /// Where the resolver puts type nodes: a range's local table (the fused builder, replayed
+    /// into the global table afterwards) or a lazy table's shared node store.
+    pub(crate) trait Sink {
         /// `Resolver::node`: intern by value.
+        fn node(&mut self, t: Ty) -> TypeIdx;
+        /// `Resolver::unresolved`, memoized per descriptor `id` (the entry of its `{`; the
+        /// reference memoizes every descriptor's result).
+        fn unresolved(&mut self, id: u32, name: &str) -> Ty;
+    }
+
+    impl Sink for Local<'_> {
         fn node(&mut self, t: Ty) -> TypeIdx {
             let k = tkey(&t);
             if let Some(&i) = self.by_value.get(&k) {
@@ -1783,8 +1792,6 @@ mod fast {
             self.by_value.insert(k, i);
             TypeIdx(i)
         }
-        /// `Resolver::unresolved`, memoized per descriptor (the reference memoizes every
-        /// descriptor's result).
         fn unresolved(&mut self, id: u32, name: &str) -> Ty {
             if let Some(&t) = self.holders.get(&id) {
                 return t;
@@ -1797,21 +1804,49 @@ mod fast {
         }
     }
 
+    /// The name lookups the resolver needs (the fused builder's hash maps, or a lazy table's
+    /// indexes).
+    pub(crate) trait Names {
+        /// Ordinal of the user type `name`.
+        fn utype(&self, name: &str) -> Option<u32>;
+        /// Ordinal of the enumeration `name`.
+        fn enumeration(&self, name: &str) -> Option<u32>;
+        /// The `base` of enumeration `i`.
+        fn enum_base(&self, i: u32) -> Option<&str>;
+    }
+
+    /// The fields of user type `i` read from its own member value (anonymous members).
+    pub(crate) type SubFields<'r, 'a> = dyn FnMut(u32) -> Result<(Vec<FieldTmp<'a>>, Vec<Desc<'a>>)> + 'r;
+
+    /// The fused builder's lookups.
+    struct Maps<'s> {
+        utype_idx: FxHashMap<&'s str, u32>,
+        enum_idx: FxHashMap<&'s str, u32>,
+        enum_bases: Vec<&'s str>,
+    }
+
+    impl Names for Maps<'_> {
+        fn utype(&self, name: &str) -> Option<u32> {
+            self.utype_idx.get(name).copied()
+        }
+        fn enumeration(&self, name: &str) -> Option<u32> {
+            self.enum_idx.get(name).copied()
+        }
+        fn enum_base(&self, i: u32) -> Option<&str> {
+            self.enum_bases.get(i as usize).copied()
+        }
+    }
+
     /// Shared, read-only resolution context.
-    struct Ctx<'a, 's> {
-        natives: &'s [NativeDef],
-        native_idx: &'s FxHashMap<&'s str, usize>,
-        utype_idx: &'s FxHashMap<&'s str, u32>,
-        enum_idx: &'s FxHashMap<&'s str, u32>,
-        enum_bases: &'s [Cow<'a, str>],
-        /// value entry of every user type (random access for anonymous flattening)
-        user_values: &'s [u32],
-        flatten: bool,
-        sym_types: bool,
+    pub(crate) struct Ctx<'s, N: Names> {
+        pub natives: &'s [NativeDef],
+        pub native_idx: &'s FxHashMap<String, usize>,
+        pub names: &'s N,
+        pub flatten: bool,
     }
 
     /// A field as read (its type descriptor in the range's arena).
-    struct FieldTmp<'a> {
+    pub(crate) struct FieldTmp<'a> {
         name: Cow<'a, str>,
         offset: i128,
         anonymous: bool,
@@ -1819,9 +1854,9 @@ mod fast {
     }
 
     /// Read a descriptor object into `arena` (the reference `parse_desc`, plus its identity:
-    /// the entry of its `{`).
+    /// the position of its `{` in the document).
     fn read_desc<'a>(w: &mut Walker<'_, 'a>, arena: &mut Vec<Desc<'a>>) -> Result<u32> {
-        let id = w.entry() as u32;
+        let id = w.abs_pos() as u32;
         let mut d = Desc::default();
         w.object(|w, k| {
             match k.as_ref() {
@@ -1848,7 +1883,7 @@ mod fast {
     }
 
     /// A `user_types` member value: (kind, size, fields) like the reference `parse_user`.
-    fn read_user<'a>(w: &mut Walker<'_, 'a>, arena: &mut Vec<Desc<'a>>) -> Result<(Cow<'a, str>, i128, Vec<FieldTmp<'a>>)> {
+    pub(crate) fn read_user<'a>(w: &mut Walker<'_, 'a>, arena: &mut Vec<Desc<'a>>) -> Result<(Cow<'a, str>, i128, Vec<FieldTmp<'a>>)> {
         let mut kind = Cow::Borrowed("struct");
         let mut fields: Vec<FieldTmp<'a>> = Vec::new();
         let mut size = None;
@@ -1887,7 +1922,31 @@ mod fast {
         Ok((kind, size.or(length).unwrap_or(0), fields))
     }
 
-    impl<'a, 's> Ctx<'a, 's> {
+    /// A `symbols` member value that is an object (python's delegate skips other values):
+    /// (address, type descriptor, constant data) like the reference `parse_symbol`.
+    pub(crate) fn read_symbol<'a>(p: &mut Walker<'_, 'a>, arena: &mut Vec<Desc<'a>>) -> Result<(i128, Option<u32>, Option<Cow<'a, str>>)> {
+        let mut address = 0i128;
+        let mut ty = None;
+        let mut constant_data = None;
+        p.object(|p, k| {
+            match k.as_ref() {
+                "address" => address = p.int()?,
+                "type" => ty = Some(read_desc(p, arena)?),
+                "constant_data" => {
+                    if p.peek_kind()? == Kind::Str {
+                        constant_data = Some(p.str()?)
+                    } else {
+                        p.skip()?
+                    }
+                }
+                _ => p.skip()?,
+            }
+            Ok(())
+        })?;
+        Ok((address, ty, constant_data))
+    }
+
+    impl<'s, N: Names> Ctx<'s, N> {
         fn native(&self, name: &str) -> Option<Ty> {
             self.native_idx.get(name).map(|&i| self.natives[i].ty)
         }
@@ -1897,7 +1956,7 @@ mod fast {
         fn int_prim(&self, t: Ty) -> Option<Prim> {
             match t {
                 Ty::Int(p) | Ty::Float(p) => Some(p),
-                Ty::Enum(i) => match self.native(self.enum_bases.get(i as usize)?) {
+                Ty::Enum(i) => match self.native(self.names.enum_base(i)?) {
                     Some(Ty::Int(p)) => Some(p),
                     _ => None,
                 },
@@ -1907,7 +1966,7 @@ mod fast {
         }
 
         /// The reference `Resolver::desc_uncached` over the arena.
-        fn resolve(&self, arena: &[Desc<'a>], di: u32, l: &mut Local<'a>) -> Ty {
+        pub(crate) fn resolve<'a, S: Sink>(&self, arena: &[Desc<'a>], di: u32, l: &mut S) -> Ty {
             let d = &arena[di as usize];
             let mut type_name: &str = &d.kind;
             if type_name == "base" {
@@ -1947,8 +2006,8 @@ mod fast {
                     }
                     "enum" => {
                         let name = d.name.as_deref().unwrap_or("");
-                        return match self.enum_idx.get(name) {
-                            Some(&i) => Ty::Enum(i),
+                        return match self.names.enumeration(name) {
+                            Some(i) => Ty::Enum(i),
                             None => l.unresolved(d.id, name),
                         };
                     }
@@ -1972,7 +2031,7 @@ mod fast {
             if matches!(&*d.kind, "struct" | "union" | "class") {
                 let name = d.name.as_deref().unwrap_or("");
                 if !name.contains('!') {
-                    if let Some(&i) = self.utype_idx.get(name) {
+                    if let Some(i) = self.names.utype(name) {
                         return Ty::Struct(i);
                     }
                 }
@@ -1982,8 +2041,8 @@ mod fast {
         }
 
         /// A user type's members (reference: the user-type loop of `build_from`), types in
-        /// local node indexes.
-        fn members(&self, w: &mut Walker<'_, 'a>, fields: &[FieldTmp<'a>], arena: &[Desc<'a>], l: &mut Local<'a>) -> Result<Vec<(Cow<'a, str>, u64, Ty)>> {
+        /// `l`'s node indexes.
+        pub(crate) fn members<'a, S: Sink>(&self, sub: &mut SubFields<'_, 'a>, fields: &[FieldTmp<'a>], arena: &[Desc<'a>], l: &mut S) -> Result<Vec<(Cow<'a, str>, u64, Ty)>> {
             let mut members: Vec<(Cow<'a, str>, u64, Ty)> = Vec::with_capacity(fields.len());
             let needs_flatten = self.flatten && fields.iter().any(|f| f.anonymous);
             if !needs_flatten {
@@ -2016,13 +2075,11 @@ mod fast {
                 let f = &flist[i];
                 let new_off = parent_off + f.offset;
                 if f.anonymous {
-                    let sub = f.ty.and_then(|t| ar[t as usize].name.as_deref()).and_then(|n| self.utype_idx.get(n).copied());
-                    if let Some(si) = sub {
+                    let anon = f.ty.and_then(|t| ar[t as usize].name.as_deref()).and_then(|n| self.names.utype(n));
+                    if let Some(si) = anon {
                         depth_guard += 1;
                         if depth_guard < 100_000 {
-                            let mut sub_arena = Vec::new();
-                            w.seek(self.user_values[si as usize] as usize);
-                            let (_, _, sub_fields) = read_user(w, &mut sub_arena)?;
+                            let (sub_fields, sub_arena) = sub(si)?;
                             frames.push(Frame { fields: sub_fields, arena: sub_arena });
                             stack.push((frames.len() - 1, 0, new_off));
                         }
@@ -2070,7 +2127,7 @@ mod fast {
     }
 
     /// Byte-balanced ranges over `keys` (member-key entries, in order).
-    fn ranges(w: &Walker, keys: &[u32], total_bytes: usize, threads: usize) -> Vec<Range<usize>> {
+    pub(crate) fn ranges(w: &Walker, keys: &[u32], total_bytes: usize, threads: usize) -> Vec<Range<usize>> {
         let per = (total_bytes / (threads * 4)).max(64 << 10);
         let mut out = Vec::new();
         let mut s = 0;
@@ -2104,7 +2161,7 @@ mod fast {
     }
 
     /// Whether any name repeats (open addressing on the precomputed hashes).
-    fn has_repeats(names: &[Cow<'_, str>], hashes: &[u64]) -> bool {
+    pub(crate) fn has_repeats(names: &[Cow<'_, str>], hashes: &[u64]) -> bool {
         let n = names.len();
         if n < 2 {
             return false;
@@ -2127,9 +2184,58 @@ mod fast {
         false
     }
 
+    /// [`each_member`] through a local index over the members' bytes only (`keys`, `close`:
+    /// byte positions; a lazy table's validation and records): the key must be the entry at
+    /// its position, then ':', the value, then ',' directly followed by the next key (the end
+    /// of the range for the range's last key) or, after the section's last key, its `}` as the
+    /// range's last entry. `pos` is a reusable position buffer.
+    pub(crate) fn each_member_local<'a>(
+        json: &'a [u8],
+        keys: &[u32],
+        r: Range<usize>,
+        close: usize,
+        pos: &mut Vec<u32>,
+        mut f: impl FnMut(&mut Walker<'_, 'a>, usize, Cow<'a, str>) -> Result<()>,
+    ) -> Option<()> {
+        if r.is_empty() {
+            return Some(());
+        }
+        let start = keys[r.start] as usize;
+        let end = match keys.get(r.end) {
+            Some(&k) => k as usize,
+            None => close.checked_add(1)?,
+        };
+        let part = json.get(start..end)?;
+        let idx = Index::build_serial_reusing(part, std::mem::take(pos)).ok()?;
+        let ok = (|| {
+            let mut w = idx.walker(part).with_base(start);
+            let mut e = 0usize;
+            for j in r.clone() {
+                if w.pos_of(e) + start != keys[j] as usize || w.ch(e) != b'"' || w.ch(e + 2) != b':' {
+                    return None;
+                }
+                let name = w.string_at(e).ok()?;
+                w.seek(e + 3);
+                f(&mut w, j, name).ok()?;
+                let at = w.entry();
+                if j + 1 < keys.len() {
+                    if w.ch(at) != b',' || (j + 1 == r.end && at + 1 != w.len()) {
+                        return None;
+                    }
+                    e = at + 1;
+                } else if w.ch(at) != b'}' || at + 1 != w.len() || w.pos_of(at) + start != close {
+                    return None;
+                }
+            }
+            Some(())
+        })();
+        *pos = idx.recycle();
+        ok
+    }
+
     /// Parse the members `keys[r]` of a big section: each member = key, ':', value, then ','
     /// before the next key, or the section's closing '}' (`close`) after the last one.
-    fn each_member<'d, 'a>(w: &mut Walker<'d, 'a>, keys: &[u32], r: Range<usize>, close: usize, mut f: impl FnMut(&mut Walker<'d, 'a>, usize, Cow<'a, str>) -> Result<()>) -> Option<()> {
+    pub(crate) fn each_member<'d, 'a>(w: &mut Walker<'d, 'a>, keys: &[u32], r: Range<usize>, close: usize, mut f: impl FnMut(&mut Walker<'d, 'a>, usize, Cow<'a, str>) -> Result<()>) -> Option<()> {
         for j in r {
             let ke = keys[j] as usize;
             if w.ch(ke + 2) != b':' {
@@ -2154,20 +2260,90 @@ mod fast {
         Ok(build_opt(json, opts))
     }
 
-    fn build_opt(json: &[u8], opts: &BuildOptions) -> Option<Vec<u8>> {
+    /// One big root section (`user_types`, `enums`, `symbols`): its member-key entries, the
+    /// entry of its closing `}` and its size in bytes.
+    pub(crate) struct Section {
+        pub keys: Vec<u32>,
+        pub close: usize,
+        pub bytes: usize,
+    }
+
+    /// Everything the fused builder and a lazy table ([`crate::symbols::lazy`]) share: the
+    /// structural index, the checked root object, the header, natives, the user type and
+    /// symbol sections, the user type and enum names (unique) and the parsed enums. `None` for any
+    /// document the fused builder does not handle (the reference path decides those).
+    pub(crate) struct Prep<'a> {
+        pub idx: Index,
+        pub par: bool,
+        pub version: (u32, u32, u32),
+        pub fparts: Vec<u32>,
+        pub metadata: Option<Json<'a>>,
+        pub natives: Vec<NativeDef>,
+        pub users: Section,
+        pub syms: Section,
+        pub unames: Vec<Cow<'a, str>>,
+        pub uhashes: Vec<u64>,
+        pub ehashes: Vec<u64>,
+        pub edefs: Vec<EnumDef<'a>>,
+    }
+
+    /// The root object of a document as [`prepare`] checks it: header, natives and the three
+    /// big sections (user types, enums, symbols), each with its `{` value entry, the entry of
+    /// its `}` and its member keys.
+    pub(crate) struct Root<'a> {
+        pub version: (u32, u32, u32),
+        pub fparts: Vec<u32>,
+        pub metadata: Option<Json<'a>>,
+        pub natives: Vec<NativeDef>,
+        /// user types, enums, symbols
+        pub big: [(usize, Section); 3],
+    }
+
+    pub(crate) fn prepare<'a>(json: &'a [u8], opts: &BuildOptions) -> Option<Prep<'a>> {
         let threads = crate::util::par::threads();
         let par = json.len() >= PAR_PARSE_MIN && parallel_allowed();
         let idx = {
             let _t = crate::util::trace::span("isf: stage 1");
             Index::build_with(json, par).ok()?
         };
-        let _t = crate::util::trace::span("isf: build (fused)");
+        let _tp = crate::util::trace::span("isf: top events + small sections");
+        let Root { version, fparts, metadata, natives, big: [(_, users), (_, enums), (_, syms)] } = root(json, &idx, opts)?;
+        let w = idx.walker(json);
+        drop(_tp);
+        let _tp = crate::util::trace::span("isf: names + enums");
+        // ---- names of the user types and enums (resolution needs them up front)
+        let (unames, uhashes) = names(&w, &users.keys)?;
+        let (_, ehashes) = names(&w, &enums.keys)?;
+
+        // ---- enums (their base types are needed to resolve bitfields of enum type)
+        let eranges = if par { ranges(&w, &enums.keys, enums.bytes, threads) } else { vec![0..enums.keys.len()] };
+        let run_enums = |i: usize| -> Option<Vec<EnumDef>> {
+            let mut p = idx.walker(json);
+            let mut v = Vec::with_capacity(eranges[i].len());
+            each_member(&mut p, &enums.keys, eranges[i].clone(), enums.close, |p, _, name| {
+                v.push(parse_enum(p, name)?);
+                Ok(())
+            })?;
+            Some(v)
+        };
+        let eparts = if eranges.len() > 1 { crate::util::pool::map(eranges.len(), run_enums) } else { (0..eranges.len()).map(run_enums).collect() };
+        let mut edefs: Vec<EnumDef> = Vec::with_capacity(enums.keys.len());
+        for p in eparts {
+            edefs.extend(p?);
+        }
+        drop(w);
+        Some(Prep { idx, par, version, fparts, metadata, natives, users, syms, unames, uhashes, ehashes, edefs })
+    }
+
+    /// The root object's members from `idx`'s structure events and the small sections,
+    /// checked exactly as the fused builder does (see [`Root`]); `None` for a document it does
+    /// not handle.
+    pub(crate) fn root<'a>(json: &'a [u8], idx: &Index, opts: &BuildOptions) -> Option<Root<'a>> {
         let w = idx.walker(json);
         if w.ch(0) != b'{' {
             return None;
         }
         // ---- the root object's members from the structure events
-        let _tp = crate::util::trace::span("isf: top events + small sections");
         let ev = idx.top_events(json);
         let mut members: Vec<Member> = Vec::new();
         let mut keys2: Vec<u32> = Vec::new();
@@ -2204,6 +2380,7 @@ mod fast {
             }
             members.push(m);
         }
+        drop(ev);
         if members.is_empty() || members[0].value != 4 {
             return None;
         }
@@ -2271,55 +2448,32 @@ mod fast {
         }
         let (version, fparts) = check_header(&seen, metadata.as_ref()).ok()?;
         let natives = make_natives(version, &bases, opts).ok()?;
-        let native_idx: FxHashMap<&str, usize> = natives.iter().enumerate().map(|(i, n)| (n.name.as_str(), i)).collect();
-        let (mu, me, ms) = (&members[big[S_USERS]?], &members[big[S_ENUMS]?], &members[big[S_SYMBOLS]?]);
-        let (ukeys, ekeys, skeys) = (&keys2[mu.keys.clone()], &keys2[me.keys.clone()], &keys2[ms.keys.clone()]);
-
-        drop(_tp);
-        let _tp = crate::util::trace::span("isf: names + enums");
-        // ---- names of the user types and enums (resolution needs them up front)
-        let (unames, uhashes) = names(&w, ukeys)?;
-        let (enames, ehashes) = names(&w, ekeys)?;
-        let utype_idx: FxHashMap<&str, u32> = unames.iter().enumerate().map(|(i, n)| (n.as_ref(), i as u32)).collect();
-        let enum_idx: FxHashMap<&str, u32> = enames.iter().enumerate().map(|(i, n)| (n.as_ref(), i as u32)).collect();
-        let user_values: Vec<u32> = ukeys.iter().map(|&k| k + 3).collect();
-
-        // ---- enums (their base types are needed to resolve bitfields of enum type)
-        let eranges = if par { ranges(&w, ekeys, w.pos_of(me.close?) - w.pos_of(me.value), threads) } else { vec![0..ekeys.len()] };
-        let run_enums = |i: usize| -> Option<Vec<EnumDef>> {
-            let mut p = idx.walker(json);
-            let mut v = Vec::with_capacity(eranges[i].len());
-            each_member(&mut p, ekeys, eranges[i].clone(), me.close?, |p, _, name| {
-                v.push(parse_enum(p, name)?);
-                Ok(())
-            })?;
-            Some(v)
+        let section = |s: usize| -> Option<(usize, Section)> {
+            let m = &members[big[s]?];
+            let close = m.close?;
+            Some((m.value, Section { keys: keys2[m.keys.clone()].to_vec(), close, bytes: w.pos_of(close) - w.pos_of(m.value) }))
         };
-        let eparts = if eranges.len() > 1 { crate::util::pool::map(eranges.len(), run_enums) } else { (0..eranges.len()).map(run_enums).collect() };
-        let mut edefs: Vec<EnumDef> = Vec::with_capacity(ekeys.len());
-        for p in eparts {
-            edefs.extend(p?);
-        }
-        let enum_bases: Vec<Cow<str>> = edefs.iter().map(|e| e.base.clone()).collect();
+        Some(Root { version, fparts, metadata, natives, big: [section(S_USERS)?, section(S_ENUMS)?, section(S_SYMBOLS)?] })
+    }
 
-        drop(_tp);
+    fn build_opt(json: &[u8], opts: &BuildOptions) -> Option<Vec<u8>> {
+        let _t = crate::util::trace::span("isf: build (fused)");
+        let threads = crate::util::par::threads();
+        let Prep { idx, par, version, fparts, metadata, natives, users: su, syms: ss, unames, uhashes, ehashes, edefs } = prepare(json, opts)?;
+        let w = idx.walker(json);
+        let (ukeys, skeys) = (&su.keys[..], &ss.keys[..]);
+        let native_idx: FxHashMap<String, usize> = natives.iter().enumerate().map(|(i, n)| (n.name.clone(), i)).collect();
+        let maps = Maps {
+            utype_idx: unames.iter().enumerate().map(|(i, n)| (n.as_ref(), i as u32)).collect(),
+            enum_idx: edefs.iter().enumerate().map(|(i, e)| (e.name.as_ref(), i as u32)).collect(),
+            enum_bases: edefs.iter().map(|e| e.base.as_ref()).collect(),
+        };
+
         let _tp = crate::util::trace::span("isf: parse + resolve ranges");
         // ---- user types and symbols: parse + resolve per range
-        let ctx = Ctx {
-            natives: &natives,
-            native_idx: &native_idx,
-            utype_idx: &utype_idx,
-            enum_idx: &enum_idx,
-            enum_bases: &enum_bases,
-            user_values: &user_values,
-            flatten: version >= (6, 2, 0),
-            sym_types: version >= (2, 1, 0),
-        };
-        let (uranges, sranges) = if par {
-            (ranges(&w, ukeys, w.pos_of(mu.close?) - w.pos_of(mu.value), threads), ranges(&w, skeys, w.pos_of(ms.close?) - w.pos_of(ms.value), threads))
-        } else {
-            (vec![0..ukeys.len()], vec![0..skeys.len()])
-        };
+        let ctx = Ctx { natives: &natives, native_idx: &native_idx, names: &maps, flatten: version >= (6, 2, 0) };
+        let sym_types = version >= (2, 1, 0);
+        let (uranges, sranges) = if par { (ranges(&w, ukeys, su.bytes, threads), ranges(&w, skeys, ss.bytes, threads)) } else { (vec![0..ukeys.len()], vec![0..skeys.len()]) };
         let nu = uranges.len();
         let run = |i: usize| -> Option<Part> {
             let mut p = idx.walker(json);
@@ -2329,10 +2483,16 @@ mod fast {
                 let r = uranges[i].clone();
                 let mut out = Vec::with_capacity(r.len());
                 let mut side = idx.walker(json);
-                each_member(&mut p, ukeys, r, mu.close?, |p, j, name| {
+                let mut sub = |si: u32| -> Result<(Vec<FieldTmp>, Vec<Desc>)> {
+                    side.seek(ukeys[si as usize] as usize + 3);
+                    let mut arena = Vec::new();
+                    let (_, _, fields) = read_user(&mut side, &mut arena)?;
+                    Ok((fields, arena))
+                };
+                each_member(&mut p, ukeys, r, su.close, |p, j, name| {
                     arena.clear();
                     let (kind, size, fields) = read_user(p, &mut arena)?;
-                    let members = ctx.members(&mut side, &fields, &arena, &mut l)?;
+                    let members = ctx.members(&mut sub, &fields, &arena, &mut l)?;
                     out.push(UserOut { name, kind: user_kind_code(&kind), size, members, hash: uhashes[j] });
                     Ok(())
                 })?;
@@ -2340,30 +2500,13 @@ mod fast {
             } else {
                 let r = sranges[i - nu].clone();
                 let mut out = Vec::with_capacity(r.len());
-                each_member(&mut p, skeys, r, ms.close?, |p, _, name| {
+                each_member(&mut p, skeys, r, ss.close, |p, _, name| {
                     if p.peek_kind()? != Kind::Obj {
                         return p.skip(); // not a symbol (python's delegate skips it)
                     }
                     arena.clear();
-                    let mut address = 0i128;
-                    let mut ty = None;
-                    let mut constant_data = None;
-                    p.object(|p, k| {
-                        match k.as_ref() {
-                            "address" => address = p.int()?,
-                            "type" => ty = Some(read_desc(p, &mut arena)?),
-                            "constant_data" => {
-                                if p.peek_kind()? == Kind::Str {
-                                    constant_data = Some(p.str()?)
-                                } else {
-                                    p.skip()?
-                                }
-                            }
-                            _ => p.skip()?,
-                        }
-                        Ok(())
-                    })?;
-                    let t = match (ctx.sym_types, ty) {
+                    let (address, ty, constant_data) = read_symbol(p, &mut arena)?;
+                    let t = match (sym_types, ty) {
                         (true, Some(d)) => {
                             let t = ctx.resolve(&arena, d, &mut l);
                             l.node(t).0
@@ -2378,7 +2521,7 @@ mod fast {
             }
         };
         let n_items = nu + sranges.len();
-        let parts: Vec<Option<Part>> = if n_items > 1 && par { crate::util::pool::map(n_items, run) } else { (0..n_items).map(run).collect() };
+        let parts: Vec<Option<Part>> = if n_items > 1 && par { crate::util::pool::map(n_items, &run) } else { (0..n_items).map(&run).collect() };
 
         drop(_tp);
         // ---- an upper bound of the blob size, so a helper faults the blob's pages in while
@@ -2451,6 +2594,7 @@ mod fast {
             return None;
         }
         drop(snames);
+        drop(maps);
         let enums: Vec<EnumOut> = edefs
             .into_iter()
             .zip(ehashes)
@@ -2460,11 +2604,23 @@ mod fast {
         let out = Out { fparts, sym_cdata: version >= (4, 1, 0), nodes: g.nodes, unresolved: g.unresolved, users, enums, syms, natives: natives.clone(), meta };
         drop(_t);
         // a big index is freed off the critical path (unmapping tens of MB)
-        drop((run, run_enums, w));
+        drop(w);
         if json.len() >= PAR_PARSE_MIN {
             crate::util::bg::spawn(move || drop(idx));
         }
         Some(serialize_fast(&out, prefault.flatten().and_then(|h| h.join().ok())))
+    }
+
+    /// The blob of a table without user types, symbols or type nodes beyond `void`: the
+    /// natives, enums and metadata of `p` (a lazy table's eager part; same records as the
+    /// full blob's).
+    pub(crate) fn skeleton_blob(version: (u32, u32, u32), fparts: Vec<u32>, metadata: Option<&Json<'_>>, natives: Vec<NativeDef>, edefs: Vec<EnumDef<'_>>, ehashes: Vec<u64>) -> Vec<u8> {
+        let native_idx: FxHashMap<String, usize> = natives.iter().enumerate().map(|(i, n)| (n.name.clone(), i)).collect();
+        let enums: Vec<EnumOut> =
+            edefs.into_iter().zip(ehashes).map(|(e, hash)| EnumOut { prim: enum_prim_by(&natives, &native_idx, &e.base), name: e.name, constants: e.constants, hash }).collect();
+        let meta = metadata.map(|m| m.to_string_compact()).unwrap_or_default();
+        let out = Out { fparts, sym_cdata: version >= (4, 1, 0), nodes: vec![Ty::Void], unresolved: Vec::new(), users: Vec::new(), enums, syms: Vec::new(), natives, meta };
+        serialize_fast(&out, None)
     }
 
     /// The global node table being replayed into.
@@ -2519,7 +2675,7 @@ mod fast {
         }
     }
 
-    fn enum_prim_by(natives: &[NativeDef], native_idx: &FxHashMap<&str, usize>, base: &str) -> Prim {
+    fn enum_prim_by(natives: &[NativeDef], native_idx: &FxHashMap<String, usize>, base: &str) -> Prim {
         match native_idx.get(base).map(|&i| natives[i].ty) {
             Some(Ty::Int(p)) => p,
             Some(Ty::Pointer { prim, .. }) => prim,
@@ -2529,10 +2685,10 @@ mod fast {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    const ISF: &str = r#"{
+    pub(crate) const ISF: &str = r#"{
       "metadata": {"format": "6.2.0", "windows": {"pdb": {"GUID": "ABC", "age": 1, "database": "x.pdb"}}},
       "base_types": {
         "unsigned long": {"kind": "int", "size": 4, "signed": false, "endian": "little"},
@@ -2818,7 +2974,7 @@ mod tests {
     /// ranges (before and after), unresolved and `!`-qualified names, enum-based bitfields,
     /// pointer base overrides, unknown kinds, symbols with and without types / data; for
     /// several format versions (flattening, typed symbols, std-ctypes natives).
-    fn unique_isf(format: &str, n_types: usize, n_syms: usize) -> Vec<u8> {
+    pub(crate) fn unique_isf(format: &str, n_types: usize, n_syms: usize) -> Vec<u8> {
         let mut j = format!("{{\n  \"metadata\": {{\"format\": \"{format}\", \"producer\": {{\"name\": \"t\"}}}},\n");
         j.push_str("  \"base_types\": {\n    \"long\": {\"kind\": \"int\", \"size\": 4, \"signed\": true, \"endian\": \"little\"},\n    \"unsigned char\": {\"kind\": \"char\", \"size\": 1, \"signed\": false, \"endian\": \"little\"},\n    \"pointer\": {\"kind\": \"int\", \"size\": 8, \"signed\": false, \"endian\": \"little\"},\n    \"void\": {\"kind\": \"void\", \"size\": 0, \"signed\": false, \"endian\": \"little\"}\n  },\n");
         j.push_str("  \"enums\": {\n");

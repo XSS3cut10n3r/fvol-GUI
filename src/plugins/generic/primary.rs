@@ -106,3 +106,20 @@ pub fn primary(ctx: &Context, description: &str) -> Result<Primary> {
     }
     Ok(Primary { layer: phys, intel: None, phys, os: PrimaryOs::None, stacker: None })
 }
+
+/// The primary layer of a plugin of python category `category` (`"windows"`, `"linux"`,
+/// `"mac"`, else generic): python's `choose_os_stackers(plugin)` leaves only that OS's stackers
+/// (all of them for a generic plugin).
+pub fn primary_for_category(ctx: &Context, category: &str, description: &str) -> Result<Primary> {
+    let phys = physical(ctx, description)?;
+    let found = match category {
+        "windows" => ctx.windows_kernel().ok().map(|k| (k.vlayer, k.layer, PrimaryOs::Windows, "WindowsIntelStacker")),
+        "linux" => ctx.linux_kernel().ok().map(|k| (k.vlayer, k.layer, PrimaryOs::Linux, k.stacker)),
+        "mac" => ctx.mac_kernel().ok().map(|k| (k.vlayer, k.layer, PrimaryOs::Mac, "MacIntelStacker")),
+        _ => return primary(ctx, description),
+    };
+    Ok(match found {
+        Some((layer, intel, os, stacker)) => Primary { layer, intel: Some(intel), phys, os, stacker: Some(stacker) },
+        None => Primary { layer: phys, intel: None, phys, os: PrimaryOs::None, stacker: None },
+    })
+}

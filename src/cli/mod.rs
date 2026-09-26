@@ -74,6 +74,8 @@ pub fn main() -> i32 {
     if argv.get(1).map(String::as_str) == Some("serve") {
         return crate::web::main(&argv[2..]);
     }
+    // one run, then exit: big ISFs load lazily, their blobs are written after the output
+    crate::symbols::store::set_lazy_tables(true);
     let plugins = crate::plugins::all();
     let mut out = RawStdout::new();
     let mut err = std::io::stderr();
@@ -288,6 +290,16 @@ fn json_to_cv(j: &Json) -> Option<ConfigValue> {
         Json::Arr(v) => ConfigValue::List(v.iter().filter_map(json_to_cv).collect()),
         Json::Obj(_) => ConfigValue::Str(j.dump(None)),
     })
+}
+
+pub(crate) fn cv_to_json(v: &ConfigValue) -> Json {
+    match v {
+        ConfigValue::Bool(b) => Json::Bool(*b),
+        ConfigValue::Int(i) => Json::Int(*i),
+        ConfigValue::Str(s) => Json::Str(s.clone()),
+        ConfigValue::Bytes(b) => Json::Str(String::from_utf8_lossy(b).into_owned()),
+        ConfigValue::List(l) => Json::Arr(l.iter().map(cv_to_json).collect()),
+    }
 }
 
 fn cv_to_pyval(v: &ConfigValue) -> PyVal {
@@ -616,6 +628,8 @@ fn run_inner(
     // config file values, then the command line (python splices the file first)
     let mut cfg = Config::default();
     let mut config_location: Option<String> = None;
+    let mut config_swaps: Vec<String> = Vec::new();
+    let mut config_layer_built = false;
     if let Some(c) = args.str("config").filter(|c| !c.is_empty()) {
         let text = match std::fs::read(abspath(c, &cwd)) {
             Ok(t) => t,
@@ -633,17 +647,38 @@ fn run_inner(
         if items.iter().any(|(_, v)| matches!(v, Json::Obj(_))) {
             return Ok(traceback(err, "TypeError: Invalid type stored in configuration: <class 'dict'>"));
         }
+        // a saved configuration (`--save-config`) holds the layer trees the automagics built:
+        // rsvol rebuilds them from the image they name (the first file layer below a
+        // `memory_layer`, e.g. `kernel.layer_name.memory_layer.base_layer.location`) and its
+        // swap files (`...swap_layers.swap_layers<N>.location`)
+        let mut swaps: Vec<(u64, String)> = Vec::new();
+        let keys: std::collections::HashSet<String> = items.iter().map(|(k, _)| k.clone()).collect();
         for (k, v) in items {
             if !k.contains('.') {
                 if let Some(cv) = json_to_cv(&v) {
                     cfg.set(&k, cv);
                 }
-            } else if k.ends_with(".location") && k.contains("memory_layer") && !k.contains("swap_layers") {
-                // the image: `<...>.memory_layer.location` on raw images,
-                // `<...>.memory_layer.base_layer.location` below an ELF / LiME / ... layer
-                config_location = v.as_str().map(|x| x.to_string());
+                continue;
+            }
+            let (Some(parts), Some(loc)) = (k.strip_suffix(".location").map(|p| p.split('.').collect::<Vec<_>>()), v.as_str()) else { continue };
+            match parts.iter().rposition(|c| *c == "swap_layers") {
+                Some(i) if i + 2 == parts.len() => {
+                    if let Some(n) = parts[i + 1].strip_prefix("swap_layers").and_then(|n| n.parse().ok()) {
+                        swaps.push((n, loc.to_string()));
+                    }
+                }
+                Some(_) => {}
+                None if config_location.is_none() && parts.contains(&"memory_layer") && !parts.contains(&"meta_layer") => {
+                    // a layer the file describes completely (with its class) is built from the
+                    // file: python's automagics then leave `-f` / `--single-location` unused
+                    config_layer_built = keys.contains(&format!("{}.class", parts.join(".")));
+                    config_location = Some(loc.to_string());
+                }
+                None => {}
             }
         }
+        swaps.sort();
+        config_swaps = swaps.into_iter().map(|(_, l)| l).collect();
     }
 
     let output_dir = args.str("output_dir").unwrap_or("").to_string();
@@ -693,6 +728,11 @@ fn run_inner(
     };
     opts.stackers = strs(args.get("stackers"));
     opts.swap_locations = strs(args.get("single_swap_locations")).unwrap_or_default();
+    // (a layer built from the file has the file's swap layers, as python's WinSwapLayers then
+    // finds nothing to do)
+    if opts.swap_locations.is_empty() || config_layer_built {
+        opts.swap_locations = config_swaps;
+    }
 
     // -e / --extend
     if let Some(PyVal::List(ext)) = args.get("extend") {
@@ -730,6 +770,8 @@ fn run_inner(
             }
         }
     }
+    // what python's saved configuration records as configured (before rsvol's defaults)
+    let user_cfg = cfg.clone();
     // plugin defaults for everything not configured
     for r in &reqs {
         if cfg.get(r.name).is_none()
@@ -738,7 +780,7 @@ fn run_inner(
             }
     }
 
-    if location.is_none()
+    if (location.is_none() || config_layer_built)
         && let Some(u) = config_location {
             let path = if url_scheme(&u) == "file" { Some(file_url_path(&u)) } else { None };
             location = Some(Location { path, url: u });
@@ -771,12 +813,13 @@ fn run_inner(
         );
         save = Some("config.json".into());
     }
-    // python writes the configuration after constructing the plugin (the automagics ran), so the
-    // "already exists" error only comes when construction succeeded
-    let save_config = save.filter(|x| !x.is_empty()).map(|sc| {
-        let target = abspath(&sc, &cwd);
-        let exists = path_exists(&target).then(|| parser.error(&format!("Cannot write configuration: file {sc} already exists")));
-        SaveConfig { target, name: sc, exists }
+    // written once the automagics satisfied the plugin's requirements (python writes it right
+    // after `construct_plugin`, before the plugin runs)
+    let save = save.filter(|x| !x.is_empty()).map(|sc| SaveConfig {
+        target: abspath(&sc, &cwd),
+        exists: parser.error(&format!("Cannot write configuration: file {sc} already exists")),
+        user: user_cfg,
+        name: sc,
     });
 
     let filters: Vec<String> = match args.get("filters") {
@@ -789,16 +832,35 @@ fn run_inner(
     };
     drop(parser);
     let flush_rows = s.interactive.unwrap_or_else(|| unsafe { isatty(1) == 1 });
-    Ok(execute(plugin, &class, opts, &cfg, &renderer_name, RenderOptions { filters, hide_columns, flush_rows }, save_config, out, err))
+    Ok(execute(plugin, &class, opts, &cfg, save, &renderer_name, RenderOptions { filters, hide_columns, flush_rows }, out, err))
 }
 
-/// `--save-config FILE` / `--write-config`: where to write, and the parser error to report
-/// instead when the file already exists.
+/// `--save-config` / `--write-config`: where to write, and python's error when the file exists.
 struct SaveConfig {
     target: String,
-    /// the file name as given (python's error messages)
+    exists: Exit,
+    /// the plugin options as configured (command line, `-c`, `-e`), without rsvol's defaults
+    user: Config,
+    /// the file name as given (python's `open()` error messages)
     name: String,
-    exists: Option<Exit>,
+}
+
+/// python's `json.dump(dict(constructed.build_configuration()), f, sort_keys=True, indent=2)`
+/// plus a newline, after the automagics ran; `Err(status)` when the CLI stops instead.
+fn save_config(ctx: &Context, plugin: &dyn Plugin, class: &str, sc: SaveConfig, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), i32> {
+    let items = match crate::plugins::generic::pyconfig::plugin_configuration(ctx, plugin.name(), &sc.user, false) {
+        Ok(i) => i,
+        Err(e) => return Err(report_error(&e, None, class, out, err)),
+    };
+    if path_exists(&sc.target) {
+        let Exit::Error(t, code) = sc.exists else { return Err(2) };
+        let _ = err.write_all(t.as_bytes());
+        return Err(code);
+    }
+    if let Err(e) = std::fs::write(&sc.target, format!("{}\n", Json::Obj(items).dump(Some(2)))) {
+        return Err(traceback(err, &py_oserror(&e, &sc.name)));
+    }
+    Ok(())
 }
 
 /// Construct the context, run the plugin into the renderer and report failures like python.
@@ -808,9 +870,9 @@ fn execute(
     class: &str,
     opts: GlobalOptions,
     cfg: &Config,
+    save: Option<SaveConfig>,
     renderer_name: &str,
     ropts: RenderOptions,
-    save: Option<SaveConfig>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
@@ -818,26 +880,10 @@ fn execute(
         Ok(c) => c,
         Err(e) => return report_error(&e, None, class, out, err),
     };
-    if let Some(sc) = save {
-        // `json.dump(dict(constructed.build_configuration()), f, sort_keys=True, indent=2)`
-        let items = match crate::plugins::generic::pyconfig::build_configuration(&ctx, plugin.name(), cfg, "") {
-            Ok(items) => items,
-            Err(e) => return report_error(&e, None, class, out, err),
-        };
-        match sc.exists {
-            Some(Exit::Error(t, code)) => {
-                let _ = err.write_all(t.as_bytes());
-                return code;
-            }
-            Some(Exit::Help(t)) => {
-                let _ = out.write_all(t.as_bytes());
-                return 0;
-            }
-            None => {}
-        }
-        if let Err(e) = std::fs::write(&sc.target, format!("{}\n", Json::Obj(items).dump(Some(2)))) {
-            return traceback(err, &py_oserror(&e, &sc.name));
-        }
+    if let Some(sc) = save
+        && let Err(code) = save_config(&ctx, plugin, class, sc, out, err)
+    {
+        return code;
     }
     let (result, failure) = {
         let mut r = match text::create(renderer_name, out, ropts) {

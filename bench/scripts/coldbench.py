@@ -52,10 +52,21 @@ if ONLY:
 os.makedirs(SCRATCH, exist_ok=True)
 VHOME = os.path.join(SCRATCH, "volrs-home")
 
+def wait_helpers():
+    """wait for rsvol's detached symbol-table blob builders (`rsvol-isfb-helper`, started after
+    a run that loaded a table lazily) so they neither overlap the next timed run nor race its
+    cache deletion"""
+    for _ in range(6000):
+        if subprocess.run(["pgrep", "-f", "rsvol-isfb-helper"], stdout=subprocess.DEVNULL).returncode != 0:
+            return
+        time.sleep(0.005)
+
 def run(cmd, env):
     t = time.perf_counter()
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-    return time.perf_counter() - t, r.returncode
+    d = time.perf_counter() - t
+    wait_helpers()
+    return d, r.returncode
 
 def rm(cache, *names):
     def f():

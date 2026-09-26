@@ -889,7 +889,16 @@ where
 
 /// Run python's chunk list of the (coalesced) sections `secs` of `layer` through `scanner` on
 /// all cores; `f` gets the hits in python order and returns false to stop.
-pub(crate) fn execute<S, F>(layer: &dyn Layer, scanner: &S, secs: &[(u64, u64)], mut f: F)
+pub(crate) fn execute<S, F>(layer: &dyn Layer, scanner: &S, secs: &[(u64, u64)], f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+{
+    execute_lookahead(layer, scanner, secs, par::threads() * 4, f)
+}
+
+/// [`execute`] with at most `lookahead` work items in flight ahead of the one being emitted.
+fn execute_lookahead<S, F>(layer: &dyn Layer, scanner: &S, secs: &[(u64, u64)], lookahead: usize, mut f: F)
 where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
@@ -928,7 +937,7 @@ where
         make_plan(layer, &deps, chunks)
     };
     let _t = crate::util::trace::span("scan: execute");
-    let lookahead = par::threads() * 4;
+    let lookahead = lookahead.max(1);
     let mut round: Vec<ItemOut<S::Hit>> = Vec::new();
     par::par_map_stream(
         plan.items.len(),
@@ -965,7 +974,31 @@ where
 /// chunks are python's chunks; the section ends where python's last chunk of the batch ends,
 /// which makes the layer produce one extra overlap-sized tail chunk whose hits (offset >= last
 /// chunk start + chunk_size) belong to the next batch and are dropped via `offset_of`.
-pub fn scan_each_progressive<S, F, O>(layer: &dyn Layer, scanner: &S, offset_of: O, mut f: F)
+pub fn scan_each_progressive<S, F, O>(layer: &dyn Layer, scanner: &S, offset_of: O, f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+    O: Fn(&S::Hit) -> u64,
+{
+    scan_each_progressive_max(layer, scanner, crate::util::par::threads() * 4, offset_of, f)
+}
+
+/// [`scan_each_progressive`] with batches of at most `max_batch` chunks: for a scan whose
+/// first hit may be far into the layer (the VMCOREINFO note of a 3 GiB image can sit at
+/// 1.3 GiB), batches of about one chunk per core keep the memory bus busy and read at most
+/// one batch past the hit.
+pub fn scan_each_progressive_max<S, F, O>(layer: &dyn Layer, scanner: &S, max_batch: usize, offset_of: O, f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+    O: Fn(&S::Hit) -> u64,
+{
+    scan_each_ramp(layer, scanner, 2, max_batch, offset_of, f)
+}
+
+/// [`scan_each_progressive_max`] whose batches start at `first` chunks (doubling up to
+/// `max_batch`, then streaming); `first >= max_batch` streams from the start.
+pub fn scan_each_ramp<S, F, O>(layer: &dyn Layer, scanner: &S, first: usize, max_batch: usize, offset_of: O, mut f: F)
 where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
@@ -979,9 +1012,19 @@ where
     }
     // python default section: (min_address, max_address - min_address)
     let section_end = layer.max_address();
-    let max_batch = crate::util::par::threads() * 4;
-    let (mut i0, mut batch) = (0usize, 2usize);
+    let max_batch = max_batch.max(2);
+    let (mut i0, mut batch) = (0usize, first.max(1));
     while i0 < n {
+        if batch >= max_batch {
+            // the rest in one streamed scan, `max_batch` chunks ahead of the consumer: every
+            // core stays busy (no batch barriers) and an early stop wastes at most that much
+            let start = chunks[i0].0;
+            if section_end > start {
+                let secs = coalesce_sections(layer, &[(start, section_end - start)]);
+                execute_lookahead(layer, scanner, &secs, max_batch, f);
+            }
+            return;
+        }
         let i1 = (i0 + batch).min(n);
         let start = chunks[i0].0;
         let (end, limit) = if i1 == n {
