@@ -51,6 +51,12 @@ Any unique prefix of a plugin name works, so `windows.pslist` runs `windows.psli
 `-f` takes the image file, and the format is detected from its contents. For a VMware image,
 pass the `.vmem` file and keep the `.vmss` or `.vmsn` file of the same name next to it.
 
+`-f` also takes an `http://`, `https://` or `ftp://` URL, as python does. rsvol downloads the
+image once with `curl` into `~/.cache/rsvol/data_<SHA512>.cache`, named like python's download,
+and reads it from there on later runs without checking the server again. `--clear-cache`
+deletes the download. Like python, rsvol retries a download whose TLS certificate fails
+verification without verification, with a warning.
+
 The exit status is 0 on success, 1 when the plugin cannot run or fails, and 2 for a usage error.
 rsvol prints no progress output, so `-q` is accepted but changes nothing.
 
@@ -64,9 +70,12 @@ rsvol prints no progress output, so `-q` is accepted but changes nothing.
    vol -f <IMAGE> windows.info.Info
    ```
 
-   The converted file is stored in `~/.cache/volatility3/symbols/windows/`, where python
-   volatility3 finds it as well. Later runs on any image of the same Windows build need no
-   network.
+   The converted file, `windows/ntkrnlmp.pdb/<GUID>-<AGE>.json.xz`, goes where python
+   volatility3 would write it: into the first directory of the symbol search path (see
+   [Control where symbol files are found](#control-where-symbol-files-are-found)) in which it can
+   be created. That is normally `~/.cache/volatility3/symbols/`, but a writable `-s` directory
+   or python volatility3 installation comes first. python finds the file as well, and later runs
+   on any image of the same Windows build need no network.
 
 2. Run the plugins you need. A typical triage sequence:
 
@@ -185,8 +194,14 @@ rsvol searches for symbol files, called ISF files, in this order:
 File names may end in `.json`, `.json.xz`, `.json.gz` or `.json.bz2`, and may sit inside `.zip`
 archives.
 
+Linux and macOS kernel ISFs are found by the kernel banner. When several ISFs on the search path
+carry the same banner, rsvol loads the one python volatility3 would load, which it learns from
+python's identifier cache, `~/.cache/volatility3/identifier.cache` or the one under
+`--cache-path`. Without that file, or with `RSVOL_NO_PY_IDENT_SEED=1`, the last one in search
+order wins.
+
 To use a remote list of symbol files, pass its URL with `-u`. rsvol downloads the list and the
-files it needs once, with `curl`, and keeps them in `~/.cache/rsvol/remote/`:
+files it needs once, with `curl`, and keeps them in `~/.cache/rsvol/` as `data_<SHA512>.cache`:
 
 ```bash
 vol -u <ISF_LIST_URL> -f <IMAGE> linux.pslist.PsList

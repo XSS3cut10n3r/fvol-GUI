@@ -327,8 +327,9 @@ fn download_list() {
 fn download_and_convert_ntkrnlmp() {
     let dir = std::path::PathBuf::from(std::env::var("RSVOL_DL_DIR").expect("RSVOL_DL_DIR"));
     let t = std::time::Instant::now();
-    let p = download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, &dir, false).unwrap();
+    let (p, json) = download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, std::slice::from_ref(&dir), false).unwrap();
     eprintln!("{} in {:?}", p.display(), t.elapsed());
-    assert!(p.ends_with("windows/ntkrnlmp.pdb/8E3373D6124E747F0E72EF8E02E676B3-1.json"));
-    assert!(download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, &dir, true).is_err());
+    assert!(p.ends_with("windows/ntkrnlmp.pdb/8E3373D6124E747F0E72EF8E02E676B3-1.json.xz"));
+    assert_eq!(crate::codecs::xz::decompress(&std::fs::read(&p).unwrap()).unwrap(), json);
+    assert!(download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, &[dir], true).is_err());
 }

@@ -216,6 +216,10 @@ fn hex8_full(v: u32) -> ([u8; 8], usize) {
 }
 
 /// Nibble i of `v` -> byte i of the result.
+///
+/// pdep is used only when the build enables BMI2: detecting it at run time would mean a
+/// second build of the whole formatter, for one instruction against three shift/mask steps
+/// (which also beat pdep where it is microcoded, on AMD Zen 1/2).
 #[inline(always)]
 fn spread_nibbles(v: u32) -> u64 {
     #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]

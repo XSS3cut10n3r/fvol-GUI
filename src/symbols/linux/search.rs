@@ -10,7 +10,8 @@
 /// A prepared needle.
 pub struct Needle<'a> {
     pub needle: &'a [u8],
-    /// Offset of the second filter byte.
+    /// Offset of the second filter byte (used by the x86-64 SIMD filter).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     k: usize,
 }
 
@@ -37,28 +38,13 @@ impl<'a> Needle<'a> {
         }
         let last = hay.len() - n; // last valid start
         let mut i = 0usize;
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        if n >= 2 {
-            // SAFETY: loads stay within `hay`: i + k + 32 <= i + n - 1 + 32 <= last + n + 31 ...
-            // guarded by `i + self.k + 32 <= hay.len()` and `i + 32 <= hay.len()`.
-            unsafe {
-                use std::arch::x86_64::*;
-                let first = _mm256_set1_epi8(nd[0] as i8);
-                let second = _mm256_set1_epi8(nd[self.k] as i8);
-                let p = hay.as_ptr();
-                while i + self.k + 32 <= hay.len() && i <= last {
-                    let a = _mm256_loadu_si256(p.add(i) as *const __m256i);
-                    let b = _mm256_loadu_si256(p.add(i + self.k) as *const __m256i);
-                    let mut m = _mm256_movemask_epi8(_mm256_and_si256(_mm256_cmpeq_epi8(a, first), _mm256_cmpeq_epi8(b, second))) as u32;
-                    while m != 0 {
-                        let pos = i + m.trailing_zeros() as usize;
-                        if pos <= last && hay[pos..pos + n] == *nd && !f(pos) {
-                            return;
-                        }
-                        m &= m - 1;
-                    }
-                    i += 32;
-                }
+        // detected at run time (once per process), so portable builds keep the fast path
+        #[cfg(target_arch = "x86_64")]
+        if n >= 2 && crate::layers::scan::simd_enabled() {
+            // SAFETY: AVX2 is available (checked above).
+            match unsafe { self.for_each_avx2(hay, &mut f) } {
+                Some(next) => i = next,
+                None => return,
             }
         }
         while i <= last {
@@ -72,6 +58,36 @@ impl<'a> Needle<'a> {
                 None => return,
             }
         }
+    }
+}
+
+impl Needle<'_> {
+    /// The AVX2 filter over `hay` for as long as whole 32-byte blocks fit; returns where the
+    /// scalar search continues, or `None` when `f` asked to stop. Requires `needle.len() >= 2`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn for_each_avx2(&self, hay: &[u8], f: &mut impl FnMut(usize) -> bool) -> Option<usize> {
+        use std::arch::x86_64::*;
+        let (nd, n) = (self.needle, self.needle.len());
+        let last = hay.len() - n;
+        let mut i = 0usize;
+        let first = _mm256_set1_epi8(nd[0] as i8);
+        let second = _mm256_set1_epi8(nd[self.k] as i8);
+        let p = hay.as_ptr();
+        while i + self.k + 32 <= hay.len() && i <= last {
+            // SAFETY: both 32-byte loads end at or before i + k + 32 <= hay.len() (k < n).
+            let (a, b) = unsafe { (_mm256_loadu_si256(p.add(i) as *const __m256i), _mm256_loadu_si256(p.add(i + self.k) as *const __m256i)) };
+            let mut m = _mm256_movemask_epi8(_mm256_and_si256(_mm256_cmpeq_epi8(a, first), _mm256_cmpeq_epi8(b, second))) as u32;
+            while m != 0 {
+                let pos = i + m.trailing_zeros() as usize;
+                if pos <= last && hay[pos..pos + n] == *nd && !f(pos) {
+                    return None;
+                }
+                m &= m - 1;
+            }
+            i += 32;
+        }
+        Some(i)
     }
 }
 
@@ -231,6 +247,78 @@ mod tests {
             true
         });
         assert_eq!(v, (0..98).collect::<Vec<_>>());
+    }
+
+    /// Pseudo-random haystacks (mostly zeros, like memory) with planted needles: the SIMD
+    /// filter (when the CPU has it) finds exactly what a naive search finds, and stops early.
+    #[test]
+    fn random_matches_naive() {
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for round in 0..200 {
+            let len = (next() % 700) as usize;
+            let mut h: Vec<u8> = (0..len).map(|_| if next() % 4 == 0 { b"Linux vers\0"[(next() % 11) as usize] } else { 0 }).collect();
+            let nd: &[u8] = [b"Linux version ".as_slice(), b"Li", b"\0L", b"n\0\0", b"version"][round % 5];
+            for _ in 0..(next() % 4) {
+                if h.len() >= nd.len() {
+                    let at = (next() as usize) % (h.len() - nd.len() + 1);
+                    h[at..at + nd.len()].copy_from_slice(nd);
+                }
+            }
+            let mut v = Vec::new();
+            Needle::new(nd).for_each(&h, |o| {
+                v.push(o);
+                true
+            });
+            let want = naive(&h, nd);
+            assert_eq!(v, want, "round {round}");
+            if want.len() >= 2 {
+                let mut first = Vec::new();
+                Needle::new(nd).for_each(&h, |o| {
+                    first.push(o);
+                    false
+                });
+                assert_eq!(first, want[..1]);
+            }
+        }
+    }
+
+    /// Throughput on 64 MiB of memory-like data (`RSVOL_NO_SIMD=1` for the scalar path):
+    /// `cargo test --profile fast linux_search_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn linux_search_bench() {
+        let mut h = vec![0u8; 64 << 20];
+        let mut x: u64 = 1;
+        for (i, c) in h.chunks_mut(4096).enumerate() {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            // a third of the pages hold text-like bytes, the rest zeros
+            if i % 3 == 0 {
+                for (j, b) in c.iter_mut().enumerate() {
+                    *b = b"Linux kernel version text, LiM\n"[(j + (x >> 60) as usize) % 31];
+                }
+            }
+        }
+        h[(40 << 20) + 17..(40 << 20) + 31].copy_from_slice(b"Linux version ");
+        let nd = Needle::new(b"Linux version ");
+        let mut best = f64::MAX;
+        let mut hits = 0;
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            hits = 0;
+            nd.for_each(&h, |_| {
+                hits += 1;
+                true
+            });
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        assert_eq!(hits, 1);
+        println!("search Linux version: {:.0} MB/s (simd {})", h.len() as f64 / best / 1e6, crate::layers::scan::simd_enabled());
     }
 
     #[test]

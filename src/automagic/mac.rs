@@ -93,13 +93,16 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
         Some(a) => a,
         None => {
             // python: the MacIntelStacker built no layer
-            let r = run(phys_arc);
+            let mut index = None;
+            let r = run_indexed(phys_arc, &mut index);
             symbols::store::keep_decoded_for(None);
             let a = r.map_err(|e| unsatisfied(ctx, &e, LAYER))?;
-            cache_store(&image, &fp, &a);
+            let deps = index.map(|i| i.choice_deps("mac", &a.banner)).unwrap_or_default();
+            cache_store(&image, &fp, &a, deps);
             a
         }
     };
+    crate::util::trace::note(|| format!("mac kernel ISF: {}", am.isf.url()));
     let banner_str: String = am.banner.iter().map(|&b| b as char).collect();
     let layer = IntelLayer::new("layer_name", phys_arc.clone(), am.dtb, PagingMode::Intel32e, PteFlavor::Generic)
         .with_os("mac")
@@ -138,6 +141,11 @@ fn unsatisfied(ctx: &Context, detail: &Error, paths: &[&str]) -> Error {
 /// python `MacIntelStacker.stack` on the physical layer (+ the MacSymbolFinder lookup, which
 /// resolves the same banner to the same ISF). `Err` = no layer (the detail python logs).
 pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
+    run_indexed(phys, &mut None)
+}
+
+/// [`run`]; `index` receives the identifier index the banner -> ISF choice was made from.
+fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store::IdentifierIndex>) -> Result<MacAutomagic> {
     // python: never stack on top of an intel layer
     if phys.as_intel().is_some() {
         return Err(Error::msg("Mac automagic: the memory layer is already a translation layer"));
@@ -148,14 +156,15 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
         // ISF from the JSON it decompresses anyway; no guessing among many mac kernels
         symbols::store::keep_decoded_for_with(Some("mac"), false);
         let hint = std::sync::Mutex::new(None);
-        let d = symbols::store::identifier_index_with(symbols::symbol_path(), &|| {
+        let idx = symbols::store::identifier_index_with(symbols::symbol_path(), &|| {
             let phys = phys.clone();
             let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
                 symbols::store::set_banner_hint(crate::automagic::banner_hint(phys.as_ref(), b"Darwin Kernel Version ", b":"));
             });
             *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
-        })
-        .dictionary("mac");
+        });
+        *index = Some(idx);
+        let d = idx.dictionary("mac");
         if let Some(h) = hint.into_inner().unwrap_or_else(|e| e.into_inner()) {
             let _ = h.join();
         }
@@ -524,26 +533,25 @@ fn loc_decode(s: &str) -> Option<IsfLocation> {
 fn cache_load(image: &std::path::Path, fp: &str) -> Option<MacAutomagic> {
     use crate::automagic::cache::{get, load};
     let kv = load(image, "mac")?;
-    if get(&kv, "sympath")? != fp {
+    // the banner -> ISF choice (python's identifier cache, the banner's candidate ISFs)
+    if get(&kv, "sympath")? != fp || !symbols::store::choice_deps_hold(&kv) {
         return None;
     }
     let num = |k: &str| get(&kv, k).and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
     Some(MacAutomagic { banner: unhex(get(&kv, "banner")?)?, isf: loc_decode(get(&kv, "isf")?)?, kaslr_shift: num("kaslr")?, dtb: num("dtb")? })
 }
 
-fn cache_store(image: &std::path::Path, fp: &str, a: &MacAutomagic) {
+fn cache_store(image: &std::path::Path, fp: &str, a: &MacAutomagic, deps: Vec<(&'static str, String)>) {
     let Some(isf) = loc_encode(&a.isf) else { return };
-    crate::automagic::cache::store(
-        image,
-        "mac",
-        &[
-            ("sympath", fp.to_string()),
-            ("banner", hex(&a.banner)),
-            ("isf", isf),
-            ("kaslr", format!("{:#x}", a.kaslr_shift)),
-            ("dtb", format!("{:#x}", a.dtb)),
-        ],
-    );
+    let mut kv = vec![
+        ("sympath", fp.to_string()),
+        ("banner", hex(&a.banner)),
+        ("isf", isf),
+        ("kaslr", format!("{:#x}", a.kaslr_shift)),
+        ("dtb", format!("{:#x}", a.dtb)),
+    ];
+    kv.extend(deps);
+    crate::automagic::cache::store(image, "mac", &kv);
 }
 
 #[cfg(test)]

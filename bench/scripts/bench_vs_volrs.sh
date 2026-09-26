@@ -1,13 +1,18 @@
 #!/bin/bash
 # Time ours vs vol-rs per plugin (best of N runs, warm), output TSV: plugin ours_s volrs_s speedup
-# Usage: bench_vs_volrs.sh [-n N] [LIST]
+# Usage: bench_vs_volrs.sh [-b BIN] [-n N] [LIST]
+#   -b BIN   our binary (default: $OURS, else /home/user/rs-vol/target/release/vol)
+# Dumped files go to $SCRATCH (default /home/user/rs-vol/testdata/scratch/bench_vs_volrs, on disk:
+# a dumpfiles run writes 1.5-4.5 GB, too much for the RAM-backed /tmp); it is emptied per plugin.
 N=3
-if [ "$1" = "-n" ]; then N=$2; shift 2; fi
+OURS=${OURS:-/home/user/rs-vol/target/release/vol}
+while getopts b:n: o; do case $o in b) OURS=$OPTARG;; n) N=$OPTARG;; *) exit 2;; esac; done
+shift $((OPTIND-1))
 LIST=${1:-/home/user/rs-vol/bench/win_noarg.txt}
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
-OURS=${OURS:-/home/user/rs-vol/target/release/vol}
 VOLRS=/home/user/cbc2/vol-rs/target/release/vol-rs
-T=$(mktemp -d)
+T=${SCRATCH:-/home/user/rs-vol/testdata/scratch/bench_vs_volrs}
+mkdir -p $T || exit 1
 best() { # cmd...
   local b=999999
   for i in $(seq $N); do
@@ -22,4 +27,4 @@ while read p; do
   v=$(best $VOLRS -q -o $T/v -f $IMG $p)
   printf "%s\t%s\t%s\t%s\n" $p $o $v $(python3 -c "print(round($v/max($o,1),2))")
 done < $LIST
-rm -rf $T
+rm -rf $T/o $T/v

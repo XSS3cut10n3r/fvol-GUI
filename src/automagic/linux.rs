@@ -465,6 +465,10 @@ fn cache_kind(ctx: &Context) -> String {
 fn load_cached(image: &std::path::Path, kind: &str) -> Option<LinuxAutomagic> {
     use crate::automagic::cache::get;
     let kv = crate::automagic::cache::load(image, kind)?;
+    // the banner -> ISF choice (python's identifier cache, the banner's candidate ISFs)
+    if !crate::symbols::store::choice_deps_hold(&kv) {
+        return None;
+    }
     let num = |k: &str| get(&kv, k).and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
     Some(LinuxAutomagic {
         stacker: match get(&kv, "stacker")? {
@@ -492,25 +496,23 @@ fn load_cached(image: &std::path::Path, kind: &str) -> Option<LinuxAutomagic> {
     })
 }
 
-fn store_cached(image: &std::path::Path, kind: &str, a: &LinuxAutomagic) {
+fn store_cached(image: &std::path::Path, kind: &str, a: &LinuxAutomagic, deps: Vec<(&'static str, String)>) {
     let Some((ik, ia, ib, st)) = isf_key(&a.isf) else { return };
-    crate::automagic::cache::store(
-        image,
-        kind,
-        &[
-            ("stacker", a.stacker.to_string()),
-            ("mode", mode_name(a.mode).to_string()),
-            ("flavor", format!("{:?}", a.flavor)),
-            ("dtb", format!("{:#x}", a.dtb)),
-            ("aslr", format!("{:#x}", a.aslr_shift)),
-            ("kaslr", format!("{:#x}", a.kaslr_shift)),
-            ("banner", hex(&a.banner)),
-            ("isf_kind", ik),
-            ("isf_a", ia),
-            ("isf_b", ib),
-            ("isf_stamp", st),
-        ],
-    );
+    let mut kv = vec![
+        ("stacker", a.stacker.to_string()),
+        ("mode", mode_name(a.mode).to_string()),
+        ("flavor", format!("{:?}", a.flavor)),
+        ("dtb", format!("{:#x}", a.dtb)),
+        ("aslr", format!("{:#x}", a.aslr_shift)),
+        ("kaslr", format!("{:#x}", a.kaslr_shift)),
+        ("banner", hex(&a.banner)),
+        ("isf_kind", ik),
+        ("isf_a", ia),
+        ("isf_b", ib),
+        ("isf_stamp", st),
+    ];
+    kv.extend(deps);
+    crate::automagic::cache::store(image, kind, &kv);
 }
 
 /// Run the Linux automagic for `ctx` (called once by `Context::linux_kernel`).
@@ -531,7 +533,7 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
     let am = match load_cached(&image, &kind) {
         Some(a) => a,
         None => {
-            let (banners, notes) = {
+            let (index, banners, notes) = {
                 let _t = span("linux banners (identifier index)");
                 // the stackers load the matching kernel ISF next: the index builds it right away
                 // from the JSON it decompresses anyway, guided by the image's banner (found by a
@@ -540,7 +542,7 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                 let phys: LayerRef = *phys;
                 let hint = std::sync::Mutex::new(None);
                 let want_notes = phys.as_intel().is_none() && crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), VMCOREINFO_STACKER);
-                let d = crate::symbols::store::identifier_index_with(ctx.symbol_path(), &|| {
+                let index = crate::symbols::store::identifier_index_with(ctx.symbol_path(), &|| {
                     // the index decompresses for a while: meanwhile, find the image's banner
                     // (steers the index's speculative ISF build) and its VMCOREINFO notes
                     let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
@@ -550,10 +552,10 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                         want_notes.then(|| collect_notes(phys, release.as_deref()))
                     });
                     *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
-                })
-                .dictionary("linux");
+                });
+                let d = index.dictionary("linux");
                 let notes = hint.into_inner().unwrap_or_else(|e| e.into_inner()).and_then(|h| h.join().ok()).flatten();
-                (d, notes)
+                (index, d, notes)
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
             let found = run_with(*phys, &banners, &allow, notes);
@@ -566,10 +568,11 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                 };
                 unsatisfied(&why)
             })?;
-            store_cached(&image, &kind, &a);
+            store_cached(&image, &kind, &a, index.choice_deps("linux", &a.banner));
             a
         }
     };
+    crate::util::trace::note(|| format!("linux kernel ISF: {}", am.isf.url()));
     let banner_str: String = am.banner.iter().map(|&b| b as char).collect();
     let layer = IntelLayer::new("layer_name", phys_arc.clone(), am.dtb, am.mode, am.flavor)
         .with_os("Linux")

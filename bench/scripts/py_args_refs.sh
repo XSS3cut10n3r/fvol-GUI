@@ -1,5 +1,6 @@
 #!/bin/bash
 # Generate python references for argument/renderer cases in bench/args_cases.txt (name<TAB>args)
+# PAR python processes run at once (default 2; each takes 2-8 GB).
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
 OUT=/home/user/rs-vol/bench/ref/pyargs
 run() {
@@ -13,4 +14,4 @@ run() {
   echo -e "$name\t$rc\t$(( (e-s)/1000000 ))ms\t$args" >> $OUT/times.tsv
 }
 export -f run; export IMG OUT
-while IFS=$'\t' read name args; do printf '%s\0%s\0' "$name" "$args"; done < ${1:-/home/user/rs-vol/bench/args_cases.txt} | xargs -0 -n 2 -P ${PAR:-6} bash -c 'run "$0" "$1"'
+while IFS=$'\t' read name args; do printf '%s\0%s\0' "$name" "$args"; done < ${1:-/home/user/rs-vol/bench/args_cases.txt} | xargs -0 -n 2 -P ${PAR:-2} bash -c 'run "$0" "$1"'

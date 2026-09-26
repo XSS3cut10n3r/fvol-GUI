@@ -27,25 +27,37 @@ This README describes rsvol 0.1.0, which tracks volatility3 2.28.2.
 ## Performance
 
 These numbers come from [bench/vm/BENCHMARKS.md](bench/vm/BENCHMARKS.md), which holds the full
-per-plugin tables, and are copied here so they can be updated from that file. They were measured
-on a dedicated KVM guest with 32 vCPUs of an AMD EPYC 7302P host and 30 GiB of RAM, running
-Ubuntu 25.04, with nothing else running. rsvol commit `344e88c` was compared with python
+per-plugin tables (run 1 is kept in [BENCHMARKS-run1.md](bench/vm/BENCHMARKS-run1.md)). They were
+measured on a dedicated KVM guest with 32 vCPUs of an AMD EPYC 7302P host and 30 GiB of RAM, running
+Ubuntu 25.04, with nothing else running. rsvol commit `95528b2` was compared with python
 volatility3 2.28.2 on CPython 3.14.7 and with vol-rs 1.0.0, another Rust port. Each figure is the
-wall-clock time of the whole process with the image in the page cache. The method is in
-[bench/vm/method.md](bench/vm/method.md).
+wall-clock time of the whole process with the image in the page cache, best of 5 interleaved runs.
+The method is in [bench/vm/method.md](bench/vm/method.md).
 
-| Measurement                                     | python    | vol-rs   | rsvol    |
-| ----------------------------------------------- | --------: | -------: | -------: |
-| Windows x64 build 22000, 5 GiB, 77 plugins, sum | 4078.23 s | 149.69 s | 6.26 s   |
-| Windows, median plugin                          | 4.49 s    | 164 ms   | 10.4 ms  |
-| Linux 6.8, 3 GiB ELF core, 48 plugins, sum      | 1655.71 s | 15.79 s  | 892 ms   |
-| Linux 6.8, median plugin                        | 18.03 s   | 314 ms   | 9.5 ms   |
-| `windows.pslist.PsList`, warm cache             | 998 ms    | 86.8 ms  | 3.0 ms   |
-| `windows.pslist.PsList`, empty cache            | 1.78 s    | 573 ms   | 73.1 ms  |
+rsvol has on-disk caches (see [Caching](#caching)), so it is reported three ways: **cold** (every
+rsvol cache wiped before each run: a first-ever run), **steady** (symbol caches warm, per-image scan
+cache disabled: the honest per-run cost of the scanning work) and **warm** (all caches warm: what a
+second run of a plugin costs). vol-rs is reported cold (its caches wiped) and warm.
 
-rsvol was the fastest of the three on 76 of 77 Windows plugins and on all 48 Linux plugins. The
-exception is `vmscan.Vmscan`: vol-rs ships no VMCS symbol files and returns an empty table
-without reading the image, while python and rsvol scan all 5 GiB.
+| Measurement (sum of per-plugin best)            | python    | vol-rs cold | vol-rs warm | rsvol cold | rsvol steady | rsvol warm |
+| ----------------------------------------------- | --------: | ----------: | ----------: | ---------: | -----------: | ---------: |
+| Windows 11 x64 build 22000, 5 GiB, 77 plugins   | 4078 s    | 183.8 s     | 148.6 s     | 8.82 s     | 4.43 s       | 2.18 s     |
+| Windows, median plugin                          | 4.49 s    | 624 ms      | 164 ms      | 68.6 ms    | 10.2 ms      | 8.6 ms     |
+| Linux 6.8, 3 GiB ELF core, 59 plugins           | 2804 s    | 217.2 s     | 105.2 s     | 35.4 s     | 4.80 s       | 4.42 s     |
+| Linux 6.8, median plugin                        | 18.3 s    | 2.23 s      | 311 ms      | 541 ms     | 10.1 ms      | 9.8 ms     |
+
+Like for like (rsvol cold vs vol-rs cold, rsvol warm vs vol-rs warm): Windows 20.8x / 68.1x faster in
+total, Linux 6.1x / 23.8x. rsvol steady and warm are the fastest of the three tools on every plugin
+except `vmscan.Vmscan`, where vol-rs ships no VMCS symbol files and returns an empty table without
+reading the image, while python and rsvol scan all 5 GiB. A first-ever Linux run pays ~0.5 s once to
+index and build the kernel's 64 MB symbol table, which is then cached.
+
+`windows.pslist.PsList` startup: rsvol 64.7 ms cold / 3.3 ms warm, vol-rs 563 ms / 80.6 ms,
+python 1.87 s / 1.20 s.
+
+On that run rsvol's stdout was byte-identical to python's on every plugin (after sorting for the
+two plugins whose python output order itself varies between runs); vol-rs matched on 59/77 Windows
+and 45/59 Linux plugins.
 
 ## Quick start
 
@@ -91,9 +103,10 @@ filters.
 
 ## Building
 
-You need a Rust toolchain of version 1.95 or newer; the project uses edition 2024 and standard
-library APIs stabilized in 1.95. The published benchmarks were built with rustc 1.98.1. Linux on
-x86-64 is the tested platform.
+You need a Rust toolchain of version 1.95 or newer, the `rust-version` in `Cargo.toml`: the
+project uses edition 2024 and `std::hint::cold_path`, which was stabilized in 1.95. Stable 1.95.0
+builds it and passes the tests and parity gates. The published benchmarks were built with rustc
+1.98.1. Linux on x86-64 is the tested platform.
 
 ```bash
 cargo build --release          # target/release/vol, for benchmarks and daily use
@@ -123,10 +136,12 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
 RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static" cargo build --release
 ```
 
-The main SIMD code paths, which cover scanning, JSON parsing and crypto, detect CPU features at
-run time, so a generic build still uses AVX2, AES-NI and SHA-NI where they exist. A few codec and
-search routines are compiled in only when the target enables the feature, so a generic build is
-slightly slower there. Output is identical either way.
+The SIMD code paths, which cover scanning, JSON parsing, crypto, the snappy, Xpress and bzip2
+decoders and the Linux kernel searches, detect CPU features at run time, so a generic build still
+uses AVX2, SSSE3, BMI2, AES-NI and SHA-NI where they exist. Two small helpers, the match length of
+the zlib-exact compressor and the hex digits of the disassembler, use AVX2 or BMI2 only when the
+build enables them, because a run-time check there would cost more than it saves. Output is
+identical either way.
 
 ## No dependencies
 
@@ -138,8 +153,9 @@ a capstone-compatible x86 disassembler, a regex engine with python `re` semantic
 engine, a PDB to ISF converter, and readers for JSON, zip and SQLite files.
 
 The only external program rsvol runs is `curl`, and only where python volatility3 goes to the
-network: downloading PDB files from the Microsoft symbol server, and fetching remote ISF lists and
-files named with `-u/--remote-isf-url`. `--offline` disables both.
+network: downloading PDB files from the Microsoft symbol server, images given to `-f` or
+`--single-location` as `http://`, `https://` or `ftp://` URLs, and remote ISF lists and files
+named with `-u/--remote-isf-url`. `--offline` disables all of them.
 
 ## Web UI
 
@@ -177,16 +193,34 @@ files downloaded by either tool are shared.
 | ---------------------------------- | ----------------------------------------------- | ---------------------------------------------------------- |
 | Binary symbol tables               | `~/.cache/rsvol/isf/*.isfb`                     | A warm symbol table load is one `mmap`, with no JSON parse |
 | Symbol file identifier index       | `~/.cache/rsvol/identifiers.cache`              | Finds the ISF for a kernel banner or PDB without rereading |
+| python's identifier cache (read)   | `~/.cache/volatility3/identifier.cache`         | Seeds the identifier index, and picks python's ISF        |
 | Kernel discovery results           | `~/.cache/rsvol/automagic/`                     | Warm runs skip the DTB, KDBG and banner scans              |
 | Raw scan hits                      | `~/.cache/rsvol/scan/`, capped at 256 MiB       | Scanning plugins replay hits instead of rereading memory   |
 | `isfinfo --live` results           | `~/.cache/rsvol/isfinfo.cache`                  | Warm `isfinfo` runs parse no files                         |
-| Remote ISF downloads               | `~/.cache/rsvol/remote/`                        | Files fetched for `-u` are downloaded once                 |
+| Downloads                          | `~/.cache/rsvol/data_<SHA512>.cache`            | Remote images and `-u` files are downloaded once           |
 | Converted Windows PDBs             | `~/.cache/volatility3/symbols/windows/`         | Shared with python volatility3                             |
 
-To empty the caches, run any plugin with `--clear-cache` or delete the directory. `--clear-cache`
-removes the symbol tables, the identifier index, the kernel discovery results and the scan
-results. It keeps downloaded files and the `isfinfo` cache, and never deletes anything in
-python's cache directory.
+A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
+directory where the file can be created, as python does: normally
+`~/.cache/volatility3/symbols`, but a writable `-s` directory or python volatility3 installation
+comes first.
+
+Downloads are named like python's, `data_` and the SHA-512 of the URL, and like python's they are
+never checked for changes on the server.
+
+When python volatility3 has run on this machine, rsvol reads its identifier cache (never writes
+it; `--cache-path` selects it as for python) instead of reading every symbol file on the search
+path. It takes python's entries exactly as python's own cache update would keep them and reads
+only the files python would read again, so a first run with a large symbol pack costs
+milliseconds instead of hundreds. When several ISFs carry the same banner, for example `x.json`
+next to `x.json.xz`, rsvol loads the one python would load. Set `RSVOL_NO_PY_IDENT_SEED=1` to
+build the index from the symbol files alone.
+
+To empty the caches, run any plugin with `--clear-cache` or delete the directory. Like python's
+`--clear-cache`, which deletes every `*.cache` file in its cache directory, downloads included,
+rsvol's deletes every `*.cache` file in `~/.cache/rsvol`: downloads, the identifier index and the
+`isfinfo` cache. It also removes the symbol tables, the kernel discovery results and the scan
+results. It deletes nothing outside `~/.cache/rsvol`, so converted PDBs and python's own cache stay.
 
 ```bash
 vol --clear-cache -f <IMAGE> windows.info.Info
@@ -220,6 +254,7 @@ same contents. If you modify an image in place and restore its timestamp, clear 
 | `RSVOL_NO_SIMD=1`        | Use the scalar search kernels for scanning instead of AVX2.                         |
 | `RSVOL_TRACE=1`          | Print timing spans to stderr.                                                       |
 | `RSVOL_VOL3_ROOT=<DIR>`  | Use the symbol directories of the python volatility3 checkout at `<DIR>`.           |
+| `RSVOL_NO_PY_IDENT_SEED=1` | Do not seed the identifier index from python's identifier cache.                  |
 
 ## Verification
 
@@ -271,11 +306,8 @@ gates.
   unless `RSVOL_THREADS` says otherwise.
 - **YARA.** Rules that `import` a module such as `pe` fail with "modules are not supported", and
   `--yara-compiled-file` is not supported. Plain rules, strings and conditions work.
-- **Downloaded PDB symbols** are stored as plain `<GUID>-<age>.json`, where python writes
-  `<GUID>-<age>.json.xz`. Both tools read both. The file URL shown by `windows.info.Info` names
-  whichever file exists.
-- **Remote images.** The image must be a local file, given as a path or a `file://` URL. python can
-  also open `http://` and `https://` locations.
+- **Compressed images.** python decompresses an image whose name ends in `.gz`, `.bz2` or `.xz`
+  while reading it; rsvol reads the file as it is.
 - **Corrupt circular lists.** Where python would loop forever on a smeared structure, such as a
   cyclic subsection list in `windows.dumpfiles.DumpFiles`, rsvol stops with an error.
 - **`isfinfo.IsfInfo`** leaves the `hash` column empty for rows it adds to python's identifier
