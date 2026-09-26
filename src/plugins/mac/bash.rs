@@ -10,7 +10,8 @@ use crate::context::Context;
 use crate::error::Result;
 use crate::layers::scan::{BytesScanner, MultiStringScanner, scan};
 use crate::objects::util::array_to_string;
-use crate::objects::{Obj, Space};
+use crate::objects::{LayerRef, Obj, Space};
+use crate::symbols::TableRef;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement, TimeKind, TimelineEvent};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::mac::MacExt;
@@ -177,6 +178,35 @@ impl PartialOrd for PyInt {
     }
 }
 
+/// The per-task core of python `Bash._generator`: scan `sections` of `layer` for `#`, then for
+/// the pointer-sized values of those addresses (`struct.pack("I"/"Q", address)`), and keep the
+/// valid `hist_entry`s whose `timestamp` field is such a pointer, sorted (stably) by time.
+fn find_history(layer: LayerRef, sections: &[(u64, u64)], bash_table: TableRef, ts_offset: u64, is_32bit: bool) -> Result<Vec<Obj>> {
+    let bang_addrs: Vec<Vec<u8>> = scan(layer, &BytesScanner::new(b"#"), Some(sections))
+        .into_iter()
+        .map(|a| {
+            if is_32bit {
+                let a = u32::try_from(a).unwrap_or_else(|_| panic!("struct.error: 'I' format requires 0 <= number <= 4294967295"));
+                a.to_le_bytes().to_vec()
+            } else {
+                a.to_le_bytes().to_vec()
+            }
+        })
+        .collect();
+    // python computes the sections again for the second scan (same result)
+    let sp = Space::on(layer, bash_table);
+    let mut history: Vec<(PyInt, Obj)> = Vec::new();
+    for (address, _) in scan(layer, &MultiStringScanner::new(&bang_addrs), Some(sections)) {
+        let hist = Obj::named(sp, "hist_entry", address.wrapping_sub(ts_offset))?;
+        if hist_entry::is_valid(&hist)? {
+            history.push((hist_entry::get_time_as_integer(&hist)?, hist));
+        }
+    }
+    // sorted(history_entries, key=get_time_as_integer): stable
+    history.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(history.into_iter().map(|(_, h)| h).collect())
+}
+
 /// python `Bash._generator` rows: (pid, task name, CommandTime, Command). The rows of one task
 /// are computed together; tasks run in parallel and are emitted in python order through `emit`
 /// (`Ok(false)` stops). A returned `Err` is where python raised.
@@ -197,30 +227,9 @@ fn generate(ctx: &Context, cfg: &Config, emit: &mut dyn FnMut(Vec<Value>) -> Res
         }
         let Some(layer) = task.add_process_layer()? else { return Ok(Vec::new()) };
         let sections = scan_sections(&task.get_process_memory_sections(CONFIG_KERNEL, true)?);
-        let bang_addrs: Vec<Vec<u8>> = scan(layer, &BytesScanner::new(b"#"), Some(&sections))
-            .into_iter()
-            .map(|a| {
-                if is_32bit {
-                    let a = u32::try_from(a).unwrap_or_else(|_| panic!("struct.error: 'I' format requires 0 <= number <= 4294967295"));
-                    a.to_le_bytes().to_vec()
-                } else {
-                    a.to_le_bytes().to_vec()
-                }
-            })
-            .collect();
-        // python computes the sections again for the second scan (same result)
-        let sp = Space::on(layer, bash_table);
-        let mut history: Vec<(PyInt, Obj)> = Vec::new();
-        for (address, _) in scan(layer, &MultiStringScanner::new(&bang_addrs), Some(&sections)) {
-            let hist = Obj::named(sp, "hist_entry", address.wrapping_sub(ts_offset))?;
-            if hist_entry::is_valid(&hist)? {
-                history.push((hist_entry::get_time_as_integer(&hist)?, hist));
-            }
-        }
-        // sorted(history_entries, key=get_time_as_integer): stable
-        history.sort_by(|a, b| a.0.cmp(&b.0));
+        let history = find_history(layer, &sections, bash_table, ts_offset, is_32bit)?;
         let mut rows = Vec::with_capacity(history.len());
-        for (_, hist) in history {
+        for hist in history {
             rows.push(vec![
                 Value::Int(task.m("p_pid")?.int()?),
                 Value::Str(task_name.clone()),
@@ -289,7 +298,79 @@ impl Plugin for Bash {
 
 #[cfg(test)]
 mod tests {
-    use super::PyInt;
+    use super::{PyInt, find_history, hist_entry};
+    use crate::error::{Error, Result};
+    use crate::layers::{Layer, Mapping};
+    use crate::objects::leak_layer;
+    use crate::renderers::Value;
+    use crate::symbols::isf::{BuildOptions, load_table};
+    use std::sync::Arc;
+
+    /// Flat little-endian memory, 48-bit address space.
+    struct Mem(Vec<u8>);
+    impl Layer for Mem {
+        fn name(&self) -> &str {
+            "m1a_bash_mem"
+        }
+        fn max_address(&self) -> u64 {
+            (1 << 48) - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            let a = addr as usize;
+            match self.0.get(a..a + buf.len()) {
+                Some(s) => {
+                    buf.copy_from_slice(s);
+                    Ok(())
+                }
+                None => Err(Error::invalid(addr)),
+            }
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            addr.checked_add(len).is_some_and(|e| e <= self.0.len() as u64)
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
+            f(Mapping { offset: addr, len, mapped: addr });
+        }
+    }
+
+    /// The scan + hist_entry pipeline on a synthetic heap: validity rules, stable sort on
+    /// python ints (a negative stamp sorts first, equal stamps keep scan order), times.
+    #[test]
+    fn history_pipeline() {
+        let mut m = vec![0u8; 0x4000];
+        let mut put = |at: usize, b: &[u8]| m[at..at + b.len()].copy_from_slice(b);
+        // (hist_entry address, timestamp string address, timestamp, line address, line)
+        let entries: [(usize, usize, &[u8], usize, &[u8]); 7] = [
+            (0x1800, 0x1000, b"#1500000000", 0x1010, b"ls -la"),
+            (0x1818, 0x1020, b"#1400000000", 0x1030, b"whoami"),
+            (0x1830, 0x1040, b"#12345", 0x1050, b"short"),
+            (0x1848, 0x1060, b"#-1500000000", 0x1078, b"neg"),
+            (0x1860, 0x1090, b"#1400000000", 0x10a0, b"second-dup"),
+            (0x1878, 0x10c0, b"#14000000x0", 0x1010, b"ls -la"),
+            (0x1890, 0x10e0, b"#1400000000", 0x10f0, b""),
+        ];
+        for &(h, ts, tss, line, ls) in &entries {
+            put(ts, tss);
+            put(line, ls);
+            put(h, &(line as u64).to_le_bytes());
+            put(h + 8, &(ts as u64).to_le_bytes());
+        }
+        let layer = leak_layer(Arc::new(Mem(m)));
+        let json = include_bytes!("../../../data/isf/linux/bash64.json");
+        let table = crate::symbols::register(load_table(json, "bash64", "test", &BuildOptions::default()).unwrap(), "m1a_bash_test");
+        let ts_offset = table.offset_of("hist_entry", "timestamp").unwrap();
+        let hist = find_history(layer, &[(0x1000, 0x2000)], table, ts_offset, false).unwrap();
+        let got: Vec<(u64, String)> = hist.iter().map(|h| (h.addr, hist_entry::get_command(h).unwrap())).collect();
+        assert_eq!(
+            got,
+            [(0x1848, "neg".to_string()), (0x1818, "whoami".to_string()), (0x1860, "second-dup".to_string()), (0x1800, "ls -la".to_string())]
+        );
+        assert!(matches!(hist_entry::get_time_object(&hist[0]).unwrap(), Value::Unparsable));
+        match hist_entry::get_time_object(&hist[1]).unwrap() {
+            Value::DateTime(d) => assert_eq!(d.secs, 1400000000),
+            v => panic!("{v:?}"),
+        }
+    }
 
     fn p(s: &str) -> Option<i128> {
         PyInt::parse(s).map(|v| v.saturating_i128())

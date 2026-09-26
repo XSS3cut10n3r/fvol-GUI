@@ -246,6 +246,48 @@ mod tests {
         assert_eq!(py_hash_int(-(1 << 61)), -1 - 1);
     }
 
+    /// FNV-1a over the iteration order; the expected values were computed with CPython 3.14
+    /// (`list(s)` of a set filled from the same LCG sequence), crossing every resize step and
+    /// the 50000-entry growth switch.
+    #[test]
+    fn set_order_matches_cpython_lcg() {
+        let cases: [(u64, usize, u64, bool, usize, u64); 9] = [
+            (1, 5, 100, false, 5, 11452854844306586657),
+            (2, 17, 1000, false, 17, 17769304224765328006),
+            (3, 50, 1000, true, 47, 3592289409714888583),
+            (4, 200, 100000, true, 200, 7466873708183751588),
+            (5, 1000, 5000, true, 826, 2677121862833066355),
+            (6, 3000, 1 << 31, true, 3000, 2243579242009868765),
+            (7, 60000, 1 << 40, true, 60000, 9383077065800754809),
+            (8, 120000, 200000, false, 90272, 11637013068619461276),
+            (9, 40, 40, true, 17, 1230134097121298437),
+        ];
+        for (seed, n, rng, neg, len, want) in cases {
+            let mut x = seed;
+            let mut next = || {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x
+            };
+            let mut s = PyIntSet::new();
+            for _ in 0..n {
+                let mut v = (next() % rng) as i128;
+                if neg && next() & 1 == 1 {
+                    v = -v;
+                }
+                s.add(v);
+            }
+            assert_eq!(s.len(), len);
+            let mut h: u64 = 0xcbf29ce484222325;
+            for v in s.iter() {
+                for b in (v as i64 as u64).to_le_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+            assert_eq!(h, want, "seed {seed}");
+        }
+    }
+
     #[test]
     fn set_order_matches_cpython() {
         // list(set) after these insertions, from CPython 3.14

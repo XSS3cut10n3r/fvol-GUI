@@ -145,7 +145,8 @@ mod tests {
         assert_eq!(py_bytes_repr_len(b""), 3);
         assert_eq!(py_bytes_repr_len(b"/usr/libexec/xpcd"), 20);
         assert_eq!(py_bytes_repr_len(b"a'b"), 6); // b"a'b"
-        assert_eq!(py_bytes_repr_len(b"a'b\""), 9); // b'a\'b"'
+        assert_eq!(py_bytes_repr_len(b"a'b\""), 8); // b'a\'b"'
+        assert_eq!(py_bytes_repr_len(b"''\""), 8); // b'\'\'"'
         assert_eq!(py_bytes_repr_len(b"a\"b"), 6); // b'a"b'
         assert_eq!(py_bytes_repr_len(b"\\\t\n\r"), 11);
         assert_eq!(py_bytes_repr_len(b"\x00\x1f\x7f\x80\xff "), 3 + 5 * 4 + 1);
