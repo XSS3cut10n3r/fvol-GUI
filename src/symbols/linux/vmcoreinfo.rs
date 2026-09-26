@@ -209,7 +209,18 @@ fn read_note_data(layer: &dyn Layer, off: u64, len: u64) -> Result<Option<Vec<u8
 /// python `VMCoreInfo.search_vmcoreinfo_elf_note(context, layer_name)`: calls `f(note
 /// offset, table)` for each valid VMCOREINFO note in python order until `f` returns false.
 /// `Err` where python's generator raises (which aborts the caller's iteration).
-pub fn search_vmcoreinfo_elf_note(layer: &dyn Layer, mut f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
+pub fn search_vmcoreinfo_elf_note(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
+    search_with(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), f)
+}
+
+/// [`search_vmcoreinfo_elf_note`] with the magic's full-layer scan answered by the per-image
+/// scan cache on repeated runs (the vmcoreinfo plugin; the automagic's searches are covered by
+/// the automagic cache). The notes are parsed from the layer every time.
+pub fn search_vmcoreinfo_elf_note_cached(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
+    search_with(layer, &FastBytesScanner::cached(VMCOREINFO_MAGIC_ALIGNED), f)
+}
+
+fn search_with(layer: &dyn Layer, scanner: &FastBytesScanner, mut f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
     let mask = layer.address_mask();
     let rd32 = |addr: u64| -> Result<u32> {
         let mut b = [0u8; 4];
@@ -217,7 +228,7 @@ pub fn search_vmcoreinfo_elf_note(layer: &dyn Layer, mut f: impl FnMut(u64, &VmC
         Ok(u32::from_le_bytes(b))
     };
     let mut err = None;
-    scan_each(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), None, |magic_off| {
+    scan_each(layer, scanner, None, |magic_off| {
         let r = (|| -> Result<Option<(u64, VmCoreInfo)>> {
             let note = magic_off.wrapping_sub(ELF_NOTE_SIZE);
             if rd32(note)? as usize != VMCOREINFO_MAGIC.len() || rd32(note.wrapping_add(8))? != 0 {

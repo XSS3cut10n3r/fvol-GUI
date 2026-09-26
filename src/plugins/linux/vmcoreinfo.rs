@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::plugins::generic::primary::primary;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
-use crate::symbols::linux::vmcoreinfo::{VmValue, search_vmcoreinfo_elf_note};
+use crate::symbols::linux::vmcoreinfo::{VmValue, search_vmcoreinfo_elf_note_cached};
 
 pub struct VMCoreInfo;
 
@@ -27,7 +27,7 @@ impl Plugin for VMCoreInfo {
         let p = primary(ctx, "Memory layer to scan")?;
         out.begin(vec![Column::new("Offset", ColType::Hex), Column::new("Key", ColType::Str), Column::new("Value", ColType::Str)])?;
         let mut err = None;
-        search_vmcoreinfo_elf_note(p.layer, |off, table| {
+        search_vmcoreinfo_elf_note_cached(p.layer, |off, table| {
             for (key, value) in &table.entries {
                 let v = match value {
                     VmValue::Int(i) if key.starts_with("SYMBOL(") || key == "KERNELOFFSET" => py_hex(*i),
