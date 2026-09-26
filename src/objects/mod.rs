@@ -810,6 +810,12 @@ impl Module {
         let t: TableRef = self.sp.table;
         t.symbols_at(addr.wrapping_sub(self.offset), size)
     }
+    /// `symbols_at(addr, 0)` without building the table's address index (linear scan; for a
+    /// few lookups).
+    pub fn symbols_at_exact(&self, addr: u64) -> Vec<&'static str> {
+        let t: TableRef = self.sp.table;
+        t.symbols_at_exact(addr.wrapping_sub(self.offset))
+    }
     /// A module on another layer (e.g. a process layer) with the same table and base.
     pub fn on_layer(&self, layer: LayerRef) -> Module {
         Module { sp: self.sp.with_layer(layer), offset: self.offset }
