@@ -234,7 +234,7 @@ pub(crate) const SPEC: &str = r#"
 1 c6 /0 : mov m:b, i:b
 1 c6 @f8 : xabort i:bs
 1 c7 /0 : mov m:v, i:z ; immu
-1 c7 @f8 : xbegin j:z
+1 c7 @f8 : xbegin j:z ; relq
 1 c8 : enter i:ws, i:bs ; d64
 1 c9 : leave ; d64
 1 ca o16|o32 : retf i:w ; bnd

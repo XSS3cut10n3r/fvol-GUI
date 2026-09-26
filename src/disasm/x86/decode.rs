@@ -60,6 +60,7 @@ struct St<'a> {
     disp8n: u8, // EVEX compressed disp8 scale
     has66: bool,
     mosz: u8, // operand size used for memory size keywords
+    vvvv_hi: u8, // 32-bit mode: ignored vvvv bit 3 (still must be 0 when vvvv is unused)
     is4: u8,
     vsib: u8,   // VSIB index register class (0 = normal SIB)
 }
@@ -204,6 +205,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         vsib: 0,
         has66,
         mosz: 4,
+        vvvv_hi: 0,
         is4: 0,
     };
 
@@ -291,6 +293,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         } else {
             st.rex = 0;
             st.vvvv = vvvv & 7;
+            st.vvvv_hi = vvvv & 8;
         }
         if !(1..=3).contains(&mmmmm) {
             return false;
@@ -338,6 +341,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         } else {
             st.rex = 0;
             st.vvvv = vvvv & 7;
+            st.vvvv_hi = vvvv & 8;
         }
         map = match mm {
             1 => MAP_E1,
@@ -374,6 +378,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         } else {
             st.rex = 0;
             st.vvvv = vvvv & 7;
+            st.vvvv_hi = vvvv & 8;
         }
         map = match mmmmm {
             8 => MAP_X8,
@@ -540,7 +545,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         osz_def
     };
 
-    if flags & F_NOVVVV != 0 && st.vvvv != 0 && st.vex != VEX_NONE {
+    if flags & F_NOVVVV != 0 && (st.vvvv | st.vvvv_hi) != 0 && st.vex != VEX_NONE {
         return false;
     }
     st.has66 = has66;
@@ -1136,7 +1141,8 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     None => return false,
                 };
                 st.is4 = b;
-                let num = if m64 { b >> 4 } else { (b >> 4) & 7 };
+                // capstone does not mask the is4 register to 3 bits in 32-bit mode
+                let num = b >> 4;
                 Operand::Reg(Reg(reg_for(st, s.cls, num)))
             }
             S_FIXED => Operand::Reg(Reg(s.cls)),

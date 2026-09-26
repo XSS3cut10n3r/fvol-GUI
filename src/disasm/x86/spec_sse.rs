@@ -42,7 +42,7 @@ pub(crate) const SPEC: &str = r#"
 0f 01 @df : invlpga aAX, ecx
 0f 01 @ee : rdpkru
 0f 01 @ef : wrpkru
-0f 01 @f8 mode64 : swapgs
+0f 01 @f8 : swapgs
 0f 01 @f9 : rdtscp
 0f 01 @fa : monitorx
 0f 01 @fb : mwaitx
@@ -96,11 +96,13 @@ pub(crate) const SPEC: &str = r#"
 0f 19 m : nop m:v/z
 0f 19 r : nop m:v, r:v
 0f 1a np m : bndldx r:bnd, M:
-0f 1a 66 : bndmov r:bnd, m:bnd/x
+0f 1a 66 mode64 : bndmov r:bnd, m:bnd/x
+0f 1a 66 mode32 : bndmov r:bnd, m:bnd/q
 0f 1a f3 : bndcl r:bnd, m:n/n
 0f 1a f2 : bndcu r:bnd, m:n/n
 0f 1b np m : bndstx M:, r:bnd
-0f 1b 66 : bndmov m:bnd/x, r:bnd
+0f 1b 66 mode64 : bndmov m:bnd/x, r:bnd
+0f 1b 66 mode32 : bndmov m:bnd/q, r:bnd
 0f 1b f3 m : bndmk r:bnd, M:
 0f 1b f2 : bndcn r:bnd, m:n/n
 0f 1c np|f3|f2 m /0 : cldemote M:/b
@@ -373,10 +375,10 @@ pub(crate) const SPEC: &str = r#"
 0f ae 66 r /6 : tpause R:d
 0f ae f3 r /6 : umonitor R:A
 0f ae f2 r /6 : umwait R:d
-0f ae f3 r /0 : rdfsbase R:y
-0f ae f3 r /1 : rdgsbase R:y
-0f ae f3 r /2 : wrfsbase R:y
-0f ae f3 r /3 : wrgsbase R:y
+0f ae f3 mode64 r /0 : rdfsbase R:y
+0f ae f3 mode64 r /1 : rdgsbase R:y
+0f ae f3 mode64 r /2 : wrfsbase R:y
+0f ae f3 mode64 r /3 : wrgsbase R:y
 0f ae f3 /4 : ptwrite m:y
 0f ae f3 r /5 w0 : incsspd R:d
 0f ae f3 r /5 w1 : incsspq R:q
