@@ -121,3 +121,55 @@ fn yara_regex_ab() {
         );
     }
 }
+
+/// Compile-time breakdown per pipeline stage (developer probe, ignored test):
+///   cargo test --profile release yara_regex_compile_stages -- --ignored --nocapture
+/// Patterns: bench/refbench/regex_cases.tsv (or RSVOL_AB_PATS, tab separated).
+#[test]
+#[ignore]
+fn yara_regex_compile_stages() {
+    let pats: Vec<Vec<u8>> = match std::env::var("RSVOL_AB_PATS") {
+        Ok(p) => p.split('\t').filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec()).collect(),
+        Err(_) => {
+            let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/refbench/regex_cases.tsv")).unwrap_or_default();
+            data.split(|&b| b == b'\n')
+                .filter(|l| !l.is_empty() && l[0] != b'#')
+                .filter_map(|l| l.iter().position(|&b| b == b'\t').map(|t| l[t + 1..].to_vec()))
+                .collect()
+        }
+    };
+    fn best<T>(f: &mut dyn FnMut() -> T) -> f64 {
+        let mut b = f64::MAX;
+        for _ in 0..200 {
+            let t = Instant::now();
+            let v = std::hint::black_box(f());
+            b = b.min(t.elapsed().as_secs_f64());
+            drop(v); // not timed (the refbench driver does not time drops either)
+        }
+        b * 1e6
+    }
+    for p in pats {
+        let total = best(&mut || Regex::new(&p, 0));
+        let t_parse = best(&mut || super::parse::parse(&p, 0).map(|x| x.nodes.len()));
+        let lowered = || super::hir::lower(super::parse::parse(&p, 0).unwrap()).unwrap();
+        let t_lower = best(&mut || lowered().groups) - t_parse;
+        let l = lowered();
+        let t_props = best(&mut || super::hir::props(&l.hir, &l.group_widths).nfa_size);
+        let t_bt = best(&mut || super::backtrack::Prog::new(&l.hir, l.groups, &l.group_widths).map(|x| x.nslots));
+        let t_pre = best(&mut || super::literal::Prefilter::for_hir(&l.hir).map(|x| x.1));
+        let t_fixed = best(&mut || super::fixed_sequence(&l.hir).map(|s| s.len()));
+        let t_dfa = best(&mut || super::dfa::Searcher::new(&l.hir).map(|s| s.strategy_name()));
+        let t_nfa = best(&mut || super::nfa::Nfa::new(&l.hir, false).map(|n| n.states.len()));
+        let re = Regex::new(&p, 0).unwrap();
+        let t_first = best(&mut || {
+            let r = Regex::new(&p, 0).unwrap();
+            r.search(b"x", 0)
+        }) - total;
+        eprintln!(
+            "total {total:>6.1}us  parse {t_parse:>5.1} lower {t_lower:>5.1} props {t_props:>5.1} bt {t_bt:>5.1} prefilter {t_pre:>5.1} \
+             fixed {t_fixed:>5.1} dfa {t_dfa:>5.1} (nfa {t_nfa:>4.1})  +first-search {t_first:>5.1}  {} {}",
+            re.engine_name(),
+            String::from_utf8_lossy(&p)
+        );
+    }
+}

@@ -511,8 +511,11 @@ enum DescKind {
 
 impl SetDesc {
     pub fn new(s: &ByteSet) -> SetDesc {
-        let v: Vec<u8> = s.iter().collect();
-        let kind = match v.len() {
+        let mut v = [0u8; 3];
+        for (slot, b) in v.iter_mut().zip(s.iter()) {
+            *slot = b;
+        }
+        let kind = match s.len() {
             1 => DescKind::One(v[0]),
             2 => {
                 let d = v[0] ^ v[1];
@@ -522,7 +525,7 @@ impl SetDesc {
             _ => {
                 let mut lo = [0u8; 16];
                 let mut hi = [0u8; 16];
-                for &b in &v {
+                for b in s.iter() {
                     let bit = 1u8 << ((b >> 4) & 7);
                     if b < 0x80 {
                         lo[(b & 15) as usize] |= bit;

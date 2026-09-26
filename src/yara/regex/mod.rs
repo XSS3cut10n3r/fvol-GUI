@@ -120,7 +120,9 @@ pub struct Regex {
     flags: u32,
     groups: u32,
     names: Vec<(String, u32)>,
-    bt: backtrack::Prog,
+    /// The backtracking program: built at compile time for the backtracking engine,
+    /// on first use (`captures_at`) for the DFA / literal engines.
+    bt: std::sync::OnceLock<backtrack::Prog>,
     engine: Engine,
     /// Lower bound of any match length in bytes (sre's INFO min-width check).
     min_len: usize,
@@ -144,12 +146,7 @@ impl Regex {
         let parsed = parse::parse(pattern, flags)?;
         let lowered = hir::lower(parsed)?;
         let props = hir::props(&lowered.hir, &lowered.group_widths);
-        let mut bt = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
         let min_len = lowered.hir.min_width(&lowered.group_widths).min(usize::MAX as u128) as usize;
-        bt.min_len = min_len;
-        if lowered.hir.min_width(&lowered.group_widths) > 0 {
-            bt.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
-        }
         let fixed = fixed_sequence(&lowered.hir).and_then(|seq| literal::SeqFinder::new(&seq).map(|f| (f, seq)));
         let engine = if let Some((finder, seq)) = fixed {
             Engine::Fixed { finder, seq }
@@ -161,6 +158,20 @@ impl Regex {
         } else {
             Engine::Backtrack
         };
+        // The DFA / literal engines only need the backtracker for `captures_at`: build it
+        // then. (Prog::new cannot fail for them: the NFA or the fixed sequence was built
+        // from the same HIR with the same nesting limit and far fewer than MAX_INSTS
+        // states.) The backtracker searches unanchored only as the main engine;
+        // `captures_at` runs it anchored at a known start, without the prefilter.
+        let bt = std::sync::OnceLock::new();
+        if matches!(engine, Engine::Backtrack) {
+            let mut prog = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+            prog.min_len = min_len;
+            if min_len > 0 {
+                prog.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
+            }
+            let _ = bt.set(prog);
+        }
         Ok(Regex {
             pattern: pattern.into(),
             flags,
@@ -191,7 +202,7 @@ impl Regex {
             flags,
             groups: lowered.groups,
             names: lowered.names,
-            bt,
+            bt: std::sync::OnceLock::from(bt),
             engine: Engine::Backtrack,
             min_len,
             pool: Mutex::new(Vec::new()),
@@ -212,6 +223,15 @@ impl Regex {
     #[doc(hidden)]
     pub fn new_backtrack_only(pattern: &[u8], flags: u32) -> Result<Regex, Error> {
         let mut r = Regex::new(pattern, flags)?;
+        if !matches!(r.engine, Engine::Backtrack) {
+            let lowered = hir::lower(parse::parse(pattern, flags)?)?;
+            let mut prog = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+            prog.min_len = r.min_len;
+            if r.min_len > 0 {
+                prog.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
+            }
+            r.bt = std::sync::OnceLock::from(prog);
+        }
         r.engine = Engine::Backtrack;
         Ok(r)
     }
@@ -240,6 +260,18 @@ impl Regex {
             Engine::Dfa(s) => s.strategy_name(),
             Engine::Backtrack => "backtrack",
         }
+    }
+
+    /// The backtracking program (built on first use for the DFA / literal engines; None
+    /// only if that build failed, which the compile-time checks rule out).
+    fn bt(&self) -> Option<&backtrack::Prog> {
+        if let Some(p) = self.bt.get() {
+            return Some(p);
+        }
+        let lowered = hir::lower(parse::parse(&self.pattern, self.flags).ok()?).ok()?;
+        let mut prog = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths).ok()?;
+        prog.min_len = self.min_len;
+        Some(self.bt.get_or_init(|| prog))
     }
 
     fn scratch(&self) -> Box<Scratch> {
@@ -288,7 +320,7 @@ impl Regex {
             }
             (Engine::Dfa(s), Some(c)) => s.find(c, hay, start, anchored, must_advance),
             _ => {
-                let search = backtrack::Search { prog: &self.bt, hay };
+                let search = backtrack::Search { prog: self.bt()?, hay };
                 search.find(&mut sc.bt, start, anchored, must_advance)
             }
         }
@@ -329,7 +361,11 @@ impl Regex {
     pub fn captures_at(&self, hay: &[u8], pos: usize) -> Option<Vec<Option<(usize, usize)>>> {
         let (s, _) = self.search(hay, pos)?;
         let mut sc = self.scratch();
-        let search = backtrack::Search { prog: &self.bt, hay };
+        let Some(prog) = self.bt() else {
+            self.put_scratch(sc);
+            return None;
+        };
+        let search = backtrack::Search { prog, hay };
         let r = search.find(&mut sc.bt, s, true, false).map(|_| {
             let slots = search.slots(&sc.bt);
             (0..self.groups as usize)

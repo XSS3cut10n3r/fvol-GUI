@@ -122,23 +122,9 @@ struct Classes {
 
 impl Classes {
     fn new(nfas: &[&Nfa]) -> Classes {
-        let mut boundary = [false; 257];
-        let mut mark = |s: &ByteSet| {
-            let mut b = 0usize;
-            while b < 256 {
-                if s.contains(b as u8) {
-                    let mut e = b;
-                    while e + 1 < 256 && s.contains((e + 1) as u8) {
-                        e += 1;
-                    }
-                    boundary[b] = true;
-                    boundary[e + 1] = true;
-                    b = e + 1;
-                } else {
-                    b += 1;
-                }
-            }
-        };
+        // A class boundary wherever some set's membership changes between b - 1 and b.
+        let mut boundary = ByteSet::EMPTY;
+        let mut mark = |s: &ByteSet| boundary.union(&s.edges());
         let mut has_look = false;
         let mut has_final = false;
         for nfa in nfas {
@@ -164,7 +150,7 @@ impl Classes {
         let mut rep = Vec::new();
         let mut cls: usize = 0;
         for b in 0..256usize {
-            if b > 0 && boundary[b] {
+            if b > 0 && boundary.contains(b as u8) {
                 cls += 1;
             }
             map[b] = cls as u8;
@@ -364,18 +350,20 @@ impl Searcher {
         // Inner literal strategy for top-level concatenations.
         let mut strategy = Strategy::Core;
         let mut inner_nfa = None;
-        let flat = flatten_concat(h);
+        // An inner sequence must be 8x more selective than the prefix prefilter (and every
+        // sequence rate is >= 1): skip the analysis when the prefix is already that good.
+        let flat = if pre_rate > 8 { flatten_concat(h) } else { Vec::new() };
         if flat.len() > 1 {
             let v = &flat[..];
             let mut best: Option<(u64, usize, Vec<ByteSet>)> = None;
+            // Bytes the prefix v[..i] can consume, grown one element at a time.
+            let mut pbytes = ByteSet::EMPTY;
             for i in 1..v.len().min(12) {
-                let rest = Hir::Concat(v[i..].to_vec());
-                let (seq, _) = literal::positions(&rest);
+                pbytes.union(&literal::bytes_of_nested(&v[i - 1], 1));
+                let (seq, _) = literal::positions_concat(&v[i..]);
                 if seq.is_empty() {
                     continue;
                 }
-                let prefix = Hir::Concat(v[..i].to_vec());
-                let pbytes = literal::bytes_of(&prefix);
                 if !pbytes.intersect(&seq[0]).is_empty() {
                     continue;
                 }

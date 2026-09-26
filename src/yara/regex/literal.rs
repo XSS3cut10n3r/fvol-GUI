@@ -45,6 +45,23 @@ pub fn positions(h: &Hir) -> (Vec<ByteSet>, bool) {
     (out, complete)
 }
 
+/// `positions(&Hir::Concat(v.to_vec()))` without building the concatenation.
+pub fn positions_concat(v: &[Hir]) -> (Vec<ByteSet>, bool) {
+    let mut out = Vec::new();
+    let mut complete = true;
+    for x in v {
+        if !pos_into(x, &mut out, 1) {
+            complete = false;
+            break;
+        }
+    }
+    if out.len() > MAX_POSITIONS {
+        out.truncate(MAX_POSITIONS);
+        return (out, false);
+    }
+    (out, complete)
+}
+
 fn pos_into(h: &Hir, out: &mut Vec<ByteSet>, depth: usize) -> bool {
     if out.len() >= MAX_POSITIONS || depth > 200 {
         return false;
@@ -111,6 +128,13 @@ pub fn bytes_of(h: &Hir) -> ByteSet {
     s
 }
 
+/// `bytes_of` for a node found at nesting `depth` of a larger tree (same depth limit).
+pub fn bytes_of_nested(h: &Hir, depth: usize) -> ByteSet {
+    let mut s = ByteSet::EMPTY;
+    bytes_into(h, &mut s, depth);
+    s
+}
+
 fn bytes_into(h: &Hir, s: &mut ByteSet, depth: usize) {
     if depth > 3000 {
         *s = ByteSet::FULL;
@@ -134,12 +158,39 @@ fn bytes_into(h: &Hir, s: &mut ByteSet, depth: usize) {
 /// Estimated candidate rate (parts per 2^20) of a position sequence using its two
 /// rarest positions.
 pub fn seq_rate(seq: &[ByteSet]) -> u64 {
-    let mut f: Vec<u64> = seq.iter().map(set_freq).collect();
-    f.sort_unstable();
-    match f.len() {
+    // the two smallest frequencies
+    let (mut a, mut b) = (u64::MAX, u64::MAX);
+    for s in seq {
+        let f = set_freq(s);
+        if f < a {
+            b = a;
+            a = f;
+        } else if f < b {
+            b = f;
+        }
+    }
+    match seq.len() {
         0 => 1 << 20,
-        1 => f[0],
-        _ => ((f[0] * f[1]) >> 20).max(1),
+        1 => a,
+        _ => ((a * b) >> 20).max(1),
+    }
+}
+
+/// Whether `alt_seqs` can find more than one top-level alternative (an alternation at
+/// the top, under captures or at the head of a concatenation).
+fn top_alt(h: &Hir, depth: usize) -> bool {
+    if depth > 50 {
+        return false;
+    }
+    match h {
+        Hir::Alt(_) => true,
+        Hir::Capture { sub, .. } => top_alt(sub, depth + 1),
+        Hir::Concat(v) => match v.iter().find(|x| !matches!(x, Hir::Look(_) | Hir::Empty)) {
+            Some(Hir::Capture { sub, .. }) => matches!(**sub, Hir::Alt(_)),
+            Some(x) => matches!(x, Hir::Alt(_)),
+            None => false,
+        },
+        _ => false,
     }
 }
 
@@ -214,7 +265,7 @@ impl Prefilter {
                 best = Some((Prefilter::Seq(f), seq_rate_v));
             }
         }
-        if let Some(alts) = alt_seqs(h) {
+        if let Some(alts) = if top_alt(h, 0) { alt_seqs(h) } else { None } {
             if alts.len() > 1 {
                 let m = alts.iter().map(|s| s.len()).min().unwrap_or(0).min(3);
                 if m >= 1 {
