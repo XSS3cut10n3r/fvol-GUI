@@ -402,7 +402,8 @@ pub struct SymbolTable {
 // `cast("_EX_FAST_REF")`). The name is almost always a literal, so its address identifies it:
 // the caches are direct-mapped on (table id, user type, name address, name length), and a hit
 // still compares the name bytes (against the table's copy), so a reused address (a freed
-// `String`) can never return another member. Only successful lookups are cached.
+// `String`) can never return another member. Misses are cached separately with a copy of the
+// name.
 
 static NEXT_TABLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -429,7 +430,22 @@ struct TEntry {
     name: [u8; TCACHE_NAME],
     ty: Ty,
 }
+/// A negative member lookup (the name is kept: there is no table copy to compare against).
+#[derive(Clone, Copy)]
+struct NEntry {
+    id: u64,
+    ut: u32,
+    nlen: u8,
+    nptr: usize,
+    name: [u8; NCACHE_NAME],
+}
+const NCACHE_BITS: u32 = 7;
+/// longest member name the negative cache stores
+const NCACHE_NAME: usize = 40;
 thread_local! {
+    static NCACHE: std::cell::UnsafeCell<[NEntry; 1 << NCACHE_BITS]> = const {
+        std::cell::UnsafeCell::new([NEntry { id: 0, ut: 0, nlen: 0, nptr: 0, name: [0; NCACHE_NAME] }; 1 << NCACHE_BITS])
+    };
     static MCACHE: std::cell::UnsafeCell<[MEntry; 1 << MCACHE_BITS]> = const {
         std::cell::UnsafeCell::new([MEntry { id: 0, ut: 0, nlen: 0, nptr: 0, mname: std::ptr::null(), offset: 0, ty: Ty::Void }; 1 << MCACHE_BITS])
     };
@@ -780,12 +796,36 @@ impl SymbolTable {
                 return Some(Member { name: unsafe { std::str::from_utf8_unchecked(m) }, offset: e.offset, ty: e.ty });
             }
         }
+        self.member_miss(ut, name, slot)
+    }
+
+    /// [`member`](Self::member) past the positive cache: the negative cache (`has_member`
+    /// probes for members other kernel versions have), then the index.
+    #[inline(never)]
+    fn member_miss(&self, ut: u32, name: &str, slot: usize) -> Option<Member<'_>> {
+        let nb = name.as_bytes();
+        let nptr = nb.as_ptr() as usize;
+        let short = nb.len() <= NCACHE_NAME;
+        let nslot = slot & ((1 << NCACHE_BITS) - 1);
+        if short {
+            // SAFETY: thread-local, copied out
+            let e = NCACHE.with(|c| unsafe { (*c.get())[nslot] });
+            if e.id == self.id && e.ut == ut && e.nptr == nptr && e.nlen as usize == nb.len() && same_bytes(&e.name[..nb.len()], nb) {
+                return None;
+            }
+        }
         let r = self.member_uncached(ut, name);
-        if let Some(m) = &r
-            && nb.len() <= u32::MAX as usize
-        {
-            let e = MEntry { id: self.id, ut, nlen: nb.len() as u32, nptr, mname: m.name.as_ptr(), offset: m.offset, ty: m.ty };
-            MCACHE.with(|c| unsafe { (*c.get())[slot] = e });
+        match &r {
+            Some(m) if nb.len() <= u32::MAX as usize => {
+                let e = MEntry { id: self.id, ut, nlen: nb.len() as u32, nptr, mname: m.name.as_ptr(), offset: m.offset, ty: m.ty };
+                MCACHE.with(|c| unsafe { (*c.get())[slot] = e });
+            }
+            None if short => {
+                let mut e = NEntry { id: self.id, ut, nlen: nb.len() as u8, nptr, name: [0; NCACHE_NAME] };
+                e.name[..nb.len()].copy_from_slice(nb);
+                NCACHE.with(|c| unsafe { (*c.get())[nslot] = e });
+            }
+            _ => {}
         }
         r
     }
