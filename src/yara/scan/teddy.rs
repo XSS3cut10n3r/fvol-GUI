@@ -235,15 +235,25 @@ impl Teddy {
         #[cfg(target_arch = "x86_64")]
         {
             if has_avx2() {
-                // SAFETY: AVX2 availability checked at runtime.
-                q = unsafe {
-                    match self.m {
-                        1 => self.find_avx2::<1, F>(hay, q, to, &mut f),
-                        2 => self.find_avx2::<2, F>(hay, q, to, &mut f),
-                        3 => self.find_avx2::<3, F>(hay, q, to, &mut f),
-                        _ => self.find_avx2::<4, F>(hay, q, to, &mut f),
+                let mut cands = [0u64; CAND_CAP];
+                loop {
+                    // SAFETY: AVX2 availability checked at runtime.
+                    let (next, k) = unsafe {
+                        match self.m {
+                            1 => core_avx2::<1>(&self.lo, &self.hi, hay, q, to, &mut cands),
+                            2 => core_avx2::<2>(&self.lo, &self.hi, hay, q, to, &mut cands),
+                            3 => core_avx2::<3>(&self.lo, &self.hi, hay, q, to, &mut cands),
+                            _ => core_avx2::<4>(&self.lo, &self.hi, hay, q, to, &mut cands),
+                        }
+                    };
+                    for &c in &cands[..k.min(CAND_CAP)] {
+                        self.emit((c >> 8) as usize, c as u8, &mut f);
                     }
-                };
+                    if next == q {
+                        break;
+                    }
+                    q = next;
+                }
             }
         }
         while q < to {
@@ -254,67 +264,99 @@ impl Teddy {
             q += 1;
         }
     }
+}
 
-    /// Processes 32 positions per step while all loads stay inside `hay`; returns the
-    /// first unprocessed position.
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
-    unsafe fn find_avx2<const M: usize, F: FnMut(usize, u32)>(
-        &self,
-        hay: &[u8],
-        mut q: usize,
-        to: usize,
-        f: &mut F,
-    ) -> usize {
-        let n = hay.len();
-        let ptr = hay.as_ptr();
-        let nib = _mm256_set1_epi8(0x0f);
-        let zero = _mm256_setzero_si256();
-        let mut lo = [zero; MAX_WINDOW];
-        let mut hi = [zero; MAX_WINDOW];
-        for j in 0..M {
-            // SAFETY: 16-byte arrays; unaligned loads.
-            unsafe {
-                lo[j] = _mm256_broadcastsi128_si256(_mm_loadu_si128(self.lo[j].as_ptr() as *const __m128i));
-                hi[j] = _mm256_broadcastsi128_si256(_mm_loadu_si128(self.hi[j].as_ptr() as *const __m128i));
-            }
+/// Candidate buffer of the SIMD core: `position << 8 | bucket bits`.
+const CAND_CAP: usize = 256;
+
+/// The SIMD loop, kept out of line so the eight nibble tables stay in registers:
+/// processes 64 positions per step from `q` while all loads stay inside `hay` and
+/// the candidate buffer has room. Returns (next position, candidates written).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline(never)]
+unsafe fn core_avx2<const M: usize>(
+    lo_t: &[[u8; 16]; MAX_WINDOW],
+    hi_t: &[[u8; 16]; MAX_WINDOW],
+    hay: &[u8],
+    mut q: usize,
+    to: usize,
+    out: &mut [u64; CAND_CAP],
+) -> (usize, usize) {
+    let n = hay.len();
+    let ptr = hay.as_ptr();
+    let nib = _mm256_set1_epi8(0x0f);
+    let zero = _mm256_setzero_si256();
+    let mut lo = [zero; MAX_WINDOW];
+    let mut hi = [zero; MAX_WINDOW];
+    for j in 0..M {
+        // SAFETY: 16-byte arrays; unaligned loads.
+        unsafe {
+            lo[j] = _mm256_broadcastsi128_si256(_mm_loadu_si128(lo_t[j].as_ptr() as *const __m128i));
+            hi[j] = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_t[j].as_ptr() as *const __m128i));
         }
-        let mut buf = [0u8; 32];
-        // Loads touch [q, q + 32 + M - 1).
-        while q + 32 <= to && q + 32 + M - 1 <= n {
-            // SAFETY: bounds checked by the loop condition.
-            let acc = unsafe {
-                let v = _mm256_loadu_si256(ptr.add(q) as *const __m256i);
-                let mut acc = _mm256_and_si256(
-                    _mm256_shuffle_epi8(lo[0], _mm256_and_si256(v, nib)),
-                    _mm256_shuffle_epi8(hi[0], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
-                );
-                let mut j = 1;
-                while j < M {
-                    let v = _mm256_loadu_si256(ptr.add(q + j) as *const __m256i);
-                    let r = _mm256_and_si256(
-                        _mm256_shuffle_epi8(lo[j], _mm256_and_si256(v, nib)),
-                        _mm256_shuffle_epi8(hi[j], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
-                    );
-                    acc = _mm256_and_si256(acc, r);
-                    j += 1;
-                }
-                acc
-            };
-            let mut mask = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(acc, zero)) as u32);
-            if mask != 0 {
-                // SAFETY: 32-byte buffer.
-                unsafe { _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, acc) };
-                while mask != 0 {
-                    let k = mask.trailing_zeros() as usize;
-                    mask &= mask - 1;
-                    self.emit(q + k, buf[k], f);
-                }
-            }
-            q += 32;
-        }
-        q
     }
+    let classify = |p: usize| -> __m256i {
+        // SAFETY: the caller guarantees p + 32 + M - 1 <= n.
+        unsafe {
+            let v = _mm256_loadu_si256(ptr.add(p) as *const __m256i);
+            let mut acc = _mm256_and_si256(
+                _mm256_shuffle_epi8(lo[0], _mm256_and_si256(v, nib)),
+                _mm256_shuffle_epi8(hi[0], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
+            );
+            let mut j = 1;
+            while j < M {
+                let v = _mm256_loadu_si256(ptr.add(p + j) as *const __m256i);
+                let r = _mm256_and_si256(
+                    _mm256_shuffle_epi8(lo[j], _mm256_and_si256(v, nib)),
+                    _mm256_shuffle_epi8(hi[j], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
+                );
+                acc = _mm256_and_si256(acc, r);
+                j += 1;
+            }
+            acc
+        }
+    };
+    let mut k = 0usize;
+    let mut buf = [0u8; 64];
+    // Loads touch [q, q + 64 + M - 1).
+    while q + 64 <= to && q + 64 + M - 1 <= n && k + 64 <= CAND_CAP {
+        let a = classify(q);
+        let b = classify(q + 32);
+        let ma = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, zero)) as u32) as u64;
+        let mb = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(b, zero)) as u32) as u64;
+        let mut mask = ma | mb << 32;
+        if mask != 0 {
+            // SAFETY: 64-byte buffer.
+            unsafe {
+                _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, a);
+                _mm256_storeu_si256(buf.as_mut_ptr().add(32) as *mut __m256i, b);
+            }
+            while mask != 0 {
+                let i = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                out[k] = ((q + i) as u64) << 8 | buf[i] as u64;
+                k += 1;
+            }
+        }
+        q += 64;
+    }
+    while q + 32 <= to && q + 32 + M - 1 <= n && k + 32 <= CAND_CAP {
+        let a = classify(q);
+        let mut mask = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, zero)) as u32);
+        if mask != 0 {
+            // SAFETY: 64-byte buffer.
+            unsafe { _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, a) };
+            while mask != 0 {
+                let i = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                out[k] = ((q + i) as u64) << 8 | buf[i] as u64;
+                k += 1;
+            }
+        }
+        q += 32;
+    }
+    (q, k)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -379,6 +421,27 @@ mod tests {
                     assert!(hay[q..].starts_with(&pats[id as usize]));
                 }
             }
+        }
+    }
+
+    /// Core throughput on an in-cache-ish 32 MiB buffer with no candidates.
+    #[test]
+    #[ignore]
+    fn yara_teddy_core_speed() {
+        let hay: Vec<u8> = (0..std::env::var("TEDDY_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32) << 20).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8 & 0x7f).collect();
+        let t4 = Teddy::new(&[win(b"\xf1\xf2\xf3\xf4")], &[0]);
+        let t3 = Teddy::new(&[win(b"\xf1\xf2\xf3")], &[0]);
+        let t2 = Teddy::new(&[win(b"\xf1\xf2")], &[0]);
+        for i in 0..9 {
+            let t = [&t4, &t3, &t2][i % 3];
+            let reps = (512usize << 20) / hay.len();
+            let t0 = std::time::Instant::now();
+            let mut n = 0usize;
+            for _ in 0..reps {
+                t.find(&hay, 0, hay.len(), |_, _| n += 1);
+            }
+            let dt = t0.elapsed().as_secs_f64();
+            eprintln!("teddy core m={}: {:.1} GB/s ({n})", t.m, (hay.len() * reps) as f64 / dt / 1e9);
         }
     }
 }

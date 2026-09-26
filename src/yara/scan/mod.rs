@@ -13,6 +13,7 @@
 //!   `base64wide`, `private`;
 //! * hex / regex strings go through [`re_string::ReString`].
 
+pub mod freq;
 pub mod hashf;
 pub mod literal;
 mod matcher;

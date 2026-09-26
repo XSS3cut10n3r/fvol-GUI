@@ -12,6 +12,7 @@
 //!
 //! Data is processed in L2-sized blocks so every engine pass reads cached memory.
 
+use super::freq;
 use super::hashf::HashFilter;
 use super::literal::{self, TextStr, eq_at};
 use super::re_string::{ReState, ReString};
@@ -48,6 +49,43 @@ struct Pat {
     /// Window (engine fingerprint) offset inside the pattern and its length.
     w: u32,
     wlen: u32,
+    /// Quick window test at the candidate position (4-byte windows only):
+    /// `(word | wfold) & wmask == wval`; `wmask == 0` disables it.
+    wval: u32,
+    wfold: u32,
+    wmask: u32,
+}
+
+impl Pat {
+    fn new(string: u32, sub: u32, off: usize, pat: &[u8], fold: &[u8], w: usize, wlen: usize) -> Pat {
+        let (mut wval, mut wfold, mut wmask) = (0, 0, 0);
+        if wlen == 4 {
+            let le = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            wval = le(&pat[w..w + 4]);
+            wfold = le(&fold[w..w + 4]);
+            wmask = u32::MAX;
+        }
+        Pat {
+            string,
+            sub,
+            off: off as u32,
+            len: pat.len() as u32,
+            w: w as u32,
+            wlen: wlen as u32,
+            wval,
+            wfold,
+            wmask,
+        }
+    }
+
+    /// Cheap rejection of engine false positives: the window bytes at `q`.
+    #[inline(always)]
+    fn window_ok(&self, data: &[u8], q: usize) -> bool {
+        match data.get(q..q + 4) {
+            Some(b) => (u32::from_le_bytes([b[0], b[1], b[2], b[3]]) | self.wfold) & self.wmask == self.wval,
+            None => true,
+        }
+    }
 }
 
 /// Candidate search engine over one byte domain.
@@ -126,17 +164,20 @@ fn freq(b: u8, fold: bool) -> f64 {
     f
 }
 
-/// Rarest window (by memory byte frequency) of at most 4 bytes: (offset, length).
-fn best_window(pat: &[u8], fold: &[u8]) -> (usize, usize) {
+/// Rarest window of at most 4 bytes: (offset, length). Raw-domain windows are rated
+/// with the byte-pair statistics of real memory (`markov`), difference-stream windows
+/// with single-byte frequencies.
+fn best_window(pat: &[u8], fold: &[u8], markov: bool) -> (usize, usize) {
     let m = pat.len();
     let wl = m.min(teddy::MAX_WINDOW);
     let mut best = f64::MAX;
     let mut bw = 0;
     for w in 0..=(m - wl) {
-        let mut c = 1.0;
-        for j in 0..wl {
-            c *= freq(pat[w + j], fold[w + j] != 0);
-        }
+        let c = if markov {
+            freq::window_prob(&pat[w..w + wl], &fold[w..w + wl])
+        } else {
+            (0..wl).map(|j| freq(pat[w + j], fold[w + j] != 0)).product()
+        };
         if c < best {
             best = c;
             bw = w;
@@ -333,15 +374,8 @@ impl Matcher {
                         } else if c.len() >= 2 {
                             let d: Vec<u8> = c.pat.windows(2).map(|w| w[0] ^ w[1]).collect();
                             let zero = vec![0u8; d.len()];
-                            let (w, wl) = best_window(&d, &zero);
-                            m.dpats.push(Pat {
-                                string: si,
-                                sub: ci as u32,
-                                off: dbytes.len() as u32,
-                                len: d.len() as u32,
-                                w: w as u32,
-                                wlen: wl as u32,
-                            });
+                            let (w, wl) = best_window(&d, &zero, false);
+                            m.dpats.push(Pat::new(si, ci as u32, dbytes.len(), &d, &zero, w, wl));
                             dbytes.extend_from_slice(&d);
                         } else if !m.every_text.contains(&si) {
                             m.every_text.push(si);
@@ -382,15 +416,8 @@ impl Matcher {
     }
 
     fn add_pat(&mut self, string: u32, sub: u32, pat: &[u8], fold: &[u8]) {
-        let (w, wl) = best_window(pat, fold);
-        self.pats.push(Pat {
-            string,
-            sub,
-            off: self.bytes.len() as u32,
-            len: pat.len() as u32,
-            w: w as u32,
-            wlen: wl as u32,
-        });
+        let (w, wl) = best_window(pat, fold, true);
+        self.pats.push(Pat::new(string, sub, self.bytes.len(), pat, fold, w, wl));
         self.bytes.extend_from_slice(pat);
         self.folds.extend_from_slice(fold);
     }
@@ -409,8 +436,10 @@ impl Matcher {
         let mut st = 0u32;
         let mut raw = 0usize;
         let mut verified = 0usize;
+        let mut per = vec![0usize; self.pats.len()];
         self.raw.run(data, 0, data.len(), &mut st, |q, p| {
             raw += 1;
+            per[p as usize] += 1;
             let pat = &self.pats[p as usize];
             if let Some(s) = q.checked_sub(pat.w as usize) {
                 let (a, e) = (pat.off as usize, (pat.off + pat.len) as usize);
@@ -419,8 +448,20 @@ impl Matcher {
                 }
             }
         });
+        let mut top: Vec<(usize, usize)> = per.iter().copied().enumerate().filter(|x| x.1 > 0).collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        let top: Vec<String> = top
+            .iter()
+            .take(8)
+            .map(|&(p, c)| {
+                let pt = &self.pats[p];
+                let a = (pt.off + pt.w) as usize;
+                format!("{:?}:{c}", String::from_utf8_lossy(&self.bytes[a..a + pt.wlen as usize]))
+            })
+            .collect();
         format!(
-            "raw: {} pats, {}, {} candidates, {} verified; diff: {} pats, {}",
+            "top windows {}\nraw: {} pats, {}, {} candidates, {} verified; diff: {} pats, {}",
+            top.join(" "),
             self.pats.len(),
             kind(&self.raw),
             raw,
@@ -575,6 +616,9 @@ impl Matcher {
     #[inline]
     fn on_raw(&self, data: &[u8], q: usize, p: u32, out: &mut [Vec<Match>], sc: &mut Scratch) {
         let Some(pat) = self.pats.get(p as usize) else { return };
+        if !pat.window_ok(data, q) {
+            return;
+        }
         let Some(s) = q.checked_sub(pat.w as usize) else { return };
         let si = pat.string as usize;
         if sc.disabled[si] {

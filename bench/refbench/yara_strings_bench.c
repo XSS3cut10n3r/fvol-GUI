@@ -4,7 +4,8 @@
 //   ./yara_strings_bench RULES.yar IMAGE [OFF LEN CHUNK]
 //
 // Maps IMAGE, scans [OFF, OFF+LEN) in CHUNK+4096-byte windows advancing by CHUNK (like
-// volatility's scanner; CHUNK=0 scans the range in one call), best of 4 passes, and
+// volatility's scanner; CHUNK=0 scans the range in one call), best of 6 passes (thread
+// CPU time, robust on a busy machine), and
 // prints MB/s plus the number of matches per string (offset < CHUNK within a window).
 #include <fcntl.h>
 #include <stdio.h>
@@ -79,11 +80,12 @@ int main(int argc, char** argv)
   yr_scanner_set_callback(sc, cb, NULL);
   yr_scanner_set_flags(sc, SCAN_FLAGS_REPORT_RULES_MATCHING | SCAN_FLAGS_REPORT_RULES_NOT_MATCHING);
   double best = 1e30;
-  for (int pass = 0; pass < 4; pass++)
+  for (int pass = 0; pass < 6; pass++)
   {
     for (int i = 0; i < 4096; i++) counts[i] = 0;
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    struct timespec t0, t1, w0, w1;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t0);
+    clock_gettime(CLOCK_MONOTONIC, &w0);
     size_t p = 0;
     for (;;)
     {
@@ -94,9 +96,11 @@ int main(int argc, char** argv)
         break;
       p += chunk;
     }
-    clock_gettime(CLOCK_MONOTONIC, &t1);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t1);
+    clock_gettime(CLOCK_MONOTONIC, &w1);
     double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-    fprintf(stderr, "pass %d: %.3f s  %.0f MB/s\n", pass, dt, len / dt / 1e6);
+    double wall = (w1.tv_sec - w0.tv_sec) + (w1.tv_nsec - w0.tv_nsec) / 1e9;
+    fprintf(stderr, "pass %d: cpu %.3f s (wall %.3f)  %.0f MB/s\n", pass, dt, wall, len / dt / 1e6);
     if (dt < best)
       best = dt;
   }
