@@ -14,6 +14,9 @@
 //! * [`lznt1::decompress`] — NTFS / RtlDecompressBuffer LZNT1.
 //! * [`snappy`], [`xpress`] — owned by the formats agent (memory image containers).
 //! * [`crc`] — CRC-32, CRC-64/XZ, CRC-32/BZIP2 (PCLMULQDQ folding).
+//! * [`zlib_exact`] — byte-exact zlib 1.3.2 compressor ([`zlib_exact::Deflater`],
+//!   [`zlib_exact::compress`]) for reproducing files python writes through zlib.
+//! * [`png::png_rgba_pillow`] — Pillow 12.3.0's PNG file for an RGBA image, byte for byte.
 //!
 //! Encoders (streaming ones are `std::io::Write` + `finish() -> io::Result<W>`, compress on
 //! worker threads with bounded memory, and produce output independent of the thread count):
@@ -27,8 +30,8 @@
 //!   block-parallel.
 //!
 //! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/codecs_run.sh` (decoders),
-//! `bench/refbench/codecs_enc_run.sh` (encoders); system-tool / python round trips:
-//! `bench/refbench/codecs_enc_verify.sh`.
+//! `bench/refbench/codecs_enc_run.sh` (encoders), `bench/refbench/zlib_exact_run.sh`
+//! (zlib_exact / png); system-tool / python round trips: `bench/refbench/codecs_enc_verify.sh`.
 
 #![allow(dead_code, unexpected_cfgs)]
 

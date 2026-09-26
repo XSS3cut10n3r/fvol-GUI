@@ -31,6 +31,9 @@ const MAXBLOCK: usize = 65536;
 /// `rgba` (row-major, 4 bytes per pixel). Missing trailing bytes count as 0 (the value of
 /// pixels `Image.new` leaves unset). Pillow refuses to save an empty image ("cannot write
 /// empty image"): for `width == 0 || height == 0` this returns an empty Vec.
+///
+/// Callers converting `putpixel((r, g, b, a))` values: Pillow saturates channel values above
+/// 255 to 255 (e.g. wide framebuffer bitfields), so store `v.min(255) as u8`.
 pub fn png_rgba_pillow(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     if width == 0 || height == 0 {
         return Vec::new();
@@ -71,22 +74,64 @@ fn idat_stream(w: usize, h: usize, rgba: &[u8]) -> Vec<u8> {
     let mut d = Deflater::new(6, 15, 9, Z_FILTERED).expect("valid zlib parameters");
     // Filtered image data is typically well compressible; start with a quarter.
     let mut z = Vec::with_capacity((stride + 1) * h / 4 + 1024);
-    let mut prev = vec![0u8; stride];
-    let mut pad = Vec::new();
-    let mut filtered = vec![0u8; stride + 1];
-    for y in 0..h {
-        let start = y * stride;
-        let row: &[u8] = if start + stride <= rgba.len() {
-            &rgba[start..start + stride]
+    // Rows are read in place. A short `rgba` is padded with zeros (unset pixels): the row
+    // holding its tail is copied, rows after it are all zero like the initial previous row.
+    let zero = vec![0u8; stride];
+    let full = (rgba.len() / stride).min(h);
+    let mut tail_row = Vec::new();
+    if full < h {
+        tail_row = zero.clone();
+        let tail = &rgba[full * stride..];
+        tail_row[..tail.len()].copy_from_slice(tail);
+    }
+    let row = |y: usize| -> &[u8] {
+        if y < full {
+            &rgba[y * stride..(y + 1) * stride]
+        } else if y == full {
+            &tail_row
         } else {
-            pad.clear();
-            pad.extend_from_slice(rgba.get(start..).unwrap_or(&[]));
-            pad.resize(stride, 0);
-            &pad
-        };
-        filter_row(row, &prev, &mut filtered);
-        d.deflate_vec(&filtered, &mut z, Z_NO_FLUSH);
-        prev.copy_from_slice(row);
+            &zero
+        }
+    };
+    let filter_rows = |y0: usize, y1: usize, buf: &mut Vec<u8>| {
+        buf.resize((y1 - y0) * (stride + 1), 0);
+        for (y, out) in (y0..y1).zip(buf.chunks_exact_mut(stride + 1)) {
+            let prev = if y == 0 { &zero[..] } else { row(y - 1) };
+            filter_row(row(y), prev, out);
+        }
+    };
+    // Rows are filtered on a helper thread, a chunk ahead of the (sequential, exact) deflate
+    // that consumes them: filtering then costs no wall time.
+    let chunk_rows = ((256 << 10) / (stride + 1)).max(1);
+    let nchunks = h.div_ceil(chunk_rows);
+    if nchunks < 3 || crate::util::par::threads() < 2 {
+        let mut buf = Vec::new();
+        for c in 0..nchunks {
+            filter_rows(c * chunk_rows, ((c + 1) * chunk_rows).min(h), &mut buf);
+            for r in buf.chunks_exact(stride + 1) {
+                d.deflate_vec(r, &mut z, Z_NO_FLUSH);
+            }
+        }
+    } else {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(3);
+        let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                for c in 0..nchunks {
+                    let mut buf = back_rx.try_recv().unwrap_or_default();
+                    filter_rows(c * chunk_rows, ((c + 1) * chunk_rows).min(h), &mut buf);
+                    if tx.send(buf).is_err() {
+                        return;
+                    }
+                }
+            });
+            for buf in rx.iter() {
+                for r in buf.chunks_exact(stride + 1) {
+                    d.deflate_vec(r, &mut z, Z_NO_FLUSH);
+                }
+                let _ = back_tx.send(buf);
+            }
+        });
     }
     d.deflate_vec(&[], &mut z, Z_FINISH);
     z
@@ -116,47 +161,72 @@ fn paeth(x: u8, a: u8, b: u8, c: u8) -> u8 {
     x.wrapping_sub(p)
 }
 
+const BPP: usize = 4;
+
+/// Sums of distances from zero of the None, Up and Sub filtered row, in one pass.
+fn sums_none_up_sub(row: &[u8], prev: &[u8]) -> (u64, u64, u64) {
+    let n = row.len();
+    let prev = &prev[..n];
+    let head = n.min(BPP);
+    let (mut s_none, mut s_up, mut s_sub) = (0u64, 0u64, 0u64);
+    for i in 0..head {
+        s_none += dist(row[i]) as u64;
+        s_up += dist(row[i].wrapping_sub(prev[i])) as u64;
+        s_sub += dist(row[i]) as u64;
+    }
+    // Blocks of at most 2^16 bytes keep the u32 lane sums from overflowing (2^16 * 128).
+    let mut i = head;
+    while i < n {
+        let end = (i + (1 << 16)).min(n);
+        let (mut a0, mut a1, mut a2) = (0u32, 0u32, 0u32);
+        let (x, a, b) = (&row[i..end], &row[i - BPP..end - BPP], &prev[i..end]);
+        for j in 0..x.len() {
+            a0 += dist(x[j]);
+            a1 += dist(x[j].wrapping_sub(b[j]));
+            a2 += dist(x[j].wrapping_sub(a[j]));
+        }
+        s_none += a0 as u64;
+        s_up += a1 as u64;
+        s_sub += a2 as u64;
+        i = end;
+    }
+    (s_none, s_up, s_sub)
+}
+
+/// Writes the Paeth-filtered row to `o` and returns its sum of distances from zero.
+fn paeth_into(row: &[u8], prev: &[u8], o: &mut [u8]) -> u64 {
+    let n = row.len();
+    let (prev, o) = (&prev[..n], &mut o[..n]);
+    let head = n.min(BPP);
+    let mut s = 0u64;
+    for i in 0..head {
+        // a = c = 0: the predictor is b
+        o[i] = row[i].wrapping_sub(prev[i]);
+        s += dist(o[i]) as u64;
+    }
+    let mut i = head;
+    while i < n {
+        let end = (i + (1 << 16)).min(n);
+        let mut acc = 0u32;
+        let (x, a, b, c) = (&row[i..end], &row[i - BPP..end - BPP], &prev[i..end], &prev[i - BPP..end - BPP]);
+        let o = &mut o[i..end];
+        for j in 0..x.len() {
+            let v = paeth(x[j], a[j], b[j], c[j]);
+            o[j] = v;
+            acc += dist(v);
+        }
+        s += acc as u64;
+        i = end;
+    }
+    s
+}
+
 /// Pillow's adaptive filter choice for one scanline; writes filter byte + filtered data to
 /// `out` (len = row.len() + 1). Pixels are 4 bytes (bpp = 4).
 fn filter_row(row: &[u8], prev: &[u8], out: &mut [u8]) {
-    const BPP: usize = 4;
     let n = row.len();
     let (row, prev) = (&row[..n], &prev[..n]);
-    // All four sums in one pass over the row (the C code computes each candidate filter only
-    // while the best sum is > 0; computing all of them does not change the decision below).
-    let (mut s_none, mut s_up, mut s_sub, mut s_paeth) = (0u64, 0u64, 0u64, 0u64);
-    let head = n.min(BPP);
-    for i in 0..head {
-        let x = row[i];
-        s_none += dist(x) as u64;
-        let up = x.wrapping_sub(prev[i]);
-        s_up += dist(up) as u64;
-        s_sub += dist(x) as u64;
-        s_paeth += dist(up) as u64;
-    }
-    if n > BPP {
-        // Chunked so the u32 lane sums cannot overflow (4096 * 128 < 2^32).
-        let mut i = BPP;
-        while i < n {
-            let end = (i + 4096).min(n);
-            let (mut a0, mut a1, mut a2, mut a3) = (0u32, 0u32, 0u32, 0u32);
-            for j in i..end {
-                let x = row[j];
-                let a = row[j - BPP];
-                let b = prev[j];
-                let c = prev[j - BPP];
-                a0 += dist(x);
-                a1 += dist(x.wrapping_sub(b));
-                a2 += dist(x.wrapping_sub(a));
-                a3 += dist(paeth(x, a, b, c));
-            }
-            s_none += a0 as u64;
-            s_up += a1 as u64;
-            s_sub += a2 as u64;
-            s_paeth += a3 as u64;
-            i = end;
-        }
-    }
+    let (s_none, s_up, s_sub) = sums_none_up_sub(row, prev);
     let mut best = 0u8;
     let mut sum = s_none;
     if sum > 0 && s_up < sum {
@@ -167,11 +237,15 @@ fn filter_row(row: &[u8], prev: &[u8], out: &mut [u8]) {
         best = 1;
         sum = s_sub;
     }
-    if sum > 0 && s_paeth < sum {
-        best = 4;
+    let (f, o) = out.split_at_mut(1);
+    let o = &mut o[..n];
+    // Paeth is tried last and only while the best sum is still > 0.
+    if sum > 0 && paeth_into(row, prev, o) < sum {
+        f[0] = 4;
+        return;
     }
-    out[0] = best;
-    let o = &mut out[1..n + 1];
+    f[0] = best;
+    let head = n.min(BPP);
     match best {
         0 => o.copy_from_slice(row),
         2 => {
@@ -179,18 +253,10 @@ fn filter_row(row: &[u8], prev: &[u8], out: &mut [u8]) {
                 o[i] = row[i].wrapping_sub(prev[i]);
             }
         }
-        1 => {
+        _ => {
             o[..head].copy_from_slice(&row[..head]);
             for i in head..n {
                 o[i] = row[i].wrapping_sub(row[i - BPP]);
-            }
-        }
-        _ => {
-            for i in 0..head {
-                o[i] = row[i].wrapping_sub(prev[i]);
-            }
-            for i in head..n {
-                o[i] = paeth(row[i], row[i - BPP], prev[i], prev[i - BPP]);
             }
         }
     }
@@ -281,6 +347,43 @@ mod tests {
         }
         println!("png_pillow_corpus: {} images, {} mismatches", names.len(), bad);
         assert!(!names.is_empty() && bad == 0);
+    }
+
+    /// PNG_BENCH=DIR/NAME_WxH.rgba [PNG_RUNS=N]: best-of-N time of png_rgba_pillow. Prints
+    /// "rust png NAME BYTES BEST_MS".
+    #[test]
+    #[ignore]
+    fn png_bench() {
+        let Ok(path) = std::env::var("PNG_BENCH") else {
+            eprintln!("set PNG_BENCH");
+            return;
+        };
+        let runs: usize = std::env::var("PNG_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+        let p = std::path::Path::new(&path);
+        let stem = p.file_stem().unwrap().to_string_lossy().to_string();
+        let (w, h) = stem.rsplit('_').next().unwrap().split_once('x').unwrap();
+        let (w, h): (u32, u32) = (w.parse().unwrap(), h.parse().unwrap());
+        let rgba = std::fs::read(p).unwrap();
+        let mut best = f64::MAX;
+        let mut n = 0;
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            let png = png_rgba_pillow(w, h, &rgba);
+            best = best.min(t.elapsed().as_secs_f64());
+            n = png.len();
+        }
+        println!("rust png {stem} {n} {:.3}", best * 1e3);
+    }
+
+    #[test]
+    fn short_buffer_is_zero_padded() {
+        let (w, h) = (13usize, 9usize);
+        let px = lcg_bytes(w * h * 4, 3);
+        for cut in [0, 1, 52, 53, w * 4 * 3 + 7, w * h * 4 - 1] {
+            let mut padded = px[..cut].to_vec();
+            padded.resize(w * h * 4, 0);
+            assert!(png_rgba_pillow(w as u32, h as u32, &px[..cut]) == png_rgba_pillow(w as u32, h as u32, &padded), "cut {cut}");
+        }
     }
 
     #[test]

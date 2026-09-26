@@ -600,3 +600,87 @@ fn codecs_enc_bench_file() {
         best_counts[2]
     );
 }
+
+/// zlib_exact profile: compresses ZX_FILE (ZX_PARAMS "level,wbits,memlevel,strategy",
+/// ZX_ROWLEN = bytes per deflate(Z_NO_FLUSH) call, 0 = one Z_FINISH call) CODECS_RUNS times,
+/// prints user cycles / instructions / branch misses of the best run and, with
+/// CODECS_PROFILE_OUT set, writes an IP sample histogram like `codecs_profile_file`.
+#[test]
+#[ignore]
+fn zlib_exact_profile() {
+    use super::zlib_exact::{Deflater, Z_FINISH, Z_NO_FLUSH};
+    let Ok(file) = std::env::var("ZX_FILE") else {
+        eprintln!("set ZX_FILE");
+        return;
+    };
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+    let p: Vec<i32> =
+        std::env::var("ZX_PARAMS").unwrap_or_else(|_| "6,15,8,0".into()).split(',').map(|s| s.parse().unwrap()).collect();
+    let rowlen = env("ZX_ROWLEN", 0) as usize;
+    let runs = env("CODECS_RUNS", 3);
+    let data = std::fs::read(&file).unwrap();
+    let run = |out: &mut Vec<u8>| {
+        let mut d = Deflater::new(p[0], p[1], p[2], p[3]).unwrap();
+        if rowlen > 0 {
+            for row in data.chunks(rowlen) {
+                d.deflate_vec(row, out, Z_NO_FLUSH);
+            }
+            d.deflate_vec(&[], out, Z_FINISH);
+        } else {
+            d.deflate_vec(&data, out, Z_FINISH);
+        }
+    };
+    let mut out = Vec::with_capacity(data.len() + 4096);
+    if let Some(c) = perf::Counters::open() {
+        let mut best = [u64::MAX; 3];
+        for _ in 0..runs {
+            out.clear();
+            c.start();
+            run(&mut out);
+            let v = c.stop();
+            if v[0] < best[0] {
+                best = v;
+            }
+        }
+        println!(
+            "zlib_exact {file}: {} bytes -> {}: {:.2} cycles/B, {:.2} instr/B, {:.3} br-miss/B",
+            data.len(),
+            out.len(),
+            best[0] as f64 / data.len() as f64,
+            best[1] as f64 / data.len() as f64,
+            best[2] as f64 / data.len() as f64
+        );
+    }
+    let Ok(outp) = std::env::var("CODECS_PROFILE_OUT") else { return };
+    let event = env("CODECS_PROFILE_EVENT", 0);
+    let period = env("CODECS_PROFILE_PERIOD", if event == 0 { 20011 } else { 211 });
+    let mut s = perf::Sampler::open(event, period).expect("perf_event_open (sampling) failed");
+    let mut hist: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    for _ in 0..runs {
+        out.clear();
+        s.start();
+        run(&mut out);
+        s.stop();
+        s.drain(&mut hist);
+    }
+    let exe = std::fs::read_link("/proc/self/exe").unwrap();
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    let base = maps
+        .lines()
+        .filter(|l| l.ends_with(&*exe.to_string_lossy()))
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let range = it.next()?;
+            let _perms = it.next()?;
+            let off = u64::from_str_radix(it.next()?, 16).ok()?;
+            let start = u64::from_str_radix(range.split('-').next()?, 16).ok()?;
+            (off == 0).then_some(start)
+        })
+        .min()
+        .unwrap();
+    let mut v: Vec<(u64, u64)> = hist.into_iter().map(|(ip, n)| (ip.wrapping_sub(base), n)).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    let text: String = v.iter().map(|(a, n)| format!("{a:#x} {n}\n")).collect();
+    std::fs::write(&outp, text).unwrap();
+    println!("profile: {} samples -> {outp} (exe {})", v.iter().map(|x| x.1).sum::<u64>(), exe.display());
+}

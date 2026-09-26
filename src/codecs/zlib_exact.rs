@@ -678,8 +678,21 @@ pub struct Deflater {
     w_bits: u32,
     window: Vec<u8>,
     window_size: usize,
+    /// zlib's `prev` (3-byte hash chains, window index -> previous position).
     prev: Vec<u16>,
-    head: Vec<u16>,
+    /// zlib's `head` in the low 16 bits; in 6-byte-chain mode the high 16 bits count the
+    /// insertions into the bucket (mod 2^16), see [`Deflater::longest_match6`].
+    head: Vec<u32>,
+    /// 6-byte-chain mode (Z_FILTERED with deflate_slow, no mid-stream flush so far).
+    f6: bool,
+    /// Heads of the 6-byte hash chains (positions).
+    head6: Vec<u16>,
+    /// Per window index: previous position with the same 6-byte hash (low 16 bits) and the
+    /// 3-byte bucket insertion count of this position (high 16 bits).
+    link6: Vec<u32>,
+    /// Position whose 6-byte hash `pre_h6` was computed ahead (see prefetch_buckets).
+    pre_p: usize,
+    pre_h6: usize,
     ins_h: u32,
     hash_mask: u32,
     hash_shift: u32,
@@ -752,7 +765,10 @@ impl Deflater {
         let hash_size = 1usize << hash_bits;
         let lit_bufsize = 1usize << (mem_level + 6);
         let pending_buf_size = lit_bufsize * 4;
-        let (good, lazy, nice, chain, _) = CONFIG[level as usize];
+        let (good, lazy, nice, chain, func) = CONFIG[level as usize];
+        // Z_FILTERED discards every deflate_slow match shorter than 6 bytes, which lets the
+        // match search walk 6-byte hash chains instead of zlib's 3-byte ones (same result).
+        let f6 = strategy == Z_FILTERED && func == Func::Slow;
         let mut s = Deflater {
             total_in: 0,
             total_out: 0,
@@ -771,6 +787,11 @@ impl Deflater {
             window_size: 2 * w_size,
             prev: vec![0; w_size],
             head: vec![0; hash_size],
+            f6,
+            head6: if f6 { vec![0; 1 << HASH6_BITS] } else { Vec::new() },
+            link6: if f6 { vec![0; w_size] } else { Vec::new() },
+            pre_p: usize::MAX,
+            pre_h6: 0,
             ins_h: 0,
             hash_mask: hash_size as u32 - 1,
             hash_shift: (hash_bits + MIN_MATCH as u32 - 1) / MIN_MATCH as u32,
@@ -867,6 +888,11 @@ impl Deflater {
         }
         let old_flush = self.last_flush;
         self.last_flush = flush;
+        // The 6-byte chains need every inserted position to have 6 valid bytes when more
+        // input follows; only a mid-stream flush breaks that (zlib's own chains stay exact).
+        if self.f6 && flush != Z_NO_FLUSH && flush != Z_FINISH {
+            self.f6 = false;
+        }
 
         if self.pend.pending() != 0 {
             self.flush_pending(io);
@@ -945,8 +971,10 @@ impl Deflater {
                 self.deflate_rle(io, flush)
             } else if CONFIG[self.level as usize].4 == Func::Fast {
                 self.deflate_fast(io, flush)
+            } else if self.f6 {
+                self.deflate_slow::<S, true>(io, flush)
             } else {
-                self.deflate_slow(io, flush)
+                self.deflate_slow::<S, false>(io, flush)
             };
             if bstate == BlockState::FinishStarted || bstate == BlockState::FinishDone {
                 self.status = FINISH_STATE;
@@ -1009,12 +1037,19 @@ impl Deflater {
     }
 
     fn slide_hash(&mut self) {
-        let wsize = self.w_size as u16;
+        let wsize = self.w_size as u32;
+        // positions in the low 16 bits (counts above them are kept)
         for h in self.head.iter_mut() {
-            *h = h.saturating_sub(wsize);
+            *h = (*h & 0xffff_0000) | (*h & 0xffff).saturating_sub(wsize);
         }
         for p in self.prev.iter_mut() {
-            *p = p.saturating_sub(wsize);
+            *p = p.saturating_sub(wsize as u16);
+        }
+        for h in self.head6.iter_mut() {
+            *h = h.saturating_sub(wsize as u16);
+        }
+        for l in self.link6.iter_mut() {
+            *l = (*l & 0xffff_0000) | (*l & 0xffff).saturating_sub(wsize);
         }
     }
 
@@ -1023,15 +1058,229 @@ impl Deflater {
         ((h << self.hash_shift) ^ c as u32) & self.hash_mask
     }
 
-    /// INSERT_STRING: returns the previous head of the chain.
+    /// INSERT_STRING: returns the previous head of the chain. With `F6` also links `str` into
+    /// its 6-byte chain and counts the insertion in its 3-byte bucket.
     #[inline(always)]
-    fn insert_string(&mut self, str: usize) -> usize {
-        self.ins_h = self.update_hash(self.ins_h, self.window[str + (MIN_MATCH - 1)]);
-        let h = self.ins_h as usize;
-        let head = self.head[h];
-        self.prev[str & self.w_mask] = head;
-        self.head[h] = str as u16;
-        head as usize
+    fn insert_string<const F6: bool>(&mut self, str: usize) -> usize {
+        let wmask = self.w_mask;
+        // SAFETY: str + 7 < window.len() (str <= window_size - MIN_MATCH, 16 bytes of padding);
+        // h <= hash_mask < head.len(); str & wmask < w_size = prev.len() (= link6.len() in F6
+        // mode); h6 < 1 << HASH6_BITS = head6.len().
+        unsafe {
+            let c = *self.window.get_unchecked(str + (MIN_MATCH - 1));
+            self.ins_h = self.update_hash(self.ins_h, c);
+            let h = self.ins_h as usize;
+            let e = *self.head.get_unchecked(h);
+            let hh = e & 0xffff;
+            *self.prev.get_unchecked_mut(str & wmask) = hh as u16;
+            if F6 {
+                let cnt = e.wrapping_add(0x1_0000) & 0xffff_0000;
+                *self.head.get_unchecked_mut(h) = cnt | str as u32;
+                let h6 = if str == self.pre_p { self.pre_h6 } else { hash6(rd64u(self.window.as_ptr().add(str))) };
+                let p6 = *self.head6.get_unchecked(h6);
+                *self.head6.get_unchecked_mut(h6) = str as u16;
+                *self.link6.get_unchecked_mut(str & wmask) = cnt | p6 as u32;
+            } else {
+                *self.head.get_unchecked_mut(h) = str as u32;
+            }
+            hh as usize
+        }
+    }
+
+    /// Prefetches the hash buckets of position `p` = strstart + 1 (just after an insert at
+    /// strstart: the rolling hash continues from ins_h exactly like the next INSERT_STRING).
+    /// In F6 mode the 6-byte hash is kept for that insert when p's 8 bytes are final data.
+    #[inline(always)]
+    fn prefetch_buckets<const F6: bool>(&mut self, p: usize) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: p + 8 <= window.len() (p <= window_size - MIN_LOOKAHEAD + 1 in the callers'
+        // loops, 16 bytes of padding); bucket indices are masked; prefetch never faults.
+        unsafe {
+            use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+            let win = self.window.as_ptr();
+            let h = self.update_hash(self.ins_h, *win.add(p + (MIN_MATCH - 1)));
+            _mm_prefetch::<_MM_HINT_T0>(self.head.as_ptr().add(h as usize) as *const i8);
+            if F6 {
+                let h6 = hash6(rd64u(win.add(p)));
+                _mm_prefetch::<_MM_HINT_T0>(self.head6.as_ptr().add(h6) as *const i8);
+                // bytes p..p + 8 already hold input (not past the data end) and cannot change
+                // before a slide, which moves strstart away from p
+                self.pre_p = if self.lookahead >= 9 { p } else { usize::MAX };
+                self.pre_h6 = h6;
+            }
+        }
+    }
+
+    /// INSERT_STRING for every position in lo..=hi, in order (the insert loops after a match
+    /// at distance `dist`). Same effect as calling insert_string for each, but:
+    /// * the rolling hash is computed directly per position (no serial dependency) and the
+    ///   bucket written last is cached in registers (runs of equal hashes do not serialise on
+    ///   store-to-load forwarding);
+    /// * inside a region of period `d` (a run of one byte value for d = 1, verified on the
+    ///   window content; solid image areas filter to such runs, gradients to d = 4 patterns)
+    ///   every position has the buckets of the position d before it; when the first period's
+    ///   buckets are pairwise distinct, each later position's chain predecessor is p - d and its
+    ///   bucket count one more, so the tables are filled in bulk.
+    #[inline(always)]
+    fn insert_range<const F6: bool>(&mut self, lo: usize, hi: usize, dist: usize) {
+        if lo > hi {
+            return;
+        }
+        let wmask = self.w_mask;
+        let shift = self.hash_shift;
+        let hmask = self.hash_mask;
+        let mut ins_h = self.ins_h;
+        // SAFETY: hi + 16 <= window.len() + 3 (hi <= window_size - MIN_MATCH, 16 bytes of
+        // padding; the run/period scans read at most hi + 13); lo >= 1; bucket and window
+        // indices are masked to their table sizes (see insert_string).
+        unsafe {
+            let win = self.window.as_ptr();
+            let head = self.head.as_mut_ptr();
+            let prev = self.prev.as_mut_ptr();
+            let head6 = self.head6.as_mut_ptr();
+            let link6 = self.link6.as_mut_ptr();
+            // After three UPDATE_HASH steps the running hash only depends on the last three
+            // bytes (hash_shift * 3 >= hash_bits). If the incoming ins_h already is that
+            // function of window[lo - 1..lo + 2] (always, unless zlib left it stale), every
+            // position's hash can be computed directly.
+            let direct = |p: usize| -> u32 {
+                ((*win.add(p) as u32) << (2 * shift) ^ (*win.add(p + 1) as u32) << shift ^ *win.add(p + 2) as u32)
+                    & hmask
+            };
+            let consistent = ins_h == direct(lo - 1);
+            let mut p = lo;
+            let mut last_h = usize::MAX;
+            let mut cnt = 0u32;
+            let mut last_h6 = usize::MAX;
+            // One INSERT_STRING at p (hash, chain link, bucket count, 6-byte chain).
+            macro_rules! insert_one {
+                () => {{
+                    ins_h = if consistent || p >= lo + 2 {
+                        direct(p)
+                    } else {
+                        ((ins_h << shift) ^ *win.add(p + (MIN_MATCH - 1)) as u32) & hmask
+                    };
+                    let h = ins_h as usize;
+                    // the bucket written last holds position p - 1 (count cnt)
+                    let e = if h == last_h {
+                        cnt = cnt.wrapping_add(1);
+                        (p - 1) as u32
+                    } else {
+                        let e = *head.add(h);
+                        cnt = (e >> 16).wrapping_add(1);
+                        e
+                    };
+                    *prev.add(p & wmask) = e as u16;
+                    *head.add(h) = if F6 { cnt << 16 | p as u32 } else { p as u32 };
+                    last_h = h;
+                    if F6 {
+                        let h6 = hash6(rd64u(win.add(p)));
+                        let p6 = if h6 == last_h6 { (p - 1) as u32 } else { *head6.add(h6) as u32 };
+                        *head6.add(h6) = p as u16;
+                        last_h6 = h6;
+                        *link6.add(p & wmask) = (cnt << 16) | p6;
+                    }
+                    p += 1;
+                }};
+            }
+            if consistent {
+                let v = *win.add(lo);
+                let pat = v as u64 * 0x0101_0101_0101_0101;
+                if rd64u(win.add(lo)) == pat {
+                    // d = 1: window[lo..end] == v
+                    let mut end = lo + 8;
+                    let lim = hi + 6;
+                    while end < lim && rd64u(win.add(end)) == pat {
+                        end += 8;
+                    }
+                    while end < lim && *win.add(end) == v {
+                        end += 1;
+                    }
+                    let b = hi.min(end - 6); // positions lo..=b have 6 run bytes
+                    let h = direct(lo) as usize;
+                    let e = *head.add(h);
+                    let c0 = (e >> 16).wrapping_add(1);
+                    *prev.add(lo & wmask) = e as u16;
+                    fill_iota16(prev, wmask, lo + 1, b);
+                    cnt = c0.wrapping_add((b - lo) as u32);
+                    *head.add(h) = if F6 { cnt << 16 | b as u32 } else { b as u32 };
+                    if F6 {
+                        let h6 = hash6(pat);
+                        let p6 = *head6.add(h6) as u32;
+                        *link6.add(lo & wmask) = c0 << 16 | p6;
+                        fill_iota_link(link6, wmask, lo + 1, b, c0.wrapping_add(1) << 16 | lo as u32);
+                        *head6.add(h6) = b as u16;
+                        last_h6 = h6;
+                    }
+                    last_h = h;
+                    ins_h = h as u32;
+                    p = b + 1;
+                } else if (2..=8).contains(&dist) && hi >= lo + 2 * dist {
+                    // period d: window[x] == window[x - d] for x in lo + d..end
+                    let d = dist;
+                    let mut end = lo + d;
+                    let lim = hi + 6;
+                    while end < lim && rd64u(win.add(end)) == rd64u(win.add(end - d)) {
+                        end += 8;
+                    }
+                    while end < lim && *win.add(end) == *win.add(end - d) {
+                        end += 1;
+                    }
+                    // positions lo + d..=b have their 6 bytes in the periodic region
+                    let b = hi.min(end.saturating_sub(6));
+                    if b >= lo + d {
+                        let mut hs = [0usize; 8];
+                        let mut h6s = [0usize; 8];
+                        let mut cs = [0u32; 8];
+                        for r in 0..d {
+                            insert_one!();
+                            hs[r] = last_h;
+                            h6s[r] = last_h6;
+                            cs[r] = cnt;
+                        }
+                        let mut distinct = true;
+                        for i in 0..d {
+                            for j in 0..i {
+                                distinct &= hs[i] != hs[j] && (!F6 || h6s[i] != h6s[j]);
+                            }
+                        }
+                        if distinct {
+                            let mut r = 0;
+                            while p <= b {
+                                cs[r] = cs[r].wrapping_add(1);
+                                *prev.add(p & wmask) = (p - d) as u16;
+                                if F6 {
+                                    *link6.add(p & wmask) = cs[r] << 16 | (p - d) as u32;
+                                }
+                                p += 1;
+                                r += 1;
+                                if r == d {
+                                    r = 0;
+                                }
+                            }
+                            // heads: the last position of every residue
+                            for k in 0..d {
+                                let q = b - k; // residue of q: (q - lo) % d
+                                let rr = (q - lo) % d;
+                                *head.add(hs[rr]) = if F6 { cs[rr] << 16 | q as u32 } else { q as u32 };
+                                if F6 {
+                                    *head6.add(h6s[rr]) = q as u16;
+                                }
+                            }
+                            let rb = (b - lo) % d;
+                            last_h = hs[rb];
+                            last_h6 = h6s[rb];
+                            cnt = cs[rb];
+                            ins_h = hs[rb] as u32;
+                        }
+                    }
+                }
+            }
+            while p <= hi {
+                insert_one!();
+            }
+        }
+        self.ins_h = ins_h;
     }
 
     /// read_buf into window[at..], updating the check value and total_in.
@@ -1093,11 +1342,13 @@ impl Deflater {
                 let mut str = self.strstart - self.insert;
                 self.ins_h = self.window[str] as u32;
                 self.ins_h = self.update_hash(self.ins_h, self.window[str + 1]);
+                // Only after a flush other than Z_FINISH, which leaves 6-byte-chain mode.
+                debug_assert!(self.insert == 0 || !self.f6);
                 while self.insert != 0 {
                     self.ins_h = self.update_hash(self.ins_h, self.window[str + MIN_MATCH - 1]);
                     let h = self.ins_h as usize;
-                    self.prev[str & self.w_mask] = self.head[h];
-                    self.head[h] = str as u16;
+                    self.prev[str & self.w_mask] = self.head[h] as u16;
+                    self.head[h] = str as u32;
                     str += 1;
                     self.insert -= 1;
                     if self.lookahead + self.insert < MIN_MATCH {
@@ -1148,19 +1399,15 @@ impl Deflater {
     }
 
     /// longest_match (non-FASTEST). Sets match_start, returns the length.
-    #[inline(always)]
+    #[inline(never)]
     fn longest_match(&mut self, mut cur_match: usize) -> usize {
         let mut chain_length = self.max_chain_length;
-        let win = &self.window[..];
         let scan = self.strstart;
         let mut best_len = self.prev_length;
         let mut nice_match = self.nice_match;
         let max_dist = self.w_size - MIN_LOOKAHEAD;
         let limit = if self.strstart > max_dist { self.strstart - max_dist } else { NIL };
-        let prev = &self.prev[..];
         let wmask = self.w_mask;
-        let scan_start = rd16(win, scan);
-        let mut scan_end = rd16(win, scan + best_len - 1);
         if self.prev_length >= self.good_match {
             chain_length >>= 2;
         }
@@ -1168,25 +1415,102 @@ impl Deflater {
             nice_match = self.lookahead;
         }
         let mut match_start = self.match_start;
-        loop {
-            if rd16(win, cur_match + best_len - 1) == scan_end && rd16(win, cur_match) == scan_start {
-                let len = match_len(win, scan, cur_match);
-                if len > best_len {
-                    match_start = cur_match;
-                    best_len = len;
-                    if len >= nice_match {
-                        break;
+        // SAFETY: every position read is < strstart + MAX_MATCH + 8 <= window_size + 4 <
+        // window.len() (strstart <= window_size - MIN_LOOKAHEAD, cur_match < strstart,
+        // best_len <= MAX_MATCH); cur_match & wmask < prev.len().
+        unsafe {
+            let win = self.window.as_ptr();
+            let prev = self.prev.as_ptr();
+            let sp = win.add(scan);
+            let scan_start = rd16u(sp);
+            let mut scan_end = rd16u(sp.add(best_len - 1));
+            loop {
+                let mp = win.add(cur_match);
+                if rd16u(mp.add(best_len - 1)) == scan_end && rd16u(mp) == scan_start {
+                    let len = match_len_ptr(sp, mp);
+                    if len > best_len {
+                        match_start = cur_match;
+                        best_len = len;
+                        if len >= nice_match {
+                            break;
+                        }
+                        scan_end = rd16u(sp.add(best_len - 1));
                     }
-                    scan_end = rd16(win, scan + best_len - 1);
+                }
+                cur_match = *prev.add(cur_match & wmask) as usize;
+                if cur_match <= limit {
+                    break;
+                }
+                chain_length = chain_length.wrapping_sub(1);
+                if chain_length == 0 {
+                    break;
                 }
             }
-            cur_match = prev[cur_match & wmask] as usize;
-            if cur_match <= limit {
-                break;
-            }
-            chain_length -= 1;
-            if chain_length == 0 {
-                break;
+        }
+        self.match_start = match_start;
+        if best_len <= self.lookahead { best_len } else { self.lookahead }
+    }
+
+    /// longest_match for Z_FILTERED deflate_slow, walking the 6-byte hash chain of strstart
+    /// instead of zlib's 3-byte chain from `hash_head`. Same result:
+    /// * with Z_FILTERED deflate_slow discards every match of length <= 5, so nodes sharing
+    ///   fewer than 6 bytes with strstart cannot change the outcome (the result is the first
+    ///   visited node with the maximal length; or a discarded short match);
+    /// * every node sharing 6 bytes is on both chains (same 3-byte bucket; both chains are
+    ///   in decreasing position order);
+    /// * zlib visits the first `chain_length` nodes of the 3-byte chain (hash_head
+    ///   unconditionally, then nodes > limit): a node's rank there is the difference of the
+    ///   bucket insertion counts (every insertion prepends one node, and the chain is intact
+    ///   down to `limit`), so the walk stops at the first 6-byte node of rank > chain_length.
+    #[inline(always)]
+    fn longest_match6(&mut self, hash_head: usize) -> usize {
+        let mut chain_length = self.max_chain_length;
+        if self.prev_length >= self.good_match {
+            chain_length >>= 2;
+        }
+        let mut nice_match = self.nice_match;
+        if nice_match > self.lookahead {
+            nice_match = self.lookahead;
+        }
+        let scan = self.strstart;
+        let wmask = self.w_mask;
+        let max_dist = self.w_size - MIN_LOOKAHEAD;
+        let limit = if scan > max_dist { scan - max_dist } else { NIL };
+        let mut best_len = self.prev_length;
+        let mut match_start = self.match_start;
+        // SAFETY: as in longest_match; link6.len() = w_size.
+        unsafe {
+            let win = self.window.as_ptr();
+            let link6 = self.link6.as_ptr();
+            let sp = win.add(scan);
+            let l = *link6.add(scan & wmask);
+            // bucket count of strstart; hash_head's is one less, so rank(x) = c - count(x)
+            let c = l >> 16;
+            let mut cur = (l & 0xffff) as usize;
+            let key = rd64u(sp) & MASK48;
+            // zlib's quick reject: a node can only beat best_len if it also matches the two
+            // bytes ending at best_len.
+            let mut scan_end = rd16u(sp.add(best_len - 1));
+            while cur > limit || cur == hash_head {
+                let e = *link6.add(cur & wmask);
+                let mp = win.add(cur);
+                if rd64u(mp) & MASK48 == key {
+                    if c.wrapping_sub(e >> 16) & 0xffff > chain_length {
+                        break;
+                    }
+                    if rd16u(mp.add(best_len - 1)) == scan_end {
+                        let len = match_len_ptr(sp, mp);
+                        if len > best_len {
+                            match_start = cur;
+                            best_len = len;
+                            if len >= nice_match {
+                                break;
+                            }
+                            scan_end = rd16u(sp.add(best_len - 1));
+                        }
+                    }
+                }
+                cur = (e & 0xffff) as usize;
             }
         }
         self.match_start = match_start;
@@ -1356,7 +1680,7 @@ impl Deflater {
             }
             let mut hash_head = NIL;
             if self.lookahead >= MIN_MATCH {
-                hash_head = self.insert_string(self.strstart);
+                hash_head = self.insert_string::<false>(self.strstart);
             }
             if hash_head != NIL && self.strstart.wrapping_sub(hash_head) <= max_dist {
                 self.match_length = self.longest_match(hash_head);
@@ -1366,16 +1690,10 @@ impl Deflater {
                 bflush = self.tally_dist(self.strstart - self.match_start, self.match_length - MIN_MATCH);
                 self.lookahead -= self.match_length;
                 if self.match_length <= self.max_lazy_match && self.lookahead >= MIN_MATCH {
-                    self.match_length -= 1;
-                    loop {
-                        self.strstart += 1;
-                        self.insert_string(self.strstart);
-                        self.match_length -= 1;
-                        if self.match_length == 0 {
-                            break;
-                        }
-                    }
-                    self.strstart += 1;
+                    // positions strstart+1 .. strstart+match_length-1 (all have 3 bytes)
+                    self.insert_range::<false>(self.strstart + 1, self.strstart + self.match_length - 1, self.strstart - self.match_start);
+                    self.strstart += self.match_length;
+                    self.match_length = 0;
                 } else {
                     self.strstart += self.match_length;
                     self.match_length = 0;
@@ -1416,7 +1734,7 @@ impl Deflater {
         BlockState::BlockDone
     }
 
-    fn deflate_slow<S: Sink>(&mut self, io: &mut Io<S>, flush: i32) -> BlockState {
+    fn deflate_slow<S: Sink, const F6: bool>(&mut self, io: &mut Io<S>, flush: i32) -> BlockState {
         let max_dist = self.w_size - MIN_LOOKAHEAD;
         let filtered = self.strategy == Z_FILTERED;
         loop {
@@ -1431,16 +1749,35 @@ impl Deflater {
             }
             let mut hash_head = NIL;
             if self.lookahead >= MIN_MATCH {
-                hash_head = self.insert_string(self.strstart);
+                hash_head = self.insert_string::<F6>(self.strstart);
+                // The next position's buckets are known now: fetch them while this one is
+                // searched (on literal-heavy data the bucket loads are L2 misses feeding
+                // unpredictable branches).
+                self.prefetch_buckets::<F6>(self.strstart + 1);
             }
             self.prev_length = self.match_length;
             self.prev_match = self.match_start;
             self.match_length = MIN_MATCH - 1;
-            if hash_head != NIL
-                && self.prev_length < self.max_lazy_match
-                && self.strstart.wrapping_sub(hash_head) <= max_dist
-            {
-                self.match_length = self.longest_match(hash_head);
+            // zlib's condition for calling longest_match. In F6 mode it is folded (without
+            // short-circuit branches) with "the 6-byte chain has a node to visit": if it has
+            // none the search would find nothing, leaving match_start alone and match_length
+            // = prev_length instead of MIN_MATCH - 1, and both lead to the same next step
+            // (emit the previous match if prev_length >= MIN_MATCH, else a literal).
+            let search = if F6 {
+                let limit = self.strstart.saturating_sub(max_dist);
+                // (stale when nothing was inserted, but then hash_head == NIL)
+                let first6 = (self.link6[self.strstart & self.w_mask] & 0xffff) as usize;
+                (hash_head != NIL)
+                    & (self.prev_length < self.max_lazy_match)
+                    & (self.strstart.wrapping_sub(hash_head) <= max_dist)
+                    & ((first6 > limit) | (first6 == hash_head))
+            } else {
+                hash_head != NIL
+                    && self.prev_length < self.max_lazy_match
+                    && self.strstart.wrapping_sub(hash_head) <= max_dist
+            };
+            if search {
+                self.match_length = if F6 { self.longest_match6(hash_head) } else { self.longest_match(hash_head) };
                 if self.match_length <= 5
                     && (filtered
                         || (self.match_length == MIN_MATCH
@@ -1454,17 +1791,12 @@ impl Deflater {
                 let bflush =
                     self.tally_dist(self.strstart - 1 - self.prev_match, self.prev_length - MIN_MATCH);
                 self.lookahead -= self.prev_length - 1;
-                self.prev_length -= 2;
-                loop {
-                    self.strstart += 1;
-                    if self.strstart <= max_insert {
-                        self.insert_string(self.strstart);
-                    }
-                    self.prev_length -= 1;
-                    if self.prev_length == 0 {
-                        break;
-                    }
-                }
+                // zlib: prev_length -= 2; do { if (++strstart <= max_insert) INSERT_STRING }
+                // while (--prev_length != 0);
+                let n = self.prev_length - 2;
+                self.insert_range::<F6>(self.strstart + 1, (self.strstart + n).min(max_insert), self.strstart - 1 - self.prev_match);
+                self.strstart += n;
+                self.prev_length = 0;
                 self.match_available = false;
                 self.match_length = MIN_MATCH - 1;
                 self.strstart += 1;
@@ -1764,30 +2096,110 @@ impl Deflater {
     }
 }
 
+const HASH6_BITS: u32 = 16;
+const MASK48: u64 = 0xffff_ffff_ffff;
+
+/// Bucket of the 6 bytes in the low 48 bits of `v`.
 #[inline(always)]
-fn rd16(w: &[u8], i: usize) -> u16 {
-    u16::from_le_bytes([w[i], w[i + 1]])
+fn hash6(v: u64) -> usize {
+    ((v & MASK48).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - HASH6_BITS)) as usize
+}
+
+/// `dst[p & wmask] = p - 1` for p in from..=to (a run of chain links to the previous
+/// position).
+///
+/// # Safety
+/// `dst` must have `wmask + 1` elements.
+#[inline(always)]
+unsafe fn fill_iota16(dst: *mut u16, wmask: usize, from: usize, to: usize) {
+    let mut p = from;
+    while p <= to {
+        let i = p & wmask;
+        let n = (to - p + 1).min(wmask + 1 - i);
+        // SAFETY: i + n <= wmask + 1.
+        let s = unsafe { std::slice::from_raw_parts_mut(dst.add(i), n) };
+        let base = (p - 1) as u16;
+        for (k, x) in s.iter_mut().enumerate() {
+            *x = base.wrapping_add(k as u16);
+        }
+        p += n;
+    }
+}
+
+/// `dst[p & wmask] = first + (p - from) * 0x10001` for p in from..=to (link6 entries of a
+/// run: previous position and bucket count both advance by one).
+///
+/// # Safety
+/// `dst` must have `wmask + 1` elements.
+#[inline(always)]
+unsafe fn fill_iota_link(dst: *mut u32, wmask: usize, from: usize, to: usize, first: u32) {
+    let mut p = from;
+    let mut v = first;
+    while p <= to {
+        let i = p & wmask;
+        let n = (to - p + 1).min(wmask + 1 - i);
+        // SAFETY: i + n <= wmask + 1.
+        let s = unsafe { std::slice::from_raw_parts_mut(dst.add(i), n) };
+        for (k, x) in s.iter_mut().enumerate() {
+            *x = v.wrapping_add((k as u32).wrapping_mul(0x1_0001));
+        }
+        v = v.wrapping_add((n as u32).wrapping_mul(0x1_0001));
+        p += n;
+    }
 }
 
 #[inline(always)]
-fn rd64(w: &[u8], i: usize) -> u64 {
-    u64::from_le_bytes(w[i..i + 8].try_into().unwrap())
+unsafe fn rd16u(p: *const u8) -> u16 {
+    // SAFETY: the caller guarantees 2 readable bytes.
+    unsafe { u16::from_le((p as *const u16).read_unaligned()) }
+}
+
+#[inline(always)]
+unsafe fn rd64u(p: *const u8) -> u64 {
+    // SAFETY: the caller guarantees 8 readable bytes.
+    unsafe { u64::from_le((p as *const u64).read_unaligned()) }
 }
 
 /// Length of the match between `a` and `b` as zlib's longest_match computes it: bytes 0 and 1
 /// are known equal, byte 2 is not compared, the result is the index of the first difference
 /// in 3..=258, or 258.
+///
+/// # Safety
+/// `a` and `b` must have 259 readable bytes.
 #[inline(always)]
-fn match_len(w: &[u8], a: usize, b: usize) -> usize {
-    let mut len = 3;
-    while len < 259 {
-        let x = rd64(w, a + len) ^ rd64(w, b + len);
-        if x != 0 {
-            return len + (x.trailing_zeros() / 8) as usize;
+unsafe fn match_len_ptr(a: *const u8, b: *const u8) -> usize {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        use std::arch::x86_64::{__m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8};
+        // 3..259 is exactly eight 32-byte steps.
+        let mut len = 3;
+        while len < 259 {
+            // SAFETY: len + 32 <= 259 readable bytes; AVX2 is enabled at compile time.
+            let m = unsafe {
+                let x = _mm256_loadu_si256(a.add(len) as *const __m256i);
+                let y = _mm256_loadu_si256(b.add(len) as *const __m256i);
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, y)) as u32
+            };
+            if m != u32::MAX {
+                return len + (!m).trailing_zeros() as usize;
+            }
+            len += 32;
         }
-        len += 8;
+        MAX_MATCH
     }
-    MAX_MATCH
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        let mut len = 3;
+        while len < 259 {
+            // SAFETY: len + 8 <= 259.
+            let x = unsafe { rd64u(a.add(len)) ^ rd64u(b.add(len)) };
+            if x != 0 {
+                return len + (x.trailing_zeros() / 8) as usize;
+            }
+            len += 8;
+        }
+        MAX_MATCH
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1941,6 +2353,21 @@ mod tests {
         for b in two.iter_mut() {
             *b = (xorshift(&mut s) & 1) as u8;
         }
+        // Runs of short periods (1..=9) over a tiny alphabet: periodic regions whose first
+        // period has distinct or colliding hashes, broken at random points.
+        let mut periodic = Vec::new();
+        while periodic.len() < 400_000 {
+            let r = xorshift(&mut s);
+            let d = 1 + (r % 9) as usize;
+            let pat: Vec<u8> = (0..d).map(|_| [0u8, 1, 255][(xorshift(&mut s) % 3) as usize]).collect();
+            let n = (r >> 8) as usize % 2000;
+            for i in 0..n {
+                periodic.push(pat[i % d]);
+            }
+            if r >> 40 & 1 == 0 {
+                periodic.push(xorshift(&mut s) as u8);
+            }
+        }
         vec![
             ("empty", Vec::new()),
             ("one", vec![b'x']),
@@ -1957,6 +2384,7 @@ mod tests {
             ("img600", img),
             ("twosym250k", two),
             ("fib300k", fib_data(300_000, 5)),
+            ("periodic400k", periodic),
         ]
     }
 
@@ -1993,6 +2421,9 @@ mod tests {
             for strategy in 0..=4 {
                 cases.push((12usize, (level, 15, 9, strategy), 65536usize, "4097r".to_string()));
                 cases.push((6usize, (level, 15, 8, strategy), 1 << 22, "*:4".to_string()));
+                cases.push((15usize, (level, 15, 9, strategy), 65536usize, "7681r".to_string()));
+                cases.push((15usize, (level, 15, 8, strategy), 1 << 22, "*:4".to_string()));
+                cases.push((9usize, (level, 15, 9, strategy), 65536usize, "7681r".to_string()));
             }
         }
         let mut s = seed;
@@ -2005,7 +2436,15 @@ mod tests {
             let level = (xorshift(&mut s) % 12) as i32 - 1; // -1..=10
             let wb = wbits[(xorshift(&mut s) % wbits.len() as u64) as usize];
             let mem = (xorshift(&mut s) % 10) as i32; // 0..=9 (0 is invalid)
-            let strategy = (xorshift(&mut s) % 6) as i32 - (xorshift(&mut s) % 20 == 0) as i32;
+            let mut strategy = (xorshift(&mut s) % 6) as i32 - (xorshift(&mut s) % 20 == 0) as i32;
+            let mut level = level;
+            let mut mem = mem;
+            if let Some(forced) = std::env::var("ZLIB_EXACT_STRATEGY").ok().and_then(|v| v.parse().ok()) {
+                // e.g. 1 = Z_FILTERED with the lazy-matching levels (6-byte chain mode)
+                strategy = forced;
+                level = [-1, 4, 5, 6, 7, 8, 9][(xorshift(&mut s) % 7) as usize];
+                mem = mem.max(1);
+            }
             let big = inputs[input].1.len() > 70_000;
             let mut outchunk = outs[(xorshift(&mut s) % outs.len() as u64) as usize];
             if big && outchunk < 64 {
@@ -2098,6 +2537,55 @@ mod tests {
         let failures = failures.into_inner().unwrap();
         println!("zlib_exact_oracle: {} cases, {} failures", cases.len(), failures.len());
         assert!(failures.is_empty());
+    }
+
+    /// Throughput harness matching `zlib_exact_ref bench` (bench/refbench/zlib_exact_run.sh):
+    /// ZX_FILE, ZX_PARAMS="level,wbits,memlevel,strategy", ZX_ROWLEN (0 = one deflate(Z_FINISH)
+    /// call, else ROWLEN-byte Z_NO_FLUSH calls then Z_FINISH), ZX_RUNS. Prints
+    /// "rust zlib_exact LEVEL FILE IN_BYTES OUT_BYTES BEST_MS MB/s".
+    #[test]
+    #[ignore]
+    fn zlib_exact_bench() {
+        let Ok(path) = std::env::var("ZX_FILE") else {
+            eprintln!("set ZX_FILE");
+            return;
+        };
+        let p: Vec<i32> = std::env::var("ZX_PARAMS")
+            .unwrap_or_else(|_| "6,15,8,0".into())
+            .split(',')
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let rowlen: usize = std::env::var("ZX_ROWLEN").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let runs: usize = std::env::var("ZX_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+        let data = std::fs::read(&path).unwrap();
+        let mut best = f64::MAX;
+        let mut outlen = 0;
+        let mut out = Vec::with_capacity(data.len() + data.len() / 8 + 4096);
+        for _ in 0..runs {
+            out.clear();
+            let t = std::time::Instant::now();
+            let mut d = Deflater::new(p[0], p[1], p[2], p[3]).unwrap();
+            if rowlen > 0 {
+                for row in data.chunks(rowlen) {
+                    d.deflate_vec(row, &mut out, Z_NO_FLUSH);
+                }
+                assert_eq!(d.deflate_vec(&[], &mut out, Z_FINISH), Z_STREAM_END);
+            } else {
+                assert_eq!(d.deflate_vec(&data, &mut out, Z_FINISH), Z_STREAM_END);
+            }
+            let dt = t.elapsed().as_secs_f64();
+            best = best.min(dt);
+            outlen = out.len();
+        }
+        println!(
+            "rust zlib_exact {} {} {} {} {:.3} {:.1}",
+            p[0],
+            path,
+            data.len(),
+            outlen,
+            best * 1e3,
+            data.len() as f64 / best / 1e6
+        );
     }
 
     // python: zlib.compress(b"", 6), zlib.compress(b"a", 6), zlib.compress(b"hello hello hello hello", 9)
