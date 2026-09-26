@@ -1447,7 +1447,8 @@ mod tests {
     #[test]
     fn align() {
         assert_eq!(dword_align(38, 0x1000), 40);
-        assert_eq!(dword_align(38, 0x1002), 38);
+        assert_eq!(dword_align(38, 0x1002), 40);
+        assert_eq!(dword_align(36, 0x1000), 36);
         assert_eq!(adjust_section_alignment(0x1234, 0x1000, 0x200), 0x1000);
         assert_eq!(adjust_section_alignment(0x1234, 0x200, 0x200), 0x1200);
         assert_eq!(adjust_section_alignment(0x1234, 0x100, 0), 0x1234);
