@@ -889,7 +889,16 @@ where
 
 /// Run python's chunk list of the (coalesced) sections `secs` of `layer` through `scanner` on
 /// all cores; `f` gets the hits in python order and returns false to stop.
-pub(crate) fn execute<S, F>(layer: &dyn Layer, scanner: &S, secs: &[(u64, u64)], mut f: F)
+pub(crate) fn execute<S, F>(layer: &dyn Layer, scanner: &S, secs: &[(u64, u64)], f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+{
+    execute_lookahead(layer, scanner, secs, par::threads() * 4, f)
+}
+
+/// [`execute`] with at most `lookahead` work items in flight ahead of the one being emitted.
+fn execute_lookahead<S, F>(layer: &dyn Layer, scanner: &S, secs: &[(u64, u64)], lookahead: usize, mut f: F)
 where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
@@ -928,7 +937,7 @@ where
         make_plan(layer, &deps, chunks)
     };
     let _t = crate::util::trace::span("scan: execute");
-    let lookahead = par::threads() * 4;
+    let lookahead = lookahead.max(1);
     let mut round: Vec<ItemOut<S::Hit>> = Vec::new();
     par::par_map_stream(
         plan.items.len(),
@@ -995,6 +1004,16 @@ where
     let max_batch = max_batch.max(2);
     let (mut i0, mut batch) = (0usize, 2usize);
     while i0 < n {
+        if batch >= max_batch {
+            // the rest in one streamed scan, `max_batch` chunks ahead of the consumer: every
+            // core stays busy (no batch barriers) and an early stop wastes at most that much
+            let start = chunks[i0].0;
+            if section_end > start {
+                let secs = coalesce_sections(layer, &[(start, section_end - start)]);
+                execute_lookahead(layer, scanner, &secs, max_batch, f);
+            }
+            return;
+        }
         let i1 = (i0 + batch).min(n);
         let start = chunks[i0].0;
         let (end, limit) = if i1 == n {
