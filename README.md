@@ -51,7 +51,9 @@ second run of a plugin costs). vol-rs is reported cold (its caches wiped) and wa
 Like for like (rsvol cold vs vol-rs cold, rsvol warm vs vol-rs warm): Windows 20.8x / 68.1x faster in
 total, Linux 6.1x / 23.8x. rsvol steady and warm are the fastest of the three tools on every plugin
 except `vmscan.Vmscan`, where vol-rs ships no VMCS symbol files and returns an empty table without
-reading the image, while python and rsvol scan all 5 GiB. A first-ever Linux run pays ~0.5 s once to
+reading the image, while python and rsvol scan all 5 GiB. (Since that run, rsvol's vmscan sweeps the
+page starts through the image mapping and caches the bytes its checks read: on the same VM it now
+takes 44 ms steady and 1.8 ms warm, vol-rs 3.4 ms.) A first-ever Linux run pays ~0.5 s once to
 index and build the kernel's 64 MB symbol table, which is then cached.
 
 `windows.pslist.PsList` startup: rsvol 64.7 ms cold / 3.3 ms warm, vol-rs 563 ms / 80.6 ms,
@@ -251,8 +253,9 @@ A cache can make a run faster but cannot change its output:
   time of the image; the scan cache adds the inode and the identity of the rsvol executable, so a
   rebuilt binary never trusts scans recorded by an older one. Symbol tables are keyed by the
   source file's URL, size and modification time and the table format version.
-- The scan cache stores only raw byte matches. On a replay every plugin still runs all of its
-  python-equivalent validation on those matches, in python's order.
+- The scan cache stores raw byte matches (and, for `vmscan.Vmscan`, the few hundred image bytes of
+  each matched page that its checks read), never a plugin's results. On a replay every plugin
+  still runs all of its python-equivalent validation on those matches, in python's order.
 - Writes are atomic, so a crash or a concurrent run leaves either the old file or the new one.
 - The parity gates run the reference comparisons twice, once with an empty cache and once warm.
 

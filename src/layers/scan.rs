@@ -36,6 +36,20 @@ use super::{FileLayer, Layer, Mapping};
 use crate::util::par;
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Upper bound on the number of scan chunks [`build_chunks`] will materialise. Real scans are
+/// tiny by comparison (the busiest, the Windows kernel virtual layer, is ~330k chunks); a raw
+/// image's physical layer is a few hundred. A count far above that is corruption: a garbage page
+/// interpreted as a page table makes the translation walk enumerate a practically unbounded
+/// mapped space, and since rsvol builds the whole chunk list before scanning (python streams it
+/// lazily, so python instead scans forever -- confirmed: python `windows.driverscan` on such a
+/// mutant runs past a 120 s timeout emitting nothing), that list would exhaust memory. rsvol
+/// stops enumerating at this bound and scans what it has, turning an OOM into a bounded, partial
+/// result (DESIGN "never OOM on malformed memory"; where python would hang forever, stop). At
+/// ~24 bytes per chunk the cap is ~380 MiB, ~48x above any real image, so no reference scan is
+/// ever truncated.
+const MAX_SCAN_CHUNKS: usize = 16_000_000;
 
 /// python default `ScannerInterface.chunk_size` (16 MiB).
 pub const DEFAULT_CHUNK_SIZE: u64 = 0x1000000;
@@ -163,15 +177,28 @@ fn default_sections(layer: &dyn Layer) -> Vec<(u64, u64)> {
     vec![(layer.min_address(), layer.max_address() - layer.min_address())]
 }
 
-/// Build python's chunk list.
+/// Build python's chunk list (bounded by [`MAX_SCAN_CHUNKS`]).
 fn build_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], chunk: u64, overlap: u64, sections: &[(u64, u64)]) -> Vec<Chunk> {
+    build_chunks_capped(layer, deps, chunk, overlap, sections, MAX_SCAN_CHUNKS)
+}
+
+/// [`build_chunks`] with an explicit chunk cap (the tests use a small one; production always
+/// passes [`MAX_SCAN_CHUNKS`]). At most `cap` chunks are produced -- see [`MAX_SCAN_CHUNKS`] for
+/// why enumeration must stop instead of exhausting memory on a corrupted layer.
+fn build_chunks_capped(layer: &dyn Layer, deps: &[Arc<dyn Layer>], chunk: u64, overlap: u64, sections: &[(u64, u64)], cap: usize) -> Vec<Chunk> {
     let mut out = Vec::new();
+    // shared budget so one exploding top-level piece (parallel walk) cannot outgrow the cap
+    // before the others are joined; see MAX_SCAN_CHUNKS.
+    let budget = AtomicUsize::new(0);
     if layer.lower().is_none() {
         // DataLayerInterface._scan_iterator
-        for &(start, length) in sections {
+        'sections: for &(start, length) in sections {
             let mut offset = start;
             let mut length = length;
             while length > 0 {
+                if out.len() >= cap {
+                    break 'sections; // corrupted layer claims an implausibly large span
+                }
                 let mut cs = length.min(chunk + overlap);
                 out.push(Chunk { start: offset, len: cs, src: Src::Layer });
                 if cs > chunk {
@@ -184,7 +211,7 @@ fn build_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], chunk: u64, overlap:
     } else {
         // TranslationLayerInterface._scan_iterator (linear): per mapping run
         for &(start, length) in sections {
-            run_chunks(layer, deps, start, length, chunk, overlap, &mut out);
+            run_chunks(layer, deps, start, length, chunk, overlap, &budget, cap, &mut out);
         }
     }
     out
@@ -195,16 +222,22 @@ type Run = (Mapping, u8);
 
 /// python `mapping()` runs of `[addr, addr+len)` with their target layer (python's scan also
 /// reads runs that live in Windows swap layers); runs into unknown layers are skipped.
-fn mapping_runs(layer: &dyn Layer, deps: &[Arc<dyn Layer>], addr: u64, len: u64, f: &mut dyn FnMut(Run)) {
+fn mapping_runs(layer: &dyn Layer, deps: &[Arc<dyn Layer>], addr: u64, len: u64, budget: &AtomicUsize, cap: usize, f: &mut dyn FnMut(Run)) {
     let lower = layer.lower().map(|l| Arc::as_ptr(l) as *const u8);
     layer.mapping_targets(addr, len, &mut |m, t| {
         let tp = t as *const dyn Layer as *const u8;
-        if Some(tp) == lower {
+        let emitted = if Some(tp) == lower {
             f((m, 0));
+            true
         } else if let Some(i) = deps.iter().position(|d| Arc::as_ptr(d) as *const u8 == tp).filter(|&i| i > 0 && i < 256) {
             f((m, i as u8));
-        }
-        true
+            true
+        } else {
+            false
+        };
+        // stop the walk once the scan-chunk budget is exhausted: a corrupted page table can
+        // otherwise enumerate a practically unbounded number of runs (see MAX_SCAN_CHUNKS).
+        !emitted || budget.fetch_add(1, Ordering::Relaxed) < cap
     });
 }
 
@@ -234,13 +267,13 @@ fn runs_join(a: &Run, b: &Run) -> bool {
 /// parallel pieces (see [`run_pieces`]); each piece cuts its interior runs into chunks, and
 /// only the runs at piece boundaries (which may continue in the neighbour) are joined and cut
 /// sequentially.
-fn run_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], start: u64, length: u64, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
+fn run_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], start: u64, length: u64, chunk: u64, overlap: u64, budget: &AtomicUsize, cap: usize, out: &mut Vec<Chunk>) {
     if !layer.is_linear() {
         // python `_scan_iterator(linear=False)` (AVML, QEMU): every mapping() tuple is its own
         // block (nothing is coalesced) and is read through the layer itself, whose data is
         // decoded; the mapped offsets are compressed frames / fill bytes, not the data. Raw
         // spans still take the direct file path (`chunk_source` via `slice()`).
-        mapping_runs(layer, deps, start, length, &mut |r| {
+        mapping_runs(layer, deps, start, length, budget, cap, &mut |r| {
             let n = out.len();
             cut_run(r, chunk, overlap, out);
             for c in &mut out[n..] {
@@ -251,7 +284,7 @@ fn run_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], start: u64, length: u6
     }
     let Some(pieces) = run_pieces(layer, start, length) else {
         let mut pending: Option<Run> = None;
-        mapping_runs(layer, deps, start, length, &mut |r| match pending.as_mut() {
+        mapping_runs(layer, deps, start, length, budget, cap, &mut |r| match pending.as_mut() {
             Some(pr) if runs_join(pr, &r) => pr.0.len += r.0.len,
             _ => {
                 if let Some(pr) = pending.replace(r) {
@@ -272,7 +305,7 @@ fn run_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], start: u64, length: u6
     let parts: Vec<PieceOut> = par::par_map(pieces.len(), |i| {
         let (s, l) = pieces[i];
         let mut p = PieceOut { first: None, mid: Vec::new(), last: None };
-        mapping_runs(layer, deps, s, l, &mut |r| {
+        mapping_runs(layer, deps, s, l, budget, cap, &mut |r| {
             // runs of one target come coalesced; a swap run between two runs of the same
             // target keeps them apart (python coalesces per target too)
             if let Some(l) = p.last.as_mut().filter(|l| runs_join(l, &r)) {
@@ -1616,6 +1649,61 @@ mod tests {
         fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
             f(Mapping { offset: addr, len, mapped: addr });
         }
+    }
+
+    /// A translation layer whose (corrupt) page tables map an unbounded number of scattered
+    /// pages -- what a garbage page interpreted as a page table produces. `mapping` never ends
+    /// on its own; only the scan's chunk cap can stop it. Models the fuzzer's win10 finding
+    /// where many pool-scanning plugins OOMed (python, streaming lazily, hangs forever instead).
+    struct Endless {
+        lower: Arc<dyn Layer>,
+    }
+    impl Layer for Endless {
+        fn name(&self) -> &str {
+            "endless"
+        }
+        fn max_address(&self) -> u64 {
+            u64::MAX
+        }
+        fn read(&self, _addr: u64, buf: &mut [u8]) -> Result<()> {
+            buf.fill(0);
+            Ok(())
+        }
+        fn is_valid(&self, _addr: u64, _len: u64) -> bool {
+            true
+        }
+        fn lower(&self) -> Option<&Arc<dyn Layer>> {
+            Some(&self.lower)
+        }
+        fn mapping(&self, addr: u64, _len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
+            // scattered single pages (a gap after each so nothing coalesces), without end
+            let mut off = addr & !0xfff;
+            loop {
+                if !f(Mapping { offset: off, len: 0x1000, mapped: off }) {
+                    return;
+                }
+                off = off.wrapping_add(0x2000);
+            }
+        }
+    }
+
+    /// Regression (fuzzer, win10 structure/mixed mutants): a corrupted page table that maps an
+    /// unbounded space must not make the scanner materialise an unbounded chunk list and OOM.
+    /// `build_chunks` stops at the cap and scans what it has.
+    #[test]
+    fn scan_chunk_list_is_bounded_on_corrupt_layer() {
+        let cap = 5000;
+        // translation-layer path (the actual win10 bug: pool scanners over the kernel layer)
+        let endless = Endless { lower: Arc::new(Buf(vec![0u8; 0x1000])) };
+        let chunks = build_chunks_capped(&endless, &[], DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &[(0, u64::MAX)], cap);
+        assert!(chunks.len() <= cap + 4 && chunks.len() >= cap - 4, "translation scan unbounded: {}", chunks.len());
+        // data-layer path: a layer/container claiming an implausibly large address span
+        let data = Buf(vec![0u8; 0x2000]);
+        let chunks = build_chunks_capped(&data, &[], DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &[(0, u64::MAX)], cap);
+        assert_eq!(chunks.len(), cap, "data-layer scan not capped");
+        // a normal (small) span is unaffected by the cap: every chunk is produced
+        let small = build_chunks_capped(&data, &[], DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &[(0, 0x2000)], cap);
+        assert_eq!(small.len(), 1);
     }
 
     #[test]

@@ -97,11 +97,21 @@ impl Needle<'_> {
 /// [`Scanner`]: crate::layers::scan::Scanner
 pub struct FastBytesScanner {
     needle: Vec<u8>,
+    /// full scans go through the per-image scan cache
+    cached: bool,
 }
 
 impl FastBytesScanner {
     pub fn new(needle: &[u8]) -> FastBytesScanner {
-        FastBytesScanner { needle: needle.to_vec() }
+        FastBytesScanner { needle: needle.to_vec(), cached: false }
+    }
+
+    /// A scanner whose full scans are answered by the per-image scan cache on repeated runs
+    /// (plugins; the automagic scans are covered by the automagic cache instead). The matches
+    /// are cached as this scanner's own prescan output (no batched literals: the sweep costs
+    /// exactly an uncached scan).
+    pub fn cached(needle: &[u8]) -> FastBytesScanner {
+        FastBytesScanner { needle: needle.to_vec(), cached: true }
     }
 }
 
@@ -149,6 +159,17 @@ impl crate::layers::scan::Scanner for FastBytesScanner {
             });
         }
         limit
+    }
+    fn cache_query(&self) -> Option<crate::layers::scancache::CacheQuery<'_>> {
+        if !self.cached || self.needle.is_empty() {
+            return None;
+        }
+        // the prescan: every occurrence of the needle starting before chunk_size, tag 0
+        let mut key = b"linux FastBytesScanner/1\0".to_vec();
+        key.extend_from_slice(&self.chunk_size().to_le_bytes());
+        key.extend_from_slice(&(self.needle.len() as u64).to_le_bytes());
+        key.extend_from_slice(&self.needle);
+        Some(crate::layers::scancache::CacheQuery::Opaque { key })
     }
 }
 
