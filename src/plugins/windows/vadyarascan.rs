@@ -5,7 +5,7 @@
 
 use crate::context::Context;
 use crate::error::{Error, Result};
-use crate::plugins::windows::malware::malfind::layer_data;
+use crate::plugins::linux::vmayarascan::layer_data;
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::prelude::*;

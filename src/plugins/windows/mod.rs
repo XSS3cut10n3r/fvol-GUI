@@ -5,7 +5,11 @@ use crate::plugins::Plugin;
 pub mod bigpools;
 pub mod callbacks;
 pub mod cmdline;
+pub mod cmdscan;
+pub mod consoles;
 pub mod debugregisters;
+pub mod deskscan;
+pub mod desktops;
 pub mod devicetree;
 pub mod dlllist;
 pub mod driverirp;
@@ -27,6 +31,8 @@ pub mod memmap;
 pub mod modscan;
 pub mod modules;
 pub mod mutantscan;
+pub mod netscan;
+pub mod netstat;
 pub mod orphan_kernel_threads;
 pub mod poolscanner;
 pub mod privileges;
@@ -58,12 +64,18 @@ pub mod vadregexscan;
 pub mod vadwalk;
 pub mod vadyarascan;
 pub mod virtmap;
+pub mod windows;
+pub mod windowstations;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&bigpools::BigPools);
     v.push(&callbacks::Callbacks);
     v.push(&cmdline::CmdLine);
+    v.push(&cmdscan::CmdScan);
+    v.push(&consoles::Consoles);
     v.push(&debugregisters::DebugRegisters);
+    v.push(&deskscan::DeskScan);
+    v.push(&desktops::Desktops);
     v.push(&devicetree::DeviceTree);
     v.push(&dlllist::DllList);
     v.push(&driverirp::DriverIrp);
@@ -85,6 +97,8 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&modscan::ModScan);
     v.push(&modules::Modules);
     v.push(&mutantscan::MutantScan);
+    v.push(&netscan::NetScan);
+    v.push(&netstat::NetStat);
     v.push(&orphan_kernel_threads::Threads);
     v.push(&poolscanner::PoolScanner);
     v.push(&privileges::Privs);
@@ -113,6 +127,8 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&vadwalk::VadWalk);
     v.push(&vadyarascan::VadYaraScan);
     v.push(&virtmap::VirtMap);
+    v.push(&windows::Windows);
+    v.push(&windowstations::WindowStations);
     malware::register(v);
     registry::register(v);
 }

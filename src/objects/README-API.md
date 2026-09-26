@@ -156,7 +156,7 @@ mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
 
-## Linux (`use crate::symbols::linux::LinuxExt`)
+## Linux (`use crate::symbols::linux::prelude::*` - LinuxExt, FsExt, CapsExt, NetExt, ...)
 
 `let k = ctx.linux_kernel()?;` → `&LinuxKernel`, derefs to the kernel `Module` (offset =
 `aslr_shift`). Fields: `layer` (`&IntelLayer` named "layer_name": `Intel32e` from the VMCOREINFO
@@ -181,8 +181,40 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `task.cred.uid` (int or kuid_t) | `cred.cred_value("uid")?` |
 | `LinuxUtilities.container_of(addr, type, member, vmlinux)` | `crate::symbols::linux::container_of(addr, type, member, &vmlinux)?` → `Option<Obj>` |
 | `vmlinux = linux.LinuxUtilities.get_module_from_volobj_type(ctx, obj)` | `crate::symbols::linux::vmlinux_of(&obj)?` |
-| `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump}` |
+| `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump, elf_dump_ex}` (`elf_dump_ex` → (preferred, final) names) |
+| `elf` extension (`get_program_headers`, `get_section_headers`, `get_link_maps`, `get_symbols`, `elf_phdr.get_vaddr/dynamic_sections`, `elf_sym.get_name`, `elf_linkmap.get_name`) | `symbols::linux::elf::{Elf::new(layer, table, off)?, Phdr, ElfSym, LinkMap, elf_sym_get_name}` same method names |
+| bash `hist_entry` (`is_valid`, `get_command`, `get_time_object`) + `bash32/bash64` ISFs | `symbols::linux::bash::{bash_table(ctx, is_64bit), HistEntry::parse(&hist)?}` |
+| `yarascan.YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `plugins::linux::vmayarascan::{yarascan_option_requirements, yara_rules_from_config}` (+ `crate::yara::rules::volatility`) |
+| `renderers.LayerData(context, offset, layer, length)` | `plugins::linux::vmayarascan::layer_data(layer, offset, len)` → `Value::LayerBytes` |
+| `scanners.RegExScanner(pattern)` | `plugins::linux::vmaregexscan::regex_scanner(&Regex)` |
+| linux malfind `_get_dirty_pages` / `_is_suspicious` | `plugins::linux::malware::malfind::{get_dirty_pages, is_suspicious}` (`IntelLayer::page_dirty_cursor`) |
 | `LinuxUtilities.virtual_to_physical_address(a)` | `crate::symbols::linux::virtual_to_physical_address(a)` |
+| `pslist.list_tasks` into a Vec (for `par_map` per-task work) | `pslist::collect_tasks(k, &filter, threads)` → `(Vec<Obj>, Option<Error>)` (trailing python raise) |
+| `task.get_process_memory_sections(heap_only)` | same name → `Result<Vec<(start, size)>>` |
+| `task.is_being_ptraced / is_ptracing / get_ptrace_tracer_tid() / get_ptrace_tracee_tids() / get_ptrace_tracee_flags()` | same names (`PT_FLAGS` python Flag semantics) |
+| `vma.get_name(context, task)` | `vma.vma_get_name(&task)?` → `Option<String>` (`symbols::linux::utilities::vma_get_name`) |
+| `vma.get_malicious_pages(proclayer)` / `is_suspicious(proclayer)` | same names (`Option<LayerRef>`); `IntelLayer::is_dirty(addr)` / `page_size_at(addr)` = python `is_dirty` / `_translate` size |
+| `LinuxUtilities.path_for_file(ctx, task, filp, files_only)` | `crate::symbols::linux::utilities::path_for_file(&task, &filp, files_only)?` (d_path, memoized) |
+| `LinuxUtilities.do_get_path / get_path_mnt / _get_new_sock_pipe_path` | `utilities::{do_get_path, get_path_mnt, get_new_sock_pipe_path}` |
+| `LinuxUtilities.files_descriptors_for_process(ctx, table, task, files_only)` | `utilities::files_descriptors_for_process(&task, files_only)` → `Vec<Result<(fd, filp, path)>>` |
+| `LinuxUtilities.walk_internal_list(...)` / `convert_fourcc_code(c)` | `utilities::{walk_internal_list, convert_fourcc_code}` |
+| `fs_struct.get_root_dentry() / get_root_mnt()`, `files_struct.get_fds() / get_max_fds()` | `FsExt` same names |
+| `qstr.name_as_str()`, `dentry.path() / is_root() / is_subdir() / d_ancestor() / get_subdirs()` | `FsExt`: `name_as_str`, `dentry_path`, `is_root`, `is_subdir`, `d_ancestor`, `get_subdirs` |
+| `inode.is_dir/is_reg/.. / get_inode_type() / get_*_time() / get_file_mode() / get_pages() / get_contents()` | `FsExt` same names (times → `Value`); `dentry.get_inode()` via `LinuxExt::get_inode` (dispatch) |
+| `super_block.major / minor / uuid / get_type() / get_flags_access() / get_flags_opts()` | `FsExt`: `major()`, `minor()`, `uuid()`, `sb_get_type()`, `get_flags_access()`, `get_flags_opts()` |
+| `mount.*` / `vfsmount.*` (get_mnt_sb/root/flags/parent/mountpoint, has_parent, get_vfsmnt_*/get_dentry_*, is_shared/slave/unbindable, get_devname, get_dominating_id, next_peer, is_equal) | `FsExt` same names (dispatch on the struct name) |
+| `mnt_namespace.get_inode() / get_mount_points()` | `FsExt::get_mnt_ns_inode()` / `get_mount_points()` |
+| `address_space.i_pages`, `page.is_valid() / to_paddr() / get_content() / get_flags_list()` | `FsExt`: `i_pages()`, `page_is_valid()`, `to_paddr()`, `page_get_content()`, `get_flags_list()` |
+| `IDStorage.choose_id_storage(ctx, "kernel").get_entries(root)` / `PageCache(...).get_cached_pages()` | `symbols::linux::idstorage::{IdStorage::choose(vmlinux)?.get_entries(&root), PageCache::new(vmlinux, mapping)?.get_cached_pages()}` |
+| `idr.get_entries()` / `rb_root.get_nodes()` / `scatterlist.for_each_sg() / get_content()` | `idstorage::{idr_get_entries, rb_get_nodes, sg_for_each, sg_get_content}` |
+| `kernel_cap_t/kernel_cap_struct.get_capabilities() / get_kernel_cap_full() / enumerate_capabilities() / has_capability()` | `CapsExt` same names; `caps::CAPABILITIES` |
+| network extensions (`net_device`, `in_device`, `inet6_dev`, `*_ifaddr`, `socket`/`sock`/`*_sock`) | `NetExt` (`symbols::linux::network`): python names; `net_get_inode`, `sock_get_state`, `sock_get_type`, `unix_get_name` where names clash; `inet_ntop4/6`, `convert_ipv4/6`, constants |
+| `module.*` (get_module_base/core/init, get_*_size, get_name, get_sections, get_symbols, get_symbol(_by_address), get_module_address_boundaries, section_symtab/strtab/typetab, get_symbol_type), `module.is_valid()` | `ModuleExt` (`symbols::linux::module`) same names; `is_valid` via `LinuxExt::is_valid` / `module::module_is_valid(_checked)` |
+| `kernel_symbol` / `module_sect_attr` / `bin_attribute` / `bpf_prog(_aux)` / `latch_tree_root.find` / `kobject.reference_count` | `ModuleExt`: `get_name()` (dispatch), `get_value()`, `get_namespace()`, `address()`, `get_type()`, `get_tag()`, `get_address_region()`, `find(key, &mut comp)`, `reference_count()` |
+| `linux_utilities_modules.Modules.*` (list_modules, run_modules_scanners, module_lookup_by_address, get_hidden_modules, get_kset_modules, get_load_parameters, get_modules_memory_boundaries, mask_mods_list, lookup_module_address) | `symbols::linux::modules` same names (`vm` = `k` / `&Module`; `ALL_GATHERERS`, `ModuleInfo`) |
+| `kallsyms.Kallsyms(ctx, layer, module)` + `lookup_address / lookup_name / get_*_symbols` | `symbols::linux::kallsyms::Kallsyms::get(vm)?` (built once, cached, thread-safe) + same names → `KasSymbol` |
+| `ModuleExtract.extract_module(ctx, kernel, module)` | `symbols::linux::module_extract::extract_module(vm, &module)?` → `Option<Vec<u8>>` |
+| `linux_constants.KSYM_NAME_LEN / MODULE_* / NM_TYPES_DESC` | `symbols::linux::constants` |
 
 ## Mac (`use crate::symbols::mac::MacExt`)
 
@@ -335,6 +367,10 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
 * Errors: return `Err(e)`; python's "skip this row on InvalidAddressException" is
   `match row() { Err(e) if e.is_invalid_address() => continue, ... }`.
+  An `Error::Msg` / `Error::Symbol` whose text starts with a python builtin exception name
+  (`"AttributeError: ..."`, `"ValueError: ..."`, `"TypeError: ..."`, `"KeyError"`, ... see
+  `cli::python_builtin_exception`) is reported like python's uncaught exception (traceback on
+  stderr, no `"\n\n"` on stdout); other errors get python's `process_exceptions` block.
 
 ## Performance notes
 

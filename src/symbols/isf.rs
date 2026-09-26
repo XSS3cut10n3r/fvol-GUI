@@ -649,7 +649,9 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
                     Some(t) => r.desc(t),
                     None => Ty::Void,
                 };
-                members.push((f.name.as_ref(), f.offset.clamp(0, u32::MAX as i128) as u64, ty));
+                // negative offsets are legal (python adds them to the parent offset): stored as
+                // two's complement i64 and applied with wrapping arithmetic
+                members.push((f.name.as_ref(), f.offset.clamp(i64::MIN as i128, i64::MAX as i128) as i64 as u64, ty));
             }
             members_per_type.push(members);
             continue;
@@ -678,7 +680,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
                 Some(t) => r.desc(t),
                 None => Ty::Void,
             };
-            let off = new_off.clamp(0, u32::MAX as i128) as u64;
+            let off = new_off.clamp(i64::MIN as i128, i64::MAX as i128) as i64 as u64;
             let name: &str = f.name.as_ref();
             match pos.get(name) {
                 Some(&k) => members[k] = (name, off, ty),
@@ -760,8 +762,8 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
                 hashes.push(h);
                 ms.extend_from_slice(&mo.to_le_bytes());
                 ms.extend_from_slice(&ml.to_le_bytes());
-                ms.extend_from_slice(&(*off as u32).to_le_bytes());
-                ms.extend_from_slice(&0u32.to_le_bytes());
+                // offset: i64 (two's complement) over the offset + pad words
+                ms.extend_from_slice(&off.to_le_bytes());
                 ms.extend_from_slice(&ty_encode(ty));
             }
             debug_assert_eq!(ms.len() - mstart, members.len() * MEMBER_SZ);
