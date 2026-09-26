@@ -20,7 +20,6 @@
 
 use crate::error::{Error, Result};
 use crate::objects::{LayerRef, Obj};
-use crate::renderers::DateTime;
 use crate::util::FxHashSet;
 
 /// python `MacIntelStacker.virtual_to_physical_address` (ignores KASLR), on u64 with
@@ -449,83 +448,7 @@ fn do_calc_path(ret: &mut Vec<String>, vnodeobj: Option<Obj>, vname: Option<Obj>
     Err(Error::msg("RecursionError: maximum recursion depth exceeded"))
 }
 
-// ---------------------------------------------------------------------------------------------
-// python `datetime.datetime.fromtimestamp(t)` (naive, local time zone)
-// ---------------------------------------------------------------------------------------------
-
-#[repr(C)]
-struct Tm {
-    tm_sec: i32,
-    tm_min: i32,
-    tm_hour: i32,
-    tm_mday: i32,
-    tm_mon: i32,
-    tm_year: i32,
-    tm_wday: i32,
-    tm_yday: i32,
-    tm_isdst: i32,
-    tm_gmtoff: i64,
-    tm_zone: *const u8,
-}
-
-unsafe extern "C" {
-    fn localtime_r(t: *const i64, out: *mut Tm) -> *mut Tm;
-    fn tzset();
-}
-
-/// python `_PyTime_ObjectToTimeval(t, ROUND_HALF_EVEN)`: (seconds, microseconds).
-/// `Err` = the python exception text.
-pub fn float_to_timeval(t: f64) -> std::result::Result<(i64, u32), String> {
-    if t.is_nan() {
-        return Err("ValueError: Invalid value NaN (not a number)".into());
-    }
-    let mut intpart = t.trunc();
-    let x = (t - intpart) * 1e6;
-    let mut rounded = x.round();
-    if (x - rounded).abs() == 0.5 {
-        rounded = 2.0 * (x / 2.0).round();
-    }
-    let mut floatpart = rounded;
-    if floatpart >= 1e6 {
-        floatpart -= 1e6;
-        intpart += 1.0;
-    } else if floatpart < 0.0 {
-        floatpart += 1e6;
-        intpart -= 1.0;
-    }
-    if !(intpart >= -9.223_372_036_854_775_808e18 && intpart < 9.223_372_036_854_775_808e18) {
-        return Err("OverflowError: timestamp out of range for platform time_t".into());
-    }
-    Ok((intpart as i64, floatpart as u32))
-}
-
-/// python `datetime.datetime.fromtimestamp(t)` without a tz: a NAIVE datetime in the process'
-/// local time zone (libc `localtime_r`, like CPython). The returned [`DateTime`] holds the
-/// local wall-clock time in `secs` (render-only; `utc = false`).
-///
-/// `Err` is the text of the python exception (`ValueError` for years outside 1..9999, ...),
-/// which is NOT a volatility exception: python plugins crash with a traceback there (the
-/// rsvol CLI's equivalent is a plugin panic, see `plugins::mac::pslist`).
-pub fn fromtimestamp_local(t: f64) -> std::result::Result<DateTime, String> {
-    static TZ: std::sync::Once = std::sync::Once::new();
-    TZ.call_once(|| unsafe { tzset() });
-    let (secs, us) = float_to_timeval(t)?;
-    let mut tm = std::mem::MaybeUninit::<Tm>::zeroed();
-    let r = unsafe { localtime_r(&secs, tm.as_mut_ptr()) };
-    if r.is_null() {
-        return Err("OSError: [Errno 75] Value too large for defined data type".into());
-    }
-    let tm = unsafe { tm.assume_init() };
-    let year = tm.tm_year as i64 + 1900;
-    if !(1..=9999).contains(&year) {
-        return Err(format!("ValueError: year must be in 1..9999, not {year}"));
-    }
-    let days = crate::util::time::days_from_civil(year, tm.tm_mon as u32 + 1, tm.tm_mday as u32);
-    // CPython clamps leap seconds to 59
-    let sec = tm.tm_sec.min(59) as i64;
-    let local = days * 86_400 + tm.tm_hour as i64 * 3600 + tm.tm_min as i64 * 60 + sec;
-    Ok(DateTime { secs: local, micros: us, utc: false })
-}
+pub use crate::util::time::{float_to_timeval, fromtimestamp_local};
 
 /// python `int(b)` for a bytes object (ASCII whitespace around, optional sign, digits with
 /// single underscores between them). `None` = python raises `ValueError`. Values that do not

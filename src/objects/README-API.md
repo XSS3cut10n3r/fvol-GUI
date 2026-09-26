@@ -151,6 +151,31 @@ Pool / object-header helpers live in `crate::symbols::windows::pool`.
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
 
+## Mac (`use crate::symbols::mac::MacExt`)
+
+`let k = ctx.mac_kernel()?;` → `&MacKernel`, derefs to the kernel `Module` (offset = python
+`kernel_virtual_offset`, the KASLR shift). Fields: `layer` (`&IntelLayer`, python
+`layer_name`), `vlayer`, `phys`, `table` (symbol_mask 2^48-1), `kaslr_shift`, `dtb`, `banner`,
+`isf`. Automagic results are cached per image + symbol path (warm runs do no scanning).
+
+| python | rust |
+|---|---|
+| `kernel.object_from_symbol("allproc")` | `k.object_from_symbol("allproc")?` |
+| `PsList.list_tasks(ctx, kernel, filter, method)` | `crate::plugins::mac::pslist::list_tasks(k, "tasks", &filter)` (+ `list_tasks_{allproc,tasks,sessions,process_group,pid_hash_table}`) |
+| `PsList.create_pid_filter(pids)` | `pslist::pid_filter(&pids)` |
+| `queue_entry.walk_list(head, member, type_name)` | `q.walk_list(&head, "p_list", "proc", MAX_ELEMENTS)` → `Vec<Result<Obj>>` |
+| `MacUtilities.walk_tailq / walk_list_head / walk_slist(q, next)` | `q.walk_tailq(next, MAX_ELEMENTS)` / `walk_list_head` / `walk_slist` |
+| `proc.get_task()` / `add_process_layer()` / `get_map_iter()` | same names (`add_process_layer()?` → `Option<LayerRef>`) |
+| `fileglob.get_fg_type()` / `vm_map_object.get_map_object()` | same names |
+| `vm_map_entry.get_perms() / get_range_alias() / get_special_path() / get_object() / get_offset()` | same names (`get_perms` also for `sysctl_oid`) |
+| `sysctl_oid.get_ctltype()` / `vnode.full_path()` | same names |
+| `datetime.datetime.fromtimestamp(t)` (naive local time) | `crate::util::time::fromtimestamp_local(t)` → `Result<DateTime, String>` (`Err` = python exception text) |
+| `mac.MacUtilities.virtual_to_physical_address(a)` | `crate::symbols::mac::virtual_to_physical_address(a)` |
+
+A trailing `Err` in a walker's `Vec` marks where python would have raised. Python exceptions
+that are not volatility exceptions (e.g. `ValueError` from `datetime`) crash python's plugin
+with a traceback; the rsvol equivalent is a plugin panic, which the CLI renders the same way.
+
 ## Layers
 
 | python | rust |
