@@ -7,7 +7,7 @@ run() {
   [ -s "$OUT/$name.txt" ] && return
   d=$OUT/dump/$name; mkdir -p $d
   s=$(date +%s%N)
-  eval "COLUMNS=80 timeout 5400 nice -n 10 /home/user/rs-vol/bench/venv/bin/python /home/user/rs-vol/volatility3/vol.py -q -o $d -f $IMG $args" > $OUT/$name.tmp 2> $OUT/$name.err
+  eval "COLUMNS=80 /home/user/rs-vol/bench/scripts/limit.sh -m 8G timeout 5400 nice -n 10 /home/user/rs-vol/bench/venv/bin/python /home/user/rs-vol/volatility3/vol.py -q -o $d -f $IMG $args" > $OUT/$name.tmp 2> $OUT/$name.err
   rc=$?; e=$(date +%s%N)
   mv $OUT/$name.tmp $OUT/$name.txt
   echo -e "$name\t$rc\t$(( (e-s)/1000000 ))ms\t$args" >> $OUT/times.tsv
