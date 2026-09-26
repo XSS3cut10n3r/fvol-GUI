@@ -379,9 +379,9 @@ mod avx2 {
         from: usize,
         last: usize,
         i1: usize,
-        s1: &ByteSet,
+        s1: &super::SetDesc,
         i2: usize,
-        s2: &ByteSet,
+        s2: &super::SetDesc,
         verify: &mut dyn FnMut(usize) -> bool,
     ) -> Option<usize> {
         use super::vset::{Any, build};
@@ -533,6 +533,50 @@ mod avx2 {
 
 use super::regex::hir::ByteSet;
 
+/// Precomputed SIMD-friendly description of a byte set (built once, reused per call).
+#[derive(Clone, Debug)]
+pub struct SetDesc {
+    pub set: ByteSet,
+    kind: DescKind,
+}
+
+#[derive(Clone, Debug)]
+enum DescKind {
+    One(u8),
+    Two(u8, u8),
+    Three(u8, u8, u8),
+    Masked(u8, u8),
+    Truffle([u8; 16], [u8; 16]),
+}
+
+impl SetDesc {
+    pub fn new(s: &ByteSet) -> SetDesc {
+        let v: Vec<u8> = s.iter().collect();
+        let kind = match v.len() {
+            1 => DescKind::One(v[0]),
+            2 => {
+                let d = v[0] ^ v[1];
+                if d.count_ones() == 1 { DescKind::Masked(!d, v[0] & !d) } else { DescKind::Two(v[0], v[1]) }
+            }
+            3 => DescKind::Three(v[0], v[1], v[2]),
+            _ => {
+                let mut lo = [0u8; 16];
+                let mut hi = [0u8; 16];
+                for &b in &v {
+                    let bit = 1u8 << ((b >> 4) & 7);
+                    if b < 0x80 {
+                        lo[(b & 15) as usize] |= bit;
+                    } else {
+                        hi[(b & 15) as usize] |= bit;
+                    }
+                }
+                DescKind::Truffle(lo, hi)
+            }
+        };
+        SetDesc { set: *s, kind }
+    }
+}
+
 /// Leftmost p in [from, last] with hay[p+i1] in s1, hay[p+i2] in s2 and `verify(p)`.
 /// Requires last + max(i1, i2) < hay.len().
 pub fn pair_set_find(
@@ -540,9 +584,9 @@ pub fn pair_set_find(
     from: usize,
     last: usize,
     i1: usize,
-    s1: &ByteSet,
+    s1: &SetDesc,
     i2: usize,
-    s2: &ByteSet,
+    s2: &SetDesc,
     verify: &mut dyn FnMut(usize) -> bool,
 ) -> Option<usize> {
     if from > last || last + i1.max(i2) >= hay.len() {
@@ -555,7 +599,7 @@ pub fn pair_set_find(
             return unsafe { avx2::pair_set_dispatch(hay, from, last, i1, s1, i2, s2, verify) };
         }
     }
-    (from..=last).find(|&p| s1.contains(hay[p + i1]) && s2.contains(hay[p + i2]) && verify(p))
+    (from..=last).find(|&p| s1.set.contains(hay[p + i1]) && s2.set.contains(hay[p + i2]) && verify(p))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -627,44 +671,25 @@ mod vset {
     }
 
     #[target_feature(enable = "avx2")]
-    pub unsafe fn build(s: &ByteSet) -> Any {
-        let v: Vec<u8> = s.iter().collect();
+    pub unsafe fn build(d: &SetDesc) -> Any {
         unsafe {
-            match v.len() {
-                1 => Any::One(One(_mm256_set1_epi8(v[0] as i8))),
-                2 => {
-                    let d = v[0] ^ v[1];
-                    if d.count_ones() == 1 {
-                        Any::Masked(Masked(_mm256_set1_epi8(!d as i8), _mm256_set1_epi8((v[0] & !d) as i8)))
-                    } else {
-                        Any::Two(Two(_mm256_set1_epi8(v[0] as i8), _mm256_set1_epi8(v[1] as i8)))
-                    }
-                }
-                3 => Any::Three(Three(
-                    _mm256_set1_epi8(v[0] as i8),
-                    _mm256_set1_epi8(v[1] as i8),
-                    _mm256_set1_epi8(v[2] as i8),
+            match &d.kind {
+                DescKind::One(a) => Any::One(One(_mm256_set1_epi8(*a as i8))),
+                DescKind::Two(a, b) => Any::Two(Two(_mm256_set1_epi8(*a as i8), _mm256_set1_epi8(*b as i8))),
+                DescKind::Three(a, b, c) => Any::Three(Three(
+                    _mm256_set1_epi8(*a as i8),
+                    _mm256_set1_epi8(*b as i8),
+                    _mm256_set1_epi8(*c as i8),
                 )),
-                _ => {
-                    let mut lo = [0u8; 16];
-                    let mut hi = [0u8; 16];
-                    for &b in &v {
-                        let bit = 1u8 << ((b >> 4) & 7);
-                        if b < 0x80 {
-                            lo[(b & 15) as usize] |= bit;
-                        } else {
-                            hi[(b & 15) as usize] |= bit;
-                        }
-                    }
-                    Any::Truffle(Truffle {
-                        lo: _mm256_broadcastsi128_si256(_mm_loadu_si128(lo.as_ptr() as *const __m128i)),
-                        hi: _mm256_broadcastsi128_si256(_mm_loadu_si128(hi.as_ptr() as *const __m128i)),
-                        bits: _mm256_setr_epi8(
-                            1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
-                            1, 2, 4, 8, 16, 32, 64, -128,
-                        ),
-                    })
-                }
+                DescKind::Masked(m, v) => Any::Masked(Masked(_mm256_set1_epi8(*m as i8), _mm256_set1_epi8(*v as i8))),
+                DescKind::Truffle(lo, hi) => Any::Truffle(Truffle {
+                    lo: _mm256_broadcastsi128_si256(_mm_loadu_si128(lo.as_ptr() as *const __m128i)),
+                    hi: _mm256_broadcastsi128_si256(_mm_loadu_si128(hi.as_ptr() as *const __m128i)),
+                    bits: _mm256_setr_epi8(
+                        1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
+                        1, 2, 4, 8, 16, 32, 64, -128,
+                    ),
+                }),
             }
         }
     }

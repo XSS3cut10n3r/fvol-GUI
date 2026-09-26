@@ -23,6 +23,8 @@ pub mod parse;
 
 #[cfg(test)]
 mod difftest;
+#[cfg(test)]
+mod perftest;
 
 use std::fmt;
 use std::sync::Mutex;
@@ -166,6 +168,12 @@ impl Regex {
             Ok(mut p) => p.pop(),
             Err(_) => None,
         };
+        let mut got = got;
+        if let Some(sc) = got.as_mut() {
+            if let Some(c) = sc.dfa.as_mut() {
+                c.reset_stats();
+            }
+        }
         got.unwrap_or_else(|| {
             Box::new(Scratch {
                 bt: backtrack::Cache::new(),
