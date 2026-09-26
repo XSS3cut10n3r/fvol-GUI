@@ -169,6 +169,16 @@ pub trait Layer: Send + Sync {
         self.lower().cloned().into_iter().collect()
     }
 
+    /// python `mapping()` with the layer each run maps into: like [`Layer::mapping`] but also
+    /// reports runs backed by layers other than `lower()` (Windows pagefile / swap layers).
+    /// `f(run, target)` returns false to stop. Default: `mapping()` with `lower()`.
+    fn mapping_targets(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping, &dyn Layer) -> bool) {
+        if let Some(lower) = self.lower() {
+            let l: &dyn Layer = lower.as_ref();
+            self.mapping(addr, len, &mut |m| f(m, l));
+        }
+    }
+
     /// Downcast helper: `Some` for the file layer (enables windowed-mmap scanning).
     fn as_file(&self) -> Option<&FileLayer> {
         None

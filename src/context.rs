@@ -103,6 +103,14 @@ fn keep_err<T>(r: &std::result::Result<T, String>) -> Result<&T> {
 impl Context {
     /// Cheap: records options and sets the symbol search path. Nothing is opened or scanned.
     pub fn new(opts: GlobalOptions) -> Result<Context> {
+        if opts.clear_cache {
+            // python --clear-cache wipes its identifier cache and cached data; ours are the
+            // identifier index, the automagic results and the binary symbol tables
+            let dir = crate::util::paths::rsvol_cache_dir();
+            let _ = std::fs::remove_file(dir.join("identifiers.cache"));
+            let _ = std::fs::remove_dir_all(dir.join("automagic"));
+            let _ = std::fs::remove_dir_all(dir.join("isf"));
+        }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         Ok(Context {
             opts,
@@ -173,11 +181,24 @@ impl Context {
         keep_err(self.mac.get_or_init(|| crate::automagic::mac::init(self).map_err(|e| e.to_string())))
     }
 
+    /// Log an automagic failure detail (python logs these at -v levels) and return the python
+    /// UnsatisfiedException for `paths`.
+    fn unsatisfied(&self, detail: &Error, paths: &[&str]) -> Error {
+        if self.opts.verbosity > 0 {
+            eprintln!("automagic: {detail}");
+        }
+        crate::plugins::unsatisfied(paths)
+    }
+
     fn init_windows(&self) -> Result<WinKernel> {
         let _t = crate::util::trace::span("windows kernel init (total)");
-        let (phys_arc, phys) = self.physical_arc()?;
+        // python: no translation layer -> both the layer and the symbol requirement are
+        // unsatisfied; a layer without kernel symbols -> only the symbol requirement
+        const LAYER: &[&str] = &["kernel.layer_name", "kernel.symbol_table_name"];
+        const SYMS: &[&str] = &["kernel.symbol_table_name"];
+        let (phys_arc, phys) = self.physical_arc().map_err(|e| self.unsatisfied(&e, LAYER))?;
         if !crate::automagic::stacker_enabled(self.opts.stackers.as_deref(), "WindowsIntelStacker") {
-            return Err(Error::Unsatisfied("WindowsIntelStacker disabled by --stackers".into()));
+            return Err(self.unsatisfied(&Error::msg("WindowsIntelStacker disabled by --stackers"), LAYER));
         }
         let image = self.image_path()?;
         let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
@@ -200,7 +221,19 @@ impl Context {
         let am = match cached {
             Some(a) => a,
             None => {
-                let a = crate::automagic::windows::run(phys_arc)?;
+                use crate::automagic::windows::{WinAutomagic, find_dtb, find_kernel};
+                let d = {
+                    let _t = crate::util::trace::span("windows dtb scan");
+                    find_dtb(phys_arc).map_err(|e| self.unsatisfied(&e, LAYER))?.ok_or_else(|| self.unsatisfied(&Error::msg("no Windows DTB found"), LAYER))?
+                };
+                let vl = IntelLayer::new("layer_name", phys_arc.clone(), d.dtb, d.mode, PteFlavor::Windows);
+                let k = {
+                    let _t = crate::util::trace::span("windows pdbscan");
+                    find_kernel(&vl, *phys)
+                        .map_err(|e| self.unsatisfied(&e, SYMS))?
+                        .ok_or_else(|| self.unsatisfied(&Error::msg("No suitable kernels found during pdbscan"), SYMS))?
+                };
+                let a = WinAutomagic { dtb: d.dtb, mode: d.mode, kvo: k.kvo, pdb_name: k.pdb.pdb_name, guid: k.pdb.guid, age: k.pdb.age };
                 crate::automagic::cache::store(
                     &image,
                     "win",
@@ -234,11 +267,11 @@ impl Context {
         let vlayer: LayerRef = layer;
         let loc = {
             let _t = crate::util::trace::span("kernel isf lookup");
-            symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline)?
+            symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline).map_err(|e| self.unsatisfied(&e, SYMS))?
         };
         let table = {
             let _t = crate::util::trace::span("kernel isf load");
-            symbols::load_location(&loc, "symbol_table_name", None, 0)?
+            symbols::load_location(&loc, "symbol_table_name", None, 0).map_err(|e| self.unsatisfied(&e, SYMS))?
         };
         let module = Module::new(vlayer, table, am.kvo);
         Ok(WinKernel {
@@ -276,6 +309,34 @@ impl Context {
         symbols::load_location(&loc, &prefix, None, 0)
     }
 
+    /// python `PDBUtility.symbol_table_from_pdb(context, path, layer, pdb_name, offset, size)`:
+    /// find the RSDS record of `pdb_name` (e.g. "tcpip.pdb") inside `[offset, offset+size)` of
+    /// `layer` and load (or download/convert) its ISF.
+    pub fn symbol_table_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<TableRef> {
+        Ok(self.modtable_from_pdb(layer, pdb_name, offset, size)?.1)
+    }
+
+    /// python `PDBUtility.module_from_pdb(...)`: like [`Context::symbol_table_from_pdb`] but
+    /// returns a [`Module`] based at the MZ header found before the RSDS record.
+    pub fn module_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<Module> {
+        let (mz, t) = self.modtable_from_pdb(layer, pdb_name, offset, size)?;
+        let mz = mz.ok_or_else(|| Error::Symbol(format!("No MZ header found for {pdb_name}")))?;
+        Ok(Module::new(layer, t, mz))
+    }
+
+    fn modtable_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<(Option<u64>, TableRef)> {
+        let start = offset.unwrap_or(layer.min_address());
+        let size = size.unwrap_or_else(|| layer.max_address().wrapping_sub(start));
+        let mut first = None;
+        crate::automagic::windows::pdbname_scan(layer, &[pdb_name.as_bytes()], Some(start), Some(start.wrapping_add(size)), |s| {
+            first = Some(s);
+            false
+        });
+        let s = first.ok_or_else(|| Error::Symbol(format!("Did not find GUID of {pdb_name} in module @ {start:#x}!")))?;
+        let t = self.load_windows_pdb(&s.pdb_name, &s.guid, s.age)?;
+        Ok((s.mz_offset, t))
+    }
+
     /// Create a file in the output directory (volatility3 CLIFileHandler semantics: if the
     /// preferred name already exists a counter is appended, see `cli::files::create`).
     /// Returns the open file and the FINAL file name, which is what python's
@@ -310,6 +371,213 @@ mod bench {
     use super::*;
     use crate::layers::LayerExt;
     use crate::layers::scan::{BytesScanner, scan};
+
+    /// A physical layer that corrupts ~`rate`% of pages (deterministically) to simulate smear.
+    struct Smear {
+        inner: Arc<dyn Layer>,
+        rate: u64,
+    }
+    impl Smear {
+        fn corrupt(&self, page: u64) -> Option<u64> {
+            let h = crate::util::fxhash::hash_u64(page ^ 0x5eed);
+            if h % 100 < self.rate { Some(h) } else { None }
+        }
+    }
+    impl Layer for Smear {
+        fn name(&self) -> &str {
+            "smear"
+        }
+        fn max_address(&self) -> u64 {
+            self.inner.max_address()
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            self.inner.read(addr, buf)?;
+            for (i, b) in buf.iter_mut().enumerate() {
+                let a = addr + i as u64;
+                if let Some(h) = self.corrupt(a >> 12) {
+                    *b ^= (crate::util::fxhash::hash_u64(h ^ a) & 0xff) as u8;
+                }
+            }
+            Ok(())
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            self.inner.is_valid(addr, len)
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(crate::layers::Mapping) -> bool) {
+            self.inner.mapping(addr, len, f)
+        }
+        fn lower(&self) -> Option<&Arc<dyn Layer>> {
+            Some(&self.inner)
+        }
+    }
+
+    /// `cargo test --release smear_robustness -- --ignored --nocapture`: walk processes, VADs,
+    /// modules, strings, tokens over a physical layer with corrupted pages -- errors are fine,
+    /// panics are not.
+    #[test]
+    #[ignore]
+    fn smear_robustness() {
+        use crate::symbols::windows::prelude::*;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let (phys, _) = ctx.physical_arc().unwrap();
+        for rate in [1u64, 5, 20, 50] {
+            let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate });
+            let vl = IntelLayer::new("layer_name", smear, k.dtb, k.layer.mode(), PteFlavor::Windows).with_kernel_virtual_offset(Some(k.base));
+            let vl: &'static IntelLayer = Box::leak(Box::new(vl));
+            let kk = WinKernel { module: Module::new(vl, k.table, k.base), layer: vl, vlayer: vl, phys: k.phys, table: k.table, base: k.base, dtb: k.dtb, pdb_name: String::new(), guid: String::new(), age: 0 };
+            let (mut procs, mut vads, mut mods, mut errs) = (0, 0, 0, 0);
+            for p in crate::plugins::windows::pslist::list_processes(&kk, &|_| Ok(false)) {
+                let Ok(p) = p else {
+                    errs += 1;
+                    continue;
+                };
+                procs += 1;
+                let _ = p.is_valid();
+                let _ = p.image_file_name();
+                let _ = p.get_create_time();
+                let _ = p.get_session_id();
+                let _ = p.get_handle_count();
+                let _ = p.environment_variables();
+                if let Ok(t) = p.m("Token").and_then(|t| t.fast_ref_dereference()).and_then(|t| t.cast("_TOKEN")) {
+                    let _ = t.get_sids();
+                    let _ = t.privileges();
+                }
+                if let Ok(root) = p.get_vad_root() {
+                    for v in root.traverse() {
+                        match v {
+                            Ok(v) => {
+                                vads += 1;
+                                let _ = (v.get_start(), v.get_end(), v.get_file_name(), v.get_commit_charge(), v.get_parent());
+                            }
+                            Err(_) => errs += 1,
+                        }
+                    }
+                }
+                for m in p.load_order_modules() {
+                    match m {
+                        Ok(m) => {
+                            mods += 1;
+                            let _ = m.m("FullDllName").and_then(|n| n.get_string());
+                        }
+                        Err(_) => errs += 1,
+                    }
+                }
+            }
+            for m in crate::plugins::windows::modules::list_modules(&kk) {
+                if let Ok(m) = m {
+                    let _ = m.m("BaseDllName").and_then(|n| n.get_string());
+                }
+            }
+            println!("smear {rate}%: {procs} procs, {vads} vads, {mods} modules, {errs} errors, no panic");
+        }
+    }
+
+    /// API proof against python: windows.dlllist.DllList's default output rebuilt from the
+    /// core extension API (get_peb / load_order_modules / UNICODE_STRING / get_load_count on
+    /// process layers), rendered by the real quick renderer and diffed with the reference.
+    #[test]
+    #[ignore]
+    fn dlllist_via_core_api() {
+        use crate::renderers::{ColType, Column, Value};
+        use crate::symbols::windows::WinExt;
+        use crate::util::time::wintime_to_datetime;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let refp = std::env::var("RSVOL_BENCH_REF").unwrap_or_else(|_| "/home/user/rs-vol/bench/ref/py/windows.dlllist.DllList.txt".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let mut out: Vec<u8> = b"Volatility 3 Framework 2.28.2\n".to_vec();
+        {
+            let mut r = crate::renderers::text::create("quick", &mut out, Default::default()).unwrap();
+            r.begin(vec![
+                Column::new("PID", ColType::Int),
+                Column::new("Process", ColType::Str),
+                Column::new("Base", ColType::Hex),
+                Column::new("Size", ColType::Hex),
+                Column::new("Name", ColType::Str),
+                Column::new("Path", ColType::Str),
+                Column::new("LoadCount", ColType::Int),
+                Column::new("LoadTime", ColType::DateTime),
+                Column::new("File output", ColType::Str),
+            ])
+            .unwrap();
+            let kuser = crate::plugins::windows::info::get_kuser_structure(k).unwrap();
+            let (maj, min) = (kuser.m("NtMajorVersion").unwrap().int().unwrap(), kuser.m("NtMinorVersion").unwrap().int().unwrap());
+            let load_time_field = maj > 6 || (maj == 6 && min >= 1);
+            for p in crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)) {
+                let proc = p.unwrap();
+                proc.add_process_layer().unwrap();
+                for e in proc.load_order_modules() {
+                    let e = e.unwrap();
+                    let (mut base_name, mut full_name) = (Value::Unreadable, Value::Unreadable);
+                    if let Ok(b) = e.m("BaseDllName").and_then(|n| n.get_string()) {
+                        base_name = Value::Str(b);
+                        if let Ok(f) = e.m("FullDllName").and_then(|n| n.get_string()) {
+                            full_name = Value::Str(f);
+                        }
+                    }
+                    let load_time = if load_time_field {
+                        e.path("LoadTime.QuadPart").and_then(|q| q.int()).map(wintime_to_datetime).unwrap_or(Value::Unreadable)
+                    } else {
+                        Value::NotApplicable
+                    };
+                    let hexv = |r: crate::error::Result<i128>| r.map(Value::Int).unwrap_or(Value::NotAvailable);
+                    r.row(
+                        0,
+                        vec![
+                            Value::Int(proc.m("UniqueProcessId").unwrap().int().unwrap()),
+                            Value::Str(proc.image_file_name_str().unwrap()),
+                            hexv(e.m("DllBase").and_then(|x| x.int())),
+                            hexv(e.m("SizeOfImage").and_then(|x| x.int())),
+                            base_name,
+                            full_name,
+                            e.get_load_count().map(Value::Int).unwrap_or(Value::NotAvailable),
+                            load_time,
+                            Value::SStr("Disabled"),
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            r.finish().unwrap();
+        }
+        let reference = std::fs::read(&refp).unwrap();
+        if out != reference {
+            let a = String::from_utf8_lossy(&out);
+            let b = String::from_utf8_lossy(&reference);
+            for (i, (x, y)) in a.lines().zip(b.lines()).enumerate() {
+                if x != y {
+                    panic!("line {i} differs:\n ours: {x}\n  ref: {y}");
+                }
+            }
+            panic!("length differs: ours {} lines, ref {} lines", a.lines().count(), b.lines().count());
+        }
+        println!("dlllist via core API: byte-identical ({} bytes)", out.len());
+    }
+
+    /// `cargo test --release module_pdb_lookup -- --ignored --nocapture` (needs the test image
+    /// and tcpip.pdb's ISF in a symbol dir): python `PDBUtility.module_from_pdb` for tcpip.sys.
+    #[test]
+    #[ignore]
+    fn module_pdb_lookup() {
+        use crate::symbols::windows::WinExt;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let m = crate::plugins::windows::modules::list_modules(k)
+            .into_iter()
+            .filter_map(|m| m.ok())
+            .find(|m| m.m("BaseDllName").and_then(|n| n.get_string()).map(|n| n.eq_ignore_ascii_case("tcpip.sys")).unwrap_or(false))
+            .unwrap();
+        let base = m.m("DllBase").unwrap().u64().unwrap();
+        let size = m.m("SizeOfImage").unwrap().u64().unwrap();
+        let t = std::time::Instant::now();
+        let md = ctx.module_from_pdb(k.vlayer, "tcpip.pdb", Some(base), Some(size)).unwrap();
+        println!("tcpip.pdb module at {:#x} (DllBase {base:#x}), table {} from {} in {:.2} ms", md.offset, md.table().name(), md.table().isf_url(), t.elapsed().as_secs_f64() * 1e3);
+        assert_eq!(md.offset, base);
+        assert!(md.table().symbol_count() > 0);
+    }
 
     /// `RSVOL_BENCH_IMG=... cargo test --release translation_bench -- --ignored --nocapture`
     /// (run through bench/scripts/limit.sh): page-walk / mapping / virtual-scan throughput.
