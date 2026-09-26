@@ -798,14 +798,24 @@ impl SymbolTable {
     /// Symbol names with `offset <= address <= offset + size` (python
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
+        // index sorted by address only (integer keys: no name lookups while building it; some
+        // addresses carry tens of thousands of aliases); the matches of one query are ordered
+        // by (address, name) afterwards, names being unique
         let idx = self.by_addr.get_or_init(|| {
-            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (self.sym_at(i).address, i)).collect();
-            v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1)))));
+            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32)
+                .map(|i| {
+                    let a = rd64(self.sym_rec(i), 8);
+                    (if self.symbol_mask != 0 { a & self.symbol_mask } else { a }, i)
+                })
+                .collect();
+            v.sort_unstable();
             v
         });
         let start = idx.partition_point(|e| e.0 < offset);
         let end_addr = offset.saturating_add(size);
-        idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| self.sym_at(e.1).name).collect()
+        let mut hits: Vec<(u64, &str)> = idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| (e.0, self.rec_str(self.sym_rec(e.1)))).collect();
+        hits.sort_unstable();
+        hits.into_iter().map(|(_, n)| n).collect()
     }
 
     // ------------------------------------------------------------------ types by name

@@ -236,33 +236,30 @@ impl Plugin for VmaYaraScan {
                 None => Ok(()),
             };
         };
-        // scan the VMAs on all cores, emit in order (bounded look-ahead keeps memory flat)
-        let mut out_err = None;
-        crate::util::par::par_map_stream(
-            items.len(),
-            crate::util::par::threads() * 2,
-            |i| {
-                let (layer, tgid, start, size) = items[i];
-                let mut buf = read_vma(layer, start, size);
-                scanner_hits(rules, buf.as_mut(), start)
-                    .into_iter()
-                    .map(|(offset, rule, name, value)| {
-                        vec![Value::Int(offset as i128), Value::Int(tgid), Value::Str(rule), Value::Str(name), layer_data(layer, offset, value.len() as u64)]
-                    })
-                    .collect::<Vec<_>>()
-            },
-            |_, item_rows| {
-                for row in item_rows {
-                    if let Err(e) = out.row(0, row) {
-                        out_err = Some(e);
-                        return false;
-                    }
-                }
-                true
-            },
-        );
-        if let Some(e) = out_err {
-            return Err(e);
+        // Scan the VMAs on all cores, biggest first (cost ~ VMA size; a few big VMAs would
+        // otherwise form the tail), then emit in python order. Only one buffer per worker is
+        // alive at a time; the hits are small.
+        let mut order: Vec<usize> = (0..items.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(items[i].3));
+        let done = crate::util::par::par_map(order.len(), |k| {
+            let (layer, tgid, start, size) = items[order[k]];
+            let mut buf = read_vma(layer, start, size);
+            let hits = scanner_hits(rules, buf.as_mut(), start);
+            drop(buf);
+            hits.into_iter()
+                .map(|(offset, rule, name, value)| {
+                    vec![Value::Int(offset as i128), Value::Int(tgid), Value::Str(rule), Value::Str(name), layer_data(layer, offset, value.len() as u64)]
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut slots: Vec<Vec<Vec<Value>>> = (0..items.len()).map(|_| Vec::new()).collect();
+        for (k, rows) in done.into_iter().enumerate() {
+            slots[order[k]] = rows;
+        }
+        for rows in slots {
+            for row in rows {
+                out.row(0, row)?;
+            }
         }
         match tail {
             Some(e) => Err(raise_if_python(e)),
