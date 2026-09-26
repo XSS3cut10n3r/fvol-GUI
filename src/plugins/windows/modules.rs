@@ -136,20 +136,35 @@ impl Plugin for Modules {
         ]
     }
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        out.begin(vec![
-            Column::new("Offset", ColType::Hex),
-            Column::new("Base", ColType::Hex),
-            Column::new("Size", ColType::Hex),
-            Column::new("Name", ColType::Str),
-            Column::new("Path", ColType::Str),
-            Column::new("File output", ColType::Str),
-        ])?;
+        out.begin(columns())?;
+        let k = ctx.windows_kernel()?;
+        generate(ctx, cfg, out, &mut || list_modules(k))
+    }
+}
+
+/// The TreeGrid columns of `Modules` (and its subclass `ModScan`).
+pub fn columns() -> Vec<Column> {
+    vec![
+        Column::new("Offset", ColType::Hex),
+        Column::new("Base", ColType::Hex),
+        Column::new("Size", ColType::Hex),
+        Column::new("Name", ColType::Str),
+        Column::new("Path", ColType::Str),
+        Column::new("File output", ColType::Str),
+    ]
+}
+
+/// python `Modules._generator()` over `self._enumeration_method` (`enumerate` returns the
+/// module entries, a trailing `Err` = python raised there): the `--dump` / `--base` / `--name`
+/// handling shared by `Modules` and `ModScan`.
+pub fn generate(ctx: &Context, cfg: &Config, out: &mut dyn RowSink, enumerate: &mut dyn FnMut() -> Vec<Result<Obj>>) -> Result<()> {
+    {
         let k = ctx.windows_kernel()?;
         let dump = cfg.get_bool("dump");
         let base_filter = cfg.get_int("base").filter(|b| *b != 0);
         let name_filter = cfg.get_str("name").filter(|n| !n.is_empty());
         let (pe_table, session_layers) = if dump { (Some(ctx.load_isf("windows/pe")?), get_session_layers(k, &[])?) } else { (None, Vec::new()) };
-        for m in list_modules(k) {
+        for m in enumerate() {
             let m = m?;
             let dll_base = m.m("DllBase")?.u64()?;
             if let Some(b) = base_filter {

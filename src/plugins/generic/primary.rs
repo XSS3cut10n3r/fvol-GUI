@@ -42,7 +42,7 @@ pub struct Primary {
 /// python's unsatisfied `primary` requirement (the CLI prints
 /// `Unsatisfied requirement plugins.<Class>.primary: <description>`).
 pub fn unsatisfied(description: &str) -> Error {
-    Error::Unsatisfied(format!("primary: {description}"))
+    crate::plugins::unsatisfied_described(&[("primary", crate::plugins::UnsatKind::Layer, description)])
 }
 
 /// Only the physical layer (python plugins that immediately step down to `memory_layer`, e.g.

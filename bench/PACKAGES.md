@@ -40,3 +40,15 @@ L1 linux ext+process, M1 mac. Pending: W5 malware+services (after disasm + yara 
 L3 linux fs/net (after L1's extensions land).
 - regex: URL pattern 0.91-0.94x PCRE2-JIT (everything else >= 1x or at the ~20 GB/s page-cache floor).
 - codecs: xz single-block 0.97-0.99x liblzma (cold ISF path only; binary ISF cache hides it).
+- core: level-by-level page-table range walker (memmap all-procs 42M rows = 19 s, strings, statistics use per-page translate).
+- statistics requires kernel symbols; python only needs the memory layer.
+
+## Queue (launch as agent slots free up; 20-concurrent cap)
+1. perf pass snappy/xpress + container layers   2. W5 malware+services (needs disasm merged)
+3. L2 linux kernel, L3 linux fs/net (need L1 extensions merged)
+
+## Dedupe list (cleanup pass later)
+- src/plugins/windows/thread_pe_symbols.rs (W1 private) -> W2b pe_symbols (symbol names currently empty!)
+- handles.rs private registry key naming -> W3 RegExt helpers
+- hivescan private list_big_pools -> W1 bigpools::list_big_pools_each
+- core RSDS scanner duplicates symbols::windows::pdb::rsds_scan
