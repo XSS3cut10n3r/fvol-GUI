@@ -12,6 +12,7 @@
 //!
 //! Data is processed in L2-sized blocks so every engine pass reads cached memory.
 
+use super::hashf::HashFilter;
 use super::literal::{self, TextStr, eq_at};
 use super::re_string::ReString;
 use super::teddy::{self, Teddy};
@@ -55,6 +56,8 @@ enum Engine {
     Teddy(Teddy),
     /// Aho-Corasick over exact window atoms; `map[atom] = pattern`.
     Aho { ac: AhoCorasick, map: Vec<u32> },
+    /// Large sets: hashed 4-byte windows, plus an engine for the shorter windows.
+    Hash { hf: HashFilter, short: Box<Engine> },
 }
 
 /// Reusable scan state (one per thread).
@@ -130,49 +133,81 @@ fn build_re(def: &StringDef) -> Result<ReString, String> {
 }
 
 impl Engine {
-    fn build(pats: &[Pat], bytes: &[u8], folds: &[u8]) -> Engine {
-        if pats.is_empty() {
+    /// Engine for patterns `ids` (indices into `pats`).
+    fn build(pats: &[Pat], ids: &[u32], bytes: &[u8], folds: &[u8]) -> Engine {
+        if ids.is_empty() {
             return Engine::None;
         }
-        if pats.len() <= TEDDY_MAX {
-            let mut wins = Vec::with_capacity(pats.len());
-            for p in pats {
-                let a = (p.off + p.w) as usize;
-                let win: Vec<ByteSet> = (0..p.wlen as usize)
-                    .map(|j| {
-                        let b = bytes[a + j];
-                        let mut s = ByteSet::single(b);
-                        if folds[a + j] != 0 {
-                            s.insert(b ^ 0x20);
-                        }
-                        s
-                    })
-                    .collect();
-                wins.push(win);
+        // Window byte `j` of pattern `p` and its case-folded alternative, if any.
+        let wbyte = |p: &Pat, j: usize| -> (u8, Option<u8>) {
+            let a = (p.off + p.w) as usize + j;
+            (bytes[a], if folds[a] != 0 { Some(bytes[a] ^ 0x20) } else { None })
+        };
+        if ids.len() <= TEDDY_MAX {
+            let wins: Vec<Vec<ByteSet>> = ids
+                .iter()
+                .map(|&id| {
+                    let p = &pats[id as usize];
+                    (0..p.wlen as usize)
+                        .map(|j| {
+                            let (b, alt) = wbyte(p, j);
+                            let mut s = ByteSet::single(b);
+                            if let Some(c) = alt {
+                                s.insert(c);
+                            }
+                            s
+                        })
+                        .collect()
+                })
+                .collect();
+            return Engine::Teddy(Teddy::new(&wins, ids));
+        }
+        // Exact windows with every case combination of folded letters.
+        let expand = |p: &Pat| -> Vec<Vec<u8>> {
+            let mut out = vec![Vec::with_capacity(p.wlen as usize)];
+            for j in 0..p.wlen as usize {
+                let (b, alt) = wbyte(p, j);
+                match alt {
+                    None => out.iter_mut().for_each(|v| v.push(b)),
+                    Some(c) => {
+                        let mut more = out.clone();
+                        out.iter_mut().for_each(|v| v.push(b));
+                        more.iter_mut().for_each(|v| v.push(c));
+                        out.extend(more);
+                    }
+                }
             }
-            let ids: Vec<u32> = (0..pats.len() as u32).collect();
-            return Engine::Teddy(Teddy::new(&wins, &ids));
+            out
+        };
+        let (long, short): (Vec<u32>, Vec<u32>) =
+            ids.iter().partition(|&&id| pats[id as usize].wlen as usize == teddy::MAX_WINDOW);
+        if !long.is_empty() {
+            let mut wins = Vec::new();
+            let mut wids = Vec::new();
+            for &id in &long {
+                for w in expand(&pats[id as usize]) {
+                    let mut a = [0u8; 4];
+                    a.copy_from_slice(&w[..4]);
+                    wins.push(a);
+                    wids.push(id);
+                }
+            }
+            let short = Box::new(Engine::build(pats, &short, bytes, folds));
+            return Engine::Hash { hf: HashFilter::new(&wins, &wids), short };
         }
         let mut atoms: Vec<Vec<u8>> = Vec::new();
         let mut map = Vec::new();
-        for (pi, p) in pats.iter().enumerate() {
-            let a = (p.off + p.w) as usize;
-            let win = &bytes[a..a + p.wlen as usize];
-            let fold = &folds[a..a + p.wlen as usize];
-            // Case combinations of folded letters.
-            let folded: Vec<usize> = (0..win.len()).filter(|&j| fold[j] != 0).collect();
-            for combo in 0..(1usize << folded.len()) {
-                let mut v = win.to_vec();
-                for (bit, &j) in folded.iter().enumerate() {
-                    if combo >> bit & 1 != 0 {
-                        v[j] ^= 0x20;
-                    }
-                }
-                atoms.push(v);
-                map.push(pi as u32);
+        for &id in ids {
+            for w in expand(&pats[id as usize]) {
+                atoms.push(w);
+                map.push(id);
             }
         }
         Engine::Aho { ac: AhoCorasick::new(&atoms), map }
+    }
+
+    fn is_none(&self) -> bool {
+        matches!(self, Engine::None)
     }
 
     /// Candidate windows in `hay[from..to)`: `f(q, pattern)` with `q` the window start.
@@ -187,6 +222,10 @@ impl Engine {
                     f(end - len, p);
                 }
             }),
+            Engine::Hash { hf, short } => {
+                hf.find(hay, from, to, &mut f);
+                short.run(hay, from, to, state, f);
+            }
         }
     }
 }
@@ -306,9 +345,11 @@ impl Matcher {
                 }
             }
         }
-        m.raw = Engine::build(&m.pats, &m.bytes, &m.folds);
+        let ids: Vec<u32> = (0..m.pats.len() as u32).collect();
+        m.raw = Engine::build(&m.pats, &ids, &m.bytes, &m.folds);
         let dzero = vec![0u8; dbytes.len()];
-        m.diff = Engine::build(&m.dpats, &dbytes, &dzero);
+        let ids: Vec<u32> = (0..m.dpats.len() as u32).collect();
+        m.diff = Engine::build(&m.dpats, &ids, &dbytes, &dzero);
         Ok(m)
     }
 
@@ -324,6 +365,41 @@ impl Matcher {
         });
         self.bytes.extend_from_slice(pat);
         self.folds.extend_from_slice(fold);
+    }
+
+    /// Diagnostics: engine kinds and the number of candidates each produces on `data`.
+    #[cfg(test)]
+    pub(crate) fn candidate_stats(&self, data: &[u8]) -> String {
+        fn kind(e: &Engine) -> String {
+            match e {
+                Engine::None => "none".into(),
+                Engine::Teddy(t) => format!("teddy(est {:.2e})", t.estimated_rate()),
+                Engine::Aho { ac, .. } => format!("aho({} states)", ac.state_count()),
+                Engine::Hash { short, .. } => format!("hash+{}", kind(short)),
+            }
+        }
+        let mut st = 0u32;
+        let mut raw = 0usize;
+        let mut verified = 0usize;
+        self.raw.run(data, 0, data.len(), &mut st, |q, p| {
+            raw += 1;
+            let pat = &self.pats[p as usize];
+            if let Some(s) = q.checked_sub(pat.w as usize) {
+                let (a, e) = (pat.off as usize, (pat.off + pat.len) as usize);
+                if eq_at(data, s, &self.bytes[a..e], &self.folds[a..e], 0) {
+                    verified += 1;
+                }
+            }
+        });
+        format!(
+            "raw: {} pats, {}, {} candidates, {} verified; diff: {} pats, {}",
+            self.pats.len(),
+            kind(&self.raw),
+            raw,
+            verified,
+            self.dpats.len(),
+            kind(&self.diff)
+        )
     }
 
     /// Number of strings.
@@ -377,7 +453,7 @@ impl Matcher {
         while b0 < n {
             let b1 = (b0 + BLOCK).min(n);
             self.raw.run(data, b0, b1, &mut raw_state, |q, p| self.on_raw(data, q, p, out, sc));
-            if !matches!(self.diff, Engine::None) && n >= 2 {
+            if !self.diff.is_none() && n >= 2 {
                 // D[i] = data[i] ^ data[i+1] for i in [b0, e).
                 let e = (b1 + 64).min(n - 1);
                 if e > b0 {

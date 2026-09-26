@@ -138,6 +138,9 @@ fn yara_scan_bench() {
     let all = map.as_slice();
     let end = (off + len).min(all.len());
     let data = &all[off.min(end)..end];
+    if std::env::var("RSVOL_YARA_STATS").is_ok() {
+        eprintln!("{}", mt.candidate_stats(data));
+    }
     let mut sc = Scratch::new();
     let mut out = Vec::new();
     let mut best = f64::MAX;
