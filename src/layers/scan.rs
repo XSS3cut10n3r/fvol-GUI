@@ -215,25 +215,19 @@ fn collect_runs(layer: &dyn Layer, start: u64, length: u64) -> Vec<Mapping> {
     out
 }
 
-/// Resolve `[addr, addr+len)` of `layer` to one contiguous span of the backing file.
+/// Locate `[addr, addr+len)` of `layer` as linear bytes of the backing file: the layer IS the
+/// file layer, or it is a container whose `slice()` (which only succeeds for truly linear,
+/// unencoded spans and never touches the bytes) points into the file's mapping. Encoded
+/// container data (compressed frames, fill pages...) is never read from the file directly.
 fn file_span(layer: &dyn Layer, addr: u64, len: u64) -> Option<(&FileLayer, u64)> {
     if let Some(f) = layer.as_file() {
         return if addr.checked_add(len)? <= f.len() { Some((f, addr)) } else { None };
     }
-    let lower = layer.lower()?;
-    let mut runs = [Mapping { offset: 0, len: 0, mapped: 0 }; 2];
-    let mut n = 0;
-    layer.mapping(addr, len, &mut |m| {
-        if n < 2 {
-            runs[n] = m;
-        }
-        n += 1;
-        n < 2
-    });
-    if n != 1 || runs[0].offset != addr || runs[0].len != len {
-        return None;
-    }
-    file_span(lower.as_ref(), runs[0].mapped, len)
+    let f = super::base_file(layer)?;
+    let s = layer.slice(addr, usize::try_from(len).ok()?)?;
+    let base = f.data().as_ptr() as usize;
+    let p = s.as_ptr() as usize;
+    if s.len() as u64 == len && p >= base && p + s.len() <= base + f.data().len() { Some((f, (p - base) as u64)) } else { None }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1282,6 +1276,62 @@ mod tests {
         ];
         let all = MultiStringScanner::new(&tags);
         run("multi builtin(15)", &|| scan(&file, &all, None).len());
+    }
+
+    /// Reference executor: python's chunks, each read through the layer (`read`, empty when
+    /// unreadable), scanned sequentially.
+    fn reference_scan<S: Scanner>(layer: &dyn Layer, scanner: &S) -> Vec<S::Hit> {
+        let secs = coalesce_sections(layer, &default_sections(layer));
+        let chunks = build_chunks(layer, scanner.chunk_size(), scanner.overlap(), &secs);
+        let mut hits = Vec::new();
+        for c in &chunks {
+            read_chunk(layer, c, |d| {
+                if !d.is_empty() {
+                    scanner.scan(d, c.start, &mut hits)
+                }
+            });
+        }
+        hits
+    }
+
+    /// The parallel executor returns exactly what python's sequential chunk-by-chunk scan
+    /// returns, on real images (raw, LiME, ELF core, kernel virtual layer):
+    /// `RSVOL_BENCH_IMG=img cargo test --profile fast scan_exact -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn scan_exact() {
+        let Ok(path) = std::env::var("RSVOL_BENCH_IMG") else {
+            eprintln!("set RSVOL_BENCH_IMG");
+            return;
+        };
+        let (phys, _) = crate::automagic::stack_physical(std::path::Path::new(&path), None).unwrap();
+        let mut layers: Vec<(&str, &dyn Layer)> = vec![("physical", phys.as_ref())];
+        let ctx;
+        if std::env::var_os("RSVOL_BENCH_WIN").is_some() {
+            ctx = crate::context::Context::new(crate::context::GlobalOptions { file: Some(path.clone()), ..Default::default() }).unwrap();
+            layers.push(("kernel virtual", ctx.windows_kernel().unwrap().vlayer));
+        }
+        let tags: [&[u8]; 15] = [
+            b"AtmT", b"Pro\xe3", b"Proc", b"Thr\xe5", b"Thre", b"Fil\xe5", b"File", b"Mut\xe1", b"Muta", b"Dri\xf6", b"Driv", b"MmLd", b"Sym\xe2",
+            b"Symb", b"CM10",
+        ];
+        let multi = MultiStringScanner::new(&tags);
+        let short = MultiStringScanner::new(&[b"Linux".as_ref(), b"Li", b"\x7fELF", b"MZ"]);
+        let bytes = BytesScanner::new(b"Linux version");
+        for (name, l) in layers {
+            let t = std::time::Instant::now();
+            let a = scan(l, &multi, None);
+            let dt = t.elapsed().as_secs_f64();
+            let b = reference_scan(l, &multi);
+            assert!(a == b, "{name}: multi differs ({} vs {})", a.len(), b.len());
+            let a2 = scan(l, &short, None);
+            let b2 = reference_scan(l, &short);
+            assert!(a2 == b2, "{name}: short multi differs ({} vs {})", a2.len(), b2.len());
+            let a3 = scan(l, &bytes, None);
+            let b3 = reference_scan(l, &bytes);
+            assert!(a3 == b3, "{name}: bytes differs ({} vs {})", a3.len(), b3.len());
+            eprintln!("{name}: identical ({} / {} / {} hits), multi {:.1} ms", a.len(), a2.len(), a3.len(), dt * 1e3);
+        }
     }
 
     /// Single-thread search kernel throughput on cache-resident data:
