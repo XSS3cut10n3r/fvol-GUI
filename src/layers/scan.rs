@@ -33,9 +33,9 @@
 //! ```
 
 use super::{FileLayer, Layer, Mapping};
-use std::sync::Arc;
 use crate::util::par;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 /// python default `ScannerInterface.chunk_size` (16 MiB).
 pub const DEFAULT_CHUNK_SIZE: u64 = 0x1000000;
@@ -133,16 +133,19 @@ pub fn coalesce_sections(layer: &dyn Layer, sections: &[(u64, u64)]) -> Vec<(u64
             break;
         }
     }
-    // while result and result[-1] > (max, 0): only pops sections starting beyond max
-    // (python's clipping branch writes result[1], a bug we mirror by only popping)
+    // while result and result[-1] > (max, 0) (tuple order: only sections starting at or beyond
+    // max): pops those beyond max; python's clipping branch writes result[1] -- the last
+    // section only when there are exactly two (one section: IndexError, more: endless loop;
+    // we keep those)
     while let Some(&(last_start, last_length)) = result.last() {
         if (last_start, last_length) <= (max, 0) {
             break;
         }
         if last_start > max {
             result.pop();
+        } else if last_start + last_length > max && result.len() == 2 {
+            result[1] = (last_start, max - last_start);
         } else {
-            // last_start == max and length > 0: python would loop forever / mangle; keep it
             break;
         }
     }
@@ -1545,6 +1548,20 @@ mod tests {
     }
 
     #[test]
+    fn coalesce_matches_python() {
+        let l = Buf(vec![0u8; 100]); // max_address 99
+        // adjacent / overlapping sections merge
+        assert_eq!(coalesce_sections(&l, &[(10, 5), (15, 5), (30, 10), (35, 10)]), vec![(10, 10), (30, 15)]);
+        // sections starting beyond max are dropped; one ending beyond it is kept (python
+        // compares tuples: (90, 50) < (99, 0))
+        assert_eq!(coalesce_sections(&l, &[(10, 5), (90, 50), (200, 5)]), vec![(10, 5), (90, 50)]);
+        // starting at max: python's clip writes result[1] (right with exactly two sections)
+        assert_eq!(coalesce_sections(&l, &[(10, 5), (99, 5)]), vec![(10, 5), (99, 0)]);
+        // one section at max: python raises (IndexError); we keep it
+        assert_eq!(coalesce_sections(&l, &[(99, 5)]), vec![(99, 5)]);
+    }
+
+    #[test]
     fn bytes_scanner_chunks() {
         // python semantics: last byte of the layer is never scanned
         let mut data = vec![0u8; 100];
@@ -1663,6 +1680,9 @@ mod tests {
         }
         run("bytes Proc", &|| scan(&file, &BytesScanner::new(b"Proc"), None).len());
         run("bytes KDBG", &|| scan(&file, &BytesScanner::new(b"KDBG"), None).len());
+        run("bytes SystemRoot", &|| scan(&file, &BytesScanner::new(b"\\SystemRoot\\system32\\nt"), None).len());
+        run("bytes RSDS", &|| scan(&file, &BytesScanner::new(b"RSDS"), None).len());
+        run("bytes MZ", &|| scan(&file, &BytesScanner::new(b"MZ\x90\x00"), None).len());
         let ps = MultiStringScanner::new(&[b"Pro\xe3".as_ref(), b"Proc"]);
         run("multi psscan(2)", &|| scan(&file, &ps, None).len());
         let tags: [&[u8]; 15] = [

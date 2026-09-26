@@ -248,7 +248,7 @@ impl ObjectCarver {
         while addr < addr_limit {
             let a = addr;
             addr += self.alignment as usize;
-            let infomask = data[a + io];
+            let Some(&infomask) = data.get(a + io) else { break };
             let pc_bytes = &data[(a + pco).min(data.len())..(a + pco + pcs).min(data.len())];
             let pointercount = le_signed(pc_bytes);
             if !(0 <= pointercount && pointercount < 0x1000000) {
@@ -271,7 +271,9 @@ impl ObjectCarver {
                     continue;
                 }
                 let p = p as usize;
-                padding_length = u32::from_le_bytes(data[p..p + 4].try_into().unwrap()) as i128;
+                // python: struct.unpack("<I", ...) of a short slice raises
+                let b = data.get(p..p + 4).ok_or_else(|| Error::msg("struct.error: unpack requires a buffer of 4 bytes"))?;
+                padding_length = u32::from_le_bytes(b.try_into().unwrap()) as i128;
                 padding_length -= self.opt_lengths[self.padding_index.unwrap_or(0)] as i128;
             }
             if a as i128 - ohl >= padding_length && padding_length > a as i128 {
