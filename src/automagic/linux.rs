@@ -392,9 +392,7 @@ fn cache_kind(ctx: &Context) -> String {
     use crate::util::fxhash::FxHasher;
     use std::hash::Hasher;
     let mut h = FxHasher::default();
-    for r in &ctx.symbol_path().roots {
-        h.write(format!("{r:?}").as_bytes());
-    }
+    h.write_u64(ctx.symbol_path().os_fingerprint("linux"));
     if let Some(s) = &ctx.opts.stackers {
         for x in s {
             h.write(x.as_bytes());

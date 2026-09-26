@@ -333,6 +333,25 @@ impl SymbolPath {
 
     /// Every ISF reachable from the search path (python `file_symbol_url("")`), including
     /// zip pack members; used to build the identifier index.
+    /// A cheap fingerprint of where `os` ISFs can come from, for per-image automagic caches:
+    /// the roots, the mtimes of each root and its `<os>/` directory (adding or removing an ISF
+    /// there changes them; deeper directories are not stat'ed) and the `-u` list URL.
+    pub fn os_fingerprint(&self, os: &str) -> u64 {
+        let mut h = FxHasher::default();
+        for r in &self.roots {
+            h.write(format!("{r:?}").as_bytes());
+            if let Root::Dir(d) = r {
+                for p in [d.clone(), d.join(os)] {
+                    let (s, m) = paths::file_stamp(&p).unwrap_or((0, 0));
+                    h.write_u64(s);
+                    h.write_u64(m as u64);
+                }
+            }
+        }
+        h.write(super::remote_isf_url().unwrap_or_default().as_bytes());
+        h.finish()
+    }
+
     pub fn all(&self) -> Vec<IsfLocation> {
         let mut out = Vec::new();
         for root in &self.roots {

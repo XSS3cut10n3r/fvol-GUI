@@ -504,7 +504,8 @@ fn symbol_path_fingerprint() -> String {
     use std::hash::Hasher;
     let sp = symbols::symbol_path();
     let mut h = FxHasher::default();
-    h.write(format!("{:?}|{:?}", sp.roots, sp.download_dir).as_bytes());
+    h.write(format!("{:?}", sp.download_dir).as_bytes());
+    h.write_u64(sp.os_fingerprint("mac"));
     format!("{:016x}", h.finish())
 }
 
