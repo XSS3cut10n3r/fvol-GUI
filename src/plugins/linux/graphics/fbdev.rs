@@ -3,7 +3,8 @@
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 //!
 //! `--dump` writes each framebuffer as a PNG (python converts it with pillow when the pixel
-//! format is RGB-like) or as the raw buffer (FOURCC formats).
+//! format is RGB-like; `codecs::png::png_rgba_pillow` writes pillow's exact bytes) or as the
+//! raw buffer (FOURCC formats).
 
 use crate::context::Context;
 use crate::error::Result;
@@ -99,47 +100,6 @@ pub fn fb_raw_to_rgba(xres: u64, yres: u64, bits_per_pixel: u64, raw: &[u8], fie
     out
 }
 
-/// A plain RGBA PNG (8-bit, colour type 6, one IDAT).
-// TODO(l3): pillow-exact encoder from the codecs package
-fn png_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
-    fn chunk(out: &mut Vec<u8>, ty: &[u8; 4], data: &[u8]) {
-        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        let start = out.len();
-        out.extend_from_slice(ty);
-        out.extend_from_slice(data);
-        let crc = crate::codecs::crc::crc32(&out[start..]);
-        out.extend_from_slice(&crc.to_be_bytes());
-    }
-    let mut raw = Vec::with_capacity(rgba.len() + height as usize);
-    let stride = width as usize * 4;
-    for row in 0..height as usize {
-        raw.push(0);
-        raw.extend_from_slice(&rgba[row * stride..(row + 1) * stride]);
-    }
-    // zlib stream with stored blocks
-    let mut z = vec![0x78, 0x01];
-    let chunks: Vec<&[u8]> = raw.chunks(65535).collect();
-    if chunks.is_empty() {
-        z.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
-    }
-    for (i, c) in chunks.iter().enumerate() {
-        z.push((i + 1 == chunks.len()) as u8);
-        z.extend_from_slice(&(c.len() as u16).to_le_bytes());
-        z.extend_from_slice(&(!(c.len() as u16)).to_le_bytes());
-        z.extend_from_slice(c);
-    }
-    z.extend_from_slice(&crate::codecs::zlib::adler32(&raw).to_be_bytes());
-    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
-    chunk(&mut out, b"IHDR", &ihdr);
-    chunk(&mut out, b"IDAT", &z);
-    chunk(&mut out, b"IEND", &[]);
-    out
-}
-
 /// python `Fbdev.dump_fb(context, kernel, open_method, fb, convert_to_png_image)`: the file
 /// name python returns (the requested name). `Err` where python raises (the kernel layer read
 /// raises InvalidAddressException before any file is created).
@@ -157,7 +117,12 @@ pub fn dump_fb(ctx: &Context, fb: &Framebuffer, convert_to_png: bool) -> Result<
     let (buf, filename) = match (&fb.color_fields, convert_to_png) {
         (Some(fields), true) => {
             let rgba = fb_raw_to_rgba(fb.xres_virtual, fb.yres_virtual, fb.bpp, &data, fields);
-            (png_rgba(fb.xres_virtual as u32, fb.yres_virtual as u32, &rgba), format!("{base}.png"))
+            if fb.xres_virtual == 0 || fb.yres_virtual == 0 {
+                // pillow's `Image.save`
+                return Err(crate::error::Error::msg("ValueError: cannot write empty image"));
+            }
+            // pillow's `image.save(BytesIO, "PNG")`, byte for byte
+            (crate::codecs::png::png_rgba_pillow(fb.xres_virtual as u32, fb.yres_virtual as u32, &rgba), format!("{base}.png"))
         }
         _ => (data, format!("{base}.raw")),
     };
@@ -245,6 +210,20 @@ mod tests {
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn dump_png_like_python_pillow() {
+        // expected: python's convert_fb_raw_buffer_to_image(...) + image.save(BytesIO, "PNG")
+        // (pillow 12.3.0 / zlib 1.3.2)
+        let raw: Vec<u8> = (0..60u32).map(|i| ((i * 37 + 11) & 255) as u8).collect();
+        let xrgb = [(16, 8, 0), (8, 8, 0), (0, 8, 0), (0, 0, 0)];
+        let png = crate::codecs::png::png_rgba_pillow(5, 3, &fb_raw_to_rgba(5, 3, 32, &raw, &xrgb));
+        assert_eq!(hex(&png), "89504e470d0a1a0a0000000d49484452000000050000000308060000005b36c5f80000002749444154789c630835e0fefff2c8fcffb511c6ff05df1cffbfb421fa3fd393274f18d031564100b3c826e02e01bd440000000049454e44ae426082");
+        let raw2: Vec<u8> = (0..56u32).map(|i| ((i * i * 7 + 3) & 255) as u8).collect();
+        let rgb565 = [(11, 5, 0), (5, 6, 0), (0, 5, 0), (0, 0, 0)];
+        let png2 = crate::codecs::png::png_rgba_pillow(7, 4, &fb_raw_to_rgba(7, 4, 16, &raw2, &rgb565));
+        assert_eq!(hex(&png2), "89504e470d0a1a0a0000000d494844520000000700000004080600000042c6257d0000005e49444154789c05c1510e82400c40c1d7ed024a1a4324fcf5fe27eb11aa68dc50674436ad05e7a1c9ab1ba3022d676d49ebcd390866354e92dbcff94ab00e43d8f7ba8bb18de0ecce55c984611ab4e765a826393bd308de652c3df994f3071a9021c94ca002f10000000049454e44ae426082");
     }
 
     #[test]

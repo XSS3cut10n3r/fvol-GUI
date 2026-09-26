@@ -900,7 +900,7 @@ impl<W: Write + Send> FinishWrite for crate::codecs::gzip_enc::GzipEncoder<W> {
 
 /// Our deflate level for the `.tar.gz`. python uses zlib level 9; the tarball bytes differ from
 /// python's anyway (timestamps), so we pick the level that gives python's compression ratio
-/// or better at a fraction of the CPU (noble ELF image: 3.8 GB tar -> 837 MB in ~3 s on 20
+/// or better at a fraction of the CPU (noble ELF image: 3.8 GB tar -> 837.5 MB in ~3 s on 20
 /// threads, python's zlib -9: 842 MB). The gzip header stays python's (XFL = 2).
 const GZ_LEVEL: u32 = 4;
 
