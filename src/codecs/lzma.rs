@@ -1552,6 +1552,12 @@ impl LzmaDecoder {
                 "dec {t2:e}",
                 "jnz 44b",
                 "shl {t3:e}, 4",
+                // the match source is known to within 16 bytes: prefetch it during the
+                // align bits (far matches miss L1/L2 and the next literal waits on them)
+                "mov {t0}, {op}",
+                "sub {t0}, {t3}",
+                "prefetcht0 byte ptr [{t0} - 16]",
+                "prefetcht0 byte ptr [{t0} + 48]",
                 mark!("07"),
                 rev4a!("{probs} + 1604"),
                 "add {sym:e}, {t3:e}",
@@ -1660,6 +1666,10 @@ impl LzmaDecoder {
                 "mov qword ptr [{ctx} + 40], {t1}",
                 "mov qword ptr [{ctx} + 32], {t0}",
                 "55:",
+                "mov {t0}, {op}",
+                "sub {t0}, qword ptr [{ctx} + 32]",
+                "prefetcht0 byte ptr [{t0} - 1]",
+                "prefetcht0 byte ptr [{t0} + 63]",
                 "movzx {t0:e}, byte ptr [{ctx} + {t2} + 128]",
                 "mov qword ptr [{ctx} + 64], {t0}",
                 mark!("11"),
