@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 pub struct FileLayer {
     name: String,
+    /// python's layer name once the layer stacker has named it (see [`FileLayer::set_python_name`]).
+    py_name: std::sync::OnceLock<String>,
     map: Arc<Mmap>,
     file: Arc<File>,
     path: PathBuf,
@@ -22,12 +24,18 @@ impl FileLayer {
         let f = File::open(path)?;
         let map = Mmap::map(&f)?;
         let path = crate::util::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        Ok(FileLayer { name: "FileLayer".to_string(), map: Arc::new(map), file: Arc::new(f), path })
+        Ok(FileLayer { name: "FileLayer".to_string(), py_name: Default::default(), map: Arc::new(map), file: Arc::new(f), path })
     }
 
     /// A cheap copy of this layer (same mapping) with another name.
     pub fn with_name(&self, name: &str) -> FileLayer {
-        FileLayer { name: name.to_string(), map: self.map.clone(), file: self.file.clone(), path: self.path.clone() }
+        FileLayer { name: name.to_string(), py_name: Default::default(), map: self.map.clone(), file: self.file.clone(), path: self.path.clone() }
+    }
+
+    /// Name the (already shared) layer as python's construction magic does (`memory_layer`
+    /// for a raw image, `base_layer` below a container); the first name set sticks.
+    pub fn set_python_name(&self, name: &str) {
+        let _ = self.py_name.set(name.to_string());
     }
 
     /// The whole file.
@@ -72,7 +80,7 @@ impl FileLayer {
 
 impl Layer for FileLayer {
     fn name(&self) -> &str {
-        &self.name
+        self.py_name.get().unwrap_or(&self.name)
     }
 
     fn max_address(&self) -> u64 {

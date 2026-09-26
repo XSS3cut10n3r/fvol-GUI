@@ -295,7 +295,7 @@ pub fn read_header(lower: &Arc<dyn Layer>) -> Result<CrashHeader> {
 pub fn find_header(physical: &Arc<dyn Layer>) -> Option<CrashHeader> {
     let mut cur = Some(physical);
     while let Some(l) = cur {
-        if matches!(l.name(), "WindowsCrashDump32Layer" | "WindowsCrashDump64Layer") {
+        if matches!(l.class_name(), "WindowsCrashDump32Layer" | "WindowsCrashDump64Layer") {
             return read_header(l.lower()?).ok();
         }
         cur = l.lower();

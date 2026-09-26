@@ -163,7 +163,10 @@ impl RunIndex {
 }
 
 pub struct SegmentedLayer {
+    /// python class name ("LimeLayer", ...).
     name: &'static str,
+    /// python's layer name once the layer stacker has named it (`memory_layer`, `base_layer`).
+    py_name: std::sync::OnceLock<String>,
     lower: Arc<dyn Layer>,
     file: Option<Arc<FileLayer>>,
     /// `file`'s mapped bytes (pointer, length), kept alive by `file`: one load instead of
@@ -307,6 +310,7 @@ impl SegmentedLayer {
         let file_data = base.file.as_ref().map_or((std::ptr::null(), 0), |f| (f.data().as_ptr(), f.data().len()));
         SegmentedLayer {
             name,
+            py_name: Default::default(),
             lower: base.layer.clone(),
             file: base.file.clone(),
             file_data,
@@ -325,6 +329,12 @@ impl SegmentedLayer {
     /// python class name of the layer ("LimeLayer", ...).
     pub fn class_name(&self) -> &'static str {
         self.name
+    }
+
+    /// Name the (already shared) layer as python's construction magic does (`memory_layer`,
+    /// `base_layer`, ...); until then [`Layer::name`] is the class name. The first name set sticks.
+    pub fn set_python_name(&self, name: &str) {
+        let _ = self.py_name.set(name.to_string());
     }
 
     /// Number of runs after normalisation/merging (diagnostics, tests); EXACT mode reports the
@@ -672,6 +682,10 @@ fn mergeable(a: &Run, b: &Run) -> bool {
 
 impl Layer for SegmentedLayer {
     fn name(&self) -> &str {
+        self.py_name.get().map_or(self.name, String::as_str)
+    }
+
+    fn class_name(&self) -> &'static str {
         self.name
     }
 
