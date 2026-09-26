@@ -114,6 +114,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     let mut has67 = false;
     let mut rex = 0u8;
     let mut xacq = 0u8;
+    // LLVM-7 style mandatory prefix: the last F2/F3 immediately followed by 0F/66/REX, else a 66
+    // immediately followed by 0F/REX (only if no F2/F3 was mandatory).
+    let mut mand = 0u8;
     loop {
         if i >= n {
             return false;
@@ -152,10 +155,24 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                         return false;
                     }
                 }
+                if b != 0xF0 && i + 1 < n {
+                    let nb = d[i + 1];
+                    if nb == 0x0F || nb == 0x66 || (m64 && nb & 0xF0 == 0x40) {
+                        mand = b;
+                    }
+                }
                 lockrep = b;
             }
             0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 => segp = b,
-            0x66 => has66 = true,
+            0x66 => {
+                has66 = true;
+                if mand == 0 && i + 1 < n {
+                    let nb = d[i + 1];
+                    if nb == 0x0F || (m64 && nb & 0xF0 == 0x40) {
+                        mand = 0x66;
+                    }
+                }
+            }
             0x67 => has67 = true,
             _ => break,
         }
@@ -218,10 +235,27 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             op = b2;
             opcode = [0x0F, b2, 0, 0];
         }
-        pfx = match lockrep {
-            0xF3 => 2 + 2 * has66 as usize,
-            0xF2 => 3 + 2 * has66 as usize,
-            _ => has66 as usize,
+        // context: the mandatory prefix alone, else the legacy prefixes (66 / F2|F3)
+        pfx = match mand {
+            0x66 => 1,
+            0xF3 => 2,
+            0xF2 => 3,
+            _ => {
+                let r = match lockrep {
+                    0xF3 => 2,
+                    0xF2 => 3,
+                    _ => 0,
+                };
+                if r != 0 {
+                    // XS/XD + ADSIZE contexts are empty in 32-bit mode
+                    if has67 && !m64 {
+                        return false;
+                    }
+                    r + 2 * has66 as usize
+                } else {
+                    has66 as usize
+                }
+            }
         };
     } else if (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
         // VEX (a LOCK or REX prefix makes it invalid; 66/F2/F3 are ignored)
@@ -355,8 +389,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         op = b;
         opcode = [b, 0, 0, 0];
         pfx = match lockrep {
-            0xF3 => 2 + 2 * has66 as usize,
-            0xF2 => 3 + 2 * has66 as usize,
+            0xF3 => 2,
+            0xF2 => 3,
             _ => has66 as usize,
         };
     }
@@ -514,7 +548,12 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             st.mosz = 4;
         } else if flags & F_NOPFX != 0 {
             if pfx >= 4 {
-                st.mosz = 4;
+                // XS_OPSIZE / XD_OPSIZE contexts hold no prefix-less instructions
+                return false;
+            }
+            if (mand == 0xF2 || mand == 0xF3) && has66 {
+                // F2/F3 context: the 32/64-bit variant is matched (no 16-bit equivalent)
+                st.mosz = if rexw { 8 } else { 4 };
             }
         } else if pfx == 1 && rexw {
             st.mosz = 2;
