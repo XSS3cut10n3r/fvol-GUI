@@ -551,31 +551,42 @@ impl Plugin for MFTScan {
     /// record flags) the events generated before stay in python's timeline, so they are
     /// returned without the error.
     fn timeline(&self, ctx: &Context, cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
-        let layer = match if cfg.get_bool(ANY_OS_STACKER) { any_os_memory_layer(ctx) } else { primary_memory_layer(ctx) } {
-            Ok(l) => l,
-            Err(e) => return Some(Err(e)),
-        };
-        #[derive(Default)]
-        struct Batch {
-            ev: Vec<TimelineEvent>,
-            tmp: MftScanBatch,
-            failed: bool,
-        }
-        let mut all = Vec::new();
-        enumerate_mft_batches(
-            layer,
-            Batch::default,
-            |b: &mut Batch, e| {
-                b.failed = timeline_record(&mut b.ev, &mut b.tmp, &e).is_err();
-                !b.failed
-            },
-            |b| {
-                all.extend(b.ev);
-                !b.failed
-            },
-        );
-        Some(Ok(all))
+        Some(timeline_batches(ctx, cfg).map(|b| b.into_iter().flatten().collect()))
     }
+    /// `timeline()` as the scan workers' batches (millions of events: no concatenation).
+    fn timeline_batches(&self, ctx: &Context, cfg: &Config) -> Option<(Vec<Vec<TimelineEvent>>, Option<Error>)> {
+        Some(match timeline_batches(ctx, cfg) {
+            Ok(b) => (b, None),
+            Err(e) => (Vec::new(), Some(e)),
+        })
+    }
+}
+
+/// The events of `MFTScan.generate_timeline()`, one vector per scan batch, in order.
+fn timeline_batches(ctx: &Context, cfg: &Config) -> Result<Vec<Vec<TimelineEvent>>> {
+    let layer = if cfg.get_bool(ANY_OS_STACKER) { any_os_memory_layer(ctx) } else { primary_memory_layer(ctx) }?;
+    #[derive(Default)]
+    struct Batch {
+        ev: Vec<TimelineEvent>,
+        tmp: MftScanBatch,
+        failed: bool,
+    }
+    let mut all = Vec::new();
+    enumerate_mft_batches(
+        layer,
+        Batch::default,
+        |b: &mut Batch, e| {
+            b.failed = timeline_record(&mut b.ev, &mut b.tmp, &e).is_err();
+            !b.failed
+        },
+        |b| {
+            if !b.ev.is_empty() {
+                all.push(b.ev);
+            }
+            !b.failed
+        },
+    );
+    Ok(all)
 }
 
 impl Plugin for ADS {

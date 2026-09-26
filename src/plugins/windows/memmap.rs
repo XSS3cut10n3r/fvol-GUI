@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::layers::{Layer, Mapping};
 use crate::objects::LayerRef;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
+use crate::renderers::text::RowEncoder;
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::WinExt;
 use std::io::Write;
@@ -22,6 +23,35 @@ fn runs(layer: LayerRef) -> Vec<Mapping> {
         true
     });
     v
+}
+
+/// A process's rows: its runs (formatted by the output thread), or already formatted.
+enum Rows {
+    Runs(Vec<Mapping>),
+    Encoded((Vec<u8>, usize)),
+}
+
+/// The process's rows (without --dump) formatted by `enc`: (bytes, row count).
+fn encode_runs(layer: LayerRef, enc: &RowEncoder) -> (Vec<u8>, usize) {
+    let mut out = Vec::new();
+    let (mut n, mut file_offset) = (0usize, 0u64);
+    let null = enc.is_null();
+    layer.mapping_targets(0, layer.max_address(), &mut |m, _| {
+        if !null {
+            let row = [
+                Value::Int(m.offset as i128),
+                Value::Int(m.mapped as i128),
+                Value::Int(m.len as i128),
+                Value::Int(file_offset as i128),
+                Value::SStr("Disabled"),
+            ];
+            enc.row(&mut out, &row);
+        }
+        n += 1;
+        file_offset = file_offset.wrapping_add(m.len);
+        true
+    });
+    (out, n)
 }
 
 /// Append the padded contents of `[offset, offset+len)` to `f`, in bounded chunks.
@@ -82,24 +112,31 @@ impl Plugin for Memmap {
             })
             .collect();
         // walking a whole address space is independent per process: stream them in parallel
-        // (bounded look-ahead), emit in python order
+        // (bounded look-ahead), emit in python order. Without --dump the workers also format
+        // the rows (the renderer's encoder), so the output thread only copies bytes.
+        let enc = if dump { None } else { out.encoder() };
         let mut result: Result<()> = Ok(());
         let mut buf = Vec::new();
         let mut procs = procs.into_iter();
         crate::util::par::par_map_stream(
             layers.len(),
             4,
-            |i| match &layers[i] {
-                Some((_, l)) => runs(*l),
-                None => Vec::new(),
+            |i| match (&layers[i], &enc) {
+                (Some((_, l)), Some(enc)) => Rows::Encoded(encode_runs(*l, enc)),
+                (Some((_, l)), None) => Rows::Runs(runs(*l)),
+                (None, _) => Rows::Runs(Vec::new()),
             },
-            |i, maps| {
+            |i, rows| {
                 let r = (|| -> Result<()> {
                     procs.next().unwrap()?;
                     if let Some(e) = errs[i].take() {
                         return Err(e);
                     }
                     let Some((pid, layer)) = layers[i] else { return Ok(()) };
+                    let maps = match rows {
+                        Rows::Encoded((block, n)) => return out.rows_encoded(&block, n),
+                        Rows::Runs(maps) => maps,
+                    };
                     let mut file = None;
                     let name = format!("pid.{pid}.dmp");
                     if dump {
@@ -114,9 +151,9 @@ impl Plugin for Memmap {
                             }
                             None => Value::SStr("Disabled"),
                         };
-                        out.row(
+                        out.row_ref(
                             0,
-                            vec![
+                            &[
                                 Value::Int(m.offset as i128),
                                 Value::Int(m.mapped as i128),
                                 Value::Int(m.len as i128),

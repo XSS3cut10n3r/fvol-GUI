@@ -150,6 +150,7 @@ struct Entry {
 }
 
 /// python's `_generator` state.
+#[derive(Default)]
 struct Merge {
     classes: Vec<&'static str>,
     entries: Vec<Entry>,
@@ -159,9 +160,197 @@ struct Merge {
     /// python's loop variable `times` (an entry)
     cur: Option<u32>,
     rows: Vec<(u32, u32)>,
+    /// per class: entries added by `add_bulk` are missing from `index`
+    stale: Vec<bool>,
 }
 
+/// Plugins yielding at least this many events are merged by the parallel `add_bulk`.
+const BULK_MIN: usize = 1 << 16;
+
 impl Merge {
+    /// Put the entries of `class` that `add_bulk` added into `index`.
+    fn refresh_index(&mut self, class: u16) {
+        if !self.stale.get(class as usize).copied().unwrap_or(false) {
+            return;
+        }
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.class == class {
+                self.index.insert((class, e.desc), i as u32);
+            }
+        }
+        self.stale[class as usize] = false;
+    }
+
+    /// All events of one plugin, in order (`add_event` for each).
+    fn add_events(&mut self, class: u16, batches: Vec<Vec<TimelineEvent>>) {
+        let n: usize = batches.iter().map(|b| b.len()).sum();
+        if n >= BULK_MIN {
+            return self.add_bulk(class, batches);
+        }
+        self.refresh_index(class);
+        for ev in batches.into_iter().flatten() {
+            self.add_event(class, ev);
+        }
+    }
+
+    /// `add_event` for every event, in parallel: only the plugin's end state matters (entries
+    /// in first-occurrence order, the last value set per time type, `cur` = the last event's
+    /// entry; snapshots are only taken by `pass`). Events are sharded by description hash,
+    /// each shard reduced on its own thread, then the new entries appended in order.
+    fn add_bulk(&mut self, class: u16, mut batches: Vec<Vec<TimelineEvent>>) {
+        const SHARDS: usize = 64;
+        if self.stale.len() <= class as usize {
+            self.stale.resize(class as usize + 1, false);
+        }
+        let has_old = self.entries.iter().any(|e| e.class == class);
+        if has_old {
+            self.refresh_index(class);
+        }
+        let shard_of = |d: &str| (crate::util::fxhash::hash_bytes(d.as_bytes()) >> 58) as usize;
+        // work units of at most 64k events: (batch, start, end)
+        let mut units: Vec<(u32, u32, u32)> = Vec::new();
+        for (b, v) in batches.iter().enumerate() {
+            let mut s = 0;
+            while s < v.len() {
+                let e = (s + (1 << 16)).min(v.len());
+                units.push((b as u32, s as u32, e as u32));
+                s = e;
+            }
+        }
+        // 1. per unit and shard: groups of consecutive events with the same description (an
+        //    entry's events come back to back: MFT records yield 4), as (start, count)
+        let parts: Vec<Vec<Vec<(u32, u32)>>> = crate::util::par::par_map(units.len(), |u| {
+            let (b, s, e) = units[u];
+            let evs = &batches[b as usize];
+            let mut v = vec![Vec::new(); SHARDS];
+            let mut i = s;
+            while i < e {
+                let d = &evs[i as usize].description;
+                let mut j = i + 1;
+                while j < e && evs[j as usize].description == *d {
+                    j += 1;
+                }
+                v[shard_of(d)].push((i, j - i));
+                i = j;
+            }
+            v
+        });
+        // 2. per shard: distinct new descriptions (first position, values), and the values set
+        //    on existing entries; non-date values are resolved later (`Tv::Other(k)` = the k-th
+        //    position in `other`)
+        struct Shard {
+            first: Vec<(u32, u32)>,
+            times: Vec<[Tv; 4]>,
+            old: Vec<(u32, [Tv; 4])>,
+            other: Vec<(u32, u32)>,
+            /// local id / existing entry of the plugin's last event (if in this shard)
+            last: Option<std::result::Result<u32, u32>>,
+        }
+        let last_pos = batches.iter().enumerate().rev().find(|(_, v)| !v.is_empty()).map(|(b, v)| (b as u32, v.len() as u32 - 1));
+        let index = &self.index;
+        let shards: Vec<Shard> = crate::util::par::par_map(SHARDS, |s| {
+            let mut map: FxHashMap<&str, u32> = FxHashMap::default();
+            let mut old: FxHashMap<u32, [Tv; 4]> = FxHashMap::default();
+            let mut sh = Shard { first: Vec::new(), times: Vec::new(), old: Vec::new(), other: Vec::new(), last: None };
+            for (u, &(b, _, _)) in units.iter().enumerate() {
+                let evs = &batches[b as usize];
+                for &(i, c) in &parts[u][s] {
+                    let d = evs[i as usize].description.as_str();
+                    let g = if has_old { index.get(&(class, d)).copied() } else { None };
+                    let (id, t) = match g {
+                        Some(g) => (Err(g), old.entry(g).or_insert([Tv::Missing; 4])),
+                        None => {
+                            let id = *map.entry(d).or_insert_with(|| {
+                                sh.first.push((b, i));
+                                sh.times.push([Tv::Missing; 4]);
+                                sh.first.len() as u32 - 1
+                            });
+                            (Ok(id), &mut sh.times[id as usize])
+                        }
+                    };
+                    for j in i..i + c {
+                        let ev = &evs[j as usize];
+                        t[kind_index(ev.kind)] = match &ev.time {
+                            Value::DateTime(dt) => Tv::Dt(*dt),
+                            Value::NotApplicable => Tv::NotApplicable,
+                            Value::Unreadable => Tv::Unreadable,
+                            Value::Unparsable => Tv::Unparsable,
+                            Value::NotAvailable => Tv::NotAvailable,
+                            _ => {
+                                sh.other.push((b, j));
+                                Tv::Other(sh.other.len() as u32 - 1)
+                            }
+                        };
+                    }
+                    if let Some((lb, li)) = last_pos
+                        && lb == b
+                        && (i..i + c).contains(&li)
+                    {
+                        sh.last = Some(id);
+                    }
+                }
+            }
+            let mut o: Vec<(u32, [Tv; 4])> = old.into_iter().collect();
+            o.sort_unstable_by_key(|x| x.0);
+            sh.old = o;
+            sh
+        });
+        drop(parts);
+        // 3. new entries in first-occurrence order
+        let mut order: Vec<(u64, u32, u32)> = Vec::new();
+        for (s, sh) in shards.iter().enumerate() {
+            for (j, &(b, i)) in sh.first.iter().enumerate() {
+                order.push((((b as u64) << 32) | i as u64, s as u32, j as u32));
+            }
+        }
+        order.sort_unstable_by_key(|x| x.0);
+        let base = self.entries.len() as u32;
+        let mut gid: Vec<Vec<u32>> = shards.iter().map(|sh| vec![0; sh.first.len()]).collect();
+        self.entries.reserve(order.len());
+        for (k, &(pos, s, j)) in order.iter().enumerate() {
+            gid[s as usize][j as usize] = base + k as u32;
+            let desc: &'static str = std::mem::take(&mut batches[(pos >> 32) as usize][pos as u32 as usize].description).leak();
+            self.entries.push(Entry { class, desc, times: shards[s as usize].times[j as usize], snap: 0, dirty: true });
+        }
+        // 4. existing entries' new values; non-date values
+        let mut resolve = |m: &mut Merge, sh: &Shard, t: &mut [Tv; 4]| {
+            for v in t.iter_mut() {
+                if let Tv::Other(k) = *v {
+                    let (b, i) = sh.other[k as usize];
+                    *v = m.tv(std::mem::replace(&mut batches[b as usize][i as usize].time, Value::NotApplicable));
+                }
+            }
+        };
+        for (s, sh) in shards.iter().enumerate() {
+            if !sh.other.is_empty() {
+                for &g in &gid[s] {
+                    let mut t = self.entries[g as usize].times;
+                    resolve(self, sh, &mut t);
+                    self.entries[g as usize].times = t;
+                }
+            }
+            for &(g, mut t) in &sh.old {
+                resolve(self, sh, &mut t);
+                let e = &mut self.entries[g as usize];
+                for (k, v) in t.into_iter().enumerate() {
+                    if v != Tv::Missing {
+                        e.times[k] = v;
+                    }
+                }
+                e.dirty = true;
+            }
+        }
+        if let Some((s, id)) = shards.iter().enumerate().find_map(|(s, sh)| sh.last.map(|id| (s, id))) {
+            self.cur = Some(match id {
+                Ok(j) => gid[s][j as usize],
+                Err(g) => g,
+            });
+        }
+        self.stale[class as usize] = true;
+        // freeing millions of strings is off the critical path
+        std::thread::spawn(move || drop(batches));
+    }
+
     fn tv(&mut self, v: Value) -> Tv {
         match v {
             Value::DateTime(dt) => Tv::Dt(dt),
@@ -177,11 +366,17 @@ impl Merge {
     }
 
     fn add_event(&mut self, class: u16, ev: TimelineEvent) {
+        // plugins yield an entry's events back to back (MFT records: 4 per description): the
+        // previous event's entry is the common hit, without hashing / probing the big index
+        let prev = self.cur.filter(|&i| {
+            let e = &self.entries[i as usize];
+            e.class == class && e.desc == ev.description
+        });
         let k = (class, ev.description.as_str());
-        let idx = match self.index.get(&k) {
-            Some(&i) => i,
+        let idx = match prev.or_else(|| self.index.get(&k).copied()) {
+            Some(i) => i,
             None => {
-                let desc: &'static str = Box::leak(ev.description.into_boxed_str());
+                let desc: &'static str = ev.description.leak();
                 let i = self.entries.len() as u32;
                 self.entries.push(Entry { class, desc, times: [Tv::Missing; 4], snap: 0, dirty: true });
                 self.index.insert((class, desc), i);
@@ -385,7 +580,7 @@ fn record_config(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Result<()> {
     Ok(())
 }
 
-type Outcome = Option<(Vec<TimelineEvent>, Option<Error>)>;
+type Outcome = Option<(Vec<Vec<TimelineEvent>>, Option<Error>)>;
 
 /// Run the plugins' timelines concurrently; a panicking plugin is python's `except Exception`.
 fn run_all(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Vec<Outcome> {
@@ -399,7 +594,7 @@ fn run_all(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Vec<Outcome> {
                     // python picks the stackers by the CLI plugin's category: "timeliner"
                     // excludes no OS stacker (see mftscan::ANY_OS_STACKER)
                     cfg.set(crate::plugins::windows::mftscan::ANY_OS_STACKER, ConfigValue::Bool(true));
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.timeline_events(ctx, &cfg)))
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.timeline_batches(ctx, &cfg)))
                         .unwrap_or_else(|_| Some((Vec::new(), Some(Error::msg("plugin panicked")))))
                 })
             })
@@ -428,11 +623,11 @@ impl Plugin for Timeliner {
         let plugins = usable_plugins(&cfg.get_strs("plugin-filter"));
         let results = run_all(ctx, &plugins);
         // python constructs the plugins first: unsatisfied ones never run
-        let ran: Vec<(&'static dyn Plugin, (Vec<TimelineEvent>, Option<Error>))> = plugins
+        let ran: Vec<(&'static dyn Plugin, (Vec<Vec<TimelineEvent>>, Option<Error>))> = plugins
             .iter()
             .zip(results)
             .filter_map(|(p, r)| match r {
-                Some((ev, Some(Error::Unsatisfied(_)))) if ev.is_empty() => None,
+                Some((ev, Some(Error::Unsatisfied(_)))) if ev.iter().all(|b| b.is_empty()) => None,
                 Some(r) => Some((*p, r)),
                 None => None,
             })
@@ -454,15 +649,7 @@ impl Plugin for Timeliner {
         } else {
             None
         };
-        let mut m = Merge {
-            classes: Vec::new(),
-            entries: Vec::new(),
-            index: FxHashMap::default(),
-            snaps: Vec::new(),
-            others: Vec::new(),
-            cur: None,
-            rows: Vec::new(),
-        };
+        let mut m = Merge::default();
         for (p, (events, err)) in ran {
             let class = p.name().rsplit('.').next().unwrap_or("");
             let ci = match m.classes.iter().position(|c| *c == class) {
@@ -472,9 +659,7 @@ impl Plugin for Timeliner {
                     m.classes.len() - 1
                 }
             } as u16;
-            for ev in events {
-                m.add_event(ci, ev);
-            }
+            m.add_events(ci, events);
             if err.is_none() {
                 m.pass(&mut body)?;
             }
@@ -482,22 +667,38 @@ impl Plugin for Timeliner {
         if let Some(w) = body.as_mut() {
             w.flush()?;
         }
-        for (e, s) in m.sorted_rows() {
+        let rows = m.sorted_rows();
+        let values = |&(e, s): &(u32, u32)| {
             let en = &m.entries[e as usize];
             let t = m.snaps[s as usize];
-            out.row(
-                0,
-                vec![
-                    Value::SStr(m.classes[en.class as usize]),
-                    Value::SStr(en.desc),
-                    m.cell(t[0]),
-                    m.cell(t[1]),
-                    m.cell(t[2]),
-                    m.cell(t[3]),
-                ],
-            )?;
-        }
-        Ok(())
+            [Value::SStr(m.classes[en.class as usize]), Value::SStr(en.desc), m.cell(t[0]), m.cell(t[1]), m.cell(t[2]), m.cell(t[3])]
+        };
+        let Some(enc) = out.encoder() else {
+            for r in &rows {
+                out.row_ref(0, &values(r))?;
+            }
+            return Ok(());
+        };
+        // format blocks of rows on all cores, hand them to the renderer in order
+        const BLOCK: usize = 1 << 14;
+        let mut result = Ok(());
+        crate::util::par::par_map_stream(
+            rows.len().div_ceil(BLOCK),
+            64,
+            |b| {
+                let part = &rows[b * BLOCK..((b + 1) * BLOCK).min(rows.len())];
+                let mut buf = Vec::with_capacity(part.len() * 160);
+                for r in part {
+                    enc.row(&mut buf, &values(r));
+                }
+                (buf, part.len())
+            },
+            |_, (buf, n)| {
+                result = out.rows_encoded(&buf, n);
+                result.is_ok()
+            },
+        );
+        result
     }
 }
 
@@ -526,7 +727,7 @@ mod tests {
     #[ignore]
     fn timeliner_scale() {
         let t0 = std::time::Instant::now();
-        let mut m = Merge { classes: Vec::new(), entries: Vec::new(), index: FxHashMap::default(), snaps: Vec::new(), others: Vec::new(), cur: None, rows: Vec::new() };
+        let mut m = Merge::default();
         let plan: [(&str, usize); 16] = [
             ("PsList", 127),
             ("PsScan", 133),
@@ -581,9 +782,86 @@ mod tests {
         eprintln!("rows {} merge {:?} sort {:?} render {:?} ({} MB)", rows.len(), t1, t2 - t1, t3 - t2, sink.len() >> 20);
     }
 
+    /// The parallel `add_bulk` ends in exactly the state of `add_event` per event: entries,
+    /// their values, `cur`, and what the passes snapshot (also with existing entries of the
+    /// same class, as with the two `Threads` plugins).
+    #[test]
+    fn bulk_merge_matches_serial() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let kinds = [TimeKind::Created, TimeKind::Modified, TimeKind::Accessed, TimeKind::Changed];
+        for round in 0..8 {
+            let pool = [50u64, 5_000, 200_000][round % 3];
+            // odd rounds: also non-date values (python can't sort those: rows not compared)
+            let others = round % 2 == 1;
+            let mut plugins: Vec<(u16, Vec<Vec<TimelineEvent>>)> = Vec::new();
+            for p in 0..4 {
+                let class = [0u16, 1, 0, 2][p];
+                let nb = 1 + rnd(12) as usize;
+                let batches: Vec<Vec<TimelineEvent>> = (0..nb)
+                    .map(|_| {
+                        let mut v = Vec::new();
+                        for _ in 0..rnd(1500) {
+                            // an entry's events back to back (like MFT records), 1-5 of them
+                            let description = format!("entry {}", rnd(pool));
+                            for _ in 0..1 + rnd(5) {
+                                let time = match rnd(10) {
+                                    0 => Value::NotApplicable,
+                                    1 => Value::Unreadable,
+                                    2 => Value::NotAvailable,
+                                    3 if others => Value::Int(rnd(1000) as i128),
+                                    _ => Value::DateTime(dt(1_600_000_000 + rnd(1_000_000) as i64, rnd(3) as u32)),
+                                };
+                                v.push(TimelineEvent { description: description.clone(), kind: kinds[rnd(4) as usize], time });
+                            }
+                        }
+                        v
+                    })
+                    .collect();
+                plugins.push((class, batches));
+            }
+            let run = |bulk: bool| {
+                let mut m = Merge { classes: vec!["A", "B", "C"], ..Default::default() };
+                for (class, batches) in plugins.iter() {
+                    let b = batches.clone();
+                    if bulk {
+                        m.add_bulk(*class, b);
+                    } else {
+                        m.refresh_index(*class);
+                        for ev in b.into_iter().flatten() {
+                            m.add_event(*class, ev);
+                        }
+                    }
+                    m.pass(&mut None).unwrap();
+                }
+                let show = |t: Tv| match t {
+                    Tv::Other(i) => format!("{:?}", m.others[i as usize]),
+                    t => format!("{t:?}"),
+                };
+                let entries: Vec<String> =
+                    m.entries.iter().map(|e| format!("{} {} {:?}", e.class, e.desc, e.times.map(show))).collect();
+                let snaps: Vec<String> = m.rows.iter().map(|&(e, s)| format!("{e} {:?}", m.snaps[s as usize].map(show))).collect();
+                let rows: Vec<String> = if others {
+                    Vec::new()
+                } else {
+                    m.sorted_rows().iter().map(|&(e, s)| format!("{e} {:?}", m.snaps[s as usize].map(show))).collect()
+                };
+                (entries, m.cur, snaps, rows)
+            };
+            let (a, b) = (run(false), run(true));
+            assert_eq!(a.0.len(), b.0.len(), "round {round}");
+            assert!(a == b, "round {round}");
+        }
+    }
+
     #[test]
     fn merge_quirks() {
-        let mut m = Merge { classes: vec!["A", "B"], entries: Vec::new(), index: FxHashMap::default(), snaps: Vec::new(), others: Vec::new(), cur: None, rows: Vec::new() };
+        let mut m = Merge { classes: vec!["A", "B"], ..Default::default() };
         let ev = |d: &str, k, t| TimelineEvent { description: d.into(), kind: k, time: t };
         m.add_event(0, ev("x", TimeKind::Created, Value::DateTime(dt(10, 0))));
         m.add_event(0, ev("y", TimeKind::Created, Value::DateTime(dt(5, 0))));

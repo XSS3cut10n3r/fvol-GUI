@@ -191,6 +191,13 @@ pub trait Plugin: Sync {
             Err(e) => (Vec::new(), Some(e)),
         })
     }
+    /// [`Plugin::timeline_events`] as consecutive batches (the events in order are the batches
+    /// concatenated), so producers of millions of events (MFT scans) hand over their per-worker
+    /// vectors without concatenating them. Default: `timeline_events` as one batch.
+    #[allow(clippy::type_complexity)]
+    fn timeline_batches(&self, ctx: &Context, cfg: &Config) -> Option<(Vec<Vec<TimelineEvent>>, Option<crate::error::Error>)> {
+        self.timeline_events(ctx, cfg).map(|(v, e)| (vec![v], e))
+    }
 }
 
 /// The plugin's configuration with every requirement default applied (what python's
