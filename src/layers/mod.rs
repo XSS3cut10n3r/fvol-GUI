@@ -31,6 +31,7 @@
 pub mod containers;
 pub mod file;
 pub mod intel;
+pub mod registry;
 pub mod scan;
 
 pub use file::FileLayer;
@@ -186,6 +187,11 @@ pub trait Layer: Send + Sync {
 
     /// Downcast helper: `Some` for Intel translation layers.
     fn as_intel(&self) -> Option<&IntelLayer> {
+        None
+    }
+
+    /// Downcast helper: `Some` for registry hive layers (python `isinstance(layer, RegistryHive)`).
+    fn as_registry_hive(&self) -> Option<&registry::RegistryHive> {
         None
     }
 }
