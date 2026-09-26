@@ -481,6 +481,11 @@ fn codecs_enc_stream_file() {
             feed(&mut e);
             e.finish().unwrap().flush().unwrap();
         }
+        "bz2" => {
+            let mut e = super::bzip2_enc::Bzip2Encoder::new(out, level);
+            feed(&mut e);
+            e.finish().unwrap().flush().unwrap();
+        }
         _ => panic!("unknown streaming codec {codec}"),
     }
     let dt = t.elapsed().as_secs_f64();
@@ -505,6 +510,7 @@ fn encode(codec: &str, level: u32, data: &[u8]) -> Option<Vec<u8>> {
         "deflate" => super::deflate_enc::deflate_compress(data, level),
         "zlib" => super::deflate_enc::zlib_compress(data, level),
         "gzip" => super::gzip_enc::gzip_compress(data, &super::gzip_enc::GzipOptions::python(level, 0)),
+        "bz2" => super::bzip2_enc::bzip2_compress(data, level),
         _ => return None,
     })
 }
