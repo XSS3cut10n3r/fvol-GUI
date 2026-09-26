@@ -13,8 +13,9 @@
  * The input file is loaded into memory once. Each timed run compresses the whole input into
  * a preallocated worst-case buffer; best of RUNS. Every result is decompressed once and
  * compared with the input.
- * Prints: "c <codec> <level> <file> <in_bytes> <out_bytes> <best_ms> <MB/s>"
- * (MB/s = 1e6 bytes of INPUT per second).
+ * Prints: "c <codec> <level> <file> <in_bytes> <out_bytes> <best_ms> <MB/s> <cycles>"
+ * (MB/s = 1e6 bytes of INPUT per second; cycles = user-mode cycles of the calling thread in
+ * the fastest run, 0 if unavailable; set RSVOL_PERF_PMU=cpu_atom when pinned to an E-core).
  */
 #include <bzlib.h>
 #include <libdeflate.h>
@@ -25,7 +26,48 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <time.h>
+#include <unistd.h>
+
+/* User-mode cycles of this thread (RSVOL_PERF_PMU=cpu_atom when pinned to an E-core). */
+static int perf_fd = -1;
+static void perf_open(void) {
+    const char *pmu_name = getenv("RSVOL_PERF_PMU");
+    char path[256];
+    snprintf(path, sizeof path, "/sys/bus/event_source/devices/%s/type", pmu_name ? pmu_name : "cpu_core");
+    unsigned long long pmu = 0;
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fscanf(f, "%llu", &pmu) != 1) pmu = 0;
+        fclose(f);
+    }
+    struct perf_event_attr a;
+    memset(&a, 0, sizeof a);
+    a.type = PERF_TYPE_HARDWARE;
+    a.size = sizeof a;
+    a.config = PERF_COUNT_HW_CPU_CYCLES | (pmu << 32);
+    a.disabled = 1;
+    a.exclude_kernel = 1;
+    a.exclude_hv = 1;
+    perf_fd = syscall(__NR_perf_event_open, &a, 0, -1, -1, 0);
+}
+static void perf_start(void) {
+    if (perf_fd >= 0) {
+        ioctl(perf_fd, PERF_EVENT_IOC_RESET, 0);
+        ioctl(perf_fd, PERF_EVENT_IOC_ENABLE, 0);
+    }
+}
+static unsigned long long perf_stop(void) {
+    unsigned long long v = 0;
+    if (perf_fd >= 0) {
+        ioctl(perf_fd, PERF_EVENT_IOC_DISABLE, 0);
+        if (read(perf_fd, &v, 8) != 8) v = 0;
+    }
+    return v;
+}
 
 static double now(void) {
     struct timespec ts;
@@ -152,14 +194,19 @@ int main(int argc, char **argv) {
     memset(out, 0, cap); /* prefault */
     double best = 1e30;
     size_t m = 0;
+    unsigned long long best_cyc = 0;
+    perf_open();
     for (int i = 0; i < runs; i++) {
+        perf_start();
         double t = now();
         m = compress_buf(codec, level, in, n, out, cap);
         double dt = now() - t;
+        unsigned long long cyc = perf_stop();
+        if (best_cyc == 0 || cyc < best_cyc) best_cyc = cyc;
         if (m == (size_t)-1) { fprintf(stderr, "compress failed\n"); return 1; }
         if (dt < best) best = dt;
     }
     if (!verify(codec, in, n, out, m)) { fprintf(stderr, "%s: roundtrip failed\n", argv[3]); return 1; }
-    printf("c %s %d %s %zu %zu %.3f %.1f\n", codec, level, argv[3], n, m, best * 1e3, n / best / 1e6);
+    printf("c %s %d %s %zu %zu %.3f %.1f %llu\n", codec, level, argv[3], n, m, best * 1e3, n / best / 1e6, best_cyc);
     return 0;
 }

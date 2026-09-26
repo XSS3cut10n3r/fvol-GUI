@@ -149,6 +149,7 @@ fn codecs_bench_file() {
 }
 
 /// Sampling profile ("perf record" without perf): decodes CODECS_BENCH_FILE CODECS_RUNS times
+/// (or encodes it with CODECS_BENCH_CODEC at level CODECS_ENC_LEVEL when that is set)
 /// while sampling the instruction pointer every CODECS_PROFILE_PERIOD events of
 /// CODECS_PROFILE_EVENT (0 = cycles, 5 = branch misses) and writes "vaddr count" lines
 /// (addresses relative to the executable's load base, for addr2line) to CODECS_PROFILE_OUT.
@@ -172,7 +173,10 @@ fn codecs_profile_file() {
     let mut hist: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
     for _ in 0..runs {
         s.start();
-        let r = decode(&codec, &data).unwrap().unwrap();
+        let r = match std::env::var("CODECS_ENC_LEVEL").ok().and_then(|s| s.parse::<u32>().ok()) {
+            Some(level) => encode(&codec, level, &data).expect("unknown codec"),
+            None => decode(&codec, &data).unwrap().unwrap(),
+        };
         s.stop();
         s.drain(&mut hist);
         drop(r);
@@ -222,7 +226,9 @@ mod perf {
         // perf_event_attr, PERF_ATTR_SIZE_VER0 (64 bytes).
         let mut attr = [0u64; 8];
         // Hybrid CPUs: PERF_TYPE_HARDWARE with the P-core PMU type in config bits 32..63.
-        let pmu = std::fs::read_to_string("/sys/bus/event_source/devices/cpu_core/type")
+        // RSVOL_PERF_PMU=cpu_atom when pinned to an E-core of a hybrid CPU.
+        let pmu_name = std::env::var("RSVOL_PERF_PMU").unwrap_or_else(|_| "cpu_core".into());
+        let pmu = std::fs::read_to_string(format!("/sys/bus/event_source/devices/{pmu_name}/type"))
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
@@ -523,10 +529,23 @@ fn codecs_enc_bench_file() {
     let data = std::fs::read(&file).unwrap();
     let mut best = f64::MAX;
     let mut out_len = 0;
+    let counters = perf::Counters::open();
+    let mut best_cyc = 0u64;
+    let mut best_counts = [0u64; 3];
     for r in 0..runs {
+        if let Some(c) = counters.as_ref() {
+            c.start();
+        }
         let t = Instant::now();
         let c = encode(&codec, level, &data).expect("unknown codec");
         let dt = t.elapsed().as_secs_f64();
+        if let Some(c) = counters.as_ref() {
+            let v = c.stop();
+            if best_cyc == 0 || v[0] < best_cyc {
+                best_cyc = v[0];
+                best_counts = v;
+            }
+        }
         best = best.min(dt);
         out_len = c.len();
         if r == 0 {
@@ -538,11 +557,25 @@ fn codecs_enc_bench_file() {
             assert!(d == data, "{file}: roundtrip mismatch");
         }
     }
+    #[cfg(deflate_stats)]
+    {
+        let v: Vec<u64> = super::deflate_enc::STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+        let n = data.len() as f64 * runs as f64;
+        eprintln!(
+            "stats per byte: finds {:.3} cands {:.3} (per find {:.2}) inserts {:.3} lits {:.3} matches {:.3} avg_len {:.1} blocks {}",
+            v[0] as f64 / n, v[1] as f64 / n, v[1] as f64 / v[0].max(1) as f64, v[2] as f64 / n, v[3] as f64 / n,
+            v[4] as f64 / n, v[5] as f64 / v[4].max(1) as f64, v[6] / runs as u64
+        );
+    }
+    // Last fields: user-mode cycles, instructions and branch misses of the calling thread in
+    // the fastest run (single-thread runs only; 0 without perf counters).
     println!(
-        "rust {codec} {level} {file} {} {out_len} {:.3} {:.1} {}",
+        "rust {codec} {level} {file} {} {out_len} {:.3} {:.1} {} {best_cyc} {} {}",
         data.len(),
         best * 1e3,
         data.len() as f64 / best / 1e6,
-        crate::util::par::threads()
+        crate::util::par::threads(),
+        best_counts[1],
+        best_counts[2]
     );
 }
