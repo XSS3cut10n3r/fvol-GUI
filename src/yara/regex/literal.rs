@@ -313,21 +313,22 @@ impl Prefilter {
                 best = Some((Prefilter::Seq(f), seq_rate_v));
             }
         }
-        if let Some(alts) = alts {
-            if alts.len() > 1 {
-                let m = alts.iter().map(|s| s.len()).min().unwrap_or(0).min(3);
-                if m >= 1 {
-                    let rate: u64 = alts
-                        .iter()
-                        .map(|s| s[..m].iter().fold(1u64 << 20, |acc, x| (acc * set_freq(x)) >> 20).max(1))
-                        .sum::<u64>()
-                        .saturating_mul(2);
-                    let better = best.as_ref().map_or(true, |b| rate * 2 < b.1);
-                    if rate < MAX_RATE && better {
-                        if let Some(t) = crate::yara::teddy::Teddy::from_vec(alts) {
-                            best = Some((Prefilter::Teddy(t), rate));
-                        }
-                    }
+        if let Some(alts) = alts
+            && alts.len() > 1
+        {
+            let m = alts.iter().map(|s| s.len()).min().unwrap_or(0).min(3);
+            if m >= 1 {
+                let rate: u64 = alts
+                    .iter()
+                    .map(|s| s[..m].iter().fold(1u64 << 20, |acc, x| (acc * set_freq(x)) >> 20).max(1))
+                    .sum::<u64>()
+                    .saturating_mul(2);
+                let better = best.as_ref().is_none_or(|b| rate * 2 < b.1);
+                if rate < MAX_RATE
+                    && better
+                    && let Some(t) = crate::yara::teddy::Teddy::from_vec(alts)
+                {
+                    best = Some((Prefilter::Teddy(t), rate));
                 }
             }
         }

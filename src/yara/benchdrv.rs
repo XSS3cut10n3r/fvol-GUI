@@ -245,7 +245,8 @@ fn yara_rules_bench_driver() {
 fn yara_scaling_probe() {
     let w = bench_window();
     let hay = w.bytes();
-    let mut jobs: Vec<(String, Box<dyn Fn(&[u8]) -> usize + Sync>)> = Vec::new();
+    type Job = Box<dyn Fn(&[u8]) -> usize + Sync>;
+    let mut jobs: Vec<(String, Job)> = Vec::new();
     if let Ok(files) = std::env::var("RSVOL_BENCH_YARA_CASES") {
         for path in files.split(',').filter(|p| !p.is_empty()) {
             let src = std::fs::read_to_string(path).expect("read rule file");

@@ -139,6 +139,7 @@ const POOL_KEEP: usize = 4;
 /// One pool shard, alone on its cache lines (adjacent locks would bounce one line
 /// between the cores).
 #[repr(align(128))]
+#[allow(clippy::vec_box)] // scratch spaces move in and out of the pool: keep them boxed
 struct PoolShard(Mutex<Vec<Box<Scratch>>>);
 
 /// This thread's pool shard (threads are assigned round-robin).
@@ -324,10 +325,10 @@ impl Regex {
     }
 
     fn put_scratch(&self, s: Box<Scratch>) {
-        if let Ok(mut p) = self.pool().0.lock() {
-            if p.len() < POOL_KEEP {
-                p.push(s);
-            }
+        if let Ok(mut p) = self.pool().0.lock()
+            && p.len() < POOL_KEEP
+        {
+            p.push(s);
         }
     }
 

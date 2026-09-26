@@ -282,16 +282,16 @@ impl ReString {
         if offset >= data.len() {
             return true;
         }
-        if let (Some(fo), 0) = (self.fixed_offset, pi) {
-            if fo != offset as i64 {
-                return true;
-            }
+        if let (Some(fo), 0) = (self.fixed_offset, pi)
+            && fo != offset as i64
+        {
+            return true;
         }
         let PartKind::Re { code, .. } = &part.kind else { return false };
-        if let Some(id) = ca.node {
-            if code.fwd_ref.get(id as usize).copied().flatten().is_none() {
-                return true;
-            }
+        if let Some(id) = ca.node
+            && code.fwd_ref.get(id as usize).copied().flatten().is_none()
+        {
+            return true;
         }
         let bwd = ca.node.and_then(|id| code.bwd_ref.get(id as usize).copied().flatten()).is_some();
         let filter = part.filters.get(ai as usize).map_or(&[][..], |f| &f[..]);
