@@ -517,6 +517,67 @@ mod tests {
         assert_eq!(py_int_timestamp(&dt(253402300799, 999_900)), 253402300799);
     }
 
+    /// `cargo test --release timeliner_scale -- --ignored --nocapture`: the reference image's
+    /// shape (16 passes, 311k MFT entries, 2.84M rows) merged, sorted and rendered to a sink.
+    #[test]
+    #[ignore]
+    fn timeliner_scale() {
+        let t0 = std::time::Instant::now();
+        let mut m = Merge { classes: Vec::new(), entries: Vec::new(), index: FxHashMap::default(), snaps: Vec::new(), others: Vec::new(), cur: None, rows: Vec::new() };
+        let plan: [(&str, usize); 16] = [
+            ("PsList", 127),
+            ("PsScan", 133),
+            ("Amcache", 0),
+            ("ThrdScan", 1268),
+            ("Threads", 1247),
+            ("Threads", 0),
+            ("DllList", 0),
+            ("MFTScan", 311414),
+            ("NetScan", 26),
+            ("NetStat", 23),
+            ("ScheduledTasks", 348),
+            ("Sessions", 111),
+            ("ShimcacheMem", 254),
+            ("SymlinkScan", 216),
+            ("UnloadedModules", 7),
+            ("UserAssist", 23),
+        ];
+        for (pi, (class, n)) in plan.iter().enumerate() {
+            m.classes.push(class);
+            for i in 0..*n {
+                for k in [TimeKind::Created, TimeKind::Modified, TimeKind::Accessed] {
+                    let dt = DateTime { secs: 1_700_000_000 + ((i * 7919 + pi) % 100_000) as i64, micros: 0, utc: true };
+                    m.add_event(pi as u16, TimelineEvent { description: format!("{class} entry {i} some/path/name.ext"), kind: k, time: Value::DateTime(dt) });
+                }
+            }
+            m.pass(&mut None).unwrap();
+        }
+        let t1 = t0.elapsed();
+        let rows = m.sorted_rows();
+        let t2 = t0.elapsed();
+        let mut sink: Vec<u8> = Vec::new();
+        {
+            let mut r = crate::renderers::text::create("quick", &mut sink, Default::default()).unwrap();
+            r.begin(vec![
+                Column::new("Plugin", ColType::Str),
+                Column::new("Description", ColType::Str),
+                Column::new("Created Date", ColType::DateTime),
+                Column::new("Modified Date", ColType::DateTime),
+                Column::new("Accessed Date", ColType::DateTime),
+                Column::new("Changed Date", ColType::DateTime),
+            ])
+            .unwrap();
+            for &(e, s) in &rows {
+                let en = &m.entries[e as usize];
+                let t = m.snaps[s as usize];
+                r.row(0, vec![Value::SStr(m.classes[en.class as usize]), Value::SStr(en.desc), m.cell(t[0]), m.cell(t[1]), m.cell(t[2]), m.cell(t[3])]).unwrap();
+            }
+            r.finish().unwrap();
+        }
+        let t3 = t0.elapsed();
+        eprintln!("rows {} merge {:?} sort {:?} render {:?} ({} MB)", rows.len(), t1, t2 - t1, t3 - t2, sink.len() >> 20);
+    }
+
     #[test]
     fn merge_quirks() {
         let mut m = Merge { classes: vec!["A", "B"], entries: Vec::new(), index: FxHashMap::default(), snaps: Vec::new(), others: Vec::new(), cur: None, rows: Vec::new() };
