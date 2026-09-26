@@ -407,3 +407,23 @@ fn yara_rules_never_panic_on_garbage() {
 fn t_src(src: &str) -> bool {
     !names(src, b"", &[]).is_empty()
 }
+
+#[test]
+fn yara_rules_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Rules>();
+    // Evaluation from several threads at once.
+    let r = Rules::compile(r#"rule a { strings: $a = "x" condition: for all i in (1..#a) : (@a[i] >= 0) }"#).unwrap();
+    std::thread::scope(|s| {
+        for t in 0..4 {
+            let r = &r;
+            s.spawn(move || {
+                for i in 0..200 {
+                    let ms = vec![(0..(i + t) % 7).map(|k| m(k, 1)).collect::<Vec<_>>()];
+                    let out = r.evaluate(b"xxxxxxxx", &ms);
+                    assert_eq!(out.len(), usize::from(!ms[0].is_empty()));
+                }
+            });
+        }
+    });
+}

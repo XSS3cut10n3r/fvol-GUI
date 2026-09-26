@@ -185,7 +185,7 @@ impl<'a> RLexer<'a> {
         let lo_digits = &s[d1..j];
         if s.get(j) == Some(&b'}') && !lo_digits.is_empty() {
             let v = atoi(lo_digits);
-            if v > RE_MAX_RANGE || v < 0 {
+            if !(0..=RE_MAX_RANGE).contains(&v) {
                 return Err("repeat interval too large".into());
             }
             return Ok(Some((RTok::Range(v, v), j + 1)));
@@ -252,26 +252,25 @@ impl<'a> RLexer<'a> {
             } else {
                 Some(1)
             };
-            if let Some(sl) = start_len {
-                if self.peek(sl) == Some(b'-') && self.peek(sl + 1).is_some_and(|b| b != b']') {
-                    let start = if c == b'\\' {
-                        escaped_value(&self.s[self.i..self.i + sl]).ok_or_else(|| "illegal escape sequence".to_string())?
-                    } else {
-                        c
-                    };
-                    let mut end = self.s[self.i + sl + 1];
-                    self.i += sl + 2;
-                    if end == b'\\' {
-                        end = self.read_escaped().ok_or_else(|| "illegal escape sequence".to_string())?;
-                    }
-                    if end < start {
-                        return Err("bad character range".into());
-                    }
-                    for v in start..=end {
-                        set_bit(&mut bm, v);
-                    }
-                    continue;
+            let range = start_len.filter(|&sl| self.peek(sl) == Some(b'-') && self.peek(sl + 1).is_some_and(|b| b != b']'));
+            if let Some(sl) = range {
+                let start = if c == b'\\' {
+                    escaped_value(&self.s[self.i..self.i + sl]).ok_or_else(|| "illegal escape sequence".to_string())?
+                } else {
+                    c
+                };
+                let mut end = self.s[self.i + sl + 1];
+                self.i += sl + 2;
+                if end == b'\\' {
+                    end = self.read_escaped().ok_or_else(|| "illegal escape sequence".to_string())?;
                 }
+                if end < start {
+                    return Err("bad character range".into());
+                }
+                for v in start..=end {
+                    set_bit(&mut bm, v);
+                }
+                continue;
             }
             if c == b'\\' {
                 match self.peek(1) {

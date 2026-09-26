@@ -111,6 +111,10 @@ impl fmt::Debug for Rules {
     }
 }
 
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
+}
+
 /// C-string view of a python `str` source (libyara parses sources with
 /// `yy_scan_string`, i.e. up to the first NUL).
 fn c_str(s: &str) -> &[u8] {
@@ -202,21 +206,27 @@ impl Rules {
         let mut rule_matched = vec![false; n];
         let mut ns_unsatisfied = vec![false; self.namespaces.len()];
         let mut entry_point = None;
-        let mut scratch = Scratch::default();
         let mut mem = [0i64; MEM_SIZE];
-        for (i, r) in self.rules.iter().enumerate() {
-            let v = {
-                let mut ctx = Ctx { data, matches, rule_matched: &rule_matched, entry_point: &mut entry_point };
-                self.prog.run(r.code.0 as usize, r.code.1 as usize, &mut ctx, &mut scratch, &mut mem)
+        SCRATCH.with(|cell| {
+            // Reuse the per-thread VM buffers (a fresh set if somehow re-entered).
+            let mut fresh = Scratch::default();
+            let mut guard = cell.try_borrow_mut();
+            let scratch = match guard.as_deref_mut() {
+                Ok(s) => s,
+                Err(_) => &mut fresh,
             };
-            if !eval::is_undef(v) && v != 0 {
-                rule_matched[i] = true;
-            } else if r.global {
-                if let Some(u) = ns_unsatisfied.get_mut(r.ns as usize) {
+            for (i, r) in self.rules.iter().enumerate() {
+                let v = {
+                    let mut ctx = Ctx { data, matches, rule_matched: &rule_matched, entry_point: &mut entry_point };
+                    self.prog.run(r.code.0 as usize, r.code.1 as usize, &mut ctx, scratch, &mut mem)
+                };
+                if !eval::is_undef(v) && v != 0 {
+                    rule_matched[i] = true;
+                } else if let (true, Some(u)) = (r.global, ns_unsatisfied.get_mut(r.ns as usize)) {
                     *u = true;
                 }
             }
-        }
+        });
         for (i, r) in self.rules.iter().enumerate() {
             if ns_unsatisfied.get(r.ns as usize).copied().unwrap_or(false) {
                 rule_matched[i] = false;

@@ -700,17 +700,10 @@ fn int_func(w: &[u8]) -> Option<IntFunc> {
         Some(r) => (3u8, r),
         None => (0u8, w),
     };
-    let rest = if let Some(r) = rest.strip_prefix(b"int8") {
-        r
-    } else if let Some(r) = rest.strip_prefix(b"int16") {
-        v += 1;
-        r
-    } else if let Some(r) = rest.strip_prefix(b"int32") {
-        v += 2;
-        r
-    } else {
-        return None;
-    };
+    let (size, rest) = [(0u8, &b"int8"[..]), (1, b"int16"), (2, b"int32")]
+        .iter()
+        .find_map(|&(k, p)| rest.strip_prefix(p).map(|r| (k, r)))?;
+    v += size;
     match rest {
         b"" => Some(v),
         b"be" => Some(v + 6),
@@ -861,9 +854,8 @@ mod tests {
             }
             let mut l = Lexer::new(&buf);
             for _ in 0..1000 {
-                match l.next_token() {
-                    Ok(Tok::Eof) => break,
-                    _ => {}
+                if let Ok(Tok::Eof) = l.next_token() {
+                    break;
                 }
             }
         }

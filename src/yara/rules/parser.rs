@@ -551,14 +551,13 @@ impl<'a, 'c> Parser<'a, 'c> {
         self.expect_char(b'=', "'='")?;
         let decl_line = self.tok_line;
         let mut mods = Modifiers::default();
-        let kind;
         let mut empty = false;
-        match std::mem::replace(&mut self.tok, Tok::Eof) {
+        let kind = match std::mem::replace(&mut self.tok, Tok::Eof) {
             Tok::Text(s) => {
                 self.advance();
                 empty = s.is_empty();
                 self.parse_text_modifiers(&mut mods, decl_line)?;
-                kind = StringKind::Text(s);
+                StringKind::Text(s)
             }
             Tok::Regex { src, nocase, dotall } => {
                 self.advance();
@@ -566,18 +565,18 @@ impl<'a, 'c> Parser<'a, 'c> {
                 if nocase {
                     mods.nocase = true;
                 }
-                kind = StringKind::Regex { src, nocase, dotall };
+                StringKind::Regex { src, nocase, dotall }
             }
             Tok::Hex(h) => {
                 self.advance();
                 self.parse_simple_modifiers(&mut mods, false, decl_line)?;
-                kind = StringKind::Hex(h);
+                StringKind::Hex(h)
             }
             other => {
                 self.tok = other;
                 return self.unexpected("text string");
             }
-        }
+        };
 
         // yr_parser_reduce_string_declaration checks.
         let anonymous = id == "$";
@@ -603,16 +602,15 @@ impl<'a, 'c> Parser<'a, 'c> {
         let def = StringDef { id: id.clone(), kind, mods, fixed_offset: None };
         // Hex / regex validity comes from the matcher (libyara parses the
         // string at declaration time).
-        if !matches!(def.kind, StringKind::Text(_)) || base64 {
-            if let Err(e) = Matcher::new(std::slice::from_ref(&def)) {
-                let msg = if e.starts_with("invalid ") {
-                    e
-                } else {
-                    let what = if matches!(def.kind, StringKind::Hex(_)) { "hex string" } else { "regular expression" };
-                    format!("invalid {what} \"{id}\": {e}")
-                };
-                return self.sem_at(msg, decl_line);
-            }
+        let validate = !matches!(def.kind, StringKind::Text(_)) || base64;
+        if let Err(e) = if validate { Matcher::new(std::slice::from_ref(&def)).map(|_| ()) } else { Ok(()) } {
+            let msg = if e.starts_with("invalid ") {
+                e
+            } else {
+                let what = if matches!(def.kind, StringKind::Hex(_)) { "hex string" } else { "regular expression" };
+                format!("invalid {what} \"{id}\": {e}")
+            };
+            return self.sem_at(msg, decl_line);
         }
         let private = def.mods.private;
         self.c.defs.push(def);
@@ -787,7 +785,7 @@ impl<'a, 'c> Parser<'a, 'c> {
     }
 
     /// OP_STR_TO_BOOL when a string is used as a boolean_expression.
-    fn to_bool(&mut self, e: Expr) {
+    fn emit_str_to_bool(&mut self, e: Expr) {
         if e.ty == Ty::Str {
             self.emit(Op::StrToBool);
         }
@@ -806,18 +804,18 @@ impl<'a, 'c> Parser<'a, 'c> {
     /// boolean_expression at the lowest precedence (`or`).
     fn boolean_expression(&mut self) -> PResult<Expr> {
         let e = self.or_expr()?;
-        self.to_bool(e);
+        self.emit_str_to_bool(e);
         Ok(Expr { primary: false, ..e })
     }
 
     fn or_expr(&mut self) -> PResult<Expr> {
         let mut l = self.and_expr()?;
         while self.is_kw(Kw::Or) {
-            self.to_bool(l);
+            self.emit_str_to_bool(l);
             let j = self.emit(Op::JTrue(0));
             self.advance();
             let r = self.and_expr()?;
-            self.to_bool(r);
+            self.emit_str_to_bool(r);
             self.emit(Op::Or);
             let t = self.here();
             self.patch(j, t);
@@ -829,11 +827,11 @@ impl<'a, 'c> Parser<'a, 'c> {
     fn and_expr(&mut self) -> PResult<Expr> {
         let mut l = self.not_expr()?;
         while self.is_kw(Kw::And) {
-            self.to_bool(l);
+            self.emit_str_to_bool(l);
             let j = self.emit(Op::JFalse(0));
             self.advance();
             let r = self.not_expr()?;
-            self.to_bool(r);
+            self.emit_str_to_bool(r);
             self.emit(Op::And);
             let t = self.here();
             self.patch(j, t);
@@ -852,7 +850,7 @@ impl<'a, 'c> Parser<'a, 'c> {
         self.enter()?;
         let e = self.not_expr()?;
         self.leave();
-        self.to_bool(e);
+        self.emit_str_to_bool(e);
         self.emit(op);
         Ok(Expr::boolean())
     }
