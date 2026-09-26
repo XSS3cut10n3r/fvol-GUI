@@ -54,7 +54,6 @@ pub mod strings;
 pub mod suspended_threads;
 pub mod symlinkscan;
 pub mod thrdscan;
-pub mod thread_pe_symbols;
 pub mod threads;
 pub mod timers;
 pub mod truecrypt;

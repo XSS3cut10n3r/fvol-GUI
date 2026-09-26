@@ -490,18 +490,46 @@ pub fn get_all_vads_with_file_paths(k: &WinKernel) -> Vec<Result<(Obj, LayerRef,
 /// python `PESymbols.get_process_modules(context, kernel, filter_modules)`: every file-mapping
 /// VAD of every process, keyed by lower-case file name (filtered with python's `endswith`).
 pub fn get_process_modules(k: &WinKernel, filter: Option<&FilterModules>) -> Result<CollectedModules> {
+    get_process_modules_cached(k, filter, &mut FxHashMap::default())
+}
+
+/// [`get_process_modules`] sharing python's `vads_cache` dict (see
+/// [`get_vads_for_process_cache`]): the file-mapping VADs of processes already in the cache
+/// are reused and the others are added to it (a process' VADs are the same whoever asks, so
+/// plugins that use both avoid walking every VAD tree twice).
+pub fn get_process_modules_cached(k: &WinKernel, filter: Option<&FilterModules>, vads_cache: &mut FxHashMap<u64, Vec<Range>>) -> Result<CollectedModules> {
     let check = filter_check(filter);
+    let procs = super::pslist::list_processes(k, &|_| Ok(false));
+    // independent per process: walk the uncached VAD trees in parallel, merge in python's order
+    let cache: &FxHashMap<u64, Vec<Range>> = vads_cache;
+    let per = crate::util::par::par_map(procs.len(), |i| -> Option<Result<(LayerRef, Option<Vec<Range>>)>> {
+        let proc = procs[i].as_ref().ok()?;
+        let layer = match proc.add_process_layer() {
+            Ok(l) => l,
+            Err(e) if e.is_invalid_address() => return None,
+            Err(e) => return Some(Err(e)),
+        };
+        if cache.contains_key(&proc.addr) {
+            return Some(Ok((layer, None)));
+        }
+        Some(get_proc_vads_with_file_paths(proc).map(|v| (layer, Some(v))))
+    });
     let mut found: CollectedModules = FxHashMap::default();
-    for r in get_all_vads_with_file_paths(k) {
-        let (_proc, layer, vads) = r?;
-        for (start, size, path) in vads {
-            let name = filename_for_path(&path);
+    for (p, r) in procs.into_iter().zip(per) {
+        let proc = p?;
+        let Some(r) = r else { continue };
+        let (layer, computed) = r?;
+        if let Some(v) = computed {
+            vads_cache.insert(proc.addr, v);
+        }
+        for (start, size, path) in &vads_cache[&proc.addr] {
+            let name = filename_for_path(path);
             if let Some(c) = &check {
                 if !c.iter().any(|s| name.ends_with(s.as_str())) {
                     continue;
                 }
             }
-            found.entry(name).or_default().push(ModuleInstance { layer, start, size });
+            found.entry(name).or_default().push(ModuleInstance { layer, start: *start, size: *size });
         }
     }
     Ok(found)
