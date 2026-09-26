@@ -91,9 +91,10 @@ filters.
 
 ## Building
 
-You need a Rust toolchain of version 1.95 or newer; the project uses edition 2024 and standard
-library APIs stabilized in 1.95. The published benchmarks were built with rustc 1.98.1. Linux on
-x86-64 is the tested platform.
+You need a Rust toolchain of version 1.95 or newer, the `rust-version` in `Cargo.toml`: the
+project uses edition 2024 and `std::hint::cold_path`, which was stabilized in 1.95. Stable 1.95.0
+builds it and passes the tests and parity gates. The published benchmarks were built with rustc
+1.98.1. Linux on x86-64 is the tested platform.
 
 ```bash
 cargo build --release          # target/release/vol, for benchmarks and daily use

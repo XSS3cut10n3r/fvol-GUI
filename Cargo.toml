@@ -2,6 +2,7 @@
 name = "rsvol"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 description = "A zero-dependency Rust rewrite of the Volatility 3 memory forensics framework"
 license-file = "LICENSE.txt"
 
