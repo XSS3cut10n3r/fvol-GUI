@@ -3,128 +3,35 @@
 //! (`hashlib.sha1` in `windows/getservicesids.py`) and as the underlying hash for
 //! HMAC-SHA1 where needed elsewhere in the framework.
 
-/// Incremental SHA-1 hasher.
-#[derive(Clone)]
-pub struct Sha1 {
-    state: [u32; 5],
-    len: u64,
-    buf: [u8; 64],
-    buf_len: usize,
+const H0: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
+
+/// Runs the compression function over every 64-byte block of `blocks`
+/// (`blocks.len()` must be a multiple of 64): SHA-NI when the CPU has it, else
+/// the portable implementation.
+#[inline]
+fn compress(state: &mut [u32; 5], blocks: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    if sha_ni::available() {
+        // Safety: available() checked the target features.
+        unsafe { sha_ni::compress(state, blocks) };
+        return;
+    }
+    compress_portable(state, blocks);
 }
 
-impl Default for Sha1 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Sha1 {
-    pub fn new() -> Self {
-        Sha1 {
-            state: [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0],
-            len: 0,
-            buf: [0; 64],
-            buf_len: 0,
-        }
-    }
-
-    pub fn update(&mut self, mut data: &[u8]) {
-        self.len = self.len.wrapping_add(data.len() as u64);
-
-        if self.buf_len > 0 {
-            let need = 64 - self.buf_len;
-            let take = need.min(data.len());
-            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
-            self.buf_len += take;
-            data = &data[take..];
-            if self.buf_len == 64 {
-                let block = self.buf;
-                self.process_block(&block);
-                self.buf_len = 0;
-            }
-        }
-
-        while data.len() >= 64 {
-            let mut block = [0u8; 64];
-            block.copy_from_slice(&data[..64]);
-            self.process_block(&block);
-            data = &data[64..];
-        }
-
-        if !data.is_empty() {
-            self.buf[..data.len()].copy_from_slice(data);
-            self.buf_len = data.len();
-        }
-    }
-
-    pub fn finalize(mut self) -> [u8; 20] {
-        let bit_len = self.len.wrapping_mul(8);
-        let mut pad = [0u8; 72];
-        pad[0] = 0x80;
-        let pad_len = if self.buf_len < 56 {
-            56 - self.buf_len
-        } else {
-            120 - self.buf_len
-        };
-        self.append_no_len(&pad[..pad_len]);
-        self.append_no_len(&bit_len.to_be_bytes());
-
-        let mut out = [0u8; 20];
-        for (i, w) in self.state.iter().enumerate() {
-            out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
-        }
-        out
-    }
-
-    fn append_no_len(&mut self, mut data: &[u8]) {
-        if self.buf_len > 0 {
-            let need = 64 - self.buf_len;
-            let take = need.min(data.len());
-            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
-            self.buf_len += take;
-            data = &data[take..];
-            if self.buf_len == 64 {
-                let block = self.buf;
-                self.process_block(&block);
-                self.buf_len = 0;
-            }
-        }
-        while data.len() >= 64 {
-            let mut block = [0u8; 64];
-            block.copy_from_slice(&data[..64]);
-            self.process_block(&block);
-            data = &data[64..];
-        }
-        if !data.is_empty() {
-            self.buf[..data.len()].copy_from_slice(data);
-            self.buf_len = data.len();
-        }
-    }
-
-    fn process_block(&mut self, block: &[u8; 64]) {
-        #[cfg(target_arch = "x86_64")]
-        if sha_ni::available() {
-            sha_ni::process_block(&mut self.state, block);
-            return;
-        }
-        self.process_block_scalar(block);
-    }
-
-    fn process_block_scalar(&mut self, block: &[u8; 64]) {
+/// FIPS 180-4 compression, plain Rust (the non-SHA-NI path, and the reference
+/// the SHA-NI path is tested against).
+fn compress_portable(state: &mut [u32; 5], blocks: &[u8]) {
+    for block in blocks.chunks_exact(64) {
         let mut w = [0u32; 80];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                block[i * 4],
-                block[i * 4 + 1],
-                block[i * 4 + 2],
-                block[i * 4 + 3],
-            ]);
+            w[i] = u32::from_be_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
         }
         for i in 16..80 {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
         }
 
-        let [mut a, mut b, mut c, mut d, mut e] = self.state;
+        let [mut a, mut b, mut c, mut d, mut e] = *state;
 
         for (i, &wi) in w.iter().enumerate() {
             let (f, k) = match i {
@@ -146,219 +53,200 @@ impl Sha1 {
             a = temp;
         }
 
-        self.state[0] = self.state[0].wrapping_add(a);
-        self.state[1] = self.state[1].wrapping_add(b);
-        self.state[2] = self.state[2].wrapping_add(c);
-        self.state[3] = self.state[3].wrapping_add(d);
-        self.state[4] = self.state[4].wrapping_add(e);
+        for (s, v) in state.iter_mut().zip([a, b, c, d, e]) {
+            *s = s.wrapping_add(v);
+        }
     }
 }
 
-// --- SHA-NI hardware path (x86_64 only, runtime-detected). Same family of
-// intrinsics as SHA-256's (see that module's doc comment): `sha1rnds4` does 4
+/// Incremental SHA-1 hasher.
+#[derive(Clone)]
+pub struct Sha1 {
+    state: [u32; 5],
+    len: u64,
+    buf: [u8; 64],
+    buf_len: usize,
+}
+
+impl Default for Sha1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sha1 {
+    pub fn new() -> Self {
+        Sha1 {
+            state: H0,
+            len: 0,
+            buf: [0; 64],
+            buf_len: 0,
+        }
+    }
+
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.len = self.len.wrapping_add(data.len() as u64);
+
+        if self.buf_len > 0 {
+            let take = (64 - self.buf_len).min(data.len());
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+            self.buf_len += take;
+            data = &data[take..];
+            if self.buf_len < 64 {
+                return;
+            }
+            compress(&mut self.state, &self.buf);
+            self.buf_len = 0;
+        }
+
+        let whole = data.len() & !63;
+        if whole > 0 {
+            compress(&mut self.state, &data[..whole]);
+        }
+        let rest = &data[whole..];
+        self.buf[..rest.len()].copy_from_slice(rest);
+        self.buf_len = rest.len();
+    }
+
+    pub fn finalize(mut self) -> [u8; 20] {
+        // Pad in place: 0x80, zeros, then the 64-bit big-endian bit length,
+        // spilling into a second block when fewer than 8 bytes remain.
+        let n = self.buf_len;
+        let mut tail = [0u8; 128];
+        tail[..n].copy_from_slice(&self.buf[..n]);
+        tail[n] = 0x80;
+        let total = if n < 56 { 64 } else { 128 };
+        tail[total - 8..total].copy_from_slice(&self.len.wrapping_mul(8).to_be_bytes());
+        compress(&mut self.state, &tail[..total]);
+
+        let mut out = [0u8; 20];
+        for (i, w) in self.state.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        }
+        out
+    }
+}
+
+// --- SHA-NI hardware path (x86_64 only, runtime-detected). `sha1rnds4` does 4
 // rounds of the compression function per call (choosing one of the 4 round
 // functions via its immediate), `sha1nexte`/`sha1msg1`/`sha1msg2` compute the
-// message schedule 4 words at a time. Correctness is pinned down by the same
-// FIPS 180-4 / differential tests the scalar path uses.
+// message schedule 4 words at a time (Intel's published instruction sequence).
+// The 20 `sha1rnds4` of a block are one serial chain; the state stays in
+// registers across all blocks of one call instead of being unpacked and
+// re-packed around every block.
 #[cfg(target_arch = "x86_64")]
 mod sha_ni {
     use std::arch::x86_64::*;
-    use std::sync::OnceLock;
 
+    #[inline]
     pub fn available() -> bool {
-        static AVAILABLE: OnceLock<bool> = OnceLock::new();
-        *AVAILABLE.get_or_init(|| {
-            is_x86_feature_detected!("sha")
-                && is_x86_feature_detected!("sse4.1")
-                && is_x86_feature_detected!("ssse3")
-                && is_x86_feature_detected!("sse2")
-        })
+        is_x86_feature_detected!("sha")
+            && is_x86_feature_detected!("sse2")
+            && is_x86_feature_detected!("ssse3")
+            && is_x86_feature_detected!("sse4.1")
     }
 
-    pub fn process_block(state: &mut [u32; 5], block: &[u8; 64]) {
-        unsafe { process_block_unchecked(state, block) }
-    }
-
-    #[target_feature(enable = "sha,sse4.1,ssse3,sse2")]
-    unsafe fn process_block_unchecked(state: &mut [u32; 5], block: &[u8; 64]) {
+    /// Safety: the CPU must support sha, sse2, ssse3 and sse4.1.
+    #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+    pub unsafe fn compress(state: &mut [u32; 5], blocks: &[u8]) {
         unsafe {
             let mask = _mm_set_epi64x(0x0001020304050607u64 as i64, 0x08090a0b0c0d0e0fu64 as i64);
-
-            let mut abcd = _mm_loadu_si128(state.as_ptr() as *const __m128i);
+            // ABCD with A in the top lane; E in the top lane of its own register
+            // (the low three lanes must stay zero: they are added to W1..W3).
+            let mut abcd = _mm_shuffle_epi32(_mm_loadu_si128(state.as_ptr().cast()), 0x1B);
             let mut e0 = _mm_set_epi32(state[4] as i32, 0, 0, 0);
-            abcd = _mm_shuffle_epi32(abcd, 0x1B);
-
-            let abcd_save = abcd;
-            let e0_save = e0;
-
-            let p = block.as_ptr();
-            let mut msg0 = _mm_shuffle_epi8(_mm_loadu_si128(p as *const __m128i), mask);
-            let mut msg1 = _mm_shuffle_epi8(_mm_loadu_si128(p.add(16) as *const __m128i), mask);
-            let mut msg2 = _mm_shuffle_epi8(_mm_loadu_si128(p.add(32) as *const __m128i), mask);
-            let mut msg3 = _mm_shuffle_epi8(_mm_loadu_si128(p.add(48) as *const __m128i), mask);
-
             let mut e1;
 
-            // Rounds 0-3 (func 0: Ch)
-            e0 = _mm_add_epi32(e0, msg0);
-            e1 = abcd;
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 0);
+            // Group g (rounds 4g..4g+4) on schedule vector `$cur`: E (nexte of the
+            // ABCD saved one group earlier, plus W) goes in, and the current ABCD
+            // is saved into `$e_next` for the group after.
+            macro_rules! group {
+                ($e:ident, $e_next:ident, $cur:expr, $f:literal) => {
+                    $e = _mm_sha1nexte_epu32($e, $cur);
+                    $e_next = abcd;
+                    abcd = _mm_sha1rnds4_epu32(abcd, $e, $f);
+                };
+            }
 
-            // Rounds 4-7 (func 0)
-            e1 = _mm_sha1nexte_epu32(e1, msg1);
-            e0 = abcd;
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 0);
-            msg0 = _mm_sha1msg1_epu32(msg0, msg1);
+            for block in blocks.chunks_exact(64) {
+                let abcd_save = abcd;
+                let e_save = e0;
+                let p = block.as_ptr();
+                // Message schedule, 4 words per vector v[g] = W[4g..4g+4] (W[4g]
+                // in the top lane). Groups 4-7 use sha1msg1/sha1msg2; groups 8-19
+                // use W[i] = rotl2(W[i-6] ^ W[i-16] ^ W[i-28] ^ W[i-32]) (valid for
+                // i >= 32, and free of dependencies inside a 4-word group) in
+                // plain SSE. The 20 sha1rnds4 are the serial chain (4-cycle
+                // latency, but the SHA unit is busy 3 of those cycles), and
+                // sha1msg2 holds that same unit for ~2 cycles each: with Intel's
+                // all-sha1msg sequence the loop ran at ~118 cycles/block
+                // (OpenSSL: ~117); with 12 of the 16 msg2 moved to SSE and each
+                // v[g+2] computed right after group g (so the schedule never
+                // queues ahead of the rounds in program order): ~106.
+                let mut v = [_mm_setzero_si128(); 20];
+                for g in 0..4 {
+                    v[g] = _mm_shuffle_epi8(_mm_loadu_si128(p.add(16 * g).cast()), mask);
+                }
+                macro_rules! sch {
+                    (msg, $g:literal) => {
+                        let t = _mm_xor_si128(_mm_sha1msg1_epu32(v[$g - 4], v[$g - 3]), v[$g - 2]);
+                        v[$g] = _mm_sha1msg2_epu32(t, v[$g - 1]);
+                    };
+                    (id, $g:literal) => {
+                        // [W(i-6), W(i-5), W(i-4), W(i-3)] = low half of v[g-2] :
+                        // high half of v[g-1].
+                        let x = _mm_xor_si128(_mm_alignr_epi8(v[$g - 2], v[$g - 1], 8), v[$g - 4]);
+                        let x = _mm_xor_si128(x, _mm_xor_si128(v[$g - 7], v[$g - 8]));
+                        v[$g] = _mm_or_si128(_mm_slli_epi32(x, 2), _mm_srli_epi32(x, 30));
+                    };
+                }
+                // Rounds 0-3: E is added directly (no previous A to rotate in).
+                e0 = _mm_add_epi32(e0, v[0]);
+                e1 = abcd;
+                abcd = _mm_sha1rnds4_epu32(abcd, e0, 0);
+                group!(e1, e0, v[1], 0);
+                group!(e0, e1, v[2], 0);
+                sch!(msg, 4);
+                group!(e1, e0, v[3], 0);
+                sch!(msg, 5);
+                group!(e0, e1, v[4], 0);
+                sch!(msg, 6);
+                group!(e1, e0, v[5], 1);
+                sch!(msg, 7);
+                group!(e0, e1, v[6], 1);
+                sch!(id, 8);
+                group!(e1, e0, v[7], 1);
+                sch!(id, 9);
+                group!(e0, e1, v[8], 1);
+                sch!(id, 10);
+                group!(e1, e0, v[9], 1);
+                sch!(id, 11);
+                group!(e0, e1, v[10], 2);
+                sch!(id, 12);
+                group!(e1, e0, v[11], 2);
+                sch!(id, 13);
+                group!(e0, e1, v[12], 2);
+                sch!(id, 14);
+                group!(e1, e0, v[13], 2);
+                sch!(id, 15);
+                group!(e0, e1, v[14], 2);
+                sch!(id, 16);
+                group!(e1, e0, v[15], 3);
+                sch!(id, 17);
+                group!(e0, e1, v[16], 3);
+                sch!(id, 18);
+                group!(e1, e0, v[17], 3);
+                sch!(id, 19);
+                group!(e0, e1, v[18], 3);
+                group!(e1, e0, v[19], 3);
 
-            // Rounds 8-11 (func 0)
-            e0 = _mm_sha1nexte_epu32(e0, msg2);
-            e1 = abcd;
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 0);
-            msg1 = _mm_sha1msg1_epu32(msg1, msg2);
-            msg0 = _mm_xor_si128(msg0, msg2);
+                // Fold in the saved state: E via nexte (rotl(A_79, 30) + E_save;
+                // its low lanes come from e_save, i.e. stay zero).
+                e0 = _mm_sha1nexte_epu32(e0, e_save);
+                abcd = _mm_add_epi32(abcd, abcd_save);
+            }
 
-            // Rounds 12-15 (func 0)
-            e1 = _mm_sha1nexte_epu32(e1, msg3);
-            e0 = abcd;
-            msg0 = _mm_sha1msg2_epu32(msg0, msg3);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 0);
-            msg2 = _mm_sha1msg1_epu32(msg2, msg3);
-            msg1 = _mm_xor_si128(msg1, msg3);
-
-            // Rounds 16-19 (func 0, last group of func 0)
-            e0 = _mm_sha1nexte_epu32(e0, msg0);
-            e1 = abcd;
-            msg1 = _mm_sha1msg2_epu32(msg1, msg0);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 0);
-            msg3 = _mm_sha1msg1_epu32(msg3, msg0);
-            msg2 = _mm_xor_si128(msg2, msg0);
-
-            // Rounds 20-39 (func 1: Parity), 5 groups of 4, e0/e1 ping-ponging
-            // roles each group exactly as rounds 0-19 did above.
-
-            // Rounds 20-23 (func 1)
-            e1 = _mm_sha1nexte_epu32(e1, msg1);
-            e0 = abcd;
-            msg2 = _mm_sha1msg2_epu32(msg2, msg1);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 1);
-            msg0 = _mm_sha1msg1_epu32(msg0, msg1);
-            msg3 = _mm_xor_si128(msg3, msg1);
-
-            // Rounds 24-27 (func 1)
-            e0 = _mm_sha1nexte_epu32(e0, msg2);
-            e1 = abcd;
-            msg3 = _mm_sha1msg2_epu32(msg3, msg2);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 1);
-            msg1 = _mm_sha1msg1_epu32(msg1, msg2);
-            msg0 = _mm_xor_si128(msg0, msg2);
-
-            // Rounds 28-31 (func 1)
-            e1 = _mm_sha1nexte_epu32(e1, msg3);
-            e0 = abcd;
-            msg0 = _mm_sha1msg2_epu32(msg0, msg3);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 1);
-            msg2 = _mm_sha1msg1_epu32(msg2, msg3);
-            msg1 = _mm_xor_si128(msg1, msg3);
-
-            // Rounds 32-35 (func 1)
-            e0 = _mm_sha1nexte_epu32(e0, msg0);
-            e1 = abcd;
-            msg1 = _mm_sha1msg2_epu32(msg1, msg0);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 1);
-            msg3 = _mm_sha1msg1_epu32(msg3, msg0);
-            msg2 = _mm_xor_si128(msg2, msg0);
-
-            // Rounds 36-39 (func 1, last of func 1)
-            e1 = _mm_sha1nexte_epu32(e1, msg1);
-            e0 = abcd;
-            msg2 = _mm_sha1msg2_epu32(msg2, msg1);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 1);
-            msg0 = _mm_sha1msg1_epu32(msg0, msg1);
-            msg3 = _mm_xor_si128(msg3, msg1);
-
-            // Rounds 40-59 (func 2: Maj), 5 groups of 4.
-            // Rounds 40-43
-            e0 = _mm_sha1nexte_epu32(e0, msg2);
-            e1 = abcd;
-            msg3 = _mm_sha1msg2_epu32(msg3, msg2);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 2);
-            msg1 = _mm_sha1msg1_epu32(msg1, msg2);
-            msg0 = _mm_xor_si128(msg0, msg2);
-
-            // Rounds 44-47
-            e1 = _mm_sha1nexte_epu32(e1, msg3);
-            e0 = abcd;
-            msg0 = _mm_sha1msg2_epu32(msg0, msg3);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 2);
-            msg2 = _mm_sha1msg1_epu32(msg2, msg3);
-            msg1 = _mm_xor_si128(msg1, msg3);
-
-            // Rounds 48-51
-            e0 = _mm_sha1nexte_epu32(e0, msg0);
-            e1 = abcd;
-            msg1 = _mm_sha1msg2_epu32(msg1, msg0);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 2);
-            msg3 = _mm_sha1msg1_epu32(msg3, msg0);
-            msg2 = _mm_xor_si128(msg2, msg0);
-
-            // Rounds 52-55
-            e1 = _mm_sha1nexte_epu32(e1, msg1);
-            e0 = abcd;
-            msg2 = _mm_sha1msg2_epu32(msg2, msg1);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 2);
-            msg0 = _mm_sha1msg1_epu32(msg0, msg1);
-            msg3 = _mm_xor_si128(msg3, msg1);
-
-            // Rounds 56-59 (last of func 2)
-            e0 = _mm_sha1nexte_epu32(e0, msg2);
-            e1 = abcd;
-            msg3 = _mm_sha1msg2_epu32(msg3, msg2);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 2);
-            msg1 = _mm_sha1msg1_epu32(msg1, msg2);
-            msg0 = _mm_xor_si128(msg0, msg2);
-
-            // Rounds 60-79 (func 3: Parity), 5 groups of 4; no more msg1 needed
-            // after round 63's schedule word, and no more xor-prep after 71.
-            // Rounds 60-63
-            e1 = _mm_sha1nexte_epu32(e1, msg3);
-            e0 = abcd;
-            msg0 = _mm_sha1msg2_epu32(msg0, msg3);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 3);
-            msg2 = _mm_sha1msg1_epu32(msg2, msg3);
-            msg1 = _mm_xor_si128(msg1, msg3);
-
-            // Rounds 64-67
-            e0 = _mm_sha1nexte_epu32(e0, msg0);
-            e1 = abcd;
-            msg1 = _mm_sha1msg2_epu32(msg1, msg0);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 3);
-            msg3 = _mm_sha1msg1_epu32(msg3, msg0);
-            msg2 = _mm_xor_si128(msg2, msg0);
-
-            // Rounds 68-71
-            e1 = _mm_sha1nexte_epu32(e1, msg1);
-            e0 = abcd;
-            msg2 = _mm_sha1msg2_epu32(msg2, msg1);
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 3);
-            msg3 = _mm_xor_si128(msg3, msg1);
-
-            // Rounds 72-75
-            e0 = _mm_sha1nexte_epu32(e0, msg2);
-            e1 = abcd;
-            msg3 = _mm_sha1msg2_epu32(msg3, msg2);
-            abcd = _mm_sha1rnds4_epu32(abcd, e0, 3);
-
-            // Rounds 76-79
-            e1 = _mm_sha1nexte_epu32(e1, msg3);
-            e0 = abcd;
-            abcd = _mm_sha1rnds4_epu32(abcd, e1, 3);
-
-            // Combine state.
-            e0 = _mm_sha1nexte_epu32(e0, e0_save);
-            abcd = _mm_add_epi32(abcd, abcd_save);
-
-            abcd = _mm_shuffle_epi32(abcd, 0x1B);
-            _mm_storeu_si128(state.as_mut_ptr() as *mut __m128i, abcd);
+            _mm_storeu_si128(state.as_mut_ptr().cast(), _mm_shuffle_epi32(abcd, 0x1B));
             state[4] = _mm_extract_epi32(e0, 3) as u32;
         }
     }
@@ -417,10 +305,10 @@ mod tests {
         }
     }
 
-    // Cross-checks the SHA-NI path against the scalar path on any CPU that
-    // actually has SHA-NI.
+    // Cross-checks the SHA-NI multi-block path against the portable path on any
+    // CPU that actually has SHA-NI, for single blocks and multi-block runs.
     #[test]
-    fn ni_matches_scalar_if_available() {
+    fn ni_matches_portable_if_available() {
         #[cfg(target_arch = "x86_64")]
         {
             if !sha_ni::available() {
@@ -433,16 +321,13 @@ mod tests {
                 rng ^= rng << 17;
                 rng
             };
-            for nblocks in [1usize, 2, 5] {
-                let block: Vec<u8> = (0..nblocks * 64).map(|_| next() as u8).collect();
-                let mut ni_state = [0x67452301u32, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
-                for chunk in block.chunks_exact(64) {
-                    let b: &[u8; 64] = chunk.try_into().unwrap();
-                    sha_ni::process_block(&mut ni_state, b);
-                }
-                let mut scalar = Sha1::new();
-                scalar.update(&block);
-                assert_eq!(ni_state, scalar.state, "nblocks={nblocks}");
+            for nblocks in [1usize, 2, 5, 33] {
+                let data: Vec<u8> = (0..nblocks * 64).map(|_| next() as u8).collect();
+                let mut ni_state = H0;
+                unsafe { sha_ni::compress(&mut ni_state, &data) };
+                let mut sw_state = H0;
+                compress_portable(&mut sw_state, &data);
+                assert_eq!(ni_state, sw_state, "nblocks={nblocks}");
             }
         }
     }
