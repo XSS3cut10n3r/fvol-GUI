@@ -30,6 +30,7 @@ use crate::layers::{Layer, LayerExt};
 use crate::objects::Obj;
 use crate::renderers::Value;
 use crate::symbols::windows::WinExt;
+use crate::symbols::{StrEnc, StrErrors};
 
 /// python `BIG_DATA_MAXLEN`.
 pub const BIG_DATA_MAXLEN: u64 = 0x3FD8;
@@ -245,6 +246,10 @@ pub trait RegExt {
     fn is_key_node(&self) -> bool;
     /// True for `_CM_KEY_VALUE` objects (python `isinstance(node, CM_KEY_VALUE)`).
     fn is_key_value(&self) -> bool;
+    /// python `CM_KEY_BODY.get_full_key_name()` on a `_CM_KEY_BODY` (a kernel object, e.g. a
+    /// handle's body): `None` where python returns None (a loop in the `ParentKcb` chain, or
+    /// more than 128 levels).
+    fn get_full_key_name(&self) -> Result<Option<String>>;
 }
 
 fn is_named(o: &Obj, name: &str) -> bool {
@@ -445,6 +450,40 @@ impl RegExt for Obj {
             Some(h) => self.ty == h.types.key_value,
             None => is_named(self, "_CM_KEY_VALUE"),
         }
+    }
+
+    fn get_full_key_name(&self) -> Result<Option<String>> {
+        const KEY_HIVE_ENTRY: i128 = key_flags::KEY_HIVE_ENTRY as i128;
+        // _skip_key_hive_entry_path: `_CM_KEY_BODY.Trans` appeared in Win10 14393
+        let has_trans = self.has_member("Trans");
+        let mut output: Vec<String> = Vec::new();
+        let mut seen = crate::util::FxHashSet::default();
+        let mut kcb = self.m("KeyControlBlock")?;
+        loop {
+            let parent = kcb.m("ParentKcb")?;
+            if parent.u64()? == 0 {
+                break;
+            }
+            if !seen.insert(parent.addr) {
+                return Ok(None);
+            }
+            if output.len() > 128 {
+                return Ok(None);
+            }
+            // `kcb.NameBlock.Name is None` is never true
+            if has_trans && KEY_HIVE_ENTRY & kcb.m("Flags")?.int()? == KEY_HIVE_ENTRY {
+                kcb = kcb.m("ParentKcb")?;
+                if kcb.u64()? == 0 {
+                    break;
+                }
+            }
+            let nb = kcb.m("NameBlock")?;
+            let len = nb.m("NameLength")?.u64()?;
+            output.push(nb.m("Name")?.cast_string(len, StrEnc::Utf8, StrErrors::Replace).string()?);
+            kcb = kcb.m("ParentKcb")?;
+        }
+        output.reverse();
+        Ok(Some(output.join("\\")))
     }
 }
 

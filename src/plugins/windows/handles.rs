@@ -29,7 +29,8 @@ use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::WinExt;
 use crate::symbols::windows::objects::{ObjectsExt, is_name_info_value_error};
 use crate::symbols::windows::pool::{PoolExt, TypeMap};
-use crate::symbols::{StrEnc, StrErrors, Ty};
+use crate::symbols::windows::registry::RegExt;
+use crate::symbols::Ty;
 
 pub use crate::plugins::windows::poolscanner::{find_cookie, get_type_map};
 
@@ -236,41 +237,6 @@ impl HandleWalker {
     }
 }
 
-/// python `CM_KEY_BODY.get_full_key_name()` (None where python returns None).
-// TODO(dedupe): owned by A3 registry (symbols/windows/extensions/registry.py CM_KEY_BODY)
-fn cm_key_body_full_name(body: &Obj) -> Result<Option<String>> {
-    const KEY_HIVE_ENTRY: i128 = 0x04;
-    let has_trans = body.has_member("Trans");
-    let mut output: Vec<String> = Vec::new();
-    let mut seen = crate::util::FxHashSet::default();
-    let mut kcb = body.m("KeyControlBlock")?;
-    loop {
-        let parent = kcb.m("ParentKcb")?;
-        if parent.u64()? == 0 {
-            break;
-        }
-        if !seen.insert(parent.addr) {
-            return Ok(None);
-        }
-        if output.len() > 128 {
-            return Ok(None);
-        }
-        // `kcb.NameBlock.Name is None` is never true
-        if has_trans && KEY_HIVE_ENTRY & kcb.m("Flags")?.int()? == KEY_HIVE_ENTRY {
-            kcb = kcb.m("ParentKcb")?;
-            if kcb.u64()? == 0 {
-                break;
-            }
-        }
-        let nb = kcb.m("NameBlock")?;
-        let len = nb.m("NameLength")?.u64()?;
-        output.push(nb.m("Name")?.cast_string(len, StrEnc::Utf8, StrErrors::Replace).string()?);
-        kcb = kcb.m("ParentKcb")?;
-    }
-    output.reverse();
-    Ok(Some(output.join("\\")))
-}
-
 /// python `_generator`'s per-handle part: (type name, object name) of one handle, `Ok(None)`
 /// for handles python skips (unknown type or InvalidAddressException).
 pub fn handle_object_info(item: &HandleItem, type_map: &TypeMap, cookie: Option<u64>) -> Result<Option<(String, Value)>> {
@@ -288,7 +254,7 @@ pub fn handle_object_info(item: &HandleItem, type_map: &TypeMap, cookie: Option<
                 let cid = t.m("Cid")?;
                 Value::Str(format!("Tid {} Pid {}", cid.m("UniqueThread")?.int()?, cid.m("UniqueProcess")?.int()?))
             }
-            "Key" => match cm_key_body_full_name(&body.cast("_CM_KEY_BODY")?)? {
+            "Key" => match body.cast("_CM_KEY_BODY")?.get_full_key_name()? {
                 Some(s) => Value::Str(s),
                 None => Value::NotAvailable,
             },

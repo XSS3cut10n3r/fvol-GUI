@@ -21,7 +21,7 @@ mod reader;
 mod scan;
 
 pub use download::{download_and_convert, download_pdb, isf_relative_path, symbol_server_urls, SYMBOL_SERVER_URL};
-pub use pe::{find_mz_before, pe_codeview_info, pe_image_size, rsds_scan, CodeViewInfo, PdbNameScan, PdbScanResult, RsdsMatch};
+pub use pe::{find_mz_before, find_rsds, guid_string, pe_codeview_info, pe_image_size, rsds_scan, rsds_search, CodeViewInfo, PdbNameScan, PdbScanResult, RsdsMatch};
 
 use crate::error::{Error, Result};
 

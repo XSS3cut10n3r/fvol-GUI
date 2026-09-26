@@ -17,6 +17,7 @@ use crate::symbols::TableRef;
 use crate::symbols::windows::consoles::{ConsoleExt, Screen};
 use crate::symbols::windows::prelude::*;
 use crate::symbols::windows::registry::{RegData, RegExt};
+use crate::util::pyset::py_hash_int;
 
 pub struct Consoles;
 
@@ -33,35 +34,16 @@ pub enum SetElem {
     Bytes(Vec<u8>),
 }
 
-/// CPython's `hash(int)`: `sign * (|v| mod (2**61 - 1))`, with -1 mapped to -2.
-pub fn py_hash_int(v: i128) -> i64 {
-    const P: u128 = (1u128 << 61) - 1;
-    let m = (v.unsigned_abs() % P) as i64;
-    let h = if v < 0 { -m } else { m };
-    if h == -1 { -2 } else { h }
-}
-
-/// A python `set` of ints with CPython 3.14's exact iteration order (`setobject.c`: open
-/// addressing on `hash & mask`, `LINEAR_PROBES` = 9 then perturbation, a table of 8 slots grown
-/// to the smallest power of two > `used * 4` when `fill * 5 >= mask * 3`, iteration in slot
-/// order). Python iterates `max_history` this way, and the order decides which scan hits come
-/// first. `bytes` elements (whose hash is randomized per python process, so python's order is
-/// not reproducible) are kept apart and iterated last.
-#[derive(Clone, Debug)]
+/// A python `set` of ints with CPython 3.14's exact iteration order ([`util::pyset::PySet`]):
+/// python iterates `max_history` this way, and the order decides which scan hits come first.
+/// `bytes` elements (whose hash is randomized per python process, so python's order is not
+/// reproducible) are kept apart and iterated last.
+///
+/// [`util::pyset::PySet`]: crate::util::pyset::PySet
+#[derive(Clone, Debug, Default)]
 pub struct PySet {
-    table: Vec<Option<(i64, i128)>>,
-    fill: usize,
-    used: usize,
+    ints: crate::util::pyset::PySet<i128>,
     other: Vec<Vec<u8>>,
-}
-
-const LINEAR_PROBES: usize = 9;
-const PERTURB_SHIFT: u32 = 5;
-
-impl Default for PySet {
-    fn default() -> Self {
-        PySet { table: vec![None; 8], fill: 0, used: 0, other: Vec::new() }
-    }
 }
 
 impl PySet {
@@ -88,73 +70,19 @@ impl PySet {
 
     /// `set_add_entry` for an int key.
     pub fn add_int(&mut self, key: i128) {
-        let hash = py_hash_int(key);
-        let mask = self.table.len() - 1;
-        let mut i = (hash as u64 as usize) & mask;
-        let mut perturb = hash as u64;
-        loop {
-            let probes = if i + LINEAR_PROBES <= mask { LINEAR_PROBES } else { 0 };
-            for j in 0..=probes {
-                match self.table[i + j] {
-                    None => {
-                        self.table[i + j] = Some((hash, key));
-                        self.fill += 1;
-                        self.used += 1;
-                        if self.fill * 5 >= mask * 3 {
-                            self.resize(if self.used > 50000 { self.used * 2 } else { self.used * 4 });
-                        }
-                        return;
-                    }
-                    Some((h, k)) if h == hash && k == key => return,
-                    _ => {}
-                }
-            }
-            perturb >>= PERTURB_SHIFT;
-            i = (i.wrapping_mul(5).wrapping_add(1).wrapping_add(perturb as usize)) & mask;
-        }
-    }
-
-    /// `set_table_resize(so, minused)` (no dummies: nothing is ever removed).
-    fn resize(&mut self, minused: usize) {
-        let mut newsize = 8usize;
-        while newsize <= minused {
-            newsize <<= 1;
-        }
-        let old = std::mem::replace(&mut self.table, vec![None; newsize]);
-        let mask = newsize - 1;
-        for (hash, key) in old.into_iter().flatten() {
-            // set_insert_clean
-            let mut i = (hash as u64 as usize) & mask;
-            let mut perturb = hash as u64;
-            'probe: loop {
-                if self.table[i].is_none() {
-                    self.table[i] = Some((hash, key));
-                    break;
-                }
-                if i + LINEAR_PROBES <= mask {
-                    for j in 1..=LINEAR_PROBES {
-                        if self.table[i + j].is_none() {
-                            self.table[i + j] = Some((hash, key));
-                            break 'probe;
-                        }
-                    }
-                }
-                perturb >>= PERTURB_SHIFT;
-                i = (i.wrapping_mul(5).wrapping_add(1).wrapping_add(perturb as usize)) & mask;
-            }
-        }
+        self.ints.add(py_hash_int(key), key);
     }
 
     /// The elements in python iteration order.
     pub fn elems(&self) -> Vec<SetElem> {
-        let mut v: Vec<SetElem> = self.table.iter().flatten().map(|&(_, k)| SetElem::Int(k)).collect();
+        let mut v: Vec<SetElem> = self.ints.iter().map(|&k| SetElem::Int(k)).collect();
         v.extend(self.other.iter().cloned().map(SetElem::Bytes));
         v
     }
 
     /// Number of elements.
     pub fn len(&self) -> usize {
-        self.used + self.other.len()
+        self.ints.len() + self.other.len()
     }
 
     /// True when empty.
@@ -916,9 +844,9 @@ mod tests {
 
     #[test]
     fn hash_and_pack() {
-        assert_eq!(py_hash_int(-1), -2);
+        assert_eq!(py_hash_int(-1) as i64, -2);
         assert_eq!(py_hash_int((1 << 61) - 1), 0);
-        assert_eq!(py_hash_int(-((1 << 61) + 5)), -6);
+        assert_eq!(py_hash_int(-((1 << 61) + 5)) as i64, -6);
         assert_eq!(pack_h(&SetElem::Int(50)).unwrap(), [50, 0]);
         assert!(pack_h(&SetElem::Int(65536)).is_err());
         assert!(pack_h(&SetElem::Int(-1)).is_err());

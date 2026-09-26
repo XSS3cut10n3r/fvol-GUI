@@ -442,6 +442,42 @@ fn adjacent_runs_merge_and_fill_pages() {
     std::fs::remove_file(p).unwrap();
 }
 
+/// Scanning a non-linear layer (python `NonLinearlySegmentedLayer`: QEMU, AVML) reads the
+/// decoded data through the layer, one chunk series per python segment: the mapped offsets
+/// (fill bytes, compressed frames) are never scanned as data, adjacent same-byte fill pages
+/// stay apart (no match spans them, like python), raw segments still scan their file bytes.
+#[test]
+fn nonlinear_scan_reads_through_the_layer() {
+    use crate::layers::scan::{BytesScanner, scan};
+    let mut data = vec![b'Z'; 3 * 4096];
+    data[100..104].copy_from_slice(b"XYZW");
+    let p = temp_file("nonlinear-scan", &data);
+    let file = open(&p);
+    let base = Base::from_file(&file);
+    let segs = vec![
+        Seg { start: 0, len: 4096, src: Src::Fill { at: 10, byte: b'A' } },
+        Seg { start: 4096, len: 4096, src: Src::Fill { at: 11, byte: b'A' } },
+        Seg { start: 8192, len: 4096, src: Src::Raw(0) },
+    ];
+    let l = SegmentedLayer::new_nonlinear_allow_empty("QemuSuspendLayer", &base, segs).unwrap();
+    assert!(!l.is_linear());
+    let mut runs = Vec::new();
+    l.mapping(0, 1 << 20, &mut |m| {
+        runs.push((m.offset, m.len));
+        true
+    });
+    assert_eq!(runs, vec![(0, 4096), (4096, 4096), (8192, 4096)]);
+    // "AAAA" inside each fill page, none across the two pages
+    let a = scan(&l, &BytesScanner::new(b"AAAA"), None);
+    assert_eq!(a.len(), 2 * (4096 - 3));
+    assert!(a.iter().all(|&h| h + 4 <= 4096 || (4096..=8192 - 4).contains(&h)));
+    // the fill pages are 'A's, not the file's 'Z's at their mapped offsets
+    let z = scan(&l, &BytesScanner::new(b"ZZZZ"), None);
+    assert!(z.iter().all(|&h| h >= 8192), "{:?}", &z[..z.len().min(4)]);
+    assert_eq!(scan(&l, &BytesScanner::new(b"XYZW"), None), vec![8192 + 100]);
+    std::fs::remove_file(p).unwrap();
+}
+
 #[test]
 fn truncated_file_reads() {
     // LiME segment claims 3 pages but the file stops after 1.5 pages
