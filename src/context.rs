@@ -347,6 +347,88 @@ mod bench {
     use crate::layers::LayerExt;
     use crate::layers::scan::{BytesScanner, scan};
 
+    /// API proof against python: windows.dlllist.DllList's default output rebuilt from the
+    /// core extension API (get_peb / load_order_modules / UNICODE_STRING / get_load_count on
+    /// process layers), rendered by the real quick renderer and diffed with the reference.
+    #[test]
+    #[ignore]
+    fn dlllist_via_core_api() {
+        use crate::renderers::{ColType, Column, Value};
+        use crate::symbols::windows::WinExt;
+        use crate::util::time::wintime_to_datetime;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let refp = std::env::var("RSVOL_BENCH_REF").unwrap_or_else(|_| "/home/user/rs-vol/bench/ref/py/windows.dlllist.DllList.txt".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let mut out: Vec<u8> = b"Volatility 3 Framework 2.28.2\n".to_vec();
+        {
+            let mut r = crate::renderers::text::create("quick", &mut out, Default::default()).unwrap();
+            r.begin(vec![
+                Column::new("PID", ColType::Int),
+                Column::new("Process", ColType::Str),
+                Column::new("Base", ColType::Hex),
+                Column::new("Size", ColType::Hex),
+                Column::new("Name", ColType::Str),
+                Column::new("Path", ColType::Str),
+                Column::new("LoadCount", ColType::Int),
+                Column::new("LoadTime", ColType::DateTime),
+                Column::new("File output", ColType::Str),
+            ])
+            .unwrap();
+            let kuser = crate::plugins::windows::info::get_kuser_structure(k).unwrap();
+            let (maj, min) = (kuser.m("NtMajorVersion").unwrap().int().unwrap(), kuser.m("NtMinorVersion").unwrap().int().unwrap());
+            let load_time_field = maj > 6 || (maj == 6 && min >= 1);
+            for p in crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)) {
+                let proc = p.unwrap();
+                proc.add_process_layer().unwrap();
+                for e in proc.load_order_modules() {
+                    let e = e.unwrap();
+                    let (mut base_name, mut full_name) = (Value::Unreadable, Value::Unreadable);
+                    if let Ok(b) = e.m("BaseDllName").and_then(|n| n.get_string()) {
+                        base_name = Value::Str(b);
+                        if let Ok(f) = e.m("FullDllName").and_then(|n| n.get_string()) {
+                            full_name = Value::Str(f);
+                        }
+                    }
+                    let load_time = if load_time_field {
+                        e.path("LoadTime.QuadPart").and_then(|q| q.int()).map(wintime_to_datetime).unwrap_or(Value::Unreadable)
+                    } else {
+                        Value::NotApplicable
+                    };
+                    let hexv = |r: crate::error::Result<i128>| r.map(Value::Int).unwrap_or(Value::NotAvailable);
+                    r.row(
+                        0,
+                        vec![
+                            Value::Int(proc.m("UniqueProcessId").unwrap().int().unwrap()),
+                            Value::Str(proc.image_file_name_str().unwrap()),
+                            hexv(e.m("DllBase").and_then(|x| x.int())),
+                            hexv(e.m("SizeOfImage").and_then(|x| x.int())),
+                            base_name,
+                            full_name,
+                            e.get_load_count().map(Value::Int).unwrap_or(Value::NotAvailable),
+                            load_time,
+                            Value::SStr("Disabled"),
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            r.finish().unwrap();
+        }
+        let reference = std::fs::read(&refp).unwrap();
+        if out != reference {
+            let a = String::from_utf8_lossy(&out);
+            let b = String::from_utf8_lossy(&reference);
+            for (i, (x, y)) in a.lines().zip(b.lines()).enumerate() {
+                if x != y {
+                    panic!("line {i} differs:\n ours: {x}\n  ref: {y}");
+                }
+            }
+            panic!("length differs: ours {} lines, ref {} lines", a.lines().count(), b.lines().count());
+        }
+        println!("dlllist via core API: byte-identical ({} bytes)", out.len());
+    }
+
     /// `cargo test --release module_pdb_lookup -- --ignored --nocapture` (needs the test image
     /// and tcpip.pdb's ISF in a symbol dir): python `PDBUtility.module_from_pdb` for tcpip.sys.
     #[test]
