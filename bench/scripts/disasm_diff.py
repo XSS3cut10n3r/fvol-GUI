@@ -188,7 +188,7 @@ def write_ref(path, entries):
 
 # ----------------------------------------------------------------------------- corpora
 
-def gather_real(pe_dirs, quick, lib_seed=1234, real_mb=48):
+def gather_real(pe_dirs, quick, lib_seed=1234, real_mb=48, only_files=None):
     jobs = {32: [], 64: []}
     budget = {32: 0, 64: 0}
     limit = (4 << 20) if quick else (real_mb << 20)
@@ -198,7 +198,7 @@ def gather_real(pe_dirs, quick, lib_seed=1234, real_mb=48):
             for nm in sorted(names):
                 if nm.endswith(".dmp"):
                     files.append(os.path.join(root, nm))
-    for lib in ("/usr/lib", "/usr/lib32"):
+    for lib in (() if only_files else ("/usr/lib", "/usr/lib32")):
         try:
             names = sorted(os.listdir(lib))
         except OSError:
@@ -208,11 +208,13 @@ def gather_real(pe_dirs, quick, lib_seed=1234, real_mb=48):
         for nm in names:
             if ".so" in nm:
                 files.append(os.path.join(lib, nm))
+    if only_files:
+        files = list(only_files)
     for p in files:
         try:
             if os.path.islink(p) or not os.path.isfile(p):
                 continue
-            if os.path.getsize(p) > (64 << 20):
+            if os.path.getsize(p) > (64 << 20) and not only_files:
                 continue
             with open(p, "rb") as f:
                 data = f.read()
@@ -357,6 +359,7 @@ def main_gen(argv):
     real_mb = 48
     no_pe = False
     small_tail = False
+    only_files = None
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -382,6 +385,8 @@ def main_gen(argv):
             no_pe = True
         elif a == "--small-tail":
             small_tail = True
+        elif a == "--files":
+            only_files = argv[i + 1].split(","); i += 1
         i += 1
     if not pe_dirs and not no_pe:
         pe_dirs = [d for d in DEFAULT_PE if os.path.isdir(d)]
@@ -389,7 +394,7 @@ def main_gen(argv):
     rnd = random.Random(seed)
     with Pool(jobs) as pool:
         if only is None or "real" in only:
-            jobs = gather_real(pe_dirs, quick, lib_seed, real_mb)
+            jobs = gather_real(pe_dirs, quick, lib_seed, real_mb, only_files)
             for bits in (64, 32):
                 print(f"real{bits}: {len(jobs[bits])} chunks", file=sys.stderr)
                 tot = merge(pool.imap_unordered(sweep, jobs[bits], chunksize=1))
