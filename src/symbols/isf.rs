@@ -1363,7 +1363,7 @@ impl BlobPtr {
 /// [`serialize`] in two passes: a sequential layout pass (string pool interning in blob order,
 /// every section's size and offset), then all sections written in parallel into one
 /// preallocated buffer (no per-section vectors, no assembly copy). Same bytes.
-fn serialize_fast(o: &Out<'_>) -> Vec<u8> {
+fn serialize_fast(o: &Out<'_>, prefaulted: Option<Vec<u8>>) -> Vec<u8> {
     let _t = crate::util::trace::span("isf serialize");
     let nu = o.users.len();
     let total_members: usize = o.users.iter().map(|u| u.members.len()).sum();
@@ -1539,7 +1539,14 @@ fn serialize_fast(o: &Out<'_>) -> Vec<u8> {
     }
     drop(_ts);
     let _ts = crate::util::trace::span("isf serialize: fill");
-    let mut blob = vec![0u8; total];
+    // a zeroed buffer whose pages a helper already faulted in, when it is big enough
+    let mut blob = match prefaulted {
+        Some(mut v) if v.len() >= total => {
+            v.truncate(total);
+            v
+        }
+        _ => vec![0u8; total],
+    };
     blob[..8].copy_from_slice(MAGIC);
     blob[8..12].copy_from_slice(&BLOB_VERSION.to_le_bytes());
     blob[12..16].copy_from_slice(&(sec::N as u32).to_le_bytes());
@@ -1759,19 +1766,21 @@ mod fast {
     #[derive(Default)]
     struct Local<'a> {
         nodes: Vec<LNode<'a>>,
-        by_value: FxHashMap<Ty, u32>,
+        /// keyed by the 16-byte encoding (injective; hashes in two words, not field by field)
+        by_value: FxHashMap<u128, u32>,
         holders: FxHashMap<u32, Ty>,
     }
 
     impl<'a> Local<'a> {
         /// `Resolver::node`: intern by value.
         fn node(&mut self, t: Ty) -> TypeIdx {
-            if let Some(&i) = self.by_value.get(&t) {
+            let k = tkey(&t);
+            if let Some(&i) = self.by_value.get(&k) {
                 return TypeIdx(i);
             }
             let i = self.nodes.len() as u32;
             self.nodes.push(LNode::Value(t));
-            self.by_value.insert(t, i);
+            self.by_value.insert(k, i);
             TypeIdx(i)
         }
         /// `Resolver::unresolved`, memoized per descriptor (the reference memoizes every
@@ -2042,6 +2051,12 @@ mod fast {
     enum Part<'a> {
         Users(Vec<UserOut<'a>>, Local<'a>),
         Syms(Vec<SymOut<'a>>, Local<'a>),
+    }
+
+    /// Hash-map key of a type: its blob encoding (injective).
+    #[inline(always)]
+    fn tkey(t: &Ty) -> u128 {
+        u128::from_le_bytes(ty_encode(t))
     }
 
     /// Remap a local type (references into the range's table) to the global table.
@@ -2366,6 +2381,40 @@ mod fast {
         let parts: Vec<Option<Part>> = if n_items > 1 && par { crate::util::pool::map(n_items, run) } else { (0..n_items).map(run).collect() };
 
         drop(_tp);
+        // ---- an upper bound of the blob size, so a helper faults the blob's pages in while
+        // this thread replays nodes and lays out the string pool
+        let prefault = par.then(|| {
+            let slots_ub = |n: usize| 16 * n + 16;
+            let mut ub = HDR_SZ + 8 * sec::N + 4096;
+            ub += metadata.as_ref().map(|_| 1 << 16).unwrap_or(0) + natives.iter().map(|n| BASE_SZ + n.name.len() + 16).sum::<usize>() + slots_ub(natives.len());
+            ub += edefs.iter().map(|e| ENUM_SZ + 16 + e.name.len() + e.constants.iter().map(|c| CONST_SZ + c.0.len()).sum::<usize>()).sum::<usize>() + slots_ub(edefs.len());
+            ub += slots_ub(ukeys.len()) + slots_ub(skeys.len()) + NODE_SZ;
+            for part in parts.iter().flatten() {
+                let l = match part {
+                    Part::Users(v, l) => {
+                        ub += v.iter().map(|u| UTYPE_SZ + u.name.len() + slots_ub(u.members.len()) + u.members.iter().map(|m| MEMBER_SZ + m.0.len()).sum::<usize>()).sum::<usize>();
+                        l
+                    }
+                    Part::Syms(v, l) => {
+                        ub += v.iter().map(|s| SYMBOL_SZ + s.name.len() + s.constant_data.as_ref().map_or(0, |c| c.len())).sum::<usize>();
+                        l
+                    }
+                };
+                ub += l.nodes.iter().map(|n| NODE_SZ + if let LNode::Holder(_, name) = n { name.len() } else { 0 }).sum::<usize>();
+            }
+            std::thread::Builder::new()
+                .name("rsvol-prefault".into())
+                .spawn(move || {
+                    let mut v = vec![0u8; ub];
+                    let p = v.as_mut_ptr();
+                    for i in (0..ub).step_by(4096) {
+                        // SAFETY: i < ub; a write faults the (zero) page in
+                        unsafe { std::ptr::write_volatile(p.add(i), 0) };
+                    }
+                    v
+                })
+                .ok()
+        });
         // ---- replay the node creations: user types in order, then symbols
         let _tr = crate::util::trace::span("isf: node replay");
         let mut g = Global::default();
@@ -2415,13 +2464,13 @@ mod fast {
         if json.len() >= PAR_PARSE_MIN {
             crate::util::bg::spawn(move || drop(idx));
         }
-        Some(serialize_fast(&out))
+        Some(serialize_fast(&out, prefault.flatten().and_then(|h| h.join().ok())))
     }
 
     /// The global node table being replayed into.
     struct Global {
         nodes: Vec<Ty>,
-        node_idx: FxHashMap<Ty, u32>,
+        node_idx: FxHashMap<u128, u32>,
         holders: FxHashMap<u32, u32>,
         unresolved: Vec<(u32, String)>,
     }
@@ -2430,7 +2479,7 @@ mod fast {
         fn default() -> Global {
             // node 0 = void, like the reference resolver
             let mut node_idx = FxHashMap::default();
-            node_idx.insert(Ty::Void, 0);
+            node_idx.insert(tkey(&Ty::Void), 0);
             Global { nodes: vec![Ty::Void], node_idx, holders: FxHashMap::default(), unresolved: Vec::new() }
         }
     }
@@ -2453,12 +2502,13 @@ mod fast {
                     },
                     LNode::Value(t) => {
                         let t = remap(*t, m);
-                        match self.node_idx.get(&t) {
+                        let k = tkey(&t);
+                        match self.node_idx.get(&k) {
                             Some(&i) => i,
                             None => {
                                 let i = self.nodes.len() as u32;
                                 self.nodes.push(t);
-                                self.node_idx.insert(t, i);
+                                self.node_idx.insert(k, i);
                                 i
                             }
                         }
