@@ -1,7 +1,7 @@
 #!/bin/bash
 # Generate Python volatility3 reference outputs for each plugin (no args) on the Windows image.
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
-OUT=/home/user/rs-vol/bench/ref/py
+OUT=${OUT:-/home/user/rs-vol/bench/ref/py}
 LIST=${1:-/home/user/rs-vol/bench/win_noarg.txt}
 run() {
   p=$1
