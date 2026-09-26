@@ -80,6 +80,37 @@ pub fn get_session_layers(k: &WinKernel, pids: &[i128]) -> Result<Vec<LayerRef>>
     Ok(out)
 }
 
+/// python `Modules.get_session_layers_map(context, kernel, pids)`: `(session id, process
+/// layer)` for the first process of each session, in process-list order (python's dict).
+pub fn get_session_layers_map(k: &WinKernel, pids: &[i128]) -> Result<Vec<(i128, LayerRef)>> {
+    let filter = super::pslist::pid_filter(pids);
+    let has_session_space = k.table.user_type("_MM_SESSION_SPACE").is_some();
+    let mut out: Vec<(i128, LayerRef)> = Vec::new();
+    for p in super::pslist::list_processes(k, &filter) {
+        let proc = p?;
+        let r = (|| -> Result<(i128, LayerRef)> {
+            let pl = proc.add_process_layer()?;
+            let session = proc.m("Session")?.u64()?;
+            let sid = if has_session_space {
+                k.object_abs("_MM_SESSION_SPACE", session)?.m("SessionId")?.int()?
+            } else {
+                k.object_abs("unsigned long", session.wrapping_add(8))?.int()?
+            };
+            Ok((sid, pl))
+        })();
+        match r {
+            Ok((sid, pl)) => {
+                if !out.iter().any(|(s, _)| *s == sid) {
+                    out.push((sid, pl));
+                }
+            }
+            Err(e) if e.is_invalid_address() => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
 /// python `Modules.find_session_layer(context, session_layers, base)`.
 pub fn find_session_layer(layers: &[LayerRef], base: u64) -> Option<LayerRef> {
     layers.iter().copied().find(|l| l.is_valid(base, 1))
