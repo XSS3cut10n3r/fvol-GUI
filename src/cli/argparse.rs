@@ -5,8 +5,8 @@
 //! messages and `--help` (derived from Volatility 3 / CPython, Volatility Software License 1.0).
 
 use super::help::Formatter;
-use super::regex::Regex;
 use crate::renderers::pyfmt::{parse_int0, str_repr};
+use std::borrow::Cow;
 use std::rc::Rc;
 
 /// A namespace value.
@@ -72,10 +72,13 @@ pub enum Conv {
     Bytes,
 }
 
-#[derive(Clone, Debug)]
+/// Lazily built (name, short help) list of the subcommands, for `--help` only.
+pub type SubHelp = Rc<dyn Fn() -> Vec<(String, Option<String>)>>;
+
+#[derive(Clone)]
 pub struct Action {
     pub option_strings: Vec<String>,
-    pub dest: String,
+    pub dest: &'static str,
     pub kind: Kind,
     pub nargs: Nargs,
     pub const_: PyVal,
@@ -84,14 +87,14 @@ pub struct Action {
     pub conv: Conv,
     pub choices: Option<Vec<String>>,
     pub required: bool,
-    pub help: Option<String>,
+    pub help: Option<Cow<'static, str>>,
     pub metavar: Option<String>,
     /// subparser choices (name, help) for the help listing
-    pub sub_choices: Option<Rc<Vec<(String, Option<String>)>>>,
+    pub sub_choices: Option<SubHelp>,
 }
 
 impl Action {
-    pub fn new(option_strings: &[&str], dest: &str, kind: Kind) -> Action {
+    pub fn new(option_strings: &[&str], dest: &'static str, kind: Kind) -> Action {
         let nargs = match kind {
             Kind::Help | Kind::StoreTrue | Kind::Count => Nargs::Zero,
             Kind::Parsers => Nargs::Parser,
@@ -99,7 +102,7 @@ impl Action {
         };
         Action {
             option_strings: option_strings.iter().map(|s| s.to_string()).collect(),
-            dest: dest.to_string(),
+            dest,
             kind,
             nargs,
             const_: PyVal::None,
@@ -117,14 +120,14 @@ impl Action {
     }
 
     pub fn pseudo(name: &str, help: Option<String>) -> Action {
-        let mut a = Action::new(&[], name, Kind::Store);
+        let mut a = Action::new(&[], "", Kind::Store);
         a.metavar = Some(name.to_string());
-        a.help = help;
+        a.help = help.map(Cow::Owned);
         a
     }
 
-    pub fn help(mut self, h: &str) -> Self {
-        self.help = Some(h.to_string());
+    pub fn help(mut self, h: impl Into<Cow<'static, str>>) -> Self {
+        self.help = Some(h.into());
         self
     }
     pub fn default(mut self, v: PyVal) -> Self {
@@ -163,7 +166,7 @@ impl Action {
         } else if let Some(m) = &self.metavar {
             Some(m.clone())
         } else if self.dest != "==SUPPRESS==" {
-            Some(self.dest.clone())
+            Some(self.dest.to_string())
         } else {
             self.choices.as_ref().map(|c| format!("{{{}}}", c.join(",")))
         }
@@ -189,14 +192,15 @@ pub struct Parser {
     /// mutually exclusive groups (never required here)
     pub mutex: Vec<Vec<usize>>,
     pub defaults: Vec<(String, PyVal)>,
-    pub sub_names: Rc<Vec<(String, Option<String>)>>,
+    /// subcommand names (matched by substring, like volatility3's HelpfulSubparserAction)
+    pub sub_names: Rc<Vec<&'static str>>,
     pub sub_factory: Option<SubFactory>,
 }
 
 /// The namespace (python `argparse.Namespace`), insertion ordered.
 #[derive(Clone, Debug, Default)]
 pub struct Namespace {
-    pub vals: Vec<(String, PyVal)>,
+    pub vals: Vec<(Cow<'static, str>, PyVal)>,
     unrecognized: Vec<String>,
 }
 
@@ -207,10 +211,11 @@ impl Namespace {
     pub fn has(&self, k: &str) -> bool {
         self.vals.iter().any(|(n, _)| n == k)
     }
-    pub fn set(&mut self, k: &str, v: PyVal) {
-        match self.vals.iter_mut().find(|(n, _)| n == k) {
+    pub fn set(&mut self, k: impl Into<Cow<'static, str>>, v: PyVal) {
+        let k = k.into();
+        match self.vals.iter_mut().find(|(n, _)| *n == k) {
             Some(slot) => slot.1 = v,
-            None => self.vals.push((k.to_string(), v)),
+            None => self.vals.push((k, v)),
         }
     }
     pub fn str(&self, k: &str) -> Option<&str> {
@@ -339,7 +344,7 @@ impl Parser {
     pub fn set_defaults(&mut self, kv: Vec<(String, PyVal)>) {
         for (k, v) in kv {
             for a in self.actions.iter_mut() {
-                if a.dest == k {
+                if a.dest == k.as_str() {
                     a.default = Some(v.clone());
                 }
             }
@@ -395,15 +400,15 @@ impl Parser {
     pub fn parse_known_args(&self, args: &[String]) -> Result<(Namespace, Vec<String>), Exit> {
         let mut ns = Namespace::default();
         for a in &self.actions {
-            if a.dest != "==SUPPRESS==" && !ns.has(&a.dest) {
+            if a.dest != "==SUPPRESS==" && !ns.has(a.dest) {
                 if let Some(d) = &a.default {
-                    ns.set(&a.dest, d.clone());
+                    ns.set(a.dest, d.clone());
                 }
             }
         }
         for (k, v) in &self.defaults {
             if !ns.has(k) {
-                ns.set(k, v.clone());
+                ns.set(k.clone(), v.clone());
             }
         }
         match self.parse_inner(args, &mut ns) {
@@ -484,52 +489,100 @@ impl Parser {
         result
     }
 
-    fn nargs_pattern(a: &Action) -> &'static str {
-        let opt = !a.option_strings.is_empty();
-        match (a.nargs, opt) {
-            (Nargs::Single, true) => "([A])",
-            (Nargs::Single, false) => "(-*A-*)",
-            (Nargs::Optional, true) => "(A?)",
-            (Nargs::Optional, false) => "(-*A?-*)",
-            (Nargs::ZeroOrMore, true) => "(A*)",
-            (Nargs::ZeroOrMore, false) => "(-*[A-]*)",
-            (Nargs::OneOrMore, true) => "(A+)",
-            (Nargs::OneOrMore, false) => "(-*A[A-]*)",
-            (Nargs::Parser, true) => "(A[AO]*)",
-            (Nargs::Parser, false) => "(-*A[-AO]*)",
-            (Nargs::Zero, true) => "()",
-            (Nargs::Zero, false) => "(-*)",
-        }
-    }
-
-    /// `HelpfulArgParser._match_argument`
+    /// `HelpfulArgParser._match_argument`: how many of the following strings (pattern chars
+    /// 'A' argument / 'O' option / '-' for "--") an optional consumes (argparse's
+    /// `([A])`, `(A?)`, `(A*)`, `(A+)`, `(A[AO]*)`, `()` patterns).
     fn match_argument(&self, a: &Action, pattern: &str) -> Result<usize, ArgError> {
-        let re = Regex::new(Self::nargs_pattern(a)).expect("nargs pattern");
-        match re.match_prefix(pattern) {
-            Some((_, groups)) => Ok(groups.first().copied().flatten().map(|(s, e)| e - s).unwrap_or(0)),
-            None => {
-                let mut msg = match a.nargs {
-                    Nargs::Single => "expected one argument".to_string(),
-                    Nargs::Optional => "expected at most one argument".to_string(),
-                    Nargs::OneOrMore => "expected at least one argument".to_string(),
-                    _ => "expected 0 arguments".to_string(),
-                };
-                if let Some(c) = &a.choices {
-                    msg = format!("{msg} (from: {})", c.join(", "));
-                }
-                Err(ArgError::new(Some(a), msg))
+        let p = pattern.as_bytes();
+        let leading_a = p.iter().take_while(|&&c| c == b'A').count();
+        let n = match a.nargs {
+            Nargs::Single if leading_a >= 1 => Some(1),
+            Nargs::Single => None,
+            Nargs::Optional => Some(leading_a.min(1)),
+            Nargs::ZeroOrMore => Some(leading_a),
+            Nargs::OneOrMore if leading_a >= 1 => Some(leading_a),
+            Nargs::OneOrMore => None,
+            Nargs::Parser if leading_a >= 1 => Some(1 + p[1..].iter().take_while(|&&c| c != b'-').count()),
+            Nargs::Parser => None,
+            Nargs::Zero => Some(0),
+        };
+        n.ok_or_else(|| {
+            let mut msg = match a.nargs {
+                Nargs::Single => "expected one argument".to_string(),
+                Nargs::Optional => "expected at most one argument".to_string(),
+                Nargs::OneOrMore => "expected at least one argument".to_string(),
+                _ => "expected 1 argument".to_string(),
+            };
+            if let Some(c) = &a.choices {
+                msg = format!("{msg} (from: {})", c.join(", "));
             }
-        }
+            ArgError::new(Some(a), msg)
+        })
     }
 
-    /// `_match_arguments_partial`
+    /// `_match_arguments_partial`: argparse matches the concatenated positional patterns
+    /// (`(-*A-*)`, `(-*A?-*)`, `(-*[A-]*)`, `(-*A[A-]*)`, `(-*A[-AO]*)`) with `re.match`;
+    /// each is a sequence of greedy single-class repeats, matched here by the same backtracking.
     fn match_arguments_partial(&self, positionals: &[usize], pattern: &str) -> Vec<usize> {
+        const DASH: u8 = 1;
+        const A: u8 = 2;
+        const O: u8 = 4;
+        const INF: usize = usize::MAX;
+        // (class mask, min, max, group)
+        let mut pieces: Vec<(u8, usize, usize, usize)> = Vec::with_capacity(3 * positionals.len());
+        let s = pattern.as_bytes();
         for i in (1..=positionals.len()).rev() {
-            let pat: String = positionals[..i].iter().map(|&k| Self::nargs_pattern(&self.actions[k])).collect();
-            let re = Regex::new(&pat).expect("nargs pattern");
-            if let Some((end, groups)) = re.match_prefix(pattern) {
-                let mut result: Vec<usize> = groups.iter().map(|g| g.map(|(s, e)| e - s).unwrap_or(0)).collect();
-                if end < pattern.len() && pattern.as_bytes()[end] == b'O' {
+            pieces.clear();
+            for (g, &k) in positionals[..i].iter().enumerate() {
+                pieces.push((DASH, 0, INF, g));
+                match self.actions[k].nargs {
+                    Nargs::Single => pieces.extend([(A, 1, 1, g), (DASH, 0, INF, g)]),
+                    Nargs::Optional => pieces.extend([(A, 0, 1, g), (DASH, 0, INF, g)]),
+                    Nargs::ZeroOrMore => pieces.push((A | DASH, 0, INF, g)),
+                    Nargs::OneOrMore => pieces.extend([(A, 1, 1, g), (A | DASH, 0, INF, g)]),
+                    Nargs::Parser => pieces.extend([(A, 1, 1, g), (A | DASH | O, 0, INF, g)]),
+                    Nargs::Zero => {}
+                }
+            }
+            fn class(c: u8) -> u8 {
+                match c {
+                    b'A' => 2,
+                    b'O' => 4,
+                    _ => 1,
+                }
+            }
+            fn m(pieces: &[(u8, usize, usize, usize)], k: usize, pos: usize, s: &[u8], ends: &mut [usize]) -> bool {
+                if k == pieces.len() {
+                    return true;
+                }
+                let (mask, min, max, _) = pieces[k];
+                let mut run = 0;
+                while pos + run < s.len() && run < max && class(s[pos + run]) & mask != 0 {
+                    run += 1;
+                }
+                if run < min {
+                    return false;
+                }
+                for take in (min..=run).rev() {
+                    if m(pieces, k + 1, pos + take, s, ends) {
+                        ends[k] = pos + take;
+                        return true;
+                    }
+                }
+                false
+            }
+            let mut ends = vec![0usize; pieces.len()];
+            if m(&pieces, 0, 0, s, &mut ends) {
+                let mut result = vec![0usize; i];
+                let mut start = 0;
+                for (k, p) in pieces.iter().enumerate() {
+                    if k + 1 == pieces.len() || pieces[k + 1].3 != p.3 {
+                        result[p.3] = ends[k] - start;
+                        start = ends[k];
+                    }
+                }
+                let end = ends.last().copied().unwrap_or(0);
+                if end < s.len() && s[end] == b'O' {
                     while result.last() == Some(&0) {
                         result.pop();
                     }
@@ -609,24 +662,24 @@ impl Parser {
         match a.kind {
             Kind::Help => Err(Fail::Exit(Exit::Help(self.format_help()))),
             Kind::Store => {
-                ns.set(&a.dest, values);
+                ns.set(a.dest, values);
                 Ok(())
             }
             Kind::StoreTrue => {
-                ns.set(&a.dest, PyVal::Bool(true));
+                ns.set(a.dest, PyVal::Bool(true));
                 Ok(())
             }
             Kind::Count => {
-                let n = match ns.get(&a.dest) {
+                let n = match ns.get(a.dest) {
                     Some(PyVal::Int(i)) => *i,
                     Some(PyVal::Bool(b)) => *b as i128,
                     _ => 0,
                 };
-                ns.set(&a.dest, PyVal::Int(n + 1));
+                ns.set(a.dest, PyVal::Int(n + 1));
                 Ok(())
             }
             Kind::Append | Kind::Extend => {
-                let mut items = match ns.get(&a.dest) {
+                let mut items = match ns.get(a.dest) {
                     Some(PyVal::List(l)) => l.clone(),
                     _ => Vec::new(),
                 };
@@ -635,7 +688,7 @@ impl Parser {
                 } else if let PyVal::List(v) = values {
                     items.extend(v);
                 }
-                ns.set(&a.dest, PyVal::List(items));
+                ns.set(a.dest, PyVal::List(items));
                 Ok(())
             }
             Kind::Parsers => self.call_subparser(a, values, ns),
@@ -651,11 +704,10 @@ impl Parser {
         let mut it = values.into_iter().map(|v| v.py_str());
         let parser_name = it.next().unwrap_or_default();
         let arg_strings: Vec<String> = it.collect();
-        ns.set(&a.dest, PyVal::Str(parser_name.clone()));
-        let matched: Vec<&str> =
-            self.sub_names.iter().map(|(n, _)| n.as_str()).filter(|n| n.contains(parser_name.as_str())).collect();
+        ns.set(a.dest, PyVal::Str(parser_name.clone()));
+        let matched: Vec<&str> = self.sub_names.iter().copied().filter(|n| n.contains(parser_name.as_str())).collect();
         if matched.is_empty() {
-            let names: Vec<&str> = self.sub_names.iter().map(|(n, _)| n.as_str()).collect();
+            let names: Vec<&str> = self.sub_names.to_vec();
             return Err(Fail::Arg(ArgError::new(
                 Some(a),
                 format!("invalid choice {parser_name} (choose from {})", names.join(", ")),
@@ -673,7 +725,7 @@ impl Parser {
         let sub = factory(&name);
         let (subns, rest) = sub.parse_known_args(&arg_strings).map_err(Fail::Exit)?;
         for (k, v) in subns.vals {
-            ns.set(&k, v);
+            ns.set(k, v);
         }
         ns.unrecognized.extend(rest);
         Ok(())
@@ -877,9 +929,9 @@ impl Parser {
             if a.required {
                 required.push(a.name().unwrap_or_default());
             } else if let Some(PyVal::Str(d)) = &a.default {
-                if a.conv != Conv::Str && ns.get(&a.dest) == Some(&PyVal::Str(d.clone())) {
+                if a.conv != Conv::Str && ns.get(a.dest) == Some(&PyVal::Str(d.clone())) {
                     let v = self.get_value(a, d)?;
-                    ns.set(&a.dest, v);
+                    ns.set(a.dest, v);
                 }
             }
         }

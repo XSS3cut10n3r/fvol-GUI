@@ -202,3 +202,65 @@ fn python_plugin_help_matches() {
     }
     assert!(bad.is_empty(), "{} of {} plugin helps differ:\n{}", bad.len(), plugins.len(), bad.join("\n==========\n"));
 }
+
+/// In-process cost of the CLI with all 197 python plugins registered (no exec / dynamic loading):
+///   cargo test --profile fast bench_cli -- --ignored --nocapture
+#[test]
+#[ignore]
+fn bench_cli() {
+    let cases = fixture("cli_cases.json");
+    let base = prepare_sandbox(&cases);
+    let img = format!("{base}/image.raw");
+    let runs: [(&str, Vec<&str>); 4] = [
+        ("parse -f IMG windows.pslist --pid 4 --dump", vec!["-q", "-f", &img, "windows.pslist", "--pid", "4", "--dump"]),
+        ("-h (197 plugins)", vec!["-h"]),
+        ("windows.pslist -h", vec!["windows.pslist", "-h"]),
+        ("error: pslist ambiguous", vec!["pslist"]),
+    ];
+    for (label, argv) in runs {
+        let n = 2000;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = run_case(&argv, &base, 80);
+        }
+        let dt = start.elapsed();
+        println!("{label:>45}: {:>7.1} us/run", dt.as_secs_f64() * 1e6 / n as f64);
+    }
+}
+
+#[test]
+#[ignore]
+fn bench_cli_phases() {
+    let cases = fixture("cli_cases.json");
+    let base = prepare_sandbox(&cases);
+    let img = format!("{base}/image.raw");
+    let plugins = &fixtures().plugins;
+    let n = 5000;
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        let mut p = base_parser("vol.py", &base, "/c");
+        add_late_arguments(&mut p, "vol.py", plugins);
+        std::hint::black_box(&p);
+    }
+    println!("build parsers: {:.2} us", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+    let mut p = base_parser("vol.py", &base, "/c");
+    add_late_arguments(&mut p, "vol.py", plugins);
+    let args: Vec<String> = ["-q", "-f", img.as_str(), "windows.pslist", "--pid", "4", "--dump"].iter().map(|s| s.to_string()).collect();
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(p.parse_known_args(&args).ok());
+    }
+    println!("one full parse: {:.2} us", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+    let bp = base_parser("vol.py", &base, "/c");
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(bp.parse_known_args(&args).ok());
+    }
+    println!("base parse: {:.2} us", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(current_dir());
+        std::hint::black_box(path_exists(&img));
+    }
+    println!("cwd+stat: {:.2} us", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+}

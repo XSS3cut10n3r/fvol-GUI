@@ -158,3 +158,70 @@ fn python_renderers_match() {
     }
     assert!(bad.is_empty(), "{} of {} renderer cases differ:\n{}", bad.len(), cases.as_arr().len(), bad.join("\n=========\n"));
 }
+
+/// Throughput of every renderer on 1M pslist-like rows written to /dev/null (values are built
+/// per row, as a plugin would). Run:
+///   cargo test --profile fast bench_renderers -- --ignored --nocapture
+#[test]
+#[ignore]
+fn bench_renderers() {
+    const N: u64 = 1_000_000;
+    let columns = || {
+        crate::cols![
+            ("PID", Int),
+            ("PPID", Int),
+            ("ImageFileName", Str),
+            ("Offset(V)", Hex),
+            ("Threads", Int),
+            ("Handles", Int),
+            ("SessionId", Int),
+            ("Wow64", Bool),
+            ("CreateTime", DateTime),
+            ("ExitTime", DateTime),
+            ("File output", Str)
+        ]
+    };
+    let row = |i: u64| -> Vec<Value> {
+        vec![
+            Value::Int(i as i128),
+            Value::Int((i / 3) as i128),
+            Value::Str(if i % 2 == 0 { "svchost.exe".into() } else { "MsMpEng.exe".into() }),
+            Value::Int(0xe485b4eaa040 + i as i128 * 0x80),
+            Value::Int((i % 97) as i128),
+            Value::Unreadable,
+            Value::NotApplicable,
+            Value::Bool(i % 5 == 0),
+            Value::DateTime(DateTime { secs: 1789354424 + i as i64, micros: 0, utc: true }),
+            Value::NotApplicable,
+            Value::SStr("Disabled"),
+        ]
+    };
+    for name in ["none", "quick", "csv", "jsonl", "json", "pretty"] {
+        let mut sink = std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+        let start = std::time::Instant::now();
+        {
+            let mut r = create(name, &mut sink, RenderOptions::default()).unwrap();
+            r.begin(columns()).unwrap();
+            for i in 0..N {
+                r.row((i % 3 == 2) as usize, row(i)).unwrap();
+            }
+            r.finish().unwrap();
+        }
+        let dt = start.elapsed();
+        println!("{name:>7}: {N} rows in {:>7.1} ms  ({:.0} ns/row)", dt.as_secs_f64() * 1e3, dt.as_nanos() as f64 / N as f64);
+    }
+    // quick with a filter active (per-cell strings)
+    let mut sink = std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+    let start = std::time::Instant::now();
+    {
+        let opts = RenderOptions { filters: vec!["ImageFileName,svchost".into()], hide_columns: None };
+        let mut r = create("quick", &mut sink, opts).unwrap();
+        r.begin(columns()).unwrap();
+        for i in 0..N {
+            r.row(0, row(i)).unwrap();
+        }
+        r.finish().unwrap();
+    }
+    let dt = start.elapsed();
+    println!("quick+filter: {N} rows in {:>7.1} ms  ({:.0} ns/row)", dt.as_secs_f64() * 1e3, dt.as_nanos() as f64 / N as f64);
+}

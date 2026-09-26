@@ -341,7 +341,7 @@ fn requirement_action(r: &Requirement) -> Action {
         ReqKind::Choice(c) => (Kind::Store, Nargs::Single, Conv::Str, Some(c.iter().map(|s| s.to_string()).collect())),
     };
     let mut a = Action::new(&[flag.as_str()], r.name, kind).nargs(nargs).conv(conv).required(!r.optional);
-    a.help = Some(r.description.to_string());
+    a.help = Some(std::borrow::Cow::Borrowed(r.description));
     a.default = Some(r.default.as_ref().map(cv_to_pyval).unwrap_or(PyVal::None));
     a.choices = choices;
     a
@@ -363,7 +363,7 @@ fn automagic_requirements() -> Vec<Requirement> {
 
 fn base_parser(prog: &str, cwd: &str, cache_path: &str) -> Parser {
     let mut p = Parser::new(prog, Some("An open-source memory forensics framework".into()), None, false);
-    let mut h = Action::new(&["-h", "--help"], "==SUPPRESS==", Kind::Help).help(&format!(
+    let mut h = Action::new(&["-h", "--help"], "==SUPPRESS==", Kind::Help).help(format!(
         "Show this help message and exit, for specific plugin options use '{prog} <pluginname> --help'"
     ));
     h.default = None;
@@ -411,7 +411,7 @@ fn base_parser(prog: &str, cwd: &str, cache_path: &str) -> Parser {
     p.add(Action::new(&["--clear-cache"], "clear_cache", Kind::StoreTrue).help("Clears out all short-term cached items"));
     p.add(
         Action::new(&["--cache-path"], "cache_path", Kind::Store)
-            .help(&format!("Change the default path ({cache_path}) used to store the cache"))
+            .help(format!("Change the default path ({cache_path}) used to store the cache"))
             .default(PyVal::Str(cache_path.to_string())),
     );
     let off = p.add(
@@ -441,7 +441,7 @@ fn add_late_arguments(p: &mut Parser, prog: &str, plugins: &[&'static dyn Plugin
     p.add(
         Action::new(&["-r", "--renderer"], "renderer", Kind::Store)
             .metavar("RENDERER")
-            .help(&format!("Determines how to render the output ({})", names.join(", ")))
+            .help(format!("Determines how to render the output ({})", names.join(", ")))
             .default(PyVal::Str("quick".into()))
             .choices(names),
     );
@@ -449,12 +449,14 @@ fn add_late_arguments(p: &mut Parser, prog: &str, plugins: &[&'static dyn Plugin
         p.add(requirement_action(&r));
     }
     let g = p.add_group("Plugins", Some(format!("For plugin specific options, run '{prog} <plugin> --help'")));
-    let list: Rc<Vec<(String, Option<String>)>> =
-        Rc::new(plugins.iter().map(|pl| (pl.name().to_string(), split_doc(*pl).0)).collect());
+    let names: Vec<&'static str> = plugins.iter().map(|pl| pl.name()).collect();
     let mut sub = Action::new(&[], "plugin", Kind::Parsers).metavar("PLUGIN");
-    sub.sub_choices = Some(list.clone());
+    let for_help: Vec<&'static dyn Plugin> = plugins.to_vec();
+    sub.sub_choices = Some(Rc::new(move || {
+        for_help.iter().map(|pl| (pl.name().to_string(), split_doc(*pl).0)).collect()
+    }));
     p.add_to_group(g, sub);
-    p.sub_names = list;
+    p.sub_names = Rc::new(names);
     let plugins: Vec<&'static dyn Plugin> = plugins.to_vec();
     let prog = prog.to_string();
     p.sub_factory = Some(Rc::new(move |name: &str| {
@@ -597,7 +599,7 @@ fn run_inner(
     }
 
     if s.dump_args {
-        let j = Json::Obj(args.vals.iter().map(|(k, v)| (k.clone(), pyval_to_json(v))).collect());
+        let j = Json::Obj(args.vals.iter().map(|(k, v)| (k.to_string(), pyval_to_json(v))).collect());
         let _ = out.write_all(format!("{}\n", j.dump(None)).as_bytes());
         return Ok(0);
     }

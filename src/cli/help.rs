@@ -364,7 +364,7 @@ impl Formatter {
     }
 
     fn default_metavar(a: &Action) -> String {
-        if a.option_strings.is_empty() { a.dest.clone() } else { a.dest.to_uppercase() }
+        if a.option_strings.is_empty() { a.dest.to_string() } else { a.dest.to_uppercase() }
     }
 
     fn format_args(a: &Action) -> String {
@@ -569,7 +569,7 @@ impl Formatter {
     }
 
     fn expand_help(&self, a: &Action) -> String {
-        let h = a.help.clone().unwrap_or_default();
+        let h = a.help.as_deref().unwrap_or_default().to_string();
         if !h.contains('%') {
             return h;
         }
@@ -587,7 +587,7 @@ impl Formatter {
                     let after = &r[end + 1..];
                     let val = match key {
                         "prog" => self.prog.clone(),
-                        "dest" => a.dest.clone(),
+                        "dest" => a.dest.to_string(),
                         "metavar" => a.metavar.clone().unwrap_or_else(|| "None".into()),
                         "default" => a.default.as_ref().map(|d| d.py_str()).unwrap_or_default(),
                         "choices" => a.choices.as_ref().map(|c| c.join(", ")).unwrap_or_else(|| "None".into()),
@@ -610,7 +610,7 @@ impl Formatter {
         out
     }
 
-    fn format_action(&self, a: &Action, indent: usize, out: &mut String) {
+    fn format_action(&self, a: &Action, indent: usize, out: &mut String, subs: Option<&[(String, Option<String>)]>) {
         let help_position = (self.action_max_length + 2).min(self.max_help_position);
         let help_width = (self.width as isize - help_position as isize).max(11) as usize;
         let action_width = help_position as isize - indent as isize - 2;
@@ -652,23 +652,26 @@ impl Formatter {
         } else if !out.ends_with('\n') {
             out.push('\n');
         }
-        if let Some(sub) = &a.sub_choices {
+        if let Some(sub) = subs {
             for (name, help) in sub.iter() {
                 let pseudo = Action::pseudo(name, help.clone());
-                self.format_action(&pseudo, indent + 2, out);
+                self.format_action(&pseudo, indent + 2, out, None);
             }
         }
     }
 
     /// `ArgumentParser.format_help()`
     pub fn format_help(mut self, p: &Parser) -> String {
+        // subcommand listings, built once
+        let subs: Vec<Option<Vec<(String, Option<String>)>>> =
+            p.actions.iter().map(|a| a.sub_choices.as_ref().map(|f| f())).collect();
         // add_argument pass: compute the widest invocation
         let mut maxlen = 0;
         for g in &p.groups {
             for &i in &g.actions {
                 let a = &p.actions[i];
                 maxlen = maxlen.max(vlen(&self.format_invocation(a)) + 2);
-                if let Some(sub) = &a.sub_choices {
+                if let Some(sub) = &subs[i] {
                     for (name, _) in sub.iter() {
                         maxlen = maxlen.max(clen(name) + 4);
                     }
@@ -687,7 +690,7 @@ impl Formatter {
                 items.push_str(&self.format_text(d, 2));
             }
             for &i in &g.actions {
-                self.format_action(&p.actions[i], 2, &mut items);
+                self.format_action(&p.actions[i], 2, &mut items, subs[i].as_deref());
             }
             if items.is_empty() {
                 continue;

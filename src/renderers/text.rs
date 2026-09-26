@@ -54,9 +54,18 @@ pub trait TextRenderer: RowSink {
 pub fn create<'a>(name: &str, out: &'a mut dyn Write, opts: RenderOptions) -> Option<Box<dyn TextRenderer + 'a>> {
     let base = Base::new(out, opts);
     Some(match name {
-        "quick" => Box::new(Quick { b: base }),
-        "csv" => Box::new(Csv { b: base, scratch: Vec::new() }),
-        "pretty" => Box::new(Pretty { b: base, widths: Vec::new(), tree_width: 0, rows: Vec::new() }),
+        "quick" => Box::new(Quick { b: base, scratch: Vec::new(), spans: Vec::new() }),
+        "csv" => Box::new(Csv { b: base, scratch: Vec::new(), spans: Vec::new() }),
+        "pretty" => Box::new(Pretty {
+            b: base,
+            widths: Vec::new(),
+            tree_width: 0,
+            arena: Vec::new(),
+            cells: Vec::new(),
+            depths: Vec::new(),
+            scratch: Vec::new(),
+            spans: Vec::new(),
+        }),
         "json" => Box::new(Json::new(base, false)),
         "jsonl" => Box::new(Json::new(base, true)),
         "none" => Box::new(NoneRenderer { b: base }),
@@ -372,125 +381,129 @@ pub fn render_cell(out: &mut Vec<u8>, ty: ColType, v: &Value, mermaid: bool) {
     }
 }
 
-/// A JSON-level value (what python's JsonRenderer puts into the node dict).
-enum JVal {
-    Null,
-    Bool(bool),
-    Int(i128),
-    Float(f64),
-    Str(Vec<u8>),
-}
-
-fn json_value(ty: ColType, v: &Value) -> JVal {
+/// Write a cell the way python's JsonRenderer + `json.dumps` do (no intermediate values).
+fn write_json_cell(out: &mut Vec<u8>, ty: ColType, v: &Value, scratch: &mut Vec<u8>) {
     let absent = v.is_absent();
-    let mut s = Vec::new();
     match ty {
-        ColType::HexBytes => {
-            if absent {
-                return JVal::Str(b"N/A".to_vec());
+        ColType::HexBytes | ColType::LayerData if absent => return out.extend_from_slice(b"\"N/A\""),
+        ColType::HexBytes | ColType::LayerData | ColType::Bytes if value_bytes(v).is_some() => {
+            if ty == ColType::LayerData && !matches!(v, Value::LayerBytes { .. }) {
+                return write_json_default(out, v, scratch);
             }
-            if let Some(b) = value_bytes(v) {
-                push_hex_joined(&mut s, b);
-                return JVal::Str(s);
-            }
-        }
-        ColType::LayerData => {
-            if absent {
-                return JVal::Str(b"N/A".to_vec());
-            }
-            if let Value::LayerBytes { data, .. } = v {
-                push_hex_joined(&mut s, data);
-                return JVal::Str(s);
-            }
+            out.push(b'"');
+            push_hex_joined(out, value_bytes(v).unwrap());
+            out.push(b'"');
+            return;
         }
         ColType::Disassembly | ColType::MultiTypeData => {
             // quoted_optional(...)
             if absent {
-                return JVal::Str(Vec::new());
+                return out.extend_from_slice(b"\"\"");
             }
-            let mut r = Vec::new();
-            let converted_int = match v {
-                Value::MultiTypeData { converted_int, .. } => *converted_int,
-                _ => false,
-            };
-            render_cell(&mut r, ty, v, false);
-            if r == b"-" || r == b"N/A" {
-                return JVal::Str(Vec::new());
+            scratch.clear();
+            render_cell(scratch, ty, v, false);
+            if scratch.as_slice() == b"-" || scratch.as_slice() == b"N/A" {
+                return out.extend_from_slice(b"\"\"");
             }
-            if converted_int || matches!(v, Value::Int(_) | Value::Bool(_)) {
-                return JVal::Str(r);
+            let converted_int = matches!(v, Value::MultiTypeData { converted_int: true, .. });
+            if !(converted_int || matches!(v, Value::Int(_) | Value::Bool(_))) {
+                scratch.insert(0, b'"');
+                scratch.push(b'"');
             }
-            s.push(b'"');
-            s.extend_from_slice(&r);
-            s.push(b'"');
-            return JVal::Str(s);
+            return push_json_str(out, &String::from_utf8_lossy(scratch));
         }
         ColType::Bytes => {
             if let Some(t) = absent_text(v) {
-                return JVal::Str(t.to_vec());
-            }
-            if let Some(b) = value_bytes(v) {
-                push_hex_joined(&mut s, b);
-                return JVal::Str(s);
+                out.push(b'"');
+                out.extend_from_slice(t);
+                out.push(b'"');
+                return;
             }
         }
         ColType::DateTime => {
             if absent {
-                return JVal::Null;
+                return out.extend_from_slice(b"null");
             }
             if let Value::DateTime(dt) = v {
-                push_datetime_iso(&mut s, dt, b'T');
-                return JVal::Str(s);
+                out.push(b'"');
+                push_datetime_iso(out, dt, b'T');
+                out.push(b'"');
+                return;
             }
         }
         _ => {}
     }
+    write_json_default(out, v, scratch)
+}
+
+/// JsonRenderer's "default" renderer: the python value itself through `json.dumps`.
+fn write_json_default(out: &mut Vec<u8>, v: &Value, scratch: &mut Vec<u8>) {
     match v {
-        Value::Int(i) => JVal::Int(*i),
-        Value::Bool(b) => JVal::Bool(*b),
-        Value::Float(f) => JVal::Float(*f),
-        Value::Str(x) => JVal::Str(x.as_bytes().to_vec()),
-        Value::SStr(x) => JVal::Str(x.as_bytes().to_vec()),
-        _ if absent => JVal::Null,
+        Value::Int(i) => push_i128(out, *i),
+        Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+        Value::Float(f) => {
+            if f.is_nan() {
+                out.extend_from_slice(b"NaN")
+            } else if f.is_infinite() {
+                out.extend_from_slice(if *f > 0.0 { b"Infinity" } else { b"-Infinity" })
+            } else {
+                push_float(out, *f)
+            }
+        }
+        Value::Str(s) => push_json_str(out, s),
+        Value::SStr(s) => push_json_str(out, s),
+        _ if v.is_absent() => out.extend_from_slice(b"null"),
         _ => {
-            push_default(&mut s, v);
-            JVal::Str(s)
+            scratch.clear();
+            push_default(scratch, v);
+            push_json_str(out, &String::from_utf8_lossy(scratch));
         }
     }
 }
 
-impl JVal {
-    fn write_json(&self, out: &mut Vec<u8>) {
-        match self {
-            JVal::Null => out.extend_from_slice(b"null"),
-            JVal::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
-            JVal::Int(i) => push_i128(out, *i),
-            JVal::Float(f) => {
-                if f.is_nan() {
-                    out.extend_from_slice(b"NaN")
-                } else if f.is_infinite() {
-                    out.extend_from_slice(if *f > 0.0 { b"Infinity" } else { b"-Infinity" })
-                } else {
-                    push_float(out, *f)
-                }
-            }
-            JVal::Str(s) => push_json_str(out, &String::from_utf8_lossy(s)),
+/// python `f"{data}"` of the JsonRenderer value (what `--filters` sees with json / jsonl).
+fn json_py_str(ty: ColType, v: &Value) -> String {
+    let mut j = Vec::new();
+    let mut scratch = Vec::new();
+    write_json_cell(&mut j, ty, v, &mut scratch);
+    match j.as_slice() {
+        b"null" => return "None".into(),
+        b"true" => return "True".into(),
+        b"false" => return "False".into(),
+        _ => {}
+    }
+    if j.first() == Some(&b'"') {
+        // strings: decode the JSON literal back
+        return match crate::cli::json::parse(&String::from_utf8_lossy(&j)) {
+            Ok(crate::cli::json::Json::Str(s)) => s,
+            _ => String::new(),
+        };
+    }
+    match v {
+        Value::Float(f) => {
+            let mut o = Vec::new();
+            push_float(&mut o, *f);
+            String::from_utf8_lossy(&o).into_owned()
+        }
+        _ => String::from_utf8_lossy(&j).into_owned(),
+    }
+}
+
+/// Render the visible (or all) cells of a row into `buf`, recording `(start, end)` offsets.
+fn render_line(buf: &mut Vec<u8>, spans: &mut Vec<(usize, usize)>, cols: &[Column], hidden: &[bool], values: &[Value], all: bool) {
+    buf.clear();
+    spans.clear();
+    for (i, v) in values.iter().enumerate() {
+        if all || !hidden[i] {
+            let st = buf.len();
+            render_cell(buf, cols[i].ty, v, false);
+            spans.push((st, buf.len()));
         }
     }
-    /// python `f"{data}"` (for the filter)
-    fn py_str(&self) -> String {
-        match self {
-            JVal::Null => "None".into(),
-            JVal::Bool(b) => (if *b { "True" } else { "False" }).into(),
-            JVal::Int(i) => i.to_string(),
-            JVal::Float(f) => {
-                let mut v = Vec::new();
-                push_float(&mut v, *f);
-                String::from_utf8_lossy(&v).into_owned()
-            }
-            JVal::Str(s) => String::from_utf8_lossy(s).into_owned(),
-        }
-    }
+}
+
+fn span_strs<'b>(buf: &'b [u8], spans: &[(usize, usize)]) -> Vec<&'b str> {
+    spans.iter().map(|&(a, b)| std::str::from_utf8(&buf[a..b]).unwrap_or("")).collect()
 }
 
 // ------------------------------------------------------------------------------------------
@@ -498,6 +511,8 @@ impl JVal {
 
 struct Quick<'a> {
     b: Base<'a>,
+    scratch: Vec<u8>,
+    spans: Vec<(usize, usize)>,
 }
 
 impl RowSink for Quick<'_> {
@@ -525,14 +540,8 @@ impl RowSink for Quick<'_> {
         check_len(&self.b.columns, &values)?;
         let d = self.b.depth(depth);
         if self.b.filter.is_some() {
-            let mut line: Vec<String> = Vec::with_capacity(values.len());
-            for (i, v) in values.iter().enumerate() {
-                if !self.b.hidden[i] {
-                    let mut s = Vec::new();
-                    render_cell(&mut s, self.b.columns[i].ty, v, false);
-                    line.push(String::from_utf8_lossy(&s).into_owned());
-                }
-            }
+            render_line(&mut self.scratch, &mut self.spans, &self.b.columns, &self.b.hidden, &values, false);
+            let line = span_strs(&self.scratch, &self.spans);
             if self.b.filtered(&line)? {
                 return Ok(());
             }
@@ -604,31 +613,37 @@ fn abort_streaming(b: &mut Base<'_>, unsatisfied: bool) -> Result<()> {
 struct Csv<'a> {
     b: Base<'a>,
     scratch: Vec<u8>,
+    spans: Vec<(usize, usize)>,
 }
 
-/// Append one csv field with QUOTE_MINIMAL / doublequote / escapechar '\\' semantics.
+#[inline]
+fn csv_special(c: u8) -> bool {
+    matches!(c, b',' | b'"' | b'\n' | b'\r' | b'\\')
+}
+
+/// Escape the field that occupies `out[start..]` in place (QUOTE_MINIMAL, doublequote,
+/// escapechar '\\'). Nothing to do for the common plain field.
+fn csv_fix_field(out: &mut Vec<u8>, start: usize) {
+    if !out[start..].iter().any(|&c| csv_special(c)) {
+        return;
+    }
+    let field: Vec<u8> = out.split_off(start);
+    push_csv_field(out, &field);
+}
+
+/// Append one csv field.
 fn push_csv_field(out: &mut Vec<u8>, field: &[u8]) {
     let needs_quote = field.iter().any(|&c| matches!(c, b',' | b'"' | b'\n' | b'\r'));
     if needs_quote {
         out.push(b'"');
     }
-    let mut start = 0;
-    for (i, &c) in field.iter().enumerate() {
+    for &c in field {
         match c {
-            b'"' => {
-                out.extend_from_slice(&field[start..i]);
-                out.extend_from_slice(b"\"\"");
-                start = i + 1;
-            }
-            b'\\' => {
-                out.extend_from_slice(&field[start..i]);
-                out.extend_from_slice(b"\\\\");
-                start = i + 1;
-            }
-            _ => {}
+            b'"' => out.extend_from_slice(b"\"\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            c => out.push(c),
         }
     }
-    out.extend_from_slice(&field[start..]);
     if needs_quote {
         out.push(b'"');
     }
@@ -654,14 +669,8 @@ impl RowSink for Csv<'_> {
         check_len(&self.b.columns, &values)?;
         let d = self.b.depth(depth);
         if self.b.filter.is_some() {
-            let mut line: Vec<String> = Vec::with_capacity(values.len());
-            for (i, v) in values.iter().enumerate() {
-                if !self.b.hidden[i] {
-                    let mut s = Vec::new();
-                    render_cell(&mut s, self.b.columns[i].ty, v, false);
-                    line.push(String::from_utf8_lossy(&s).into_owned());
-                }
-            }
+            render_line(&mut self.scratch, &mut self.spans, &self.b.columns, &self.b.hidden, &values, false);
+            let line = span_strs(&self.scratch, &self.spans);
             if self.b.filtered(&line)? {
                 return Ok(());
             }
@@ -679,9 +688,9 @@ impl RowSink for Csv<'_> {
                     continue;
                 }
                 b.buf.push(b',');
-                self.scratch.clear();
-                render_cell(&mut self.scratch, b.columns[i].ty, v, false);
-                push_csv_field(&mut b.buf, &self.scratch);
+                let st = b.buf.len();
+                render_cell(&mut b.buf, b.columns[i].ty, v, false);
+                csv_fix_field(&mut b.buf, st);
             }
         }
         self.b.buf.push(b'\n');
@@ -710,74 +719,62 @@ impl TextRenderer for Csv<'_> {
 
 struct Pretty<'a> {
     b: Base<'a>,
-    /// max width per column (python keys this by column NAME)
+    /// max display width per column
     widths: Vec<usize>,
     tree_width: usize,
-    /// (path_depth, visible cells split into lines)
-    rows: Vec<(usize, Vec<Vec<String>>)>,
+    /// all rendered visible cells, back to back
+    arena: Vec<u8>,
+    /// (start, end) in `arena` of every stored visible cell, row after row
+    cells: Vec<(u32, u32)>,
+    /// path_depth of every stored row
+    depths: Vec<u32>,
+    scratch: Vec<u8>,
+    spans: Vec<(usize, usize)>,
 }
 
-/// `PrettyTextRenderer.tab_stop`
-fn tab_stop(line: &str) -> std::borrow::Cow<'_, str> {
-    if !line.contains('\t') {
-        return std::borrow::Cow::Borrowed(line);
-    }
-    let mut out = String::with_capacity(line.len() + 8);
-    let mut n = 0usize; // chars written
-    for c in line.chars() {
-        if c == '\t' {
-            let pad = 8 - (n % 8);
-            for _ in 0..pad {
-                out.push(' ');
+/// Display width of a cell: the longest line after `tab_stop` expansion, in characters.
+fn cell_width(s: &[u8]) -> usize {
+    let (mut w, mut col) = (0usize, 0usize);
+    for &c in s {
+        match c {
+            b'\n' => {
+                w = w.max(col);
+                col = 0;
             }
-            n += pad;
+            b'\t' => col += 8 - col % 8,
+            c if c & 0xc0 == 0x80 => {}
+            _ => col += 1,
+        }
+    }
+    w.max(col)
+}
+
+/// Write `line` with tabs expanded (`tab_stop`), right-aligned in `width` characters.
+fn push_cell_line(out: &mut Vec<u8>, line: &[u8], width: usize) {
+    let w = cell_width(line);
+    for _ in w..width {
+        out.push(b' ');
+    }
+    let mut col = 0usize;
+    for &c in line {
+        if c == b'\t' {
+            let pad = 8 - col % 8;
+            for _ in 0..pad {
+                out.push(b' ');
+            }
+            col += pad;
         } else {
             out.push(c);
-            n += 1;
-        }
-    }
-    std::borrow::Cow::Owned(out)
-}
-
-/// python `format(s, "<N")` / `format(s, ">N")`
-fn push_padded(out: &mut Vec<u8>, s: &str, width: usize, right: bool) {
-    let len = char_len(s);
-    let pad = width.saturating_sub(len);
-    if right {
-        for _ in 0..pad {
-            out.push(b' ');
-        }
-        out.extend_from_slice(s.as_bytes());
-    } else {
-        out.extend_from_slice(s.as_bytes());
-        for _ in 0..pad {
-            out.push(b' ');
-        }
-    }
-}
-
-impl Pretty<'_> {
-    /// index of the first column with the same name (python keys widths by name)
-    fn width_slot(&self, i: usize) -> usize {
-        let name = &self.b.columns[i].name;
-        self.b.columns.iter().position(|c| c.name == *name).unwrap_or(i)
-    }
-
-    fn write_line<S: AsRef<str>>(&mut self, tree: &str, cells: &[S]) {
-        let buf = &mut self.b.buf;
-        push_padded(buf, tree, self.tree_width, false);
-        let mut k = 0;
-        for i in 0..self.b.columns.len() {
-            if self.b.hidden[i] {
-                continue;
+            if c & 0xc0 != 0x80 {
+                col += 1;
             }
-            let slot = self.b.columns.iter().position(|c| c.name == self.b.columns[i].name).unwrap_or(i);
-            buf.extend_from_slice(b" | ");
-            push_padded(buf, cells[k].as_ref(), self.widths[slot], true);
-            k += 1;
         }
-        buf.push(b'\n');
     }
+}
+
+/// The `index`-th '\n'-separated line of `s` (empty past the end).
+fn nth_line(s: &[u8], index: usize) -> &[u8] {
+    s.split(|&c| c == b'\n').nth(index).unwrap_or(b"")
 }
 
 impl RowSink for Pretty<'_> {
@@ -793,29 +790,35 @@ impl RowSink for Pretty<'_> {
         check_len(&self.b.columns, &values)?;
         let d = self.b.depth(depth) + 1; // path_depth
         self.tree_width = self.tree_width.max(d);
-        let mut rendered: Vec<String> = Vec::with_capacity(values.len());
-        let mut s = Vec::new();
-        for (i, v) in values.iter().enumerate() {
-            s.clear();
-            render_cell(&mut s, self.b.columns[i].ty, v, false);
-            let text = String::from_utf8_lossy(&s).into_owned();
-            let w = text.split('\n').map(|l| char_len(&tab_stop(l))).max().unwrap_or(0);
-            let slot = self.width_slot(i);
-            if w > self.widths[slot] {
-                self.widths[slot] = w;
+        if self.b.filter.is_some() {
+            // the filter sees every column (hidden ones too)
+            render_line(&mut self.scratch, &mut self.spans, &self.b.columns, &self.b.hidden, &values, true);
+            for (i, &(a, b)) in self.spans.iter().enumerate() {
+                self.widths[i] = self.widths[i].max(cell_width(&self.scratch[a..b]));
             }
-            rendered.push(text);
-        }
-        if self.b.filtered(&rendered)? {
-            return Ok(());
-        }
-        let mut line = Vec::with_capacity(rendered.len());
-        for (i, text) in rendered.into_iter().enumerate() {
-            if !self.b.hidden[i] {
-                line.push(text.split('\n').map(|x| x.to_string()).collect::<Vec<String>>());
+            let line = span_strs(&self.scratch, &self.spans);
+            if self.b.filtered(&line)? {
+                return Ok(());
+            }
+            for (i, &(a, b)) in self.spans.iter().enumerate() {
+                if !self.b.hidden[i] {
+                    let st = self.arena.len() as u32;
+                    self.arena.extend_from_slice(&self.scratch[a..b]);
+                    self.cells.push((st, self.arena.len() as u32));
+                }
+            }
+        } else {
+            for (i, v) in values.iter().enumerate() {
+                if self.b.hidden[i] {
+                    continue; // hidden widths are never used
+                }
+                let st = self.arena.len();
+                render_cell(&mut self.arena, self.b.columns[i].ty, v, false);
+                self.widths[i] = self.widths[i].max(cell_width(&self.arena[st..]));
+                self.cells.push((st as u32, self.arena.len() as u32));
             }
         }
-        self.rows.push((d, line));
+        self.depths.push(d as u32);
         self.b.rows += 1;
         Ok(())
     }
@@ -826,23 +829,41 @@ impl TextRenderer for Pretty<'_> {
         if !self.b.begun {
             return self.b.flush();
         }
-        let titles: Vec<String> =
-            (0..self.b.columns.len()).filter(|&i| !self.b.hidden[i]).map(|i| self.b.columns[i].name.clone()).collect();
-        self.write_line("", &titles);
-        let rows = std::mem::take(&mut self.rows);
-        let mut cells: Vec<String> = Vec::new();
-        for (depth, line) in rows {
-            let nums_line = line.iter().map(|c| c.len()).max().unwrap_or(0);
-            for index in 0..nums_line {
-                cells.clear();
-                for col in &line {
-                    cells.push(col.get(index).map(|s| tab_stop(s).into_owned()).unwrap_or_default());
+        let visible: Vec<usize> = (0..self.b.columns.len()).filter(|&i| !self.b.hidden[i]).collect();
+        let nvis = visible.len();
+        // header
+        let buf = &mut self.b.buf;
+        for _ in 0..self.tree_width {
+            buf.push(b' ');
+        }
+        for &i in &visible {
+            buf.extend_from_slice(b" | ");
+            let name = self.b.columns[i].name.as_bytes();
+            push_cell_line(buf, name, self.widths[i]);
+        }
+        buf.push(b'\n');
+        for (r, &depth) in self.depths.iter().enumerate() {
+            let cells = &self.cells[r * nvis..(r + 1) * nvis];
+            let lines = cells.iter().map(|&(a, b)| self.arena[a as usize..b as usize].iter().filter(|&&c| c == b'\n').count() + 1).max().unwrap_or(0);
+            for index in 0..lines {
+                let buf = &mut self.b.buf;
+                let mark = if index == 0 { b'*' } else { b' ' };
+                for _ in 0..depth {
+                    buf.push(mark);
                 }
-                let tree: String = std::iter::repeat_n(if index == 0 { '*' } else { ' ' }, depth).collect();
-                self.write_line(&tree, &cells);
-                if self.b.buf.len() >= FLUSH_AT {
-                    self.b.flush_buf()?;
+                for _ in depth as usize..self.tree_width {
+                    buf.push(b' ');
                 }
+                for (k, &(a, b)) in cells.iter().enumerate() {
+                    buf.extend_from_slice(b" | ");
+                    let cell = &self.arena[a as usize..b as usize];
+                    let line = if lines == 1 { cell } else { nth_line(cell, index) };
+                    push_cell_line(buf, line, self.widths[visible[k]]);
+                }
+                buf.push(b'\n');
+            }
+            if self.b.buf.len() >= FLUSH_AT {
+                self.b.flush_buf()?;
             }
         }
         self.b.flush()
@@ -859,9 +880,13 @@ impl TextRenderer for Pretty<'_> {
 // ------------------------------------------------------------------------------------------
 // json / jsonl
 
+/// A serialized node: `data[..split]` is everything up to and including `"__children": `,
+/// `data[split..]` everything after the children array.
 struct JNode {
-    /// serialized JSON scalars, one per visible (deduplicated, key-sorted) column
-    values: Vec<Vec<u8>>,
+    data: Vec<u8>,
+    split: usize,
+    /// indentation level of the node's opening brace (json only)
+    level: usize,
     children: Vec<JNode>,
 }
 
@@ -874,19 +899,18 @@ struct Slot {
 struct Json<'a> {
     b: Base<'a>,
     lines: bool,
-    /// sorted (key, column index) pairs; `usize::MAX` marks "__children"
-    keys: Vec<(String, usize)>,
+    /// dict keys in sorted order: (JSON-escaped key, column index or usize::MAX for __children)
+    keys: Vec<(Vec<u8>, usize)>,
     stack: Vec<Slot>,
     /// top-level nodes in creation order (`None` while still open)
     top: std::collections::VecDeque<Option<JNode>>,
     top_base: usize,
-    /// visible column indices that end up in the dict (last one wins for duplicate names)
-    visible: Vec<usize>,
+    scratch: Vec<u8>,
 }
 
 impl<'a> Json<'a> {
     fn new(b: Base<'a>, lines: bool) -> Json<'a> {
-        Json { b, lines, keys: Vec::new(), stack: Vec::new(), top: Default::default(), top_base: 0, visible: Vec::new() }
+        Json { b, lines, keys: Vec::new(), stack: Vec::new(), top: Default::default(), top_base: 0, scratch: Vec::new() }
     }
 
     fn close_to(&mut self, depth: usize) {
@@ -905,68 +929,61 @@ impl<'a> Json<'a> {
         }
     }
 
-    fn write_node(&self, out: &mut Vec<u8>, node: &JNode, indent: Option<usize>) {
-        match indent {
-            None => {
-                out.push(b'{');
-                for (k, (key, col)) in self.keys.iter().enumerate() {
-                    if k > 0 {
-                        out.extend_from_slice(b", ");
-                    }
-                    push_json_str(out, key);
-                    out.extend_from_slice(b": ");
-                    self.write_value(out, node, *col, None);
-                }
-                out.push(b'}');
-            }
-            Some(level) => {
-                out.push(b'{');
-                for (k, (key, col)) in self.keys.iter().enumerate() {
-                    if k > 0 {
-                        out.push(b',');
-                    }
-                    push_newline_indent(out, level + 1);
-                    push_json_str(out, key);
-                    out.extend_from_slice(b": ");
-                    self.write_value(out, node, *col, Some(level + 1));
-                }
-                push_newline_indent(out, level);
-                out.push(b'}');
-            }
-        }
-    }
-
-    fn write_value(&self, out: &mut Vec<u8>, node: &JNode, col: usize, indent: Option<usize>) {
-        if col == usize::MAX {
-            if node.children.is_empty() {
-                out.extend_from_slice(b"[]");
-                return;
-            }
+    fn write_node(&self, out: &mut Vec<u8>, node: &JNode) {
+        out.extend_from_slice(&node.data[..node.split]);
+        if node.children.is_empty() {
+            out.extend_from_slice(b"[]");
+        } else {
             out.push(b'[');
             for (k, c) in node.children.iter().enumerate() {
-                match indent {
-                    None => {
-                        if k > 0 {
-                            out.extend_from_slice(b", ");
-                        }
-                        self.write_node(out, c, None);
-                    }
-                    Some(level) => {
-                        if k > 0 {
-                            out.push(b',');
-                        }
-                        push_newline_indent(out, level + 1);
-                        self.write_node(out, c, Some(level + 1));
-                    }
+                if k > 0 {
+                    out.push(b',');
                 }
+                if self.lines {
+                    if k > 0 {
+                        out.push(b' ');
+                    }
+                } else {
+                    push_newline_indent(out, node.level + 2);
+                }
+                self.write_node(out, c);
             }
-            if let Some(level) = indent {
-                push_newline_indent(out, level);
+            if !self.lines {
+                push_newline_indent(out, node.level + 1);
             }
             out.push(b']');
-        } else {
-            out.extend_from_slice(&node.values[col]);
         }
+        out.extend_from_slice(&node.data[node.split..]);
+    }
+
+    fn build_node(&mut self, values: &[Value], level: usize) -> JNode {
+        let mut data = Vec::with_capacity(64 + 24 * self.keys.len());
+        let mut split = 0;
+        data.push(b'{');
+        for (k, (key, col)) in self.keys.iter().enumerate() {
+            if k > 0 {
+                data.push(b',');
+            }
+            if self.lines {
+                if k > 0 {
+                    data.push(b' ');
+                }
+            } else {
+                push_newline_indent(&mut data, level + 1);
+            }
+            data.extend_from_slice(key);
+            data.extend_from_slice(b": ");
+            if *col == usize::MAX {
+                split = data.len();
+            } else {
+                write_json_cell(&mut data, self.b.columns[*col].ty, &values[*col], &mut self.scratch);
+            }
+        }
+        if !self.lines {
+            push_newline_indent(&mut data, level);
+        }
+        data.push(b'}');
+        JNode { data, split, level, children: Vec::new() }
     }
 
     /// jsonl: write every finished top-level node at the front of the queue
@@ -975,7 +992,7 @@ impl<'a> Json<'a> {
             let node = self.top.pop_front().unwrap().unwrap();
             self.top_base += 1;
             let mut out = std::mem::take(&mut self.b.buf);
-            self.write_node(&mut out, &node, None);
+            self.write_node(&mut out, &node);
             out.push(b'\n');
             self.b.buf = out;
         }
@@ -996,28 +1013,21 @@ impl RowSink for Json<'_> {
         self.b.buf.push(b'\n');
         self.b.set_columns(columns);
         self.b.compute_hidden()?;
-        // dict keys: "__children" plus each visible column name (later duplicates win)
         let mut keys: Vec<(String, usize)> = vec![("__children".to_string(), usize::MAX)];
         for (i, c) in self.b.columns.iter().enumerate() {
-            if self.b.hidden[i] {
-                continue;
-            }
-            match keys.iter_mut().find(|(k, _)| *k == c.name) {
-                Some(slot) => slot.1 = i,
-                None => keys.push((c.name.clone(), i)),
+            if !self.b.hidden[i] {
+                keys.push((c.name.clone(), i));
             }
         }
         keys.sort_by(|a, b| a.0.cmp(&b.0));
-        // node.values holds only the columns referenced by the keys, in key order
-        self.visible = keys.iter().filter(|(_, c)| *c != usize::MAX).map(|(_, c)| *c).collect();
-        let mut n = 0;
-        for k in keys.iter_mut() {
-            if k.1 != usize::MAX {
-                k.1 = n;
-                n += 1;
-            }
-        }
-        self.keys = keys;
+        self.keys = keys
+            .into_iter()
+            .map(|(k, i)| {
+                let mut e = Vec::new();
+                push_json_str(&mut e, &k);
+                (e, i)
+            })
+            .collect();
         Ok(())
     }
 
@@ -1028,27 +1038,22 @@ impl RowSink for Json<'_> {
         let keep = if self.b.filter.is_some() {
             let line: Vec<String> = (0..values.len())
                 .filter(|&i| !self.b.hidden[i])
-                .map(|i| json_value(self.b.columns[i].ty, &values[i]).py_str())
+                .map(|i| json_py_str(self.b.columns[i].ty, &values[i]))
                 .collect();
             !self.b.filtered(&line)?
         } else {
             true
         };
         let slot = if keep {
-            let mut vals = Vec::with_capacity(self.visible.len());
-            for &i in &self.visible {
-                let mut s = Vec::new();
-                json_value(self.b.columns[i].ty, &values[i]).write_json(&mut s);
-                vals.push(s);
-            }
-            let node = JNode { values: vals, children: Vec::new() };
-            let parent_kept = d > 0 && self.stack.get(d - 1).is_some_and(|p| p.node.is_some());
-            let top = if parent_kept {
-                None
-            } else {
-                self.top.push_back(None);
-                Some(self.top_base + self.top.len() - 1)
+            let parent = if d > 0 { self.stack.get(d - 1).and_then(|p| p.node.as_ref()) } else { None };
+            let (top, level) = match parent {
+                Some(p) => (None, p.level + 2),
+                None => {
+                    self.top.push_back(None);
+                    (Some(self.top_base + self.top.len() - 1), 1)
+                }
             };
+            let node = self.build_node(&values, level);
             self.b.rows += 1;
             Slot { node: Some(node), top }
         } else {
@@ -1079,7 +1084,7 @@ impl TextRenderer for Json<'_> {
                         out.push(b',');
                     }
                     push_newline_indent(&mut out, 1);
-                    self.write_node(&mut out, n, Some(1));
+                    self.write_node(&mut out, n);
                     if out.len() >= FLUSH_AT {
                         self.b.w.write_all(&out)?;
                         self.b.flushed = true;
@@ -1097,7 +1102,7 @@ impl TextRenderer for Json<'_> {
         // python writes "\n" when rendering starts and the rest at the end
         if unsatisfied && !self.b.flushed {
             self.b.buf.clear();
-        } else if !self.lines || !self.b.flushed {
+        } else if !self.b.flushed {
             let keep = if self.b.begun { 1 } else { 0 };
             self.b.buf.truncate(keep.min(self.b.buf.len()));
         } else {
