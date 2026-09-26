@@ -20,7 +20,8 @@ use super::teddy::{self, Teddy};
 use super::{MAX_STRING_MATCHES, Match, StringDef, StringKind};
 use crate::yara::aho::AhoCorasick;
 use crate::yara::regex::hir::ByteSet;
-use crate::yara::regex::literal::BYTE_FREQ;
+use crate::yara::memchr::{SetDesc, pair_set_find};
+use crate::yara::regex::literal::{BYTE_FREQ, set_freq};
 
 /// Block size for multi-pass scanning (all engines run over one block while it is
 /// hot in L2). Multiple of 32.
@@ -32,6 +33,9 @@ const BLOCK: usize = 128 * 1024;
 const TEDDY_MAX: usize = 512;
 const TEDDY_ALWAYS: usize = 64;
 const TEDDY_MAX_RATE: f64 = 2e-3;
+/// Up to this many raw patterns are searched one by one with the literal pair search
+/// (a pass over an L2-resident block costs a fraction of a Teddy pass).
+const PAIRS_MAX: usize = 3;
 /// xor strings with at most this many keys are expanded into literal patterns;
 /// larger key ranges are searched in the key-invariant difference stream.
 const XOR_EXPAND: usize = 4;
@@ -76,6 +80,12 @@ impl Pat {
 /// Candidate search engine over one byte domain.
 enum Engine {
     None,
+    /// A few raw patterns: per pattern, a SIMD search for its two rarest byte (sets),
+    /// every candidate checked against the whole pattern (the regex engine's literal
+    /// search loop), one pass per pattern over each (L2-resident) block. Candidates of
+    /// different patterns come out of position order: the text match lists insert in
+    /// order and hex/regex hits are sorted before they are replayed.
+    Pairs(Vec<PairEngine>),
     /// Teddy plus, per bucket, the strings its patterns belong to (buckets whose
     /// strings are all disabled are switched off).
     Teddy(Box<Teddy>, Vec<Vec<u32>>),
@@ -214,6 +224,68 @@ fn build_re(def: &StringDef) -> Result<ReString, String> {
     }
 }
 
+/// See [`Engine::Pair`].
+struct PairEngine {
+    id: u32,
+    /// The string the pattern belongs to (the engine switches off when it is disabled).
+    string: u32,
+    /// Pattern bytes / fold masks (`literal::eq_at` form).
+    bytes: Vec<u8>,
+    folds: Vec<u8>,
+    /// Window offset of the pattern (candidates are reported at window starts).
+    w: usize,
+    i1: usize,
+    i2: usize,
+    s1: SetDesc,
+    s2: SetDesc,
+}
+
+impl PairEngine {
+    fn new(id: u32, p: &Pat, bytes: &[u8], folds: &[u8]) -> PairEngine {
+        let (a, e) = (p.off as usize, (p.off + p.len) as usize);
+        let (bytes, folds) = (bytes[a..e].to_vec(), folds[a..e].to_vec());
+        let sets: Vec<ByteSet> = bytes
+            .iter()
+            .zip(&folds)
+            .map(|(&b, &f)| {
+                let mut s = ByteSet::single(b);
+                if f != 0 {
+                    s.insert(b ^ 0x20);
+                }
+                s
+            })
+            .collect();
+        // Two rarest positions (one position for 1-byte patterns).
+        let mut idx: Vec<usize> = (0..sets.len()).collect();
+        idx.sort_by_key(|&i| (set_freq(&sets[i]), i));
+        let (i1, i2) = (idx[0], idx.get(1).copied().unwrap_or(idx[0]));
+        PairEngine { id, string: p.string, w: p.w as usize, i1, i2, s1: SetDesc::new(&sets[i1]), s2: SetDesc::new(&sets[i2]), bytes, folds }
+    }
+
+    /// Reports `f(q, id)` for every window start `q` in `[from, to)` whose pattern start
+    /// `q - w` has a whole-pattern match (Teddy reports the superset of window matches;
+    /// `on_raw` rejects the others anyway).
+    #[inline]
+    fn run<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, f: &mut F) {
+        let m = self.bytes.len();
+        if to <= self.w || hay.len() < m {
+            return;
+        }
+        let lo = from.saturating_sub(self.w);
+        let last = (to - self.w - 1).min(hay.len() - m);
+        if lo > last {
+            return;
+        }
+        let (bytes, folds, w, id) = (&self.bytes[..], &self.folds[..], self.w, self.id);
+        pair_set_find(hay, lo, last, self.i1, &self.s1, self.i2, &self.s2, &mut |s| {
+            if eq_at(hay, s, bytes, folds, 0) {
+                f(s + w, id);
+            }
+            false
+        });
+    }
+}
+
 impl Engine {
     /// Engine for patterns `ids` (indices into `pats`).
     fn build(pats: &[Pat], ids: &[u32], bytes: &[u8], folds: &[u8]) -> Engine {
@@ -318,6 +390,15 @@ impl Engine {
                 }
                 m
             }
+            Engine::Pairs(v) => {
+                let mut m = 0u8;
+                for (k, pe) in v.iter().enumerate() {
+                    if !disabled.get(pe.string as usize).copied().unwrap_or(true) {
+                        m |= 1 << k;
+                    }
+                }
+                m
+            }
             _ => 0xff,
         }
     }
@@ -325,6 +406,13 @@ impl Engine {
     fn run<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, state: &mut u32, live: u8, mut f: F) {
         match self {
             Engine::None => {}
+            Engine::Pairs(v) => {
+                for (k, pe) in v.iter().enumerate() {
+                    if live >> k & 1 != 0 {
+                        pe.run(hay, from, to, &mut f)
+                    }
+                }
+            }
             Engine::Teddy(t, _) => t.find_live(hay, from, to, live, f),
             Engine::Aho { ac, map } => ac.scan(hay, from, to, state, |a, end| {
                 let len = ac.pattern_len(a);
@@ -459,7 +547,11 @@ impl Matcher {
             }
         }
         let ids: Vec<u32> = (0..m.pats.len() as u32).collect();
-        m.raw = Engine::build(&m.pats, &ids, &m.bytes, &m.folds);
+        m.raw = if !ids.is_empty() && ids.len() <= PAIRS_MAX {
+            Engine::Pairs(ids.iter().map(|&id| PairEngine::new(id, &m.pats[id as usize], &m.bytes, &m.folds)).collect())
+        } else {
+            Engine::build(&m.pats, &ids, &m.bytes, &m.folds)
+        };
         let dzero = vec![0u8; dbytes.len()];
         let ids: Vec<u32> = (0..m.dpats.len() as u32).collect();
         m.diff = Engine::build(&m.dpats, &ids, &dbytes, &dzero);
@@ -479,6 +571,7 @@ impl Matcher {
         fn kind(e: &Engine) -> String {
             match e {
                 Engine::None => "none".into(),
+                Engine::Pairs(v) => format!("pairs({})", v.len()),
                 Engine::Teddy(t, _) => format!("teddy(est {:.2e})", t.estimated_rate()),
                 Engine::Aho { ac, .. } => format!("aho({} states)", ac.state_count()),
                 Engine::Hash { short, .. } => format!("hash+{}", kind(short)),
@@ -725,7 +818,11 @@ impl Matcher {
                     self.add_text(si, m, out, sc);
                 }
             }
-            Kind::Re(_) => {
+            Kind::Re(rs) => {
+                // Hits `verify` would reject without effect are not queued at all.
+                if rs.hit_rejected(data, pat.sub as usize, s) {
+                    return;
+                }
                 if let Some(v) = self.re_slot.get(si).and_then(|&k| sc.re_hits.get_mut(k as usize)) {
                     v.push(ReHit { end: s + pat.len as usize, rlen: u32::MAX - pat.len, ratom: u32::MAX - pat.sub, pos: s });
                 }

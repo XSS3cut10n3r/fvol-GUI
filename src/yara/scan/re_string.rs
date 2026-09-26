@@ -265,6 +265,49 @@ impl ReString {
         }
     }
 
+    /// True when `verify(_, data, atom, pos, _)` certainly appends nothing and leaves the
+    /// state untouched: the same early checks `verify` makes (fixed offset, atom
+    /// backtrack, the per-pass prefix / backward byte-set filters of regex parts). The
+    /// matcher drops such atom hits before queuing them (frequent short atoms, e.g. the
+    /// `.` of an IPv4 regex, are mostly rejected here).
+    #[inline]
+    pub fn hit_rejected(&self, data: &[u8], atom: usize, pos: usize) -> bool {
+        let Some(&(pi, ai)) = self.atom_map.get(atom) else { return true };
+        let Some(part) = self.parts.get(pi as usize) else { return true };
+        let Some(ca) = part.atoms.get(ai as usize) else { return true };
+        if pos < ca.backtrack {
+            return true;
+        }
+        let offset = pos - ca.backtrack;
+        if offset >= data.len() {
+            return true;
+        }
+        if let (Some(fo), 0) = (self.fixed_offset, pi) {
+            if fo != offset as i64 {
+                return true;
+            }
+        }
+        let PartKind::Re { code, .. } = &part.kind else { return false };
+        if let Some(id) = ca.node {
+            if code.fwd_ref.get(id as usize).copied().flatten().is_none() {
+                return true;
+            }
+        }
+        let bwd = ca.node.and_then(|id| code.bwd_ref.get(id as usize).copied().flatten()).is_some();
+        let filter = part.filters.get(ai as usize).map_or(&[][..], |f| &f[..]);
+        let bfilter = part.bfilters.get(ai as usize).map_or(&[][..], |f| &f[..]);
+        for wide_pass in [false, true] {
+            if (!wide_pass && !self.ascii) || (wide_pass && !self.wide) {
+                continue;
+            }
+            let cs = if wide_pass { 2 } else { 1 };
+            if filter_ok(filter, data, offset, cs) && (!bwd || bfilter_ok(bfilter, data, offset, cs)) {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn new_state(&self) -> ReState {
         ReState { machine: Machine::new(), unconfirmed: vec![Vec::new(); self.parts.len()], tmp: Vec::new() }
     }
@@ -663,5 +706,60 @@ mod tests {
         let rs = ReString::new_hex("{ 41 [0-2] [2-4] 41 [2-4] 00 }", &Modifiers::default(), None).unwrap();
         let got: Vec<(usize, usize)> = scan_reference(&rs, data).iter().map(|x| (x.offset, x.len)).collect();
         assert_eq!(got, vec![(14, 11), (16, 11), (19, 8)]);
+    }
+
+    /// `hit_rejected` may only reject hits that `verify` turns into nothing (the matcher
+    /// drops them before queuing): check every atom at every position of random data.
+    #[test]
+    fn yara_re_string_hit_rejected_is_sound() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let alpha = b"0123.9aAbB:/\x00\x00\xff\x15H\x85\xc0x ";
+        let hexes = ["{ FF 15 ?? ?? ?? ?? ( 85 C0 | 48 85 C0 | 3B C3 ) }", "{ 48 [1-3] 85 C? }", "{ 30 2E ?? 39 }", "{ 61 [1-] 62 }"];
+        let regexes: [(&[u8], bool, bool); 6] = [
+            (br"\b\d{1,3}\.\d{1,3}\.\d{1,3}\b", false, false),
+            (br"[a-b]{2,}:/", true, false),
+            (br"ab.9", false, true),
+            (br"x\d+\.", false, false),
+            (br"(0|1)\.[ab]", true, false),
+            (br"a[^b]b", false, false),
+        ];
+        let mut strings: Vec<ReString> = Vec::new();
+        for h in hexes {
+            strings.push(ReString::new_hex(h, &Modifiers::default(), None).unwrap());
+        }
+        for (src, nocase, dotall) in regexes {
+            for (wide, ascii, fullword) in [(false, false, false), (true, true, false), (true, false, true)] {
+                let m = Modifiers { wide, ascii, fullword, ..Modifiers::default() };
+                strings.push(ReString::new_regex(src, nocase, dotall, &m, None).unwrap());
+            }
+        }
+        strings.push(ReString::new_hex("{ 30 2E ?? 39 }", &Modifiers::default(), Some(3)).unwrap());
+        let mut checked = 0usize;
+        for _ in 0..60 {
+            let len = (rnd() % 300) as usize;
+            let data: Vec<u8> = (0..len).map(|_| alpha[(rnd() % alpha.len() as u64) as usize]).collect();
+            for rs in &strings {
+                for atom in 0..rs.atoms().len() {
+                    for pos in 0..=data.len() {
+                        if !rs.hit_rejected(&data, atom, pos) {
+                            continue;
+                        }
+                        let mut st = rs.new_state();
+                        let mut out = Vec::new();
+                        rs.verify(&mut st, &data, atom, pos, &mut out);
+                        assert!(out.is_empty(), "rejected hit produced {out:?} (atom {atom} pos {pos})");
+                        assert!(st.unconfirmed.iter().all(|u| u.is_empty()), "rejected hit touched the chain state");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
     }
 }
