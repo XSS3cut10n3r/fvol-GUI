@@ -84,10 +84,11 @@ pub fn vmcoreinfo_stack(phys: &dyn Layer, banners: &[(Vec<u8>, IsfLocation)]) ->
         let (Some(phys_base), Some(kerneloffset)) = (vmci.get("NUMBER(phys_base)"), vmci.get("KERNELOFFSET")) else { return true };
         let (VmValue::Int(phys_base), VmValue::Int(kerneloffset)) = (phys_base, kerneloffset) else { return true };
         let aslr_shift = *kerneloffset;
-        let kaslr_shift = phys_base + aslr_shift;
+        // (VMCOREINFO values are arbitrary python ints: wrap instead of overflowing)
+        let kaslr_shift = phys_base.wrapping_add(aslr_shift);
         // _vmcoreinfo_get_dtb
         let Some(VmValue::Int(dtb_vaddr)) = vmci.get("SYMBOL(swapper_pg_dir)") else { return true };
-        let dtb = virtual_to_physical_address_i(*dtb_vaddr) - aslr_shift + kaslr_shift;
+        let dtb = virtual_to_physical_address_i(*dtb_vaddr).wrapping_sub(aslr_shift).wrapping_add(kaslr_shift);
         // _vmcoreinfo_is_32bit
         let is_pae = matches!(vmci.get("CONFIG_X86_PAE"), Some(VmValue::Str(s)) if s == "y");
         let is_32bit = is_pae || *dtb_vaddr <= 1i128 << 32;
@@ -157,7 +158,7 @@ fn banner_in_place(phys: &dyn Layer, banner: &[u8], isf: &IsfLocation, aslr_shif
     let _t = span("linux vmcoreinfo: banner in place");
     let Ok(table) = crate::symbols::load_location(isf, "LintelStacker", None, 0) else { return false };
     let Ok(sym) = table.get_symbol("linux_banner") else { return false };
-    let paddr = virtual_to_physical_address_i(sym.address as i128 + aslr_shift) - aslr_shift + kaslr_shift;
+    let paddr = virtual_to_physical_address_i((sym.address as i128).wrapping_add(aslr_shift)).wrapping_sub(aslr_shift).wrapping_add(kaslr_shift);
     if paddr < 0 || paddr > u64::MAX as i128 {
         return false;
     }

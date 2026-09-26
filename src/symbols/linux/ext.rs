@@ -7,12 +7,18 @@
 //! Implemented so far (what the automagic and `linux.pslist` need, plus cheap neighbours):
 //!   * `list_head.to_list` ([`LinuxExt::to_list`], lazy [`ListIter`]), `hlist_head.to_list`
 //!     ([`LinuxExt::hlist_to_list`]);
-//!   * `task_struct`: `is_valid`, `add_process_layer`, `is_kernel_thread`,
-//!     `is_thread_group_leader`, `is_user_thread`, `get_threads`, `state`, `get_parent_pid`,
-//!     `get_create_time`, `get_boottime`, `get_time_namespace(_id)`, the time-namespace offsets;
+//!   * `task_struct`: `is_valid`, `add_process_layer`, `get_address_space_layer`,
+//!     `is_kernel_thread`, `is_thread_group_leader`, `is_user_thread`, `get_threads`, `state`,
+//!     `get_parent_pid`, `get_create_time`, `get_boottime`, `_get_boottime_raw`,
+//!     `_get_task_start_time`, `get_time_namespace(_id)`, the time-namespace offsets;
+//!   * `mm_struct.get_vma_iter` (mmap list and maple tree), `maple_tree.get_slot_iter`;
+//!   * `vm_area_struct`: `is_valid`, `get_protection`, `get_flags`, `get_page_offset`;
+//!   * `struct file`: `get_dentry`, `get_vfsmnt`, `get_inode`; `inode.is_valid`;
 //!   * `cred`: `uid` / `gid` / `euid` / `egid` ([`LinuxExt::cred_value`]);
-//!   * `timespec64` / `timespec`: [`LinuxExt::timespec`] (python `new_from_timespec`);
-//!   * `inode.is_valid`.
+//!   * `timespec64` / `timespec`: [`LinuxExt::timespec`] (python `new_from_timespec`).
+//!
+//! Errors: where python raises, methods return `Err` (list-like results end with one `Err`);
+//! where python returns None / False, they return `Ok(None)` / `Ok(false)`.
 
 use super::timespec::{PyNum, Timespec, datetime_add_us};
 use super::{PF_KTHREAD, vmlinux_of};
@@ -299,10 +305,9 @@ impl LinuxExt for Obj {
     }
 
     fn hlist_to_list(&self, symbol_type: &str, member: &str) -> HListIter {
-        let vmlinux = vmlinux_of(self).ok();
-        let (cur, failed) = match self.m("first") {
-            Ok(c) => (Some(c), None),
-            Err(e) => (None, Some(e)),
+        let (vmlinux, cur, failed) = match vmlinux_of(self).and_then(|v| Ok((v, self.m("first")?))) {
+            Ok((v, c)) => (Some(v), Some(c), None),
+            Err(e) => (None, None, Some(e)),
         };
         HListIter { cur, vmlinux, symbol_type: symbol_type.to_string(), member: member.to_string(), failed }
     }

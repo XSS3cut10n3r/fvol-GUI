@@ -5,11 +5,19 @@
 //!
 //! For plugin porters:
 //!   * `ctx.linux_kernel()?` is python's `context.modules[self.config["kernel"]]` (derefs to a
-//!     [`Module`]: `k.object_from_symbol("init_task")`, `k.get_symbol(..)`, `k.get_type(..)`).
+//!     [`Module`]: `k.object_from_symbol("init_task")`, `k.get_symbol(..)`, `k.get_type(..)`;
+//!     also `k.layer` / `k.vlayer` (python `layer_name`), `k.phys` (`memory_layer`),
+//!     `k.table`, `k.aslr_shift` (= module offset), `k.kaslr_shift`, `k.dtb`, `k.banner`).
 //!   * `use crate::symbols::linux::LinuxExt;` then call python's extension methods on objects:
-//!     `task.is_valid()`, `task.get_create_time()`, `head.to_list("task_struct", "tasks", ..)`.
+//!     `task.is_valid()`, `task.get_create_time()`, `head.to_list("task_struct", "tasks", ..)`,
+//!     `mm.get_vma_iter()`, `vma.get_protection()`, `file.get_inode()` ... (see [`ext`]).
+//!   * `plugins::linux::pslist::list_tasks` is python's `PsList.list_tasks` (most linux plugins
+//!     start from it), `get_task_fields` python's `PsList.get_task_fields`.
 //!   * [`vmlinux_of`] is python's `LinuxUtilities.get_module_from_volobj_type(context, obj)`.
 //!   * [`container_of`] is python's `LinuxUtilities.container_of`.
+//!   * [`elf`]: python's `elf` extension (header / program headers) and `Elfs.elf_dump`.
+//!   * [`vmcoreinfo`]: python's `VMCoreInfo` (search + parse; for `linux.vmcoreinfo`).
+//!   * [`timespec`]: python's `Timespec64Concrete` with python's exact float semantics.
 
 pub mod elf;
 pub mod ext;
@@ -30,7 +38,7 @@ pub const PF_KTHREAD: i128 = 0x0020_0000;
 /// python `LinuxIntelStacker.virtual_to_physical_address`: kernel virtual -> physical
 /// (ignores KASLR), with python's unbounded-int result.
 pub fn virtual_to_physical_address_i(addr: i128) -> i128 {
-    if addr > 0xFFFF_FFFF_8000_0000 { addr - 0xFFFF_FFFF_8000_0000 } else { addr - 0xC000_0000 }
+    if addr > 0xFFFF_FFFF_8000_0000 { addr - 0xFFFF_FFFF_8000_0000 } else { addr.wrapping_sub(0xC000_0000) }
 }
 
 /// [`virtual_to_physical_address_i`] with wrapping u64 arithmetic.
