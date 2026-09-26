@@ -781,5 +781,38 @@ mod tests {
         assert!(Json::parse(b"[1,]").is_err());
         assert!(Json::parse(b"\"abc").is_err());
         assert!(Json::parse(b"{} x").is_err());
+        let deep = "[".repeat(5000);
+        assert!(Json::parse(deep.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn no_panic_on_garbage() {
+        let doc = br#"{"a": {"b": [1, 2.5e3, -7, "xA\n", true, false, null, {"c": "d\\\"e"}]}, "f": 18446744073709551616}"#;
+        // every prefix and every single-byte mutation must parse or fail cleanly
+        for n in 0..doc.len() {
+            let _ = Json::parse(&doc[..n]);
+            let mut p = Parser::new(&doc[..n]);
+            let _ = p.skip();
+        }
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        for i in 0..doc.len() {
+            for _ in 0..8 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let mut d = doc.to_vec();
+                d[i] = x as u8;
+                let _ = Json::parse(&d);
+                let _ = crate::symbols::isf::load_table(&d, "t", "u", &Default::default());
+            }
+        }
+        for _ in 0..2000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let len = (x % 64) as usize;
+            let bytes: Vec<u8> = (0..len).map(|k| b"{}[]\":,0123456789.eE+-tfnul\\ \n"[((x >> (k % 50)) as usize + k) % 30]).collect();
+            let _ = Json::parse(&bytes);
+        }
     }
 }

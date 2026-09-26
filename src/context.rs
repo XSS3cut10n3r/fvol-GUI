@@ -96,6 +96,15 @@ pub struct Context {
     output_lock: Mutex<()>,
 }
 
+/// Text stored for a failed lazy init: the bare path list for `Unsatisfied` (so the CLI can
+/// parse it back), the display text otherwise.
+fn err_text(e: Error) -> String {
+    match e {
+        Error::Unsatisfied(s) => s,
+        e => e.to_string(),
+    }
+}
+
 fn keep_err<T>(r: &std::result::Result<T, String>) -> Result<&T> {
     r.as_ref().map_err(|e| Error::Unsatisfied(e.clone()))
 }
@@ -150,8 +159,8 @@ impl Context {
     /// `memory_layer` as the owning `Arc` (to build translation layers on) and as `&dyn Layer`.
     pub fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
         keep_err(self.physical.get_or_init(|| {
-            let path = self.image_path().map_err(|e| e.to_string())?;
-            let (l, listing) = crate::automagic::stack_physical(&path, self.opts.stackers.as_deref()).map_err(|e| e.to_string())?;
+            let path = self.image_path().map_err(err_text)?;
+            let (l, listing) = crate::automagic::stack_physical(&path, self.opts.stackers.as_deref()).map_err(err_text)?;
             let _ = self.physical_listing.set(listing);
             let r = leak_layer(l.clone());
             Ok((l, r))
@@ -168,17 +177,17 @@ impl Context {
 
     /// The Windows kernel (runs the Windows automagic on first use; cached per image).
     pub fn windows_kernel(&self) -> Result<&WinKernel> {
-        keep_err(self.win.get_or_init(|| self.init_windows().map_err(|e| e.to_string())))
+        keep_err(self.win.get_or_init(|| self.init_windows().map_err(err_text)))
     }
 
     /// The Linux kernel (runs the Linux automagic on first use; see `automagic::linux`).
     pub fn linux_kernel(&self) -> Result<&crate::automagic::linux::LinuxKernel> {
-        keep_err(self.linux.get_or_init(|| crate::automagic::linux::init(self).map_err(|e| e.to_string())))
+        keep_err(self.linux.get_or_init(|| crate::automagic::linux::init(self).map_err(err_text)))
     }
 
     /// The macOS kernel (runs the Mac automagic on first use; see `automagic::mac`).
     pub fn mac_kernel(&self) -> Result<&crate::automagic::mac::MacKernel> {
-        keep_err(self.mac.get_or_init(|| crate::automagic::mac::init(self).map_err(|e| e.to_string())))
+        keep_err(self.mac.get_or_init(|| crate::automagic::mac::init(self).map_err(err_text)))
     }
 
     /// Log an automagic failure detail (python logs these at -v levels) and return the python

@@ -641,3 +641,61 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<WinAutomagic> {
 fn _unused(l: &dyn Layer) -> Vec<u64> {
     scan(l, &BytesScanner::new(b"x"), None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page_with(entries: &[(usize, u64)]) -> Vec<u8> {
+        let mut p = vec![0u8; 0x1000];
+        for &(i, v) in entries {
+            p[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        p
+    }
+
+    #[test]
+    fn selfref64() {
+        // page at 0x1ae000 with a self reference at index 0x1ed
+        let data = page_with(&[(0, 0x5000 | 1), (0x1ed, 0x1ae000 | 0x63)]);
+        assert_eq!(DtbTest::SelfRef64.test(&data, 0x1ae000, 0), Ok(Some(0x1ae000)));
+        assert_eq!(DtbTest::SelfRef64Old.test(&data, 0x1ae000, 0), Ok(Some(0x1ae000)));
+        // two self references -> rejected
+        let data = page_with(&[(0x1ed, 0x1ae000 | 1), (0x100, 0x1ae000 | 1)]);
+        assert_eq!(DtbTest::SelfRef64.test(&data, 0x1ae000, 0), Ok(None));
+        // a present entry with the reserved bit 7 -> page rejected
+        let data = page_with(&[(0x1ed, 0x1ae000 | 1), (3, 0x9000 | 0x81)]);
+        assert_eq!(DtbTest::SelfRef64.test(&data, 0x1ae000, 0), Ok(None));
+        // index outside 0x100..0x1ff
+        let data = page_with(&[(0x10, 0x1ae000 | 1)]);
+        assert_eq!(DtbTest::SelfRef64.test(&data, 0x1ae000, 0), Ok(None));
+        // partial page -> python's struct.error aborts the scan
+        let data = page_with(&[(0x1ed, 0x1ae000 | 1)]);
+        assert_eq!(DtbTest::SelfRef64.test(&data[..0x800], 0x1ae000, 0), Err(()));
+    }
+
+    #[test]
+    fn python_slices() {
+        let d = [1u8, 2, 3, 4, 5];
+        assert_eq!(py_slice(&d, -2, 5), &[4, 5]);
+        assert_eq!(py_slice(&d, -10, 2), &[1, 2]);
+        assert_eq!(py_slice(&d, 3, 1), &[] as &[u8]);
+        assert_eq!(py_slice(&d, 2, 100), &[3, 4, 5]);
+    }
+
+    #[test]
+    fn rsds_scanner() {
+        let mut data = vec![0u8; 256];
+        data[10..14].copy_from_slice(b"RSDS");
+        for (i, b) in data[14..30].iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        data[30..34].copy_from_slice(&7u32.to_le_bytes());
+        data[34..46].copy_from_slice(b"ntkrnlmp.pdb");
+        data[46] = 0;
+        let s = PdbSignatureScanner { names: KERNEL_PDB_NAMES.iter().map(|n| n.to_vec()).collect() };
+        let mut hits = Vec::new();
+        s.scan(&data, 0x1000, &mut hits);
+        assert_eq!(hits, vec![("030201000504070608090A0B0C0D0E0F".to_string(), 7, "ntkrnlmp.pdb".to_string(), 0x100a)]);
+    }
+}

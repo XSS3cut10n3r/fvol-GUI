@@ -204,4 +204,7 @@ the built-in scanners do. Per-hit validation can run inside the scanner (it runs
   (`~/.cache/rsvol/automagic`). `RSVOL_TRACE=1` prints timing spans; `RSVOL_CACHE=dir` relocates
   the caches (use an empty dir to measure cold runs).
 * Use `crate::util::par::{par_map, par_for, par_map_stream}` for per-process / per-item work
-  that reads lots of memory; results stay in order.
+  that reads lots of memory; results stay in order. Pattern (see `plugins/windows/vadinfo.rs`):
+  compute each process's rows as `Vec<Result<Vec<Value>>>` in parallel, then emit them in python
+  order, stopping at the first `Err` exactly where python would have raised. Keep work that has
+  side effects python would not reach after an error (e.g. `--dump` files) sequential.
