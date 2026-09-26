@@ -355,6 +355,22 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
 | `UnloadedModules.create_unloadedmodules_table / list_unloadedmodules` | same names in `unloadedmodules` |
 | `DebugRegisters._get_debug_info(ethread)` | `debugregisters::get_debug_info(&t)?` |
 
+### Services, malware helpers (`crate::plugins::windows::*`, package W5)
+
+| python | rust |
+|---|---|
+| `SvcScan.get_prereq_info(...)` (services ISF + registry `ImagePath` / `ServiceDll` map) | `svcscan::get_prereq_info(ctx, k)?` → `Prereq { table, binary_map }` |
+| `SvcScan.service_scan(...)` / `SvcList.service_list(...)` (rows of `get_record_tuple`) | `svcscan::service_scan(k, &pre, &mut \|row\| ..)` / `svclist::service_list(k, &pre, f)` → `ServiceRow { values, name, key }` |
+| `SvcScan.enumerate_vista_or_later_header(...)` / `SERVICE_RECORD.traverse()` | `svcscan::enumerate_vista_or_later_header(table, &map, layer, offset, f)` (row offsets are the `PrevEntry` pointers' own addresses, like python) |
+| `pslist.PsList.create_name_filter(["services.exe"])` / `create_active_process_filter()` | `svcscan::services_filter` / `malware::processghosting::active_process_filter` |
+| `Malfind.is_vad_empty(layer, vad)` / `list_injection_sites(...)` | `malware::malfind::is_vad_empty(layer, start, size)?` / `malware::malfind::list_injection_sites(&proc, &pv)` |
+| `YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `vadyarascan::yarascan_option_requirements()` / `vadyarascan::rules_from_config(cfg)?` |
+| `scanners.RegExScanner(pattern)` (DOTALL, `chunk_size` rule) | `vadregexscan::regex_scanner(&re)` → `FnScanner` |
+| `DirectSystemCalls` / `IndirectSystemCalls` machinery (`syscall_finder_type`, `_is_syscall_block`, `_generator`) | `malware::direct_system_calls::{SyscallFinder, DIRECT, run_finder}`, `malware::indirect_system_calls::INDIRECT` |
+| `PESymbols.get_process_modules / find_symbols` (names via PDB, then export table) | `malware::pesym::{get_process_modules, find_symbols_by_name}` (private subset, TODO(dedupe) W2b) |
+| `PESymbols.get_pefile_obj(...)` + pefile `parse_data_directories([EXPORT])` | `malware::pesym::pe_exports(ctx, layer, base)?` → `Option<Vec<Export { name, address }>>` |
+| a python dict keyed by int (insertion order) | `malware::hollowprocesses::OrderedMap<V>` |
+
 ## Plugins & output
 
 * A plugin is a unit struct implementing `crate::plugins::Plugin` (see `src/plugins/windows/pslist.rs`),
