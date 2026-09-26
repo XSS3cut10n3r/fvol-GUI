@@ -1122,8 +1122,9 @@ const KEEP_BUDGET: usize = 512 << 20;
 
 /// While building the identifier index, keep the decompressed JSON of the ISFs identified as
 /// `os` (within [`KEEP_BUDGET`]): the automagic that asked for the index loads one of them next,
-/// and [`load`] then skips its decompression. `None` stops keeping and frees what is kept
-/// (in the background).
+/// and [`load`] then skips its decompression. `None` (once the automagic is done) stops
+/// keeping and frees what is kept and the speculative builds no table uses (in the
+/// background).
 pub fn keep_decoded_for(os: Option<&'static str>) {
     keep_decoded_for_with(os, true)
 }
@@ -1139,8 +1140,15 @@ pub fn keep_decoded_for_with(os: Option<&'static str>, guess: bool) {
     if os.is_none() {
         set_banner_hint(None);
         let kept = std::mem::take(&mut *KEPT.lock().unwrap_or_else(|e| e.into_inner()));
-        if !kept.is_empty() {
-            crate::util::bg::spawn(move || drop(kept));
+        // speculative builds nobody loaded (only the memo holds them) go too
+        let unused: Vec<_> = {
+            let mut b = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+            let (keep, drop): (Vec<_>, Vec<_>) = std::mem::take(&mut *b).into_iter().partition(|e| std::sync::Arc::strong_count(&e.1) > 1);
+            *b = keep;
+            drop
+        };
+        if !kept.is_empty() || !unused.is_empty() {
+            crate::util::bg::spawn(move || drop((kept, unused)));
         }
     }
 }

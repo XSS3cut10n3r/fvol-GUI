@@ -18,7 +18,12 @@ pub fn spawn(f: impl FnOnce() + Send + 'static) {
         }
     });
     match h {
-        Ok(h) => PENDING.lock().unwrap_or_else(|e| e.into_inner()).push(h),
+        Ok(h) => {
+            let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            // a long-running process (the web UI) should not accumulate finished handles
+            p.retain(|h| !h.is_finished());
+            p.push(h)
+        }
         Err(_) => {
             if let Some(f) = f.lock().ok().and_then(|mut o| o.take()) {
                 f();

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Cold / warm start benchmark: rsvol (private RSVOL_CACHE) vs vol-rs (private HOME).
 
-Usage: coldbench.py [-n N] [--bin BIN] [--no-volrs] [--only NAME[,NAME]] [--scratch DIR]
+Usage: coldbench.py [-n N] [--bin BIN] [--base BIN] [--no-volrs] [--only NAME[,NAME]] [--scratch DIR]
 
-Cases per (image, plugin):
+Cases per (image, plugin), for each rsvol binary (--base: a baseline build, measured
+interleaved with --bin so machine load affects both alike):
   cold     empty rsvol cache (first time the image AND the symbol files are seen)
   newimg   symbol caches warm (ISF blobs + identifier index), automagic/scan caches empty
   symcold  automagic caches warm, symbol caches (ISF blobs + identifier index) empty
@@ -22,6 +23,7 @@ def opt(name, default=None):
     return default
 N = int(opt("-n", "5"))
 BIN = opt("--bin", os.path.join(ROOT, "target/release/vol"))
+BASE = opt("--base")
 SCRATCH = opt("--scratch", os.path.join(ROOT, "testdata/scratch/coldstart"))
 ONLY = opt("--only")
 VOLRS = os.path.expanduser("~/cbc2/vol-rs/target/release/vol-rs")
@@ -41,7 +43,6 @@ if ONLY:
     CASES = [c for c in CASES if any(k in c[0] for k in keep)]
 
 os.makedirs(SCRATCH, exist_ok=True)
-CACHE = os.path.join(SCRATCH, "bench-cache")
 VHOME = os.path.join(SCRATCH, "volrs-home")
 
 def run(cmd, env):
@@ -49,25 +50,37 @@ def run(cmd, env):
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     return time.perf_counter() - t, r.returncode
 
-def rsvol(img, plugin, extra, prep):
-    env = dict(os.environ, RSVOL_CACHE=CACHE)
-    env.pop("RSVOL_TRACE", None)
-    best, rc = 1e9, 0
-    for _ in range(N):
-        prep()
-        d, rc = run([BIN, "-q"] + extra + ["-f", img, plugin], env)
-        best = min(best, d)
-    return best, rc
-
-def rm(*names):
+def rm(cache, *names):
     def f():
         for n in names:
-            p = os.path.join(CACHE, n)
+            p = os.path.join(cache, n)
             if os.path.isdir(p):
                 shutil.rmtree(p)
             elif os.path.exists(p):
                 os.remove(p)
     return f
+
+MODES = [
+    ("cold", ("automagic", "scan", "isf", "identifiers.cache", "isfinfo.cache", "remote")),
+    ("newimg", ("automagic", "scan")),
+    ("symcold", ("isf", "identifiers.cache")),
+    ("warm", ()),
+]
+
+def rsvol_all(binary, cache, img, plugin, extra):
+    """best time per mode over N rounds of cold, newimg, symcold, warm (each mode starts from
+    the caches the previous run left)"""
+    env = dict(os.environ, RSVOL_CACHE=cache)
+    env.pop("RSVOL_TRACE", None)
+    best = {m: 1e9 for m, _ in MODES}
+    rc = 0
+    for _ in range(N):
+        for mode, names in MODES:
+            rm(cache, *names)()
+            d, r = run([binary, "-q"] + extra + ["-f", img, plugin], env)
+            rc = rc or r
+            best[mode] = min(best[mode], d)
+    return best, rc
 
 def volrs(img, plugin, extra, cold):
     env = dict(os.environ, HOME=VHOME)
@@ -83,18 +96,23 @@ if "--no-volrs" not in args and not os.path.isdir(os.path.join(VHOME, ".local/sh
     os.makedirs(os.path.join(VHOME, ".local/share"), exist_ok=True)
     shutil.copytree(os.path.expanduser("~/.local/share/vol-rs"), os.path.join(VHOME, ".local/share/vol-rs"))
 
-ms = lambda x: f"{x * 1e3:8.1f}"
-print(f"{'case':18} {'cold':>8} {'newimg':>8} {'symcold':>8} {'warm':>8} | {'volrs-cold':>10} {'volrs-warm':>10}   (ms, best of {N})")
+ms = lambda x: f"{x * 1e3:7.1f}"
+hdr = f"{'case':16} " + " ".join(f"{m:>7}" for m, _ in MODES)
+if BASE:
+    hdr += " | base: " + " ".join(f"{m:>7}" for m, _ in MODES)
+if "--no-volrs" not in args:
+    hdr += " | vol-rs: cold    warm"
+print(hdr + f"   (ms, best of {N})", flush=True)
 for name, img, plugin, extra in CASES:
-    cold, rc = rsvol(img, plugin, extra, rm("automagic", "scan", "isf", "identifiers.cache", "isfinfo.cache", "remote"))
-    newimg, _ = rsvol(img, plugin, extra, rm("automagic", "scan"))
-    symcold, _ = rsvol(img, plugin, extra, rm("isf", "identifiers.cache"))
-    warm, _ = rsvol(img, plugin, extra, lambda: None)
-    line = f"{name:18} {ms(cold)} {ms(newimg)} {ms(symcold)} {ms(warm)}"
+    cur, rc = rsvol_all(BIN, os.path.join(SCRATCH, "bench-cache"), img, plugin, extra)
+    line = f"{name:16} " + " ".join(ms(cur[m]) for m, _ in MODES)
+    if BASE:
+        base, brc = rsvol_all(BASE, os.path.join(SCRATCH, "bench-cache-base"), img, plugin, extra)
+        line += " |       " + " ".join(ms(base[m]) for m, _ in MODES)
     if "--no-volrs" not in args:
         vc, vrc = volrs(img, plugin, extra, True)
         vw, _ = volrs(img, plugin, extra, False)
-        line += f" | {ms(vc):>10} {ms(vw):>10}" + (f" (volrs rc={vrc})" if vrc else "")
+        line += f" |        {ms(vc)} {ms(vw)}" + (f" (volrs rc={vrc})" if vrc else "")
     if rc:
         line += f"  (rsvol rc={rc})"
     print(line, flush=True)

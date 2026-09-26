@@ -93,7 +93,9 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
         Some(a) => a,
         None => {
             // python: the MacIntelStacker built no layer
-            let a = run(phys_arc).map_err(|e| unsatisfied(ctx, &e, LAYER))?;
+            let r = run(phys_arc);
+            symbols::store::keep_decoded_for(None);
+            let a = r.map_err(|e| unsatisfied(ctx, &e, LAYER))?;
             cache_store(&image, &fp, &a);
             a
         }
@@ -157,7 +159,6 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
         if let Some(h) = hint.into_inner().unwrap_or_else(|e| e.into_inner()) {
             let _ = h.join();
         }
-        symbols::store::keep_decoded_for(None);
         d
     };
     if banners.is_empty() {
