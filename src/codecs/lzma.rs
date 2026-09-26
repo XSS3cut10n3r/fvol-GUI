@@ -39,6 +39,8 @@ const LEN_MID: usize = LEN_LOW + POS_STATES_MAX * 8; // 130
 const LEN_HIGH: usize = LEN_MID + POS_STATES_MAX * 8; // 258
 
 const PROB_INIT: u16 = 1024;
+/// Input bytes that must remain readable past the position checked at a symbol boundary.
+const INPUT_MARGIN: usize = 64;
 const TOP: u32 = 1 << 24;
 const END_MARKER: u32 = 0xFFFF_FFFF;
 
@@ -178,7 +180,6 @@ impl LzmaDecoder {
     ///
     /// A match that crosses `limit` is cut there and its remainder is kept in
     /// `pending_len` (it is flushed first on the next call).
-    #[inline(never)]
     pub fn decode(
         &mut self,
         rc: &mut RangeDecoder,
@@ -188,34 +189,87 @@ impl LzmaDecoder {
         limit: usize,
     ) -> Result<Stop> {
         assert!(limit <= out.len() && *pos <= limit);
-        let out_len = out.len();
-        let outp = out.as_mut_ptr();
-        let mut p = *pos;
-
         // Flush a match cut by the previous call.
         if self.pending_len > 0 {
+            let p = *pos;
             let dist = self.reps[0];
             if dist >= p {
                 return Err(corrupt("distance"));
             }
             let n = self.pending_len.min(limit - p);
-            // SAFETY: dist < p, p + n <= limit <= out_len.
-            unsafe { copy_match(outp, out_len, p - dist - 1, p, n) };
-            p += n;
+            // SAFETY: dist < p, p + n <= limit <= out.len().
+            unsafe { copy_match(out.as_mut_ptr(), out.len(), p - dist - 1, p, n) };
+            *pos = p + n;
             self.pending_len -= n;
             if self.pending_len > 0 {
-                *pos = p;
                 return Ok(Stop::Limit);
             }
         }
+        let fixed = self.props == Props { lc: 3, lp: 0, pb: 2 };
+        // Main part: read the input in place while at least INPUT_MARGIN bytes remain (a
+        // single symbol never reads more than ~50 bytes), so reads need no bounds checks.
+        if input.len() >= INPUT_MARGIN && rc.ip <= input.len() - INPUT_MARGIN {
+            let ip_limit = input.len() - INPUT_MARGIN;
+            // SAFETY: the loop stops once ip > ip_limit; one symbol reads < INPUT_MARGIN bytes.
+            let stop = unsafe {
+                if fixed {
+                    self.decode_inner::<true>(rc, input.as_ptr(), ip_limit, out, pos, limit)?
+                } else {
+                    self.decode_inner::<false>(rc, input.as_ptr(), ip_limit, out, pos, limit)?
+                }
+            };
+            if stop != Stop::InputExhausted {
+                return Ok(stop);
+            }
+        }
+        // Tail: decode the last bytes from a zero-padded copy.
+        if rc.ip > input.len() {
+            return Ok(Stop::InputExhausted);
+        }
+        let rem = input.len() - rc.ip;
+        let mut tail = [0u8; 4 * INPUT_MARGIN];
+        tail[..rem].copy_from_slice(&input[rc.ip..]);
+        let base = rc.ip;
+        rc.ip = 0;
+        // SAFETY: rem < 2 * INPUT_MARGIN, reads stay below rem + INPUT_MARGIN < tail.len().
+        let stop = unsafe {
+            if fixed {
+                self.decode_inner::<true>(rc, tail.as_ptr(), rem, out, pos, limit)
+            } else {
+                self.decode_inner::<false>(rc, tail.as_ptr(), rem, out, pos, limit)
+            }
+        };
+        rc.ip += base;
+        stop
+    }
+
+    /// The decoding loop. Reads `inp[ip]` without bounds checks; stops with
+    /// `Stop::InputExhausted` at a symbol boundary once `ip > ip_limit`.
+    ///
+    /// # Safety
+    /// `inp` must be readable up to `ip_limit + INPUT_MARGIN`.
+    /// `FIXED` = the properties are lc=3 lp=0 pb=2 (compile-time constants).
+    #[inline(never)]
+    unsafe fn decode_inner<const FIXED: bool>(
+        &mut self,
+        rc: &mut RangeDecoder,
+        inp: *const u8,
+        ip_limit: usize,
+        out: &mut [u8],
+        pos: &mut usize,
+        limit: usize,
+    ) -> Result<Stop> {
+        let out_len = out.len();
+        let outp = out.as_mut_ptr();
+        let mut p = *pos;
 
         let probs = self.probs.as_mut_ptr();
-        let lc = self.props.lc as usize;
-        let lp_mask = (1usize << self.props.lp) - 1;
-        let pb_mask = (1usize << self.props.pb) - 1;
+        let (lc, lp_mask, pb_mask) = if FIXED {
+            (3usize, 0usize, 3usize)
+        } else {
+            (self.props.lc as usize, (1usize << self.props.lp) - 1, (1usize << self.props.pb) - 1)
+        };
 
-        let inp = input.as_ptr();
-        let in_len = input.len();
         let mut ip = rc.ip;
         let mut range = rc.range;
         let mut code = rc.code;
@@ -227,8 +281,8 @@ impl LzmaDecoder {
             () => {
                 if range < TOP {
                     range <<= 8;
-                    // SAFETY: bounds checked; bytes past the end read as zero.
-                    let b = if ip < in_len { unsafe { *inp.add(ip) } } else { 0 };
+                    // SAFETY: ip <= ip_limit + INPUT_MARGIN (see decode_inner).
+                    let b = unsafe { *inp.add(ip) };
                     ip += 1;
                     code = (code << 8) | b as u32;
                 }
@@ -320,7 +374,7 @@ impl LzmaDecoder {
                 stop = Stop::Limit;
                 break;
             }
-            if ip > in_len {
+            if ip > ip_limit {
                 stop = Stop::InputExhausted;
                 break;
             }
@@ -485,7 +539,21 @@ pub(crate) unsafe fn copy_match(out: *mut u8, out_len: usize, src: usize, dst: u
     use std::ptr::copy_nonoverlapping as cp;
     let dist = dst - src;
     unsafe {
-        if dist >= 16 && dst + len + 16 <= out_len {
+        if dist >= 32 && dst + len + 64 <= out_len {
+            // Copy 64 bytes unconditionally (most matches are shorter), then 32 at a time.
+            // Chunks of C bytes are correct for any overlap as long as dist >= C.
+            let s = out.add(src);
+            let d = out.add(dst);
+            cp(s, d, 32);
+            cp(s.add(32), d.add(32), 32);
+            if len > 64 {
+                let mut i = 64;
+                while i < len {
+                    cp(s.add(i), d.add(i), 32);
+                    i += 32;
+                }
+            }
+        } else if dist >= 16 && dst + len + 16 <= out_len {
             let mut s = out.add(src);
             let mut d = out.add(dst);
             let end = out.add(dst + len);

@@ -3,17 +3,43 @@
 //! ```text
 //! CODECS_CORPUS=/path/to/dir cargo test --profile fast codecs_corpus -- --ignored --nocapture
 //! ```
-//! Every `NAME.{xz,lzma,gz,zz,bz2,lznt1}` file in the directory is decoded with the matching
-//! codec and compared against `NAME` (when it exists); the best of a few runs is reported.
+//! Every `NAME[.VARIANT].{xz,lzma,gz,zz,bz2,lznt1}` file in the directory is decoded with the
+//! matching codec and compared against `NAME` (when it exists; VARIANT is `lN`, `mt`, `x86`...);
+//! the best of a few runs is reported.
+//!
+//! `codecs_bench_file` benches a single file the same way the C reference harness in
+//! `bench/refbench/refbench.c` does (fresh output per run, best of N) and prints
+//! `rust <codec> <file> <out_bytes> <best_ms> <MB/s>`.
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn decode(ext: &str, data: &[u8]) -> Option<crate::error::Result<Vec<u8>>> {
-    Some(match ext {
+/// `big.json.l9.gz` -> `big.json`, `isf.json.xz` -> `isf.json`.
+fn reference_path(p: &Path) -> PathBuf {
+    let base = p.with_extension("");
+    let last = base.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+    let variant = last == "mt"
+        || last == "x86"
+        || last == "delta"
+        || (last.len() >= 2 && last.starts_with('l') && last.as_bytes()[1].is_ascii_digit());
+    if variant { base.with_extension("") } else { base }
+}
+
+fn codec_of(ext: &str) -> &str {
+    match ext {
+        "gz" => "gzip",
+        "zz" => "zlib",
+        other => other,
+    }
+}
+
+fn decode(codec: &str, data: &[u8]) -> Option<crate::error::Result<Vec<u8>>> {
+    Some(match codec {
         "xz" => super::xz::decompress(data),
         "lzma" => super::lzma::decompress(data),
-        // "gz" => super::gzip::decompress(data),
-        // "zz" => super::zlib::decompress(data),
+        // "gzip" => super::gzip::decompress(data),
+        // "zlib" => super::zlib::decompress(data),
+        // "deflate" => super::inflate::decompress(data),
         // "bz2" => super::bzip2::decompress(data),
         // "lznt1" => super::lznt1::decompress(data),
         _ => return None,
@@ -39,8 +65,9 @@ fn codecs_corpus() {
         }
         let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_string()) else { continue };
         let data = std::fs::read(&path).unwrap();
-        let Some(first) = decode(&ext, &data) else { continue };
-        let reference = std::fs::read(path.with_extension("")).ok();
+        let ext = codec_of(&ext);
+        let Some(first) = decode(ext, &data) else { continue };
+        let reference = std::fs::read(reference_path(&path)).ok();
         let status = match (&first, &reference) {
             (Err(e), _) => format!("ERROR {e}"),
             (Ok(out), Some(r)) if out != r => format!("MISMATCH (got {} bytes, want {})", out.len(), r.len()),
@@ -57,7 +84,7 @@ fn codecs_corpus() {
         let mut best = f64::MAX;
         for _ in 0..runs {
             let t = Instant::now();
-            let r = decode(&ext, &data).unwrap();
+            let r = decode(ext, &data).unwrap();
             let dt = t.elapsed().as_secs_f64();
             drop(r);
             best = best.min(dt);
@@ -71,6 +98,34 @@ fn codecs_corpus() {
         );
     }
     assert_eq!(failures, 0, "{failures} corpus failures");
+}
+
+#[test]
+#[ignore]
+fn codecs_bench_file() {
+    let (Ok(file), Ok(codec)) = (std::env::var("CODECS_BENCH_FILE"), std::env::var("CODECS_BENCH_CODEC")) else {
+        eprintln!("set CODECS_BENCH_FILE and CODECS_BENCH_CODEC");
+        return;
+    };
+    let runs: usize = std::env::var("CODECS_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+    let data = std::fs::read(&file).unwrap();
+    let codec = if codec == "xz-mt" { "xz" } else { codec.as_str() };
+    let out = decode(codec, &data).expect("unknown codec").expect("decode failed");
+    if let Ok(reference) = std::fs::read(reference_path(Path::new(&file))) {
+        assert!(out == reference, "{file}: output differs from reference");
+    }
+    let n = out.len();
+    drop(out);
+    let mut best = f64::MAX;
+    for _ in 0..runs {
+        let t = Instant::now();
+        let r = decode(codec, &data).unwrap().unwrap();
+        let dt = t.elapsed().as_secs_f64();
+        assert_eq!(r.len(), n);
+        drop(r);
+        best = best.min(dt);
+    }
+    println!("rust {codec} {file} {n} {:.3} {:.1}", best * 1e3, n as f64 / best / 1e6);
 }
 
 /// Symbol statistics (build with RUSTFLAGS="--cfg lzma_stats").
