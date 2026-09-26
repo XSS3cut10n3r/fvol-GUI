@@ -66,12 +66,20 @@ fn yara_regex_difftest_driver() {
     let out = std::env::var("RSVOL_REGEX_OUT").unwrap_or_else(|_| format!("{inp}.out"));
     let data = std::fs::read_to_string(&inp).expect("read cases");
     let mut res = String::new();
+    let trace = std::env::var("RSVOL_REGEX_TRACE").is_ok();
+    let mut engines: std::collections::BTreeMap<&'static str, usize> = Default::default();
     for line in data.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         if f.len() < 5 {
             continue;
         }
+        if trace {
+            eprintln!("case {}", f[0]);
+        }
         let flags: u32 = f[2].parse().unwrap_or(0);
+        if let Ok(re) = Regex::new(&unhex(f[1]), flags) {
+            *engines.entry(re.engine_name()).or_insert(0usize) += 1;
+        }
         let (r, d) = run_case(&unhex(f[1]), flags, &unhex(f[3]), f[4]);
         res.push_str(f[0]);
         res.push('\t');
@@ -83,4 +91,5 @@ fn yara_regex_difftest_driver() {
         res.push('\n');
     }
     std::fs::write(out, res).expect("write results");
+    eprintln!("engines: {engines:?}");
 }

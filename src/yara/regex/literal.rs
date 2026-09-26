@@ -7,7 +7,7 @@
 //! scans for the two rarest positions with SIMD and verifies all positions.
 
 use super::hir::{ByteSet, Hir};
-use crate::yara::memchr::{self, ByteSetFinder, Memmem};
+use crate::yara::memchr::{self, ByteSetFinder, Memmem, SetDesc};
 
 /// Approximate byte frequencies (parts per 2^20) measured on a Windows memory image.
 pub const BYTE_FREQ: [u32; 256] = [
@@ -143,6 +143,99 @@ pub fn seq_rate(seq: &[ByteSet]) -> u64 {
     }
 }
 
+/// Leading byte-set sequences per top-level alternative (every match starts with one
+/// of them). None when some alternative can start with anything / match empty.
+pub fn alt_seqs(h: &Hir) -> Option<Vec<Vec<ByteSet>>> {
+    let mut out = Vec::new();
+    alt_seqs_into(h, &mut out, 0)?;
+    if out.is_empty() || out.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    Some(out)
+}
+
+fn alt_seqs_into(h: &Hir, out: &mut Vec<Vec<ByteSet>>, depth: usize) -> Option<()> {
+    if depth > 50 || out.len() > 64 {
+        return None;
+    }
+    match h {
+        Hir::Alt(v) => {
+            for x in v {
+                alt_seqs_into(x, out, depth + 1)?;
+            }
+        }
+        Hir::Capture { sub, .. } => alt_seqs_into(sub, out, depth + 1)?,
+        Hir::Concat(v) => {
+            let k = v.iter().position(|x| !matches!(x, Hir::Look(_) | Hir::Empty)).unwrap_or(v.len());
+            let head = match v.get(k) {
+                Some(Hir::Capture { sub, .. }) => &**sub,
+                Some(x) => x,
+                None => return None,
+            };
+            if let Hir::Alt(alts) = head {
+                for a in alts {
+                    let mut c = vec![a.clone()];
+                    c.extend_from_slice(&v[k + 1..]);
+                    alt_seqs_into(&Hir::Concat(c), out, depth + 1)?;
+                }
+            } else {
+                out.push(positions(h).0);
+            }
+        }
+        _ => out.push(positions(h).0),
+    }
+    if out.len() > 64 { None } else { Some(()) }
+}
+
+/// A prefilter reporting candidate match starts.
+#[derive(Clone, Debug)]
+pub enum Prefilter {
+    Seq(SeqFinder),
+    Teddy(crate::yara::teddy::Teddy),
+}
+
+impl Prefilter {
+    #[inline]
+    pub fn find(&self, hay: &[u8], from: usize) -> Option<usize> {
+        match self {
+            Prefilter::Seq(s) => s.find(hay, from),
+            Prefilter::Teddy(t) => t.find(hay, from),
+        }
+    }
+
+    /// Choose the best prefix prefilter for `h` (None when not selective enough).
+    pub fn for_hir(h: &Hir) -> Option<(Prefilter, u64)> {
+        const MAX_RATE: u64 = (1 << 20) / 12;
+        let (pseq, _) = positions(h);
+        let seq_rate_v = if pseq.is_empty() { u64::MAX } else { seq_rate(&pseq) };
+        let mut best: Option<(Prefilter, u64)> = None;
+        if seq_rate_v < MAX_RATE {
+            if let Some(f) = SeqFinder::new(&pseq) {
+                best = Some((Prefilter::Seq(f), seq_rate_v));
+            }
+        }
+        if let Some(alts) = alt_seqs(h) {
+            if alts.len() > 1 {
+                let m = alts.iter().map(|s| s.len()).min().unwrap_or(0).min(3);
+                if m >= 1 {
+                    let rate: u64 = alts
+                        .iter()
+                        .map(|s| s[..m].iter().fold(1u64 << 20, |acc, x| (acc * set_freq(x)) >> 20).max(1))
+                        .sum::<u64>()
+                        .saturating_mul(2);
+                    let better = best.as_ref().map_or(true, |b| rate * 2 < b.1);
+                    if rate < MAX_RATE && better {
+                        if let Some(t) = crate::yara::teddy::Teddy::new(&alts) {
+                            best = Some((Prefilter::Teddy(t), rate));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // SeqFinder
 // ---------------------------------------------------------------------------------------
@@ -162,8 +255,8 @@ enum Kind {
 pub struct SeqFinder {
     seq: Vec<ByteSet>,
     kind: Kind,
-    s1: ByteSet,
-    s2: ByteSet,
+    s1: SetDesc,
+    s2: SetDesc,
 }
 
 impl SeqFinder {
@@ -174,16 +267,16 @@ impl SeqFinder {
         let seq: Vec<ByteSet> = seq.to_vec();
         if seq.iter().all(|s| s.len() == 1) && seq.len() >= 2 {
             let lit: Vec<u8> = seq.iter().filter_map(|s| s.as_single()).collect();
-            return Some(SeqFinder { kind: Kind::Lit(Memmem::new(&lit)), s1: seq[0], s2: seq[0], seq });
+            return Some(SeqFinder { kind: Kind::Lit(Memmem::new(&lit)), s1: SetDesc::new(&seq[0]), s2: SetDesc::new(&seq[0]), seq });
         }
         if seq.len() == 1 {
-            return Some(SeqFinder { kind: Kind::Set(ByteSetFinder::new(&seq[0].to_bools())), s1: seq[0], s2: seq[0], seq });
+            return Some(SeqFinder { kind: Kind::Set(ByteSetFinder::new(&seq[0].to_bools())), s1: SetDesc::new(&seq[0]), s2: SetDesc::new(&seq[0]), seq });
         }
         // Two rarest positions.
         let mut idx: Vec<usize> = (0..seq.len()).collect();
         idx.sort_by_key(|&i| (set_freq(&seq[i]), i));
         let (i1, i2) = (idx[0], idx[1]);
-        Some(SeqFinder { kind: Kind::Pair { i1, i2 }, s1: seq[i1], s2: seq[i2], seq })
+        Some(SeqFinder { kind: Kind::Pair { i1, i2 }, s1: SetDesc::new(&seq[i1]), s2: SetDesc::new(&seq[i2]), seq })
     }
 
     pub fn len(&self) -> usize {

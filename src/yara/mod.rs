@@ -10,6 +10,7 @@ pub mod memchr;
 pub mod regex;
 pub mod rules;
 pub mod scan;
+pub mod teddy;
 
 #[cfg(test)]
 mod benchdrv;

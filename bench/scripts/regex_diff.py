@@ -49,6 +49,8 @@ ALPHA = b"abcAB\n _1-"
 
 
 class Gen:
+    REGULAR = False
+
     def __init__(self, rng):
         self.r = rng
         self.groups = 0
@@ -79,6 +81,8 @@ class Gen:
                 return b"(?P<" + name + b">" + inner + b")"
             return b"(" + inner + b")"
         if r < 0.80:
+            return b"(?:" + self.alt(depth + 1) + b")"
+        if self.REGULAR and 0.80 <= r < 0.92:
             return b"(?:" + self.alt(depth + 1) + b")"
         if r < 0.84:
             kind = self.r.choice([b"?=", b"?!", b"?<=", b"?<!"])
@@ -119,7 +123,7 @@ class Gen:
         x = self.r.random()
         if x < 0.25:
             q += b"?"
-        elif x < 0.32:
+        elif x < 0.32 and not self.REGULAR:
             q += b"+"
         return q
 
@@ -149,8 +153,11 @@ def gen_pattern(rng):
     return p
 
 
+HAY_LENS = [0, 1, 2, 3, 5, 8, 13, 20, 40]
+
+
 def gen_hay(rng):
-    n = rng.choice([0, 1, 2, 3, 5, 8, 13, 20, 40])
+    n = rng.choice(HAY_LENS)
     return bytes(rng.choice(ALPHA) for _ in range(n))
 
 
@@ -184,8 +191,13 @@ def main():
     ap.add_argument("--keep", default=None)
     ap.add_argument("--profile", default="fast")
     ap.add_argument("--show", type=int, default=25)
+    ap.add_argument("--regular", action="store_true", help="only DFA-eligible constructs")
+    ap.add_argument("--long", action="store_true", help="add long haystacks (up to 3000 bytes)")
     args = ap.parse_args()
     rng = random.Random(args.seed)
+    Gen.REGULAR = args.regular
+    if args.long:
+        HAY_LENS.extend([200, 1000, 3000])
     flag_choices = [0, 0, 0, 0, re.I, re.S, re.M, re.I | re.S, re.X, re.DOTALL | re.M]
     cases = []
     # a few fixed interesting cases first

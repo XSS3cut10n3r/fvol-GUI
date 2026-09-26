@@ -23,6 +23,8 @@ pub mod parse;
 
 #[cfg(test)]
 mod difftest;
+#[cfg(test)]
+mod perftest;
 
 use std::fmt;
 use std::sync::Mutex;
@@ -166,6 +168,12 @@ impl Regex {
             Ok(mut p) => p.pop(),
             Err(_) => None,
         };
+        let mut got = got;
+        if let Some(sc) = got.as_mut() {
+            if let Some(c) = sc.dfa.as_mut() {
+                c.reset_stats();
+            }
+        }
         got.unwrap_or_else(|| {
             Box::new(Scratch {
                 bt: backtrack::Cache::new(),
@@ -265,6 +273,12 @@ impl Iterator for FindIter<'_, '_> {
         }
         let sc = self.scratch.as_mut()?;
         match self.re.find_with(sc, self.hay, self.pos, false, self.must_advance) {
+            Some((s, e)) if s < self.pos || e < s || (self.must_advance && e == self.pos) => {
+                // Defensive: an engine must never go backwards or repeat an empty
+                // match; stop rather than loop forever.
+                self.done = true;
+                None
+            }
             Some((s, e)) => {
                 self.must_advance = e == s;
                 self.pos = e;

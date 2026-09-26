@@ -16,7 +16,7 @@
 //! required inner sequence, reverse-scan its prefix, forward-verify).
 
 use super::hir::{is_word_byte, ByteSet, Hir, Look};
-use super::literal::{self, SeqFinder};
+use super::literal::{self, Prefilter, SeqFinder};
 use super::nfa::{NState, Nfa};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -271,6 +271,24 @@ pub struct Cache {
     fwd: DCache,
     rev: DCache,
     pre_rev: Option<DCache>,
+    /// Forward DFA without start tags (used once the prefilter proves ineffective).
+    plain: DCache,
+    stats: PreStats,
+}
+
+/// Prefilter effectiveness bookkeeping (per iterator).
+#[derive(Default, Clone, Copy)]
+pub struct PreStats {
+    calls: u64,
+    skipped: u64,
+    off: bool,
+}
+
+impl Cache {
+    /// Forget prefilter statistics (new haystack).
+    pub fn reset_stats(&mut self) {
+        self.stats = PreStats::default();
+    }
 }
 
 enum Strategy {
@@ -283,8 +301,10 @@ enum Strategy {
 pub struct Searcher {
     cls: Classes,
     fwd: Dir,
+    /// Same NFA as `fwd`, without start-state tags.
+    plain: Dir,
     rev: Dir,
-    prefilter: Option<SeqFinder>,
+    prefilter: Option<Prefilter>,
     strategy: Strategy,
     name: &'static str,
 }
@@ -295,13 +315,11 @@ impl Searcher {
         let rnfa = Nfa::new(h, true)?;
         let nullable = h.min_width(&[]) == 0;
         // Prefix prefilter.
-        let (pseq, _) = literal::positions(h);
         let mut prefilter = None;
         let mut pre_rate = u64::MAX;
-        if !nullable && !pseq.is_empty() {
-            let rate = literal::seq_rate(&pseq);
-            if rate < (1 << 20) / 12 {
-                prefilter = SeqFinder::new(&pseq);
+        if !nullable {
+            if let Some((p, rate)) = Prefilter::for_hir(h) {
+                prefilter = Some(p);
                 pre_rate = rate;
             }
         }
@@ -350,6 +368,7 @@ impl Searcher {
         };
         Some(Searcher {
             cls,
+            plain: Dir::new(fnfa.clone(), false, true, false),
             fwd: Dir::new(fnfa, false, true, use_start_tag),
             rev: Dir::new(rnfa, true, false, false),
             prefilter,
@@ -370,6 +389,8 @@ impl Searcher {
                 Strategy::Inner { pre, .. } => Some(DCache::new(pre.nfa.states.len())),
                 Strategy::Core => None,
             },
+            plain: DCache::new(self.plain.nfa.states.len()),
+            stats: PreStats::default(),
         }
     }
 
@@ -379,17 +400,33 @@ impl Searcher {
             return None;
         }
         if anchored {
-            let e = fwd_search(&self.cls, &self.fwd, &mut c.fwd, None, hay, start, true, must_advance).0?;
+            let e = fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, start, true, must_advance).0?;
             return Some((start, e));
         }
         if let Strategy::Inner { finder, pre } = &self.strategy {
             if let Some(pc) = c.pre_rev.as_mut() {
-                return self.find_inner(finder, pre, pc, &mut c.fwd, &mut c.rev, hay, start, must_advance);
+                return self.find_inner(finder, pre, pc, &mut c.plain, &mut c.rev, hay, start, must_advance);
             }
         }
-        let e = fwd_search(&self.cls, &self.fwd, &mut c.fwd, self.prefilter.as_ref(), hay, start, false, must_advance).0?;
+        let e = self.fwd_unanchored(c, hay, start, must_advance)?;
         let s = rev_search(&self.cls, &self.rev, &mut c.rev, hay, e, start)?;
         Some((s, e))
+    }
+
+    /// Unanchored forward search with the adaptive prefilter.
+    fn fwd_unanchored(&self, c: &mut Cache, hay: &[u8], start: usize, must_advance: bool) -> Option<usize> {
+        match &self.prefilter {
+            Some(pf) if !c.stats.off => {
+                let (e, pos, switched) =
+                    fwd_search(&self.cls, &self.fwd, &mut c.fwd, Some((pf, &mut c.stats)), hay, start, false, must_advance);
+                if switched {
+                    fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, pos, false, false).0
+                } else {
+                    e
+                }
+            }
+            _ => fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, start, false, must_advance).0,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -409,7 +446,7 @@ impl Searcher {
         loop {
             let j = finder.find(hay, at)?;
             if let Some(s) = rev_search(&self.cls, pre, pc, hay, j, start) {
-                let (e, scanned) = fwd_search(&self.cls, &self.fwd, fc, None, hay, s, true, must_advance && s == start);
+                let (e, scanned, _) = fwd_search(&self.cls, &self.plain, fc, None, hay, s, true, must_advance && s == start);
                 if let Some(e) = e {
                     return Some((s, e));
                 }
@@ -419,7 +456,7 @@ impl Searcher {
                     // Every remaining match starts after j (the prefix cannot consume
                     // the inner sequence's first byte), so resume there.
                     let from = j + 1;
-                    let e = fwd_search(&self.cls, &self.fwd, fc, self.prefilter.as_ref(), hay, from, false, false).0?;
+                    let e = fwd_search(&self.cls, &self.plain, fc, None, hay, from, false, false).0?;
                     let s2 = rev_search(&self.cls, &self.rev, rc, hay, e, from)?;
                     return Some((s2, e));
                 }
@@ -608,20 +645,20 @@ fn fwd_search(
     cls: &Classes,
     d: &Dir,
     c: &mut DCache,
-    pre: Option<&SeqFinder>,
+    mut pre: Option<(&Prefilter, &mut PreStats)>,
     hay: &[u8],
     start: usize,
     anchored: bool,
     must_advance: bool,
-) -> (Option<usize>, usize) {
+) -> (Option<usize>, usize, bool) {
     let n = hay.len();
     let mut p = start;
     let behind = if p == 0 { CTX_NONE } else { cls.byte_ctx(hay[p - 1]) };
     let mut sid = start_state(cls, d, c, behind, anchored, must_advance);
     let mut last: Option<usize> = None;
-    if let (Some(pf), false) = (pre, anchored) {
+    if let (Some((pf, _)), false) = (pre.as_ref(), anchored) {
         match pf.find(hay, p) {
-            None => return (None, n),
+            None => return (None, n, false),
             Some(q) => {
                 if q > p {
                     p = q;
@@ -635,16 +672,60 @@ fn fwd_search(
     sid &= ID_MASK;
     while p < end {
         // Hot loop: plain transitions.
-        let mut t;
-        loop {
-            t = c.trans[sid as usize + map[hay[p] as usize] as usize];
-            if t >= TAG_START {
-                break;
-            }
-            sid = t;
-            p += 1;
-            if p >= end {
-                break;
+        let mut t: u32;
+        // SAFETY: `sid` is always the untagged premultiplied id of an interned state
+        // whose row is fully allocated in `trans`; class ids are < stride; every
+        // haystack read is at an index < end <= hay.len().
+        unsafe {
+            let tp = c.trans.as_ptr();
+            let hp = hay.as_ptr();
+            let mp = map.as_ptr();
+            let cl = |q: usize| *mp.add(*hp.add(q) as usize) as usize;
+            loop {
+                if p + 4 <= end {
+                    let t0 = *tp.add(sid as usize + cl(p));
+                    if t0 >= TAG_START {
+                        t = t0;
+                        break;
+                    }
+                    let t1 = *tp.add(t0 as usize + cl(p + 1));
+                    if t1 >= TAG_START {
+                        sid = t0;
+                        p += 1;
+                        t = t1;
+                        break;
+                    }
+                    let t2 = *tp.add(t1 as usize + cl(p + 2));
+                    if t2 >= TAG_START {
+                        sid = t1;
+                        p += 2;
+                        t = t2;
+                        break;
+                    }
+                    let t3 = *tp.add(t2 as usize + cl(p + 3));
+                    if t3 >= TAG_START {
+                        sid = t2;
+                        p += 3;
+                        t = t3;
+                        break;
+                    }
+                    sid = t3;
+                    p += 4;
+                    if p >= end {
+                        t = sid;
+                        break;
+                    }
+                } else {
+                    t = *tp.add(sid as usize + cl(p));
+                    if t >= TAG_START {
+                        break;
+                    }
+                    sid = t;
+                    p += 1;
+                    if p >= end {
+                        break;
+                    }
+                }
             }
         }
         if p >= end {
@@ -657,15 +738,22 @@ fn fwd_search(
             last = Some(p);
         }
         if t & TAG_DEAD != 0 {
-            return (last, p);
+            return (last, p, false);
         }
         sid = t & ID_MASK;
         p += 1;
         if t & TAG_START != 0 {
-            if let Some(pf) = pre {
+            if let Some((pf, st)) = pre.as_mut() {
                 match pf.find(hay, p) {
-                    None => return (last, n),
+                    None => return (last, n, false),
                     Some(q) => {
+                        st.calls += 1;
+                        st.skipped += (q - p) as u64;
+                        if st.calls >= 32 && st.skipped < st.calls * 24 {
+                            // Candidates are too dense: continue without the prefilter.
+                            st.off = true;
+                            return (None, q, true);
+                        }
                         if q > p {
                             p = q;
                             sid = start_state(cls, d, c, cls.byte_ctx(hay[q - 1]), false, false) & ID_MASK;
@@ -675,14 +763,14 @@ fn fwd_search(
             }
         }
     }
-    if end < n {
+    if end < n && p == end {
         if let Some(fc) = cls.final_nl {
             let t = step(cls, d, c, &mut sid, fc);
             if t & TAG_MATCH != 0 {
                 last = Some(end);
             }
             if t & TAG_DEAD != 0 {
-                return (last, end);
+                return (last, end, false);
             }
             sid = t & ID_MASK;
         }
@@ -691,7 +779,7 @@ fn fwd_search(
     if t & TAG_MATCH != 0 {
         last = Some(n);
     }
-    (last, n)
+    (last, n, false)
 }
 
 /// Reverse search from boundary `end` down to `min_start`; returns the smallest start
