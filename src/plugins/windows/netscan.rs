@@ -105,8 +105,9 @@ pub fn determine_tcpip_version(k: &WinKernel) -> Result<(&'static str, bool)> {
             match current.last() {
                 Some(latest) => lookup(*latest).unwrap_or_default(),
                 None => {
+                    // a builtin exception: python dies with a traceback (no blank lines on stdout)
                     return Err(Error::msg(format!(
-                        "This version of Windows is not supported: {nt_major_version}.{nt_minor_version} {vers_major_version}.{vers_minor_version}!"
+                        "NotImplementedError: This version of Windows is not supported: {nt_major_version}.{nt_minor_version} {vers_major_version}.{vers_minor_version}!"
                     )));
                 }
             }

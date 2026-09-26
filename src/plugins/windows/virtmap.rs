@@ -65,7 +65,7 @@ pub fn determine_map(k: &WinKernel) -> Result<VirtualMap> {
             let srs = k.object("pointer", k.get_symbol("MmSystemRangeStart")?.address)?.int()?;
             enumerate_system_va_type(k, en, large_page_size, srs, &visible_state.m("SystemVaType")?)
         } else {
-            Err(Error::Symbol("SystemVaRegions: Required structures not found".into()))
+            Err(Error::Symbol(format!("{}!SystemVaRegions: Required structures not found", k.table.name())))
         }
     } else if k.has_symbol("MiSystemVaType") {
         let srs = k.object("pointer", k.get_symbol("MmSystemRangeStart")?.address)?.int()?;
@@ -73,7 +73,7 @@ pub fn determine_map(k: &WinKernel) -> Result<VirtualMap> {
         let arr = k.object("char", k.get_symbol("MiSystemVaType")?.address)?.cast_array_of(count.max(0) as u64, "char")?;
         enumerate_system_va_type(k, en, large_page_size, srs, &arr)
     } else {
-        Err(Error::Symbol("MiVisibleState: Required structures not found".into()))
+        Err(Error::Symbol(format!("{}!MiVisibleState: Required structures not found", k.table.name())))
     }
 }
 
@@ -91,13 +91,15 @@ impl Plugin for VirtMap {
         "Lists virtual mapped sections."
     }
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
+        // python's run() calls determine_map() before it builds the TreeGrid: a failure
+        // there prints no column header
+        let k = ctx.windows_kernel()?;
+        let mut map = determine_map(k)?;
         out.begin(vec![
             Column::new("Region", ColType::Str),
             Column::new("Start offset", ColType::Hex),
             Column::new("End offset", ColType::Hex),
         ])?;
-        let k = ctx.windows_kernel()?;
-        let mut map = determine_map(k)?;
         map.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, ranges) in map {
             for (start, end) in ranges {

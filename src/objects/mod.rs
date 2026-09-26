@@ -795,7 +795,11 @@ impl Module {
     }
     /// python `module.get_enumeration(name)`.
     pub fn get_enumeration(&self, name: &str) -> Result<u32> {
-        self.sp.table.enumeration(name).ok_or_else(|| Error::Symbol(format!("Unknown enumeration: {name}")))
+        // python SymbolError(name, table, ...) as the CLI prints it: "table!name: message"
+        self.sp.table.enumeration(name).ok_or_else(|| {
+            let t = self.sp.table.name();
+            Error::Symbol(format!("{t}!{name}: Enumeration not found in {t} table: {name}"))
+        })
     }
     /// python `get_type(t).relative_child_offset(member)`.
     pub fn offset_of(&self, type_name: &str, member: &str) -> Result<u64> {
