@@ -10,10 +10,14 @@
 //!   * Formatting is chosen by the COLUMN type (exactly like volatility3, which looks up the
 //!     renderer by `column.type`), with the Value providing the data. E.g. a `ColType::Hex`
 //!     column renders `Value::Int(16)` as `0x10`, a `ColType::Int` column renders it as `16`.
-//!   * Absent values (`Unreadable`, `Unparsable`, `NotAvailable`, `NotApplicable`) render as
-//!     "-" / "-" / "N/A" / "N/A" in the quick & pretty renderers regardless of column type.
+//!   * Absent values render as "-" (`Unreadable`, `Unparsable`, `NotAvailable`) or "N/A"
+//!     (`NotApplicable` only -- volatility3's `optional()` wrapper) in the quick / pretty / csv
+//!     renderers regardless of column type, and as `null` in json/jsonl for most column types.
+//!   * Depth jumps are clamped like volatility3's TreeGrid does (a row can be at most one level
+//!     deeper than the previous row).
 
-pub mod text; // quick / pretty / csv / json / jsonl / none renderers (CLI agent)
+pub mod pyfmt; // python-compatible number / string / datetime formatting helpers
+pub mod text; // quick / pretty / csv / json / jsonl / none / mermaid renderers (CLI agent)
 
 use crate::error::Result;
 
@@ -95,7 +99,12 @@ pub enum Value {
     /// `renderers.Disassembly(data, offset, architecture)`; arch is one of intel/intel64/arm/arm64 or None.
     Disassembly { data: Vec<u8>, offset: u64, arch: Option<&'static str> },
     /// Pre-rendered `renderers.LayerData` hexdump text (plugins resolve the memory themselves).
+    /// Prefer [`Value::LayerBytes`], which also renders correctly in json/jsonl/mermaid.
     LayerData(String),
+    /// `renderers.LayerData` resolved by the plugin: `data` is what python's
+    /// `LayerDataRenderer.render_bytes` returns (the padded read), `errors` the indices into
+    /// `data` it reports as unreadable (rendered `__` by the text renderers; usually empty).
+    LayerBytes { data: Vec<u8>, errors: Vec<u32> },
     Unreadable,
     Unparsable,
     NotApplicable,
