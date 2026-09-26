@@ -164,12 +164,33 @@ impl PySet {
     }
 }
 
+/// Marker prefix of [`py_exception`] errors.
+const PY_RAISE: &str = "\u{1}python exception: ";
+
+/// A python exception that is not a volatility exception (`struct.error`,
+/// `NotImplementedError`, `UnboundLocalError`, `TypeError` ...): python crashes with a
+/// traceback there. Carried as an error value (so rows before it are still emitted in
+/// order), then turned into the plugin panic rsvol uses for it by [`raise`].
+pub fn py_exception(msg: impl Into<String>) -> Error {
+    Error::Msg(format!("{PY_RAISE}{}", msg.into()))
+}
+
+/// Pass volatility errors through; panic (python's uncaught exception) for [`py_exception`]s.
+pub fn raise(e: Error) -> Error {
+    if let Error::Msg(s) = &e {
+        if let Some(m) = s.strip_prefix(PY_RAISE) {
+            panic!("{m}");
+        }
+    }
+    e
+}
+
 /// python `struct.pack("H", value)` (the scan needle for a CommandHistorySize value).
 pub fn pack_h(v: &SetElem) -> Result<[u8; 2]> {
     match v {
         SetElem::Int(i) if (0..=0xFFFF).contains(i) => Ok((*i as u16).to_le_bytes()),
-        SetElem::Int(_) => Err(Error::msg("struct.error: 'H' format requires 0 <= number <= 65535")),
-        SetElem::Bytes(_) => Err(Error::msg("struct.error: required argument is not an integer")),
+        SetElem::Int(_) => Err(py_exception("struct.error: 'H' format requires 0 <= number <= 65535")),
+        SetElem::Bytes(_) => Err(py_exception("struct.error: required argument is not an integer")),
     }
 }
 
@@ -192,6 +213,7 @@ pub fn config_ints(cfg: &Config, name: &str, default: i128) -> Vec<i128> {
 /// which skips the rest of that hive). Any error inside a hive skips the rest of the hive
 /// (python `except Exception: continue`); errors listing the hives propagate.
 pub fn get_console_settings_from_registry(ctx: &Context, k: &WinKernel, max_history: &mut PySet, mut max_buffers: Option<&mut PySet>) -> Result<()> {
+    let _t = crate::util::trace::span("consoles: registry settings");
     for hive in list_hives(ctx, k, None, None) {
         let hive = hive?;
         let _ = (|| -> Result<()> {
@@ -343,7 +365,7 @@ pub fn determine_conhost_version(ctx: &Context, k: &WinKernel, conhost_layer: La
     current.sort_by_key(|(v, _)| *v);
     match current.last() {
         Some((v, _)) => Ok(version_dict.iter().find(|(w, _)| w == v).map(|(_, f)| *f).unwrap_or("")),
-        None => Err(Error::msg(format!(
+        None => Err(py_exception(format!(
             "NotImplementedError: This version of Windows is not supported: {nt_major_version}.{nt_minor_version} {vers_major}.{vers_minor_version}!"
         ))),
     }
@@ -379,7 +401,7 @@ pub fn find_version_info(layer: LayerRef, filename: &str) -> Result<Option<(i128
     }
     let data = layer.read_vec(offset - 0x500, 0x500)?;
     let at = crate::layers::scan::find(&data, b"\xbd\x04\xef\xfe").map(|i| i as i64).unwrap_or(-1) + 4;
-    let s = data.get(at as usize..at as usize + 20).filter(|s| s.len() == 20).ok_or_else(|| Error::msg("struct.error: unpack requires a buffer of 20 bytes"))?;
+    let s = data.get(at as usize..at as usize + 20).filter(|s| s.len() == 20).ok_or_else(|| py_exception("struct.error: unpack requires a buffer of 20 bytes"))?;
     let w = |o: usize| u16::from_le_bytes([s[o], s[o + 1]]) as i128;
     // "<IHHHHHHHH": struct_version, FV2, FV1, FV4, FV3, ...
     Ok(Some((w(6), w(4), w(10), w(8))))
@@ -393,8 +415,11 @@ pub fn get_version_information(ctx: &Context, layer: LayerRef, base: u64) -> Res
     let pe_table = ctx.load_isf("windows/pe")?;
     let dos = Obj::named(Space::on(layer, pe_table), "_IMAGE_DOS_HEADER", base)?;
     let (pieces, err) = crate::symbols::windows::pe::reconstruct(&dos);
-    if let Some(e) = err {
-        return Err(e);
+    match err {
+        // python: ValueError (bad signatures, sizes) is not caught by consoles
+        Some(e) if e.is_invalid_address() => return Err(e),
+        Some(e) => return Err(py_exception(format!("ValueError: {e}"))),
+        None => {}
     }
     // io.BytesIO: seek + write
     let size = pieces.iter().map(|(o, d)| *o as usize + d.len()).max().unwrap_or(0);
@@ -697,7 +722,7 @@ fn console_properties(ci: &Obj, max_buffers: &[SetElem]) -> Result<Option<Vec<Pr
                 if c < 1 {
                     false
                 } else {
-                    return Err(Error::msg("TypeError: '>' not supported between instances of 'int' and 'bytes'"));
+                    return Err(py_exception("TypeError: '>' not supported between instances of 'int' and 'bytes'"));
                 }
             }
         };
@@ -869,7 +894,7 @@ pub fn emit_rows(
     let name = array_to_string(&proc.m("ImageFileName")?, None)?;
     let mut any = false;
     for f in found {
-        let (addr, props) = f?;
+        let (addr, props) = f.map_err(raise)?;
         any = true;
         for p in props {
             out.row(
@@ -924,6 +949,7 @@ pub struct Conhosts {
 /// python `find_conhost_proc` + `find_conhostexe` for every process (in parallel; they are
 /// independent) and `create_conhost_symbol_table` for the first one with a conhost.exe base.
 pub fn conhosts(ctx: &Context, k: &WinKernel, case_insensitive: bool) -> Conhosts {
+    let _t = crate::util::trace::span("consoles: conhost processes + symbol table");
     let found = find_conhost_procs(k, case_insensitive);
     let exes: Vec<Option<Result<Option<(u64, i128)>>>> = crate::util::par::par_map(found.len(), |i| match &found[i] {
         Ok(c) => Some(find_conhostexe(&c.proc)),
@@ -997,6 +1023,7 @@ impl Plugin for Consoles {
             _ => None,
         };
         // per process work in parallel, rows in python order
+        let _t = crate::util::trace::span("consoles: console info");
         let results: Vec<Option<ProcResult>> = crate::util::par::par_map(ch.procs.len(), |i| match (&ch.procs[i], table) {
             (Ok((c, Some((base, size)))), Some(t)) => Some(console_info_for(c, t, *base, *size, &max_history, &max_buffers)),
             _ => None,
@@ -1006,12 +1033,12 @@ impl Plugin for Consoles {
             _ => None,
         };
         for (p, r) in ch.procs.into_iter().zip(results) {
-            let (c, exe) = p?;
+            let (c, exe) = p.map_err(raise)?;
             if exe.is_none() {
                 continue;
             }
             if let Some(e) = table_err.take() {
-                return Err(e);
+                return Err(raise(e));
             }
             if let Some(r) = r {
                 emit_rows(out, &c.proc, r.found, r.last_candidate, "_CONSOLE_INFORMATION", "Console Information Not Found", Data::consoles_value)?;
@@ -1037,6 +1064,39 @@ mod tests {
         assert_eq!(order(&(1..=40).rev().step_by(3).collect::<Vec<_>>()), vec![1, 34, 4, 37, 7, 40, 10, 13, 16, 19, 22, 25, 28, 31]);
         assert_eq!(order(&[-1, -2, 5, 1 << 40, 1 << 62]), vec![1 << 40, 1 << 62, 5, -2, -1]);
         assert_eq!(order(&[50, 50, 4]), vec![50, 4]);
+    }
+
+    /// Random lists (ints in [0, 70000], and mixes of negatives, u32 values, multiples of 8 and
+    /// values around 2**61 - 1) with the order `list(set(values))` has in CPython 3.14.
+    #[test]
+    fn cpython_set_order_random() {
+        let cases: &[(&[i128], &[i128])] = &[
+        (&[42445, 19772], &[19772, 42445]),
+        (&[1, 0], &[0, 1]),
+        (&[11265, 56838, 54810], &[11265, 54810, 56838]),
+        (&[-4, -2, 3687093963], &[3687093963, -4, -2]),
+        (&[15439, 40433, 23688, 13507, 24624], &[13507, 23688, 15439, 24624, 40433]),
+        (&[3058492450, 464, 248, 2305843009213693948, 2305843009213693951], &[2305843009213693951, 3058492450, 464, 248, 2305843009213693948]),
+        (&[5138, 10173, 41123, 44580, 45898, 65100], &[41123, 44580, 45898, 65100, 5138, 10173]),
+        (&[4, 56, 392, -5, 253207296, 2305843009213693949], &[253207296, 4, 392, 56, -5, 2305843009213693949]),
+        (&[52644, 36416, 17947, 56429, 36493, 54433, 47024], &[36416, 54433, 52644, 56429, 36493, 47024, 17947]),
+        (&[5, 2305843009213693948, 783156687, 1, 2, 2, -2], &[1, 2, 5, 783156687, 2305843009213693948, -2]),
+        (&[13419, 30, 19826, 13299, 47659, 3342, 9216, 27256, 49313], &[9216, 49313, 47659, 13419, 3342, 19826, 13299, 27256, 30]),
+        (&[352, 2305843009213693951, 144, 16, -3, 2226497560, 2159067275, 2305843009213693949, 24], &[352, 2305843009213693951, 2159067275, 144, 16, 2305843009213693949, 2226497560, 24, -3]),
+        (&[61897, 33970, 25381, 45125, 58619, 45812, 47793, 10556, 28896, 13389, 29733, 61614], &[28896, 45125, 25381, 29733, 61897, 13389, 61614, 47793, 33970, 45812, 58619, 10556]),
+        (&[-2, 2762235647, 440, -4, 2305843009213693952, 4210381974, 2790331461, 120232146, 1400113410, -5, 3335068562, -3], &[2305843009213693952, 1400113410, 2790331461, 120232146, 3335068562, 4210381974, 440, -5, -4, -3, -2, 2762235647]),
+        (&[42727, 67941, 69563, 63240, 13907, 7447, 32570, 25074, 36296, 5531, 12811, 66547, 59267, 3652, 8305, 58097, 42678, 66263, 67130, 26136], &[59267, 63240, 12811, 7447, 26136, 5531, 42678, 67130, 32570, 69563, 3652, 36296, 13907, 66263, 67941, 42727, 8305, 25074, 66547, 58097]),
+        (&[4043716558, 2305843009213693951, 72, 2835780143, 4090974082, 2305843009213693953, 424, 2305843009213693952, 392, 4126495981, 361040387, 432, 328, -5, 224, 2305843009213693952, 2670196012, 4162737373, 4003969892, -1], &[2305843009213693951, 2305843009213693952, 4090974082, 2305843009213693953, 361040387, 392, 424, 2670196012, 2835780143, 432, 72, 328, 4043716558, 4162737373, 224, 4003969892, 4126495981, -5, -1]),
+        (&[32826, 4843, 2011, 2416, 66277, 24832, 67401, 62227, 32201, 58596, 13930, 56646, 64880, 51522, 66412, 40341, 28204, 30089, 44918, 26034, 18313, 53044, 45554, 7128, 17015, 1868, 9269, 33501, 56458, 21397, 7261, 11073, 49922], &[24832, 49922, 30089, 18313, 56458, 62227, 40341, 21397, 28204, 26034, 53044, 9269, 32826, 11073, 51522, 56646, 67401, 32201, 1868, 7128, 2011, 33501, 7261, 58596, 66277, 13930, 4843, 66412, 2416, 64880, 45554, 44918, 17015]),
+        (&[1258676654, 264, 1389567515, 0, 2, -4, 96611647, 392, 2305843009213693948, 3, -5, 2305843009213693948, 2305843009213693953, 3475568222, 2305843009213693954, 2936454391, 336, 4, 2305843009213693953, -1, 3, 512, 88, 112, 3763015118, 456, -3, 2305843009213693954, -4, 432, 48, 2305843009213693950, 2305843009213693954], &[0, 512, 2, 3, 2305843009213693953, 2305843009213693954, 4, 264, 392, 1389567515, 1258676654, 432, 48, 96611647, 456, 3763015118, 336, 88, 3475568222, -4, 112, 2305843009213693950, 2936454391, -5, 2305843009213693948, -3, -1]),
+        (&[3802, 52434, 26664, 10561, 6484, 53855, 59095, 18162, 37513, 63645, 6419, 16686, 22382, 61890, 54377, 45044, 36929, 39029, 33520, 34100, 53242, 31282, 39431, 63331, 51690, 15694, 21932, 21188, 9852, 27246, 65615, 65152, 28839, 59373, 43625, 58977, 56023, 18297, 25219, 31992, 11890, 22897, 44820, 11939, 41849, 31342, 48274, 33863, 26495, 2632], &[65152, 25219, 41849, 39431, 37513, 48274, 6419, 44820, 63645, 11939, 28839, 26664, 21932, 16686, 31282, 34100, 10561, 61890, 36929, 21188, 33863, 2632, 15694, 65615, 52434, 6484, 59095, 56023, 3802, 53855, 58977, 63331, 54377, 51690, 43625, 59373, 22382, 27246, 33520, 22897, 18162, 11890, 45044, 39029, 31342, 31992, 18297, 53242, 9852, 26495]),
+        (&[208, 504, 3644847894, 1, 2305843009213693952, 314124801, -4, 5, -5, 128, 3, 2503497687, 304, 3795780556, 416, 2305843009213693953, 1104906638, 2, 2168436173, 472, 2305843009213693949, 2554655862, -5, -3, 4001172194, 2305843009213693950, 0, 2305843009213693950, 384, 480, 192, 2305843009213693948, 1993082227, -4, -1, 4051228543, 392, 3499540438, 3171781886, 0, 2305843009213693949, 488, 104, 2305843009213693951, 2305843009213693951, 296, 256, 1887199037, 64, -2], &[128, 2305843009213693952, 1, 314124801, 3, 5, 2305843009213693953, 2, 0, 384, 392, 2305843009213693951, 256, 1104906638, 3644847894, 416, 296, 304, 1887199037, 192, 64, 3795780556, 2168436173, 208, 3499540438, 2503497687, 472, 3171781886, 480, 4001172194, 488, 104, 2305843009213693948, -3, 1993082227, 2554655862, -1, 504, -2, -5, -4, 2305843009213693949, 2305843009213693950, 4051228543]),
+        (&[588, 62228, 30292, 58759, 49004, 5290, 38492, 30525, 15625, 6604, 24847, 25449, 9845, 48789, 67196, 23299, 58866, 34071, 830, 13864, 45835, 28527, 4909, 48327, 44566, 18529, 5788, 26735, 33412, 5011, 26665, 1491, 42893, 53607, 48733, 24267, 40920, 10215, 26661, 4124, 64962, 63374, 8293, 53499, 13289, 51812, 20257, 69992, 11947, 21455, 52136, 35542, 53711, 37132, 40317, 54767, 6731, 40941, 46816, 54274, 54584, 2387, 47681, 25847, 51213, 53080, 26695, 770, 56906, 20521], &[54274, 23299, 33412, 770, 58759, 15625, 45835, 37132, 42893, 63374, 24847, 51213, 5011, 62228, 48789, 44566, 34071, 5788, 4124, 20257, 26661, 13864, 26665, 5290, 11947, 52136, 4909, 20521, 54584, 30525, 830, 47681, 64962, 48327, 26695, 56906, 24267, 588, 6604, 6731, 21455, 53711, 1491, 30292, 2387, 35542, 40920, 53080, 38492, 48733, 46816, 18529, 51812, 8293, 53607, 10215, 25449, 13289, 69992, 49004, 40941, 28527, 26735, 54767, 58866, 9845, 25847, 53499, 67196, 40317]),
+        (&[388643082, 2305843009213693953, 3982412036, 0, 1, 1350878783, 3635051491, -5, -3, 2305843009213693951, 3341854667, 1578185763, 2305843009213693949, 2032459486, 2305843009213693954, 128, 343459769, 3681088117, 224, 160, 616638316, 4, 160, 5, 5, 264, 4, 48, 2305843009213693950, 2305843009213693949, 48, 963184921, -2, -2, 5, 2305843009213693952, -2, 1, 2305843009213693949, 4, 2305843009213693953, 224, 120, -5, 160, 3780279012, 1, 1, 4, -4, -5, 2305843009213693954, -4, 2715532681, 296, 352, -5, 2305843009213693950, -5, 48, 184, 4053890304, -2, 2, 1, 885264835, 1, 2305843009213693954, 472, 992242503], &[0, 1, 2305843009213693953, 2305843009213693951, 3982412036, 2305843009213693954, 128, 4, 5, 264, 388643082, 2305843009213693952, 2715532681, 2, 963184921, 160, 1578185763, 296, 4053890304, 48, 184, 343459769, 1350878783, 885264835, 992242503, 3341854667, 472, 2032459486, 224, 352, 3635051491, 3780279012, 616638316, -3, 3681088117, -2, 120, -5, -4, 2305843009213693949, 2305843009213693950]),
+        ];
+        for (values, expected) in cases {
+            assert_eq!(&order(values)[..], *expected, "set({values:?})");
+        }
     }
 
     #[test]

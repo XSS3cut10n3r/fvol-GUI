@@ -3,12 +3,12 @@
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
 use crate::context::Context;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::layers::scan::{BytesScanner, scan};
 use crate::objects::{Obj, Space};
 use crate::plugins::windows::consoles::{
-    ConhostProc, Data, PySet, ProcResult, Prop, SetElem, columns, config_ints, conhosts, emit_rows, get_console_settings_from_registry, pack_h,
-    py_hex,
+    ConhostProc, Data, ProcResult, Prop, PySet, SetElem, columns, config_ints, conhosts, emit_rows, get_console_settings_from_registry, pack_h,
+    py_exception, py_hex, raise,
 };
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::RowSink;
@@ -90,7 +90,7 @@ fn history_properties(ch: &Obj, max_history_value: i128) -> Vec<Prop> {
 /// python `CmdScan.get_command_history` for one conhost process. Python passes the VAD
 /// *generator* as `sections` to every scan, so only the first `max_history` value (in set
 /// order) scans anything; the later scans get an exhausted generator.
-fn history_for(c: &ConhostProc, table: TableRef, vads: &Result<Vec<(i128, i128)>>, max_history: &[SetElem]) -> ProcResult {
+fn history_for(c: &ConhostProc, table: TableRef, mut vads: Result<Vec<(i128, i128)>>, max_history: &[SetElem]) -> ProcResult {
     let mut res = ProcResult { found: Vec::new(), last_candidate: None };
     let r = (|| -> Result<()> {
         let sp = Space::on(c.layer, table);
@@ -103,9 +103,9 @@ fn history_for(c: &ConhostProc, table: TableRef, vads: &Result<Vec<(i128, i128)>
                 SetElem::Bytes(_) => 0,
             };
             let sections = if idx == 0 {
-                match vads {
-                    Ok(v) => python_sections(v.clone()),
-                    Err(e) => return Err(Error::msg(e.to_string())),
+                match std::mem::replace(&mut vads, Ok(Vec::new())) {
+                    Ok(v) => python_sections(v),
+                    Err(e) => return Err(e),
                 }
             } else {
                 Vec::new()
@@ -158,8 +158,9 @@ impl Plugin for CmdScan {
             Some(Ok(t)) => Some(*t),
             _ => None,
         };
+        let _t = crate::util::trace::span("cmdscan: command histories");
         let results: Vec<Option<ProcResult>> = crate::util::par::par_map(ch.procs.len(), |i| match (&ch.procs[i], table) {
-            (Ok((c, Some(_))), Some(t)) => Some(history_for(c, t, &get_filtered_vads(&c.proc, 0x4000_0000), &max_history)),
+            (Ok((c, Some(_))), Some(t)) => Some(history_for(c, t, get_filtered_vads(&c.proc, 0x4000_0000), &max_history)),
             _ => None,
         });
         let mut table_err = match ch.table {
@@ -169,19 +170,19 @@ impl Plugin for CmdScan {
         // python's `command_history` local survives from one process to the next
         let mut carry: Option<u64> = None;
         for (p, r) in ch.procs.into_iter().zip(results) {
-            let (c, exe) = p?;
+            let (c, exe) = p.map_err(raise)?;
             if exe.is_none() {
                 continue;
             }
             if let Some(e) = table_err.take() {
-                return Err(e);
+                return Err(raise(e));
             }
             let Some(r) = r else { continue };
             if r.last_candidate.is_some() {
                 carry = r.last_candidate;
             }
             if r.found.is_empty() && carry.is_none() {
-                return Err(Error::msg("UnboundLocalError: cannot access local variable 'command_history' where it is not associated with a value"));
+                return Err(raise(py_exception("UnboundLocalError: cannot access local variable 'command_history' where it is not associated with a value")));
             }
             emit_rows(out, &c.proc, r.found, carry, "_COMMAND_HISTORY", "History Not Found", Data::cmdscan_value)?;
         }
