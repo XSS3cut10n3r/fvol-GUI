@@ -21,6 +21,7 @@ pub mod pdb;
 pub mod pe;
 pub mod pool;
 pub mod registry;
+pub mod shimcache;
 pub mod token;
 pub mod vad;
 pub mod versions;

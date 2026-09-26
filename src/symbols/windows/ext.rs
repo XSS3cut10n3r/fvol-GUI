@@ -357,7 +357,12 @@ impl WinExt for Obj {
     fn fast_ref_dereference(&self) -> Result<Obj> {
         let max_fast_ref: u64 = if self.sp.table.is_64bit() { 15 } else { 7 };
         let v = self.m("Object")?.u64()?;
-        Obj::named(self.sp, "pointer", v & !max_fast_ref)
+        let p = Obj::named(self.sp, "pointer", v & !max_fast_ref)?;
+        // python builds the pointer with context.object(), which reads its value right away:
+        // an unreadable target raises InvalidAddressException here (e.g. getsids' "Token
+        // unreadable", privileges skipping the process)
+        p.u64()?;
+        Ok(p)
     }
 
     fn is_valid(&self) -> bool {
