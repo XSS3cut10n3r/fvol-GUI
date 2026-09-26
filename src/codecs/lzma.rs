@@ -134,6 +134,208 @@ impl Props {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// x86-64 range coder steps (asm templates)
+// ---------------------------------------------------------------------------------------
+//
+// Operands shared by the templates: {range} {code} (u32), {inp} (input pointer), {base}
+// (probability node array), {sym} (node index), {t0} {t1} scratch, {p0} {p1} the current and
+// next probability (the two alternate between steps so no moves are needed).
+//
+// A bit is decoded as: bound = (range >> 11) * prob is left in {range}, {t0} = range - bound,
+// {t1} = code, code -= bound; the carry of that subtraction is the negated bit and cmov picks
+// the right range/code (the reference decoder's x86-64 scheme). The chain per bit is
+// shr, imul, sub, cmov: 6 cycles; everything else hangs off it. The node index advances with
+// `sbb sym, -1` one cycle after the flags so the children of the next node are loaded (with a
+// scaled index) in time for the next-but-one bit.
+
+/// Normalization: shift in one input byte when range < 2^24.
+#[cfg(target_arch = "x86_64")]
+macro_rules! norm {
+    () => {
+        concat!(
+            "cmp {range:e}, 0x1000000\n",
+            "jae 2f\n",
+            "shl {code:e}, 8\n",
+            "mov {code:l}, byte ptr [{inp}]\n",
+            "shl {range:e}, 8\n",
+            "inc {inp}\n",
+            "2:\n",
+        )
+    };
+}
+
+/// bound in {range}, range - bound in {t0}, old code in {t1}, code - bound in {code} (CF = !bit).
+#[cfg(target_arch = "x86_64")]
+macro_rules! calc {
+    ($p:literal) => {
+        concat!(
+            "mov {t0:e}, {range:e}\n",
+            "shr {range:e}, 11\n",
+            "imul {range:e}, {",
+            $p,
+            ":e}\n",
+            "sub {t0:e}, {range:e}\n",
+            "mov {t1:e}, {code:e}\n",
+            "sub {code:e}, {range:e}\n",
+        )
+    };
+}
+
+/// Probability update from CF (= !bit): p -= (p + (bit ? 0 : 31 - 2048)) >> 5, stored at
+/// byte offset {t1} of {base} (upper bits of the register are garbage afterwards).
+#[cfg(target_arch = "x86_64")]
+macro_rules! upd_store {
+    ($p:literal, $addr:literal) => {
+        concat!(
+            "shr {t0:e}, 5\n",
+            "sub {",
+            $p,
+            ":e}, {t0:e}\n",
+            "mov word ptr [",
+            $addr,
+            "], {",
+            $p,
+            ":x}\n",
+        )
+    };
+}
+
+/// First bit of a bit tree: node 1, children 2 and 3 loaded up front.
+#[cfg(target_arch = "x86_64")]
+macro_rules! tree_first {
+    ($a:literal, $b:literal) => {
+        concat!(
+            "movzx {", $a, ":e}, word ptr [{base} + 2]\n",
+            "mov {sym:e}, 2\n",
+            "movzx {", $b, ":e}, word ptr [{base} + 4]\n",
+            norm!(),
+            calc!($a),
+            "cmovae {range:e}, {t0:e}\n",
+            "movzx {t0:e}, word ptr [{base} + 6]\n",
+            "cmovae {", $b, ":e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "sbb {sym:e}, -1\n",
+            upd_store!($a, "{base} + {t1}"),
+        )
+    };
+}
+
+/// Middle bit: node {sym} (prob in $a); children loaded into $b.
+#[cfg(target_arch = "x86_64")]
+macro_rules! tree_mid {
+    ($a:literal, $b:literal) => {
+        concat!(
+            "movzx {", $b, ":e}, word ptr [{base} + {sym}*4]\n",
+            norm!(),
+            calc!($a),
+            "cmovae {range:e}, {t0:e}\n",
+            "movzx {t0:e}, word ptr [{base} + {sym}*4 + 2]\n",
+            "lea {sym:e}, [{sym} + {sym}]\n",
+            "cmovae {", $b, ":e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "sbb {sym:e}, -1\n",
+            upd_store!($a, "{base} + {t1}"),
+        )
+    };
+}
+
+/// Last bit; {sym} = final node + {last} + 1 (the const operand folds in the offset).
+#[cfg(target_arch = "x86_64")]
+macro_rules! tree_last {
+    ($a:literal) => {
+        concat!(
+            "add {sym:e}, {sym:e}\n",
+            norm!(),
+            calc!($a),
+            "cmovae {range:e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "sbb {sym:e}, {last}\n",
+            upd_store!($a, "{base} + {t1}"),
+        )
+    };
+}
+
+/// Reverse tree, first bit: node 1, next candidates 2 and 3; {sym} = bits so far.
+#[cfg(target_arch = "x86_64")]
+macro_rules! rev_first {
+    ($a:literal, $b:literal) => {
+        concat!(
+            "movzx {", $a, ":e}, word ptr [{base} + 2]\n",
+            "xor {sym:e}, {sym:e}\n",
+            "movzx {", $b, ":e}, word ptr [{base} + 4]\n",
+            norm!(),
+            calc!($a),
+            "cmovae {range:e}, {t0:e}\n",
+            "movzx {t0:e}, word ptr [{base} + 6]\n",
+            "cmovae {", $b, ":e}, {t0:e}\n",
+            "lea {t0:e}, [{sym} + 1]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "cmovae {sym:e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "shr {t0:e}, 5\n",
+            "sub {", $a, ":e}, {t0:e}\n",
+            "mov word ptr [{base} + 2], {", $a, ":x}\n",
+        )
+    };
+}
+
+/// Reverse tree, middle bit of weight $add: current node $dcur/2 + sym, next candidates
+/// $n0/2 + sym (bit 0) and $n1/2 + sym (bit 1).
+#[cfg(target_arch = "x86_64")]
+macro_rules! rev_mid {
+    ($a:literal, $b:literal, $add:literal, $dcur:literal, $n0:literal, $n1:literal) => {
+        concat!(
+            "movzx {", $b, ":e}, word ptr [{base} + {sym}*2 + ", $n0, "]\n",
+            norm!(),
+            calc!($a),
+            "cmovae {range:e}, {t0:e}\n",
+            "movzx {t0:e}, word ptr [{base} + {sym}*2 + ", $n1, "]\n",
+            "cmovae {", $b, ":e}, {t0:e}\n",
+            "lea {t0:e}, [{sym} + ", $add, "]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "cmovae {sym:e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "shr {t0:e}, 5\n",
+            "sub {", $a, ":e}, {t0:e}\n",
+            "mov word ptr [{base} + {t1}*2 + ", $dcur, "], {", $a, ":x}\n",
+        )
+    };
+}
+
+/// Reverse tree, last bit of weight $add at node $dcur/2 + sym.
+#[cfg(target_arch = "x86_64")]
+macro_rules! rev_last {
+    ($a:literal, $add:literal, $dcur:literal) => {
+        concat!(
+            norm!(),
+            calc!($a),
+            "cmovae {range:e}, {t0:e}\n",
+            "lea {t0:e}, [{sym} + ", $add, "]\n",
+            "cmovb {code:e}, {t1:e}\n",
+            "mov {t1:e}, {sym:e}\n",
+            "cmovae {sym:e}, {t0:e}\n",
+            "lea {t0:e}, [{", $a, "} - 2017]\n",
+            "cmovae {t0:e}, {", $a, ":e}\n",
+            "shr {t0:e}, 5\n",
+            "sub {", $a, ":e}, {t0:e}\n",
+            "mov word ptr [{base} + {t1}*2 + ", $dcur, "], {", $a, ":x}\n",
+        )
+    };
+}
+
 /// LZMA decoder state: probabilities, state machine, rep distances.
 pub(crate) struct LzmaDecoder {
     probs: Vec<u16>,
@@ -251,7 +453,7 @@ impl LzmaDecoder {
     unsafe fn decode_inner<const FIXED: bool>(
         &mut self,
         rc: &mut RangeDecoder,
-        inp: *const u8,
+        inp0: *const u8,
         ip_limit: usize,
         out: &mut [u8],
         pos: &mut usize,
@@ -268,7 +470,9 @@ impl LzmaDecoder {
             (self.props.lc as usize, (1usize << self.props.lp) - 1, (1usize << self.props.pb) - 1)
         };
 
-        let mut ip = rc.ip;
+        // SAFETY: rc.ip <= ip_limit + INPUT_MARGIN (callers), inside the readable input.
+        let mut inp = unsafe { inp0.add(rc.ip) };
+        let in_limit = inp0.wrapping_add(ip_limit);
         let mut range = rc.range;
         let mut code = rc.code;
         let mut state = self.state;
@@ -285,44 +489,235 @@ impl LzmaDecoder {
                 if range < TOP {
                     stat!(13, 1);
                     range <<= 8;
-                    // SAFETY: ip <= ip_limit + INPUT_MARGIN (see decode_inner).
-                    let b = unsafe { *inp.add(ip) };
-                    ip += 1;
-                    code = (code << 8) | b as u32;
+                    // SAFETY: inp <= in_limit + INPUT_MARGIN (see decode_inner).
+                    code = (code << 8) | unsafe { *inp } as u32;
+                    inp = unsafe { inp.add(1) };
                 }
             };
         }
-        // Decodes one bit with the probability at `probs[$i]`; evaluates to 0 or 1 (usize).
-        macro_rules! bit {
-            ($i:expr) => {{
-                // SAFETY: every index is below LITERAL + 0x300 << (lc + lp) by construction
-                // (fixed layout offsets plus bounded tree indices).
-                let pp = unsafe { probs.add($i) };
+        // Decodes one bit with the probability at `$pp`; evaluates to true for a 0 bit.
+        // (Branchy, like the reference decoder: the caller branches on the bit anyway.)
+        macro_rules! is0 {
+            ($pp:expr) => {{
+                let pp: *mut u16 = $pp;
+                // SAFETY: every index is below LITERAL + 0x300 << (lc + lp) by construction.
                 let pr = unsafe { *pp } as u32;
                 normalize!();
                 let bound = (range >> 11) * pr;
                 if code < bound {
                     range = bound;
                     unsafe { *pp = (pr + ((2048 - pr) >> 5)) as u16 };
-                    0usize
+                    true
                 } else {
                     range -= bound;
                     code -= bound;
                     unsafe { *pp = (pr - (pr >> 5)) as u16 };
-                    1usize
+                    false
                 }
             }};
         }
-        // Branchless bit with an already-loaded probability `$pr` stored at `$pp`: range/code
-        // are selected with cmov and the probability update is a single subtraction
-        // (p -= (p - adj) >> 5 with adj = 0 for a 1 bit and 2048 - 31 for a 0 bit).
-        // Evaluates to the bit as a bool.
+        // Bit trees: 3, 6 or 8 bits MSB first under the node array at `$base` (node 1 is the
+        // root), result = final node + $fa. x86-64: the reference decoder's branchless asm
+        // (both children loaded before the bit is known, node index advanced with sbb).
+        #[cfg(target_arch = "x86_64")]
+        macro_rules! tree {
+            ($base:expr, $fa:expr, $($steps:expr),+) => {{
+                let base: *mut u16 = $base;
+                let sym: usize;
+                // SAFETY: tree nodes lie inside the probability array; input reads stay
+                // within the INPUT_MARGIN slack.
+                unsafe {
+                    core::arch::asm!(
+                        $($steps),+,
+                        range = inout(reg) range,
+                        code = inout(reg) code,
+                        inp = inout(reg) inp,
+                        base = in(reg) base,
+                        sym = out(reg) sym,
+                        t0 = out(reg) _,
+                        t1 = out(reg) _,
+                        p0 = out(reg) _,
+                        p1 = out(reg) _,
+                        last = const -1 - ($fa),
+                        options(nostack),
+                    )
+                };
+                sym
+            }};
+        }
+        #[cfg(target_arch = "x86_64")]
+        macro_rules! tree3 {
+            ($base:expr, $fa:expr) => {
+                tree!($base, $fa, tree_first!("p0", "p1"), tree_mid!("p1", "p0"), tree_last!("p0"))
+            };
+        }
+        #[cfg(target_arch = "x86_64")]
+        macro_rules! tree6 {
+            ($base:expr, $fa:expr) => {
+                tree!(
+                    $base,
+                    $fa,
+                    tree_first!("p0", "p1"),
+                    tree_mid!("p1", "p0"),
+                    tree_mid!("p0", "p1"),
+                    tree_mid!("p1", "p0"),
+                    tree_mid!("p0", "p1"),
+                    tree_last!("p1")
+                )
+            };
+        }
+        #[cfg(target_arch = "x86_64")]
+        macro_rules! tree8 {
+            ($base:expr, $fa:expr) => {
+                tree!(
+                    $base,
+                    $fa,
+                    tree_first!("p0", "p1"),
+                    tree_mid!("p1", "p0"),
+                    tree_mid!("p0", "p1"),
+                    tree_mid!("p1", "p0"),
+                    tree_mid!("p0", "p1"),
+                    tree_mid!("p1", "p0"),
+                    tree_mid!("p0", "p1"),
+                    tree_last!("p1")
+                )
+            };
+        }
+        // Portable bit trees: same node walk in plain Rust.
+        #[cfg(not(target_arch = "x86_64"))]
+        macro_rules! tree_n {
+            ($base:expr, $fa:expr, $n:expr) => {{
+                let tp: *mut u16 = $base;
+                let mut m = 1usize;
+                for _ in 0..$n {
+                    m = 2 * m + (!is0!(unsafe { tp.add(m) })) as usize;
+                }
+                (m as isize + ($fa) as isize) as usize
+            }};
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        macro_rules! tree3 {
+            ($base:expr, $fa:expr) => {
+                tree_n!($base, $fa, 3)
+            };
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        macro_rules! tree6 {
+            ($base:expr, $fa:expr) => {
+                tree_n!($base, $fa, 6)
+            };
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        macro_rules! tree8 {
+            ($base:expr, $fa:expr) => {
+                tree_n!($base, $fa, 8)
+            };
+        }
+        // 4-bit reverse tree (align bits), LSB first; nodes are numbered 2^depth + (bits so
+        // far), the reference decoder's layout (any per-prefix layout is equivalent).
+        #[cfg(target_arch = "x86_64")]
+        macro_rules! rev4 {
+            ($base:expr) => {{
+                let base: *mut u16 = $base;
+                let sym: usize;
+                // SAFETY: nodes 1..16 of the align array; input within the margin.
+                unsafe {
+                    core::arch::asm!(
+                        rev_first!("p0", "p1"),
+                        rev_mid!("p1", "p0", "2", "4", "8", "12"),
+                        rev_mid!("p0", "p1", "4", "8", "16", "24"),
+                        rev_last!("p1", "8", "16"),
+                        range = inout(reg) range,
+                        code = inout(reg) code,
+                        inp = inout(reg) inp,
+                        base = in(reg) base,
+                        sym = out(reg) sym,
+                        t0 = out(reg) _,
+                        t1 = out(reg) _,
+                        p0 = out(reg) _,
+                        p1 = out(reg) _,
+                        options(nostack),
+                    )
+                };
+                sym
+            }};
+        }
+        // Reverse tree of $n (1..=5) bits, LSB first, same node layout as rev4.
+        macro_rules! rev_n {
+            ($base:expr, $n:expr) => {{
+                let tp: *mut u16 = $base;
+                let mut sym = 0usize;
+                for i in 0..$n {
+                    // SAFETY: node (1 << i) + sym < 2^n, inside this slot's range.
+                    if !is0!(unsafe { tp.add((1 << i) + sym) }) {
+                        sym += 1 << i;
+                    }
+                }
+                sym
+            }};
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        macro_rules! rev4 {
+            ($base:expr) => {
+                rev_n!($base, 4)
+            };
+        }
+        // $n (>= 1) direct bits appended to $d.
+        #[cfg(target_arch = "x86_64")]
+        macro_rules! direct {
+            ($d:expr, $n:expr) => {{
+                let mut d: u32 = $d;
+                let mut cnt: u32 = $n;
+                // SAFETY: input within the margin.
+                unsafe {
+                    core::arch::asm!(
+                        "3:",
+                        "add {d:e}, {d:e}",
+                        "lea {t1:e}, [{d:r} + 1]",
+                        norm!(),
+                        "shr {range:e}, 1",
+                        "mov {t0:e}, {code:e}",
+                        "sub {code:e}, {range:e}",
+                        "cmovns {d:e}, {t1:e}",
+                        "cmovs {code:e}, {t0:e}",
+                        "dec {cnt:e}",
+                        "jnz 3b",
+                        range = inout(reg) range,
+                        code = inout(reg) code,
+                        inp = inout(reg) inp,
+                        d = inout(reg) d,
+                        cnt = inout(reg) cnt,
+                        t0 = out(reg) _,
+                        t1 = out(reg) _,
+                        options(nostack),
+                    )
+                };
+                let _ = cnt;
+                d
+            }};
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        macro_rules! direct {
+            ($d:expr, $n:expr) => {{
+                let mut d: u32 = $d;
+                for _ in 0..$n {
+                    normalize!();
+                    range >>= 1;
+                    code = code.wrapping_sub(range);
+                    let t = 0u32.wrapping_sub(code >> 31);
+                    code = code.wrapping_add(range & t);
+                    d = (d << 1).wrapping_add(t.wrapping_add(1));
+                }
+                d
+            }};
+        }
+        // Branchless bit with an already-loaded probability `$pr` stored at `$pp` (used by
+        // the matched literal): evaluates to the bit as a bool.
         macro_rules! bitnb_loaded {
             ($pp:expr, $pr:expr) => {{
                 let pr = $pr;
                 normalize!();
                 let bound = (range >> 11) * pr;
-                // One subtraction yields both the bit (no borrow = 1) and the new code.
                 let (c2, borrow) = code.overflowing_sub(bound);
                 let r2 = range.wrapping_sub(bound);
                 code = std::hint::select_unpredictable(borrow, code, c2);
@@ -333,44 +728,16 @@ impl LzmaDecoder {
                 !borrow
             }};
         }
-        // Bit-tree walk of $n bits rooted at probs[$base + 1]. Both children of the current
-        // node are loaded before the bit is known, so the probability load is off the
-        // critical path. (Child indices < 2^($n+1) stay inside the probability array for
-        // every tree of the layout.) Evaluates to (final node m in [2^n, 2^(n+1)), the bits
-        // in reverse order).
-        macro_rules! walk {
-            ($base:expr, $n:expr) => {{
-                // SAFETY: see above; all indices are bounded by the tree size.
-                let tp = unsafe { probs.add($base) };
-                let mut m = 1usize;
-                let mut pr = unsafe { *tp.add(1) } as u32;
-                let mut rev = 0usize;
-                for _i in 0..$n {
-                    let p0 = unsafe { *tp.add(2 * m) } as u32;
-                    let p1 = unsafe { *tp.add(2 * m + 1) } as u32;
-                    let b = bitnb_loaded!(tp.add(m), pr);
-                    rev |= (b as usize) << _i;
-                    m = 2 * m + b as usize;
-                    pr = std::hint::select_unpredictable(b, p1, p0);
-                }
-                (m, rev)
-            }};
-        }
-        macro_rules! tree {
-            ($base:expr, $n:expr) => {{ walk!($base, $n).0 - (1usize << $n) }};
-        }
-        macro_rules! rev_tree {
-            ($base:expr, $n:expr) => {{ walk!($base, $n).1 }};
-        }
         macro_rules! len {
             ($coder:expr, $ps:expr) => {{
-                let c = $coder;
-                if bit!(c + LEN_CHOICE) == 0 {
-                    tree!(c + LEN_LOW + ($ps << 3), 3) + 2
-                } else if bit!(c + LEN_CHOICE2) == 0 {
-                    tree!(c + LEN_MID + ($ps << 3), 3) + 10
+                // SAFETY: fixed layout offsets.
+                let c = unsafe { probs.add($coder) };
+                if is0!(unsafe { c.add(LEN_CHOICE) }) {
+                    tree3!(unsafe { c.add(LEN_LOW + ($ps << 3)) }, 2 - 8)
+                } else if is0!(unsafe { c.add(LEN_CHOICE2) }) {
+                    tree3!(unsafe { c.add(LEN_MID + ($ps << 3)) }, 10 - 8)
                 } else {
-                    tree!(c + LEN_HIGH, 8) + 18
+                    tree8!(unsafe { c.add(LEN_HIGH) }, 18 - 256)
                 }
             }};
         }
@@ -380,19 +747,21 @@ impl LzmaDecoder {
                 stop = Stop::Limit;
                 break;
             }
-            if ip > ip_limit {
+            if inp > in_limit {
                 stop = Stop::InputExhausted;
                 break;
             }
             let pos_state = p & pb_mask;
-            if bit!(IS_MATCH + (state << 4) + pos_state) == 0 {
+            // SAFETY: fixed layout offsets (state < 12, pos_state < 16).
+            if is0!(unsafe { probs.add(IS_MATCH + (state << 4) + pos_state) }) {
                 // ---- literal ----
-                // SAFETY: p < limit <= out_len; p - 1 valid when p > 0.
                 let lit = LITERAL + 0x300 * (((p & lp_mask) << lc) + (prev >> (8 - lc)));
-                let mut sym = 1usize;
+                // SAFETY: lit + 0x300 <= probs.len().
+                let lp = unsafe { probs.add(lit) };
+                let sym;
                 if state < 7 {
                     stat!(0, 1);
-                    sym = walk!(lit, 8).0;
+                    sym = tree8!(lp, -0x100);
                 } else {
                     stat!(1, 1);
                     if rep0 >= p {
@@ -401,35 +770,35 @@ impl LzmaDecoder {
                     // SAFETY: rep0 < p.
                     let mb = (unsafe { *outp.add(p - rep0 - 1) }) as usize;
                     // While the decoded bits equal the match byte's bits ("matching"), node
-                    // `sym` of bit i lives at 0x100 + (match bit i) * 0x100 + sym, otherwise
-                    // at sym. Candidate children only need `matching` (an all-ones/zero mask)
+                    // `s` of bit i lives at 0x100 + (match bit i) * 0x100 + s, otherwise
+                    // at s. Candidate children only need `matching` (an all-ones/zero mask)
                     // and per-position offsets known from the match byte up front.
                     // SAFETY: every index is < 2 * 0x100 + 0x100 = 0x300 (the literal coder).
-                    let lp = unsafe { probs.add(lit) };
+                    let mut s = 1usize;
                     let mut matching = !0usize;
                     let mut idx = 0x100 + (((mb >> 7) & 1) << 8) + 1;
                     let mut pr = unsafe { *lp.add(idx) } as u32;
                     for i in 0..8 {
                         let mbit = (mb >> (7 - i)) & 1;
                         let mo_next = if i < 7 { 0x100 + (((mb >> (6 - i)) & 1) << 8) } else { 0 };
-                        // Offset of the child if the decoded bit is 0 / 1 and we still match.
                         let mo0 = mo_next & mbit.wrapping_sub(1);
                         let mo1 = mo_next & 0usize.wrapping_sub(mbit);
-                        let idx0 = 2 * sym + (matching & mo0);
-                        let idx1 = 2 * sym + 1 + (matching & mo1);
+                        let idx0 = 2 * s + (matching & mo0);
+                        let idx1 = 2 * s + 1 + (matching & mo1);
                         let p0 = unsafe { *lp.add(idx0) } as u32;
                         let p1 = unsafe { *lp.add(idx1) } as u32;
                         let b = bitnb_loaded!(lp.add(idx), pr);
-                        sym = 2 * sym + b as usize;
+                        s = 2 * s + b as usize;
                         let keep = std::hint::select_unpredictable(b, 0usize.wrapping_sub(mbit), mbit.wrapping_sub(1));
                         matching &= keep;
                         idx = std::hint::select_unpredictable(b, idx1, idx0);
                         pr = std::hint::select_unpredictable(b, p1, p0);
                     }
+                    sym = s & 0xFF;
                 }
                 // SAFETY: p < limit <= out_len.
                 unsafe { *outp.add(p) = sym as u8 };
-                prev = sym & 0xFF;
+                prev = sym;
                 p += 1;
                 // 0..3 -> 0, 4..9 -> state - 3, 10..11 -> state - 6
                 state = state.saturating_sub(std::hint::select_unpredictable(state >= 10, 6, 3));
@@ -437,30 +806,23 @@ impl LzmaDecoder {
             }
 
             let len;
-            if bit!(IS_REP + state) == 0 {
+            if is0!(unsafe { probs.add(IS_REP + state) }) {
                 // ---- simple match ----
                 len = len!(LEN_CODER, pos_state);
                 state = if state < 7 { 7 } else { 10 };
                 let len_state = if len < 6 { len - 2 } else { 3 };
-                let slot = tree!(DIST_SLOT + (len_state << 6), 6);
+                let slot = tree6!(unsafe { probs.add(DIST_SLOT + (len_state << 6)) }, -64);
                 let dist: u32 = if slot < 4 {
                     slot as u32
                 } else {
                     let nbits = (slot >> 1) - 1;
                     let base = (2 | (slot & 1)) << nbits;
                     if slot < 14 {
-                        (base + rev_tree!(DIST_SPECIAL + base - slot - 1, nbits)) as u32
+                        // SAFETY: DIST_SPECIAL + base - slot - 1 + node < DIST_SPECIAL + 114.
+                        (base + rev_n!(unsafe { probs.add(DIST_SPECIAL + base - slot - 1) }, nbits)) as u32
                     } else {
-                        let mut d = (2 | (slot & 1)) as u32;
-                        for _ in 0..nbits - 4 {
-                            normalize!();
-                            range >>= 1;
-                            code = code.wrapping_sub(range);
-                            let t = 0u32.wrapping_sub(code >> 31);
-                            code = code.wrapping_add(range & t);
-                            d = (d << 1).wrapping_add(t.wrapping_add(1));
-                        }
-                        (d << 4).wrapping_add(rev_tree!(ALIGN, 4) as u32)
+                        let d = direct!((2 | (slot & 1)) as u32, (nbits - 4) as u32);
+                        (d << 4).wrapping_add(rev4!(unsafe { probs.add(ALIGN) }) as u32)
                     }
                 };
                 if dist == END_MARKER {
@@ -475,8 +837,8 @@ impl LzmaDecoder {
                 stat!(10, (slot >= 14) as u64);
             } else {
                 // ---- rep match ----
-                if bit!(IS_REP0 + state) == 0 {
-                    if bit!(IS_REP0_LONG + (state << 4) + pos_state) == 0 {
+                if is0!(unsafe { probs.add(IS_REP0 + state) }) {
+                    if is0!(unsafe { probs.add(IS_REP0_LONG + (state << 4) + pos_state) }) {
                         // short rep: one byte at distance rep0
                         stat!(4, 1);
                         if rep0 >= p {
@@ -491,10 +853,10 @@ impl LzmaDecoder {
                     }
                 } else {
                     let d;
-                    if bit!(IS_REP1 + state) == 0 {
+                    if is0!(unsafe { probs.add(IS_REP1 + state) }) {
                         d = rep1;
                     } else {
-                        if bit!(IS_REP2 + state) == 0 {
+                        if is0!(unsafe { probs.add(IS_REP2 + state) }) {
                             d = rep2;
                         } else {
                             d = rep3;
@@ -530,7 +892,7 @@ impl LzmaDecoder {
             }
         }
 
-        rc.ip = ip;
+        rc.ip = inp as usize - inp0 as usize;
         rc.range = range;
         rc.code = code;
         self.state = state;
