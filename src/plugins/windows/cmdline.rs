@@ -39,16 +39,22 @@ impl Plugin for CmdLine {
         let k = ctx.windows_kernel()?;
         let pids = cfg.get_ints("pid");
         let filter = super::pslist::pid_filter(&pids);
-        for p in super::pslist::list_processes(k, &filter) {
-            let proc = p?;
+        let procs = super::pslist::list_processes(k, &filter);
+        let row = |proc: &Obj| -> Result<Vec<Value>> {
             let name = array_to_string(&proc.m("ImageFileName")?, None)?;
-            let args = match proc.m("UniqueProcessId").and_then(|p| p.int()).and_then(|_| get_cmdline(&proc)) {
+            let args = match proc.m("UniqueProcessId").and_then(|p| p.int()).and_then(|_| get_cmdline(proc)) {
                 Ok(s) if !s.is_empty() => Value::Str(s),
                 Ok(_) => Value::Unreadable,
                 Err(e) if e.is_invalid_address() => Value::Unreadable,
                 Err(e) => return Err(e),
             };
-            out.row(0, vec![Value::Int(proc.m("UniqueProcessId")?.int()?), Value::Str(name), args])?;
+            Ok(vec![Value::Int(proc.m("UniqueProcessId")?.int()?), Value::Str(name), args])
+        };
+        // independent per-process reads: compute in parallel, emit in python order
+        let rows = crate::util::par::par_map(procs.len(), |i| procs[i].as_ref().ok().map(row));
+        for (p, r) in procs.into_iter().zip(rows) {
+            p?;
+            out.row(0, r.expect("row computed for every listed process")?)?;
         }
         Ok(())
     }
