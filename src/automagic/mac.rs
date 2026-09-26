@@ -142,7 +142,21 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
     }
     let banners = {
         let _t = span("mac: identifier index");
-        symbols::store::identifier_index(symbols::symbol_path()).dictionary("mac")
+        // with the image's banner (a quick scan, meanwhile) the index builds the matching kernel
+        // ISF from the JSON it decompresses anyway; no guessing among many mac kernels
+        symbols::store::keep_decoded_for_with(Some("mac"), false);
+        let d = std::thread::scope(|s| {
+            let hint = std::thread::Builder::new().name("rsvol-hint".into()).spawn_scoped(s, || {
+                symbols::store::set_banner_hint(crate::automagic::banner_hint(phys.as_ref(), b"Darwin Kernel Version ", b":"));
+            });
+            let d = symbols::store::identifier_index(symbols::symbol_path()).dictionary("mac");
+            if let Ok(h) = hint {
+                let _ = h.join();
+            }
+            d
+        });
+        symbols::store::keep_decoded_for(None);
+        d
     };
     if banners.is_empty() {
         return Err(Error::msg("No Mac banners found - if this is a mac plugin, please check your symbol files location"));

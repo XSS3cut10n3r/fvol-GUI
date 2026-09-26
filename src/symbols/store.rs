@@ -684,6 +684,17 @@ fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: std::borrow::
     Ok(blob)
 }
 
+/// The banner of the image being analysed, when a quick scan found it (see [`set_banner_hint`]).
+static HINT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+/// A banner found in the image (`Linux version ...\n`, `Darwin Kernel Version ...`), set while
+/// the identifier index runs: the index then builds exactly the ISFs whose identifier starts
+/// with it (instead of guessing), and keeps no other JSON. Only a guide for speculation: the
+/// automagic still decides, from the complete index, python's way.
+pub fn set_banner_hint(banner: Option<Vec<u8>>) {
+    *HINT.lock().unwrap_or_else(|e| e.into_inner()) = banner;
+}
+
 /// Speculative table builds done by the identifier index (see [`keep_decoded_for`]).
 static SPEC_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// At most this many: a big symbol pack must not turn the index into a build farm.
@@ -693,10 +704,27 @@ const MAX_SPEC_BUILDS: usize = 3;
 /// ISF is loaded next. Build its table now, on this worker (the other workers keep
 /// decompressing), for the first few such files; else keep the JSON (decompressed ones only)
 /// so the load skips the decompression.
-fn speculate(loc: &IsfLocation, json: Vec<u8>, decoded: bool) {
+fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool) {
     use std::sync::atomic::Ordering;
     // plain JSON files load without decompression anyway: only compressed ones are worth it
     if !decoded {
+        return;
+    }
+    let hint = HINT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(h) = hint {
+        // the image's own banner is known: build exactly the matching ISFs, keep nothing else
+        if identifier.starts_with(&h) && SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < 2 * MAX_SPEC_BUILDS {
+            let url = loc.url();
+            let cf = cache_file(loc, &url, &BuildOptions::default());
+            let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
+            if !known {
+                let _t = crate::util::trace::span("isf speculative build (identifier index, banner hint)");
+                let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+            }
+        }
+        return;
+    }
+    if !*GUESS.lock().unwrap_or_else(|e| e.into_inner()) {
         return;
     }
     if SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < MAX_SPEC_BUILDS {
@@ -951,8 +979,19 @@ const KEEP_BUDGET: usize = 512 << 20;
 /// and [`load`] then skips its decompression. `None` stops keeping and frees what is kept
 /// (in the background).
 pub fn keep_decoded_for(os: Option<&'static str>) {
+    keep_decoded_for_with(os, true)
+}
+
+/// Whether the index may build / keep ISFs without a banner hint (a few linux kernels: yes;
+/// a pack of 100+ mac kernels: guessing is pointless).
+static GUESS: std::sync::Mutex<bool> = std::sync::Mutex::new(true);
+
+/// [`keep_decoded_for`]; `guess`: build or keep ISFs of `os` even without a banner hint.
+pub fn keep_decoded_for_with(os: Option<&'static str>, guess: bool) {
+    *GUESS.lock().unwrap_or_else(|e| e.into_inner()) = guess;
     *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner()) = os;
     if os.is_none() {
+        set_banner_hint(None);
         let kept = std::mem::take(&mut *KEPT.lock().unwrap_or_else(|e| e.into_inner()));
         if !kept.is_empty() {
             crate::util::bg::spawn(move || drop(kept));
@@ -1016,7 +1055,7 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
             {
                 let mut v = std::mem::take(&mut buf);
                 v.truncate(n);
-                speculate(loc, v, was_decoded);
+                speculate(loc, &ident.as_ref().map(|i| i.1.clone()).unwrap_or_default(), v, was_decoded);
             }
             out.push((k, make(k, ident)));
         }

@@ -38,6 +38,31 @@ pub fn stacker_enabled(stackers: Option<&[String]>, class: &str) -> bool {
     }
 }
 
+/// `prefix` + the version token that follows it + `sep` (`Linux version 6.8.0-139-generic (`,
+/// `Darwin Kernel Version 13.1.0:`) from the first `prefix` in `phys`, found by a quick
+/// progressive scan. The first copy in memory may be console output rather than the kernel's
+/// own string, so only the release is used (python's VMCOREINFO stacker matches banners the
+/// same way). Only a hint for speculative work (see `symbols::store::set_banner_hint`).
+pub fn banner_hint(phys: &dyn Layer, prefix: &[u8], sep: &[u8]) -> Option<Vec<u8>> {
+    let _t = crate::util::trace::span("banner hint scan");
+    let scanner = crate::symbols::linux::search::FastBytesScanner::new(prefix);
+    let mut at = None;
+    crate::layers::scan::scan_each_progressive(phys, &scanner, |h| *h, |h| {
+        at = Some(h);
+        false
+    });
+    let mut buf = [0u8; 128];
+    phys.read_padded(at?, &mut buf);
+    let rest = &buf[prefix.len()..];
+    let tok = rest.iter().position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+' | b'~')))?;
+    if tok == 0 || !rest[tok..].starts_with(sep) {
+        return None;
+    }
+    let n = prefix.len() + tok + sep.len();
+    crate::util::trace::note(|| format!("banner hint at {:#x}: {:?}", at.unwrap_or(0), String::from_utf8_lossy(&buf[..n])));
+    Some(buf[..n].to_vec())
+}
+
 /// Per-image automagic cache (tiny `key=value` text files).
 ///
 /// A file is named by a fully mixing 64-bit hash of its key material (canonical image path,

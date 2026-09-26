@@ -469,10 +469,20 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
         None => {
             let banners = {
                 let _t = span("linux banners (identifier index)");
-                // the stackers load the matching kernel ISF next: keep the linux ISFs the index
-                // decompresses anyway
+                // the stackers load the matching kernel ISF next: the index builds it right away
+                // from the JSON it decompresses anyway, guided by the image's banner (found by a
+                // quick scan meanwhile)
                 crate::symbols::store::keep_decoded_for(Some("linux"));
-                crate::symbols::store::identifier_index(ctx.symbol_path()).dictionary("linux")
+                std::thread::scope(|s| {
+                    let hint = std::thread::Builder::new().name("rsvol-hint".into()).spawn_scoped(s, || {
+                        crate::symbols::store::set_banner_hint(crate::automagic::banner_hint(*phys, b"Linux version ", b" ("));
+                    });
+                    let d = crate::symbols::store::identifier_index(ctx.symbol_path()).dictionary("linux");
+                    if let Ok(h) = hint {
+                        let _ = h.join();
+                    }
+                    d
+                })
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
             let found = run(*phys, &banners, &allow);
