@@ -38,8 +38,29 @@ const MAX_BLOCK: usize = 900_000;
 const PAD: usize = 64;
 /// Segment start marker in `tt` entries.
 const MARK: u32 = 1 << 31;
-/// Concurrent inverse-BWT walkers.
-const LANES: usize = 16;
+/// Concurrent inverse-BWT walkers. More lanes keep more cache misses in flight (up to the
+/// core's ~16 L1 miss buffers), but beyond 12 the lane state no longer fits in registers;
+/// 16 lanes kept on the stack measured within +-4% (better on 900k random-access blocks,
+/// worse on small or cache-friendly ones).
+const LANES: usize = 12;
+
+/// Invokes `$m!(w)` for every lane index (literals, so lane state stays in registers).
+macro_rules! for_each_lane {
+    ($m:ident) => {
+        $m!(0);
+        $m!(1);
+        $m!(2);
+        $m!(3);
+        $m!(4);
+        $m!(5);
+        $m!(6);
+        $m!(7);
+        $m!(8);
+        $m!(9);
+        $m!(10);
+        $m!(11);
+    };
+}
 /// Column stride of the walkers' output (one column per lane).
 const COL: usize = MAX_BLOCK + PAD;
 /// Blocks shorter than this use a single walker.
@@ -584,7 +605,7 @@ impl Scratch {
                 if self.cols.capacity() < LANES * COL {
                     self.cols.try_reserve_exact(LANES * COL).map_err(|_| alloc_error())?;
                 }
-                walk_lanes(self.tt.as_mut_ptr(), n, info.orig_ptr, self.cols.as_mut_ptr(), self.pre.as_mut_ptr(), &mut self.segs)?;
+                walk(self.tt.as_mut_ptr(), n, info.orig_ptr, self.cols.as_mut_ptr(), self.pre.as_mut_ptr(), &mut self.segs)?;
             }
             let start = out.len();
             unrle(std::slice::from_raw_parts(self.pre.as_ptr(), n), out)?;
@@ -806,12 +827,13 @@ unsafe fn walk_single(tt: *const u32, n: usize, orig: usize, pre: *mut u8) {
 /// Segment `j` starts at index `start(j)`; its `tt` entry is replaced by `MARK | j` (the
 /// original is kept in `s.first[j]`), so a lane that loads a marked entry knows which
 /// segment follows its own. Lanes OR their loads into `any` and marks are handled after the
-/// round, which keeps the unrolled round free of calls (all lanes stay in registers).
+/// round, which keeps the round free of calls.
 ///
 /// # Safety
 /// `tt[..n]` is the scatter output (indices < n) with room for `tt[n]`; `cols` has
 /// capacity LANES * COL; `pre[..n]` writable; n >= LANES_MIN.
-unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *mut u8, s: &mut Segs) -> Result<()> {
+unsafe fn walk(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *mut u8, s: &mut Segs) -> Result<()> {
+    debug_assert!(n >= LANES_MIN);
     let nseg = (n / SEG_LEN).max(16 * LANES).min(n / 64);
     s.nseg = nseg;
     s.step = n / nseg;
@@ -848,34 +870,41 @@ unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *m
             }
             let p = cols.add(r);
             let mut any = 0u32;
-            for (w, x) in e.iter_mut().enumerate() {
-                *p.add(w * COL) = *x as u8;
-                let ne = *tt.add((*x >> 8) as usize);
-                *x = ne;
-                any |= ne;
+            macro_rules! step {
+                ($w:literal) => {{
+                    *p.add($w * COL) = e[$w] as u8;
+                    let ne = *tt.add((e[$w] >> 8) as usize);
+                    e[$w] = ne;
+                    any |= ne;
+                }};
             }
+            for_each_lane!(step);
             r += 1;
             if any & MARK != 0 {
                 // Close the segments of the lanes that reached a start and hand them the
                 // next unassigned segment (or park them).
-                for (w, x) in e.iter_mut().enumerate() {
-                    if *x & MARK != 0 {
-                        let k = s.cur[w] as usize;
-                        s.r1[k] = r as u32;
-                        s.next[k] = *x & !MARK;
-                        if unassigned < nseg {
-                            let j = unassigned;
-                            unassigned += 1;
-                            s.cur[w] = j as u32;
-                            s.lane[j] = w as u8;
-                            s.r0[j] = r as u32;
-                            *x = s.first[j];
-                        } else {
-                            active -= 1;
-                            *x = (n as u32) << 8;
+                macro_rules! handle {
+                    ($w:literal) => {{
+                        let x = &mut e[$w];
+                        if *x & MARK != 0 {
+                            let k = s.cur[$w] as usize;
+                            s.r1[k] = r as u32;
+                            s.next[k] = *x & !MARK;
+                            if unassigned < nseg {
+                                let j = unassigned;
+                                unassigned += 1;
+                                s.cur[$w] = j as u32;
+                                s.lane[j] = $w as u8;
+                                s.r0[j] = r as u32;
+                                *x = s.first[j];
+                            } else {
+                                active -= 1;
+                                *x = (n as u32) << 8;
+                            }
                         }
-                    }
+                    }};
                 }
+                for_each_lane!(handle);
                 if active == 0 {
                     break;
                 }
@@ -1154,7 +1183,7 @@ mod tests {
                         if sc.cols.capacity() < LANES * COL {
                             sc.cols.reserve_exact(LANES * COL);
                         }
-                        walk_lanes(sc.tt.as_mut_ptr(), n, info.orig_ptr, sc.cols.as_mut_ptr(), sc.pre.as_mut_ptr(), &mut sc.segs)
+                        walk(sc.tt.as_mut_ptr(), n, info.orig_ptr, sc.cols.as_mut_ptr(), sc.pre.as_mut_ptr(), &mut sc.segs)
                             .unwrap();
                         total_rounds += sc.segs.rounds;
                     }
@@ -1223,11 +1252,11 @@ mod tests {
                 unsafe {
                     std::ptr::copy_nonoverlapping(orig.as_ptr(), tt.as_mut_ptr(), n);
                     let t0 = std::arch::x86_64::_rdtsc();
-                    walk_lanes(tt.as_mut_ptr(), n, 0, cols.as_mut_ptr(), pre.as_mut_ptr(), &mut sc.segs).unwrap();
+                    walk(tt.as_mut_ptr(), n, 0, cols.as_mut_ptr(), pre.as_mut_ptr(), &mut sc.segs).unwrap();
                     best = best.min(std::arch::x86_64::_rdtsc() - t0);
                 }
             }
-            println!("walk n={n} lanes={LANES}: {:.2} TSC ticks/step", best as f64 / n as f64);
+            println!("walk n={n}: {:.2} TSC ticks/step", best as f64 / n as f64);
         }
     }
 
