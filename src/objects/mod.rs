@@ -788,3 +788,125 @@ impl Module {
         Module { sp: self.sp.with_layer(layer), offset: self.offset }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layers::Mapping;
+    use crate::symbols::isf::{BuildOptions, load_table};
+
+    /// A little-endian memory buffer layer with a 48-bit address space (like Intel32e).
+    struct Mem(Vec<u8>);
+    impl Layer for Mem {
+        fn name(&self) -> &str {
+            "mem"
+        }
+        fn max_address(&self) -> u64 {
+            (1 << 48) - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            let a = addr as usize;
+            match self.0.get(a..a + buf.len()) {
+                Some(s) => {
+                    buf.copy_from_slice(s);
+                    Ok(())
+                }
+                None => Err(Error::invalid(addr)),
+            }
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            addr.checked_add(len).is_some_and(|e| e <= self.0.len() as u64)
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
+            f(Mapping { offset: addr, len, mapped: addr });
+        }
+    }
+
+    const ISF: &str = r#"{
+      "metadata": {"format": "6.1.0"},
+      "base_types": {
+        "unsigned long": {"kind": "int", "size": 4, "signed": false, "endian": "little"},
+        "long": {"kind": "int", "size": 4, "signed": true, "endian": "little"},
+        "unsigned char": {"kind": "char", "size": 1, "signed": false, "endian": "little"},
+        "unsigned short": {"kind": "int", "size": 2, "signed": false, "endian": "little"},
+        "pointer": {"kind": "int", "size": 8, "signed": false, "endian": "little"},
+        "void": {"kind": "void", "size": 0, "signed": false, "endian": "little"}
+      },
+      "enums": {"E": {"base": "long", "size": 4, "constants": {"A": 1, "B": 2, "C": 1}}},
+      "user_types": {
+        "_S": {"kind": "struct", "size": 40, "fields": {
+            "u": {"offset": 0, "type": {"kind": "base", "name": "unsigned long"}},
+            "s": {"offset": 4, "type": {"kind": "base", "name": "long"}},
+            "p": {"offset": 8, "type": {"kind": "pointer", "subtype": {"kind": "struct", "name": "_S"}}},
+            "arr": {"offset": 16, "type": {"kind": "array", "count": 4, "subtype": {"kind": "base", "name": "unsigned char"}}},
+            "bf": {"offset": 20, "type": {"kind": "bitfield", "bit_position": 3, "bit_length": 5, "type": {"kind": "base", "name": "long"}}},
+            "e": {"offset": 24, "type": {"kind": "enum", "name": "E"}},
+            "name": {"offset": 28, "type": {"kind": "array", "count": 8, "subtype": {"kind": "base", "name": "unsigned char"}}}
+        }}
+      },
+      "symbols": {}
+    }"#;
+
+    fn setup() -> (&'static Space, Obj) {
+        let mut m = vec![0u8; 0x100];
+        m[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        m[4..8].copy_from_slice(&(-2i32).to_le_bytes());
+        // pointer with bits above 48 set: python masks with the native layer's address mask
+        m[8..16].copy_from_slice(&0xFFFF_0000_0000_0040u64.to_le_bytes());
+        m[16..20].copy_from_slice(&[1, 2, 3, 4]);
+        m[20..24].copy_from_slice(&(-1i32).to_le_bytes());
+        m[24..28].copy_from_slice(&3i32.to_le_bytes());
+        m[28..36].copy_from_slice(b"ab\xffcd\0zz");
+        let layer = leak_layer(Arc::new(Mem(m)));
+        let t = crate::symbols::register(load_table(ISF.as_bytes(), "t", "test", &BuildOptions::default()).unwrap(), "objtest");
+        let sp = Space::on(layer, t);
+        (sp, Obj::named(sp, "_S", 0).unwrap())
+    }
+
+    #[test]
+    fn obj_is_small() {
+        assert_eq!(std::mem::size_of::<Obj>(), 32);
+    }
+
+    #[test]
+    fn primitives_follow_python() {
+        let (_, s) = setup();
+        assert_eq!(s.m("u").unwrap().int().unwrap(), 0xFFFF_FFFF);
+        assert_eq!(s.m("s").unwrap().int().unwrap(), -2);
+        // pointer value masked to 48 bits
+        assert_eq!(s.m("p").unwrap().u64().unwrap(), 0x40);
+        assert_eq!(s.m("p").unwrap().raw_u64().unwrap(), 0xFFFF_0000_0000_0040);
+        // deref + auto-deref member access
+        let d = s.m("p").unwrap().deref().unwrap();
+        assert_eq!(d.addr, 0x40);
+        assert_eq!(s.m("p").unwrap().m("u").unwrap().addr, 0x40);
+        // bitfield on a signed base: (v & ((1 << 8) - 1)) >> 3
+        assert_eq!(s.m("bf").unwrap().int().unwrap(), 0x1F);
+        // enum: value outside the choices -> description() errors, inverse keeps first name
+        let e = s.m("e").unwrap();
+        assert_eq!(e.int().unwrap(), 3);
+        assert!(e.description().is_err());
+        assert_eq!(e.enum_value("C").unwrap(), 1);
+        assert_eq!(e.table().enum_lookup(0, 1), Some("A"));
+        // arrays
+        let a = s.m("arr").unwrap();
+        assert_eq!(a.count(), 4);
+        assert_eq!(a.ints().unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(a.at(3).unwrap().int().unwrap(), 4);
+        assert!(a.at(4).is_err());
+        // strings: decode with replace then cut at NUL
+        let n = s.m("name").unwrap();
+        assert_eq!(n.read_string(8, "utf-8", "replace").unwrap(), "ab\u{FFFD}cd");
+        assert!(n.read_string(8, "utf-8", "strict").is_err());
+        assert_eq!(crate::objects::util::array_to_string(&n, None).unwrap(), "ab");
+        // missing member / invalid read
+        assert!(s.m("nope").is_err());
+        assert!(!s.has_member("nope"));
+        assert!(s.at_addr(0x1000).m("u").unwrap().int().unwrap_err().is_invalid_address());
+        // Field
+        let f = Field::new(s.table(), "_S", "s").unwrap();
+        assert_eq!(s.f(&f).int().unwrap(), -2);
+        assert_eq!(s.member_offset("e").unwrap(), 24);
+        assert_eq!(s.size(), 40);
+    }
+}
