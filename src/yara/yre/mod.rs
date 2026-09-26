@@ -9,3 +9,5 @@ pub mod exec;
 
 #[cfg(test)]
 mod difftest;
+#[cfg(test)]
+pub(crate) use difftest::run_case as difftest_run_case;
