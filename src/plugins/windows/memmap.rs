@@ -485,8 +485,9 @@ impl Plugin for Memmap {
                     let Some((pid, layer)) = layers[i] else { return Ok(()) };
                     let maps = match rows {
                         Rows::Encoded((block, n)) => {
-                            out.rows_encoded(&block, n)?;
-                            pool.lock().unwrap_or_else(|e| e.into_inner()).push(block);
+                            if let Some(b) = out.rows_encoded_owned(block, n)? {
+                                pool.lock().unwrap_or_else(|e| e.into_inner()).push(b);
+                            }
                             return Ok(());
                         }
                         Rows::Runs(maps) => maps,

@@ -759,8 +759,11 @@ impl Plugin for Timeliner {
                 (buf, part.len())
             },
             |_, (buf, n)| {
-                result = out.rows_encoded(&buf, n);
-                pool.lock().unwrap_or_else(|e| e.into_inner()).push(buf);
+                result = out.rows_encoded_owned(buf, n).map(|back| {
+                    if let Some(b) = back {
+                        pool.lock().unwrap_or_else(|e| e.into_inner()).push(b);
+                    }
+                });
                 result.is_ok()
             },
         );

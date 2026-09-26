@@ -161,6 +161,13 @@ pub trait RowSink {
         Err(crate::error::Error::msg("rows_encoded: this sink has no row encoder"))
     }
 
+    /// [`RowSink::rows_encoded`] handing over the buffer: a renderer that keeps blocks until
+    /// the end (pretty) stores it without a copy. Returns the buffer when it was not kept.
+    fn rows_encoded_owned(&mut self, block: Vec<u8>, nrows: usize) -> Result<Option<Vec<u8>>> {
+        self.rows_encoded(&block, nrows)?;
+        Ok(Some(block))
+    }
+
     /// [`RowSink::rows_encoded`] for rows encoded with `RowEncoder::row_at` (tree depths, the
     /// first row at `first_depth`, the last at `last_depth`; within the block each row at most
     /// one level below the previous one). Returns `false` and appends nothing when the block

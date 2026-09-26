@@ -67,6 +67,8 @@ pub fn create<'a>(name: &str, out: &'a mut dyn Write, opts: RenderOptions) -> Op
             arena: Vec::new(),
             cells: Vec::new(),
             depths: Vec::new(),
+            ckpt: Vec::new(),
+            segs: Vec::new(),
             scratch: Vec::new(),
             spans: Vec::new(),
         }),
@@ -1093,15 +1095,31 @@ struct Pretty<'a> {
     /// max display width per column
     widths: Vec<usize>,
     tree_width: usize,
-    /// all rendered visible cells, back to back
+    /// all rendered visible cells of the stored rows, back to back
     arena: Vec<u8>,
     /// (length in `arena`, display width | SLOW) of every stored visible cell, row after row
     cells: Vec<(u32, u32)>,
     /// path_depth of every stored row
     depths: Vec<u32>,
+    /// `arena` offset of every stored row whose index is a multiple of `PRETTY_CK`
+    ckpt: Vec<usize>,
+    /// the rows in output order
+    segs: Vec<PSeg>,
     scratch: Vec<u8>,
     spans: Vec<(usize, usize)>,
 }
+
+/// Rows of the pretty grid, in output order.
+enum PSeg {
+    /// stored rows `r0..r1` (`depths`, `cells`), their bytes starting at `arena[a0]`
+    Rows { r0: usize, r1: usize, a0: usize },
+    /// rows encoded by a `RowEncoder` (per row: u32 depth, then per visible cell u32 length,
+    /// u32 width | SLOW, bytes)
+    Block { data: Vec<u8>, nrows: usize },
+}
+
+/// Stored rows are formatted in chunks of this many rows (on all cores).
+const PRETTY_CK: usize = 4096;
 
 /// Display width of a cell: the longest line after `tab_stop` expansion, in characters.
 fn cell_width(s: &[u8]) -> usize {
@@ -1164,9 +1182,72 @@ fn nth_line(s: &[u8], index: usize) -> &[u8] {
     s.split(|&c| c == b'\n').nth(index).unwrap_or(b"")
 }
 
+/// python's pretty line(s) of one row (`depth` = path_depth; `cells` = (text, width | SLOW)).
+fn pretty_row(out: &mut Vec<u8>, tree_width: usize, widths: &[usize], depth: u32, cells: &[(&[u8], u32)]) {
+    if cells.iter().all(|c| c.1 & SLOW == 0) {
+        // one line, no tabs: pad + copy
+        for _ in 0..depth {
+            out.push(b'*');
+        }
+        push_spaces(out, tree_width - depth as usize);
+        for (k, &(text, w)) in cells.iter().enumerate() {
+            out.extend_from_slice(b" | ");
+            push_spaces(out, widths[k].saturating_sub(w as usize));
+            out.extend_from_slice(text);
+        }
+        out.push(b'\n');
+        return;
+    }
+    let lines = cells.iter().map(|&(t, _)| t.iter().filter(|&&c| c == b'\n').count() + 1).max().unwrap_or(0);
+    for index in 0..lines {
+        let mark = if index == 0 { b'*' } else { b' ' };
+        for _ in 0..depth {
+            out.push(mark);
+        }
+        push_spaces(out, tree_width - depth as usize);
+        for (k, &(cell, _)) in cells.iter().enumerate() {
+            out.extend_from_slice(b" | ");
+            let line = if lines == 1 { cell } else { nth_line(cell, index) };
+            push_cell_line(out, line, widths[k]);
+        }
+        out.push(b'\n');
+    }
+}
+
+/// The rows of an encoded pretty block: `f(path_depth, cells)`.
+fn pretty_block_rows<'d>(data: &'d [u8], nrows: usize, nvis: usize, mut f: impl FnMut(u32, &[(&'d [u8], u32)])) {
+    let u32_at = |p: usize| u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+    let mut cells: Vec<(&[u8], u32)> = Vec::with_capacity(nvis);
+    let mut p = 0usize;
+    for _ in 0..nrows {
+        let d = u32_at(p) + 1;
+        p += 4;
+        cells.clear();
+        for _ in 0..nvis {
+            let (len, w) = (u32_at(p) as usize, u32_at(p + 4));
+            p += 8;
+            cells.push((&data[p..p + len], w));
+            p += len;
+        }
+        f(d, &cells);
+    }
+}
+
 impl Pretty<'_> {
     fn visible(&self) -> Vec<usize> {
         (0..self.b.columns.len()).filter(|&i| !self.b.hidden[i]).collect()
+    }
+
+    /// Bookkeeping after storing row `r` whose bytes start at `arena[a0]`.
+    #[inline]
+    fn stored(&mut self, r: usize, a0: usize) {
+        if r % PRETTY_CK == 0 {
+            self.ckpt.push(a0);
+        }
+        match self.segs.last_mut() {
+            Some(PSeg::Rows { r1, .. }) if *r1 == r => *r1 += 1,
+            _ => self.segs.push(PSeg::Rows { r0: r, r1: r + 1, a0 }),
+        }
     }
 }
 
@@ -1187,6 +1268,7 @@ impl RowSink for Pretty<'_> {
         check_len(&self.b.columns, values)?;
         let d = self.b.depth(depth) + 1; // path_depth
         self.tree_width = self.tree_width.max(d);
+        let a0 = self.arena.len();
         if self.b.filter.is_some() {
             // the filter sees every column (hidden ones too)
             render_line(&mut self.scratch, &mut self.spans, &self.b.columns, &self.b.hidden, values, true);
@@ -1217,6 +1299,7 @@ impl RowSink for Pretty<'_> {
             }
         }
         self.depths.push(d as u32);
+        self.stored(self.depths.len() - 1, a0);
         self.b.rows += 1;
         Ok(())
     }
@@ -1233,25 +1316,21 @@ impl RowSink for Pretty<'_> {
         if !self.b.depth_fits(nrows, first_depth) {
             return Ok(false);
         }
-        let visible = self.visible();
-        let mut p = 0usize;
-        let u32_at = |p: usize| u32::from_le_bytes(block[p..p + 4].try_into().unwrap());
-        for _ in 0..nrows {
-            let d = u32_at(p) + 1; // path_depth
-            p += 4;
-            self.tree_width = self.tree_width.max(d as usize);
-            self.depths.push(d);
-            for &i in &visible {
-                let (len, w) = (u32_at(p), u32_at(p + 4));
-                p += 8;
-                self.arena.extend_from_slice(&block[p..p + len as usize]);
-                p += len as usize;
-                self.widths[i] = self.widths[i].max((w & !SLOW) as usize);
-                self.cells.push((len, w));
-            }
+        // kept as is: widths, tree width and the lines come out of it (in parallel) at the end
+        if nrows > 0 {
+            self.segs.push(PSeg::Block { data: block.to_vec(), nrows });
         }
         self.b.encoded_rows(nrows, last_depth);
         Ok(true)
+    }
+
+    fn rows_encoded_owned(&mut self, block: Vec<u8>, nrows: usize) -> Result<Option<Vec<u8>>> {
+        if nrows > 0 {
+            self.segs.push(PSeg::Block { data: block, nrows });
+            self.b.encoded_rows(nrows, 0);
+            return Ok(None);
+        }
+        Ok(Some(block))
     }
 }
 
@@ -1262,6 +1341,25 @@ impl TextRenderer for Pretty<'_> {
         }
         let visible = self.visible();
         let nvis = visible.len();
+        // the encoded blocks' widths and depths
+        let blocks: Vec<&PSeg> = self.segs.iter().filter(|s| matches!(s, PSeg::Block { .. })).collect();
+        let maxes: Vec<(usize, Vec<usize>)> = crate::util::par::par_map(blocks.len(), |i| {
+            let PSeg::Block { data, nrows } = blocks[i] else { unreachable!() };
+            let (mut tw, mut w) = (0usize, vec![0usize; nvis]);
+            pretty_block_rows(data, *nrows, nvis, |d, cells| {
+                tw = tw.max(d as usize);
+                for (k, c) in cells.iter().enumerate() {
+                    w[k] = w[k].max((c.1 & !SLOW) as usize);
+                }
+            });
+            (tw, w)
+        });
+        for (tw, w) in maxes {
+            self.tree_width = self.tree_width.max(tw);
+            for (k, &i) in visible.iter().enumerate() {
+                self.widths[i] = self.widths[i].max(w[k]);
+            }
+        }
         // header
         let buf = &mut self.b.buf;
         push_spaces(buf, self.tree_width);
@@ -1272,49 +1370,61 @@ impl TextRenderer for Pretty<'_> {
         }
         buf.push(b'\n');
         let widths: Vec<usize> = visible.iter().map(|&i| self.widths[i]).collect();
-        let mut pos = 0usize;
-        for (r, &depth) in self.depths.iter().enumerate() {
-            let cells = &self.cells[r * nvis..(r + 1) * nvis];
-            let buf = &mut self.b.buf;
-            if cells.iter().all(|c| c.1 & SLOW == 0) {
-                // one line, no tabs: pad + copy
-                for _ in 0..depth {
-                    buf.push(b'*');
-                }
-                push_spaces(buf, self.tree_width - depth as usize);
-                for (k, &(len, w)) in cells.iter().enumerate() {
-                    buf.extend_from_slice(b" | ");
-                    push_spaces(buf, widths[k].saturating_sub(w as usize));
-                    buf.extend_from_slice(&self.arena[pos..pos + len as usize]);
-                    pos += len as usize;
-                }
-                buf.push(b'\n');
-            } else {
-                let mut spans = Vec::with_capacity(nvis);
-                for &(len, _) in cells {
-                    spans.push((pos, pos + len as usize));
-                    pos += len as usize;
-                }
-                let lines = spans.iter().map(|&(a, b)| self.arena[a..b].iter().filter(|&&c| c == b'\n').count() + 1).max().unwrap_or(0);
-                for index in 0..lines {
-                    let mark = if index == 0 { b'*' } else { b' ' };
-                    for _ in 0..depth {
-                        buf.push(mark);
+        // work items in output order: (segment, stored rows r0..r1 from arena offset)
+        let mut items: Vec<(usize, usize, usize, usize)> = Vec::new();
+        for (s, seg) in self.segs.iter().enumerate() {
+            match *seg {
+                PSeg::Rows { r0, r1, a0 } => {
+                    let mut r = r0;
+                    while r < r1 {
+                        let e = ((r / PRETTY_CK + 1) * PRETTY_CK).min(r1);
+                        items.push((s, r, e, if r == r0 { a0 } else { self.ckpt[r / PRETTY_CK] }));
+                        r = e;
                     }
-                    push_spaces(buf, self.tree_width - depth as usize);
-                    for (k, &(a, b)) in spans.iter().enumerate() {
-                        buf.extend_from_slice(b" | ");
-                        let cell = &self.arena[a..b];
-                        let line = if lines == 1 { cell } else { nth_line(cell, index) };
-                        push_cell_line(buf, line, widths[k]);
-                    }
-                    buf.push(b'\n');
                 }
-            }
-            if self.b.buf.len() >= FLUSH_AT {
-                self.b.flush_buf()?;
+                PSeg::Block { .. } => items.push((s, 0, 0, 0)),
             }
         }
+        let tree_width = self.tree_width;
+        let (segs, arena, cells, depths) = (&self.segs, &self.arena, &self.cells, &self.depths);
+        // output buffers are recycled (no fresh pages to fault in per chunk)
+        let pool: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+        let format = |k: usize| -> Vec<u8> {
+            let (s, r0, r1, a0) = items[k];
+            let mut out = pool.lock().unwrap_or_else(|e| e.into_inner()).pop().unwrap_or_default();
+            out.clear();
+            match &segs[s] {
+                PSeg::Rows { .. } => {
+                    let mut row: Vec<(&[u8], u32)> = Vec::with_capacity(nvis);
+                    let mut pos = a0;
+                    for r in r0..r1 {
+                        row.clear();
+                        for &(len, w) in &cells[r * nvis..(r + 1) * nvis] {
+                            row.push((&arena[pos..pos + len as usize], w));
+                            pos += len as usize;
+                        }
+                        pretty_row(&mut out, tree_width, &widths, depths[r], &row);
+                    }
+                }
+                PSeg::Block { data, nrows } => {
+                    pretty_block_rows(data, *nrows, nvis, |d, row| pretty_row(&mut out, tree_width, &widths, d, row));
+                }
+            }
+            out
+        };
+        let mut result = self.b.flush_buf();
+        if result.is_ok() {
+            let w = &mut self.b.w;
+            crate::util::par::par_map_stream(items.len(), 2 * crate::util::par::threads(), format, |_, lines| {
+                result = w.write_all(&lines).map_err(Error::from);
+                pool.lock().unwrap_or_else(|e| e.into_inner()).push(lines);
+                result.is_ok()
+            });
+            if !items.is_empty() {
+                self.b.flushed = true;
+            }
+        }
+        result?;
         self.b.flush()
     }
     fn abort(&mut self, _unsatisfied: bool) -> Result<()> {
