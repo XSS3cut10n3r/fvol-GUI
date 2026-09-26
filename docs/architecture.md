@@ -76,9 +76,14 @@ carry-less multiplication, on several threads, and then walks the index instead 
 
 To find the right ISF for a Linux or macOS kernel, volatility3 compares the kernel banner in
 memory with the banner stored in every ISF on the search path. rsvol keeps an identifier index
-of those banners, updated only for files whose size or modification time changed. When the index
-has to read new files, a quick scan of the image for the kernel version tells it which kernel
-table to build first, on another thread. For Windows, the kernel table named by the first
+of those banners, updated only for files whose size or modification time changed. When python
+volatility3's own identifier cache (an SQLite database) exists, the index is seeded from it:
+rsvol replays python's cache update in memory (drop rows of vanished files, re-read files newer
+than a row older than three days, append new files) and reads only the files that update would
+read. python resolves a banner to the last matching row, so its choice among ISFs sharing a
+banner depends on the history of its database; replaying it gives the same choice. When the
+index has to read new files, a quick scan of the image for the kernel version tells it which
+kernel table to build first, on another thread. For Windows, the kernel table named by the first
 candidate is loaded while the full KDBG scan is still running. A speculative table is used only
 if it turns out to be the final answer.
 
