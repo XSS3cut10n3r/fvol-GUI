@@ -1082,11 +1082,18 @@ impl Deflater {
         }
     }
 
-    /// INSERT_STRING for every position in lo..=hi, in order (the insert loops after a match).
-    /// Same effect as calling insert_string for each; the bucket written last is cached in
-    /// registers so runs of equal hashes do not serialise on store-to-load forwarding.
+    /// INSERT_STRING for every position in lo..=hi, in order (the insert loops after a match
+    /// at distance `dist`). Same effect as calling insert_string for each, but:
+    /// * the rolling hash is computed directly per position (no serial dependency) and the
+    ///   bucket written last is cached in registers (runs of equal hashes do not serialise on
+    ///   store-to-load forwarding);
+    /// * inside a region of period `d` (a run of one byte value for d = 1, verified on the
+    ///   window content; solid image areas filter to such runs, gradients to d = 4 patterns)
+    ///   every position has the buckets of the position d before it; when the first period's
+    ///   buckets are pairwise distinct, each later position's chain predecessor is p - d and its
+    ///   bucket count one more, so the tables are filled in bulk.
     #[inline(always)]
-    fn insert_range<const F6: bool>(&mut self, lo: usize, hi: usize) {
+    fn insert_range<const F6: bool>(&mut self, lo: usize, hi: usize, dist: usize) {
         if lo > hi {
             return;
         }
@@ -1094,8 +1101,9 @@ impl Deflater {
         let shift = self.hash_shift;
         let hmask = self.hash_mask;
         let mut ins_h = self.ins_h;
-        // SAFETY: hi + 7 < window.len() (hi <= window_size - MIN_MATCH, 16 bytes of padding);
-        // bucket and window indices are masked to their table sizes (see insert_string).
+        // SAFETY: hi + 16 <= window.len() + 3 (hi <= window_size - MIN_MATCH, 16 bytes of
+        // padding; the run/period scans read at most hi + 13); lo >= 1; bucket and window
+        // indices are masked to their table sizes (see insert_string).
         unsafe {
             let win = self.window.as_ptr();
             let head = self.head.as_mut_ptr();
@@ -1105,7 +1113,7 @@ impl Deflater {
             // After three UPDATE_HASH steps the running hash only depends on the last three
             // bytes (hash_shift * 3 >= hash_bits). If the incoming ins_h already is that
             // function of window[lo - 1..lo + 2] (always, unless zlib left it stale), every
-            // position's hash can be computed directly, without the serial dependency.
+            // position's hash can be computed directly.
             let direct = |p: usize| -> u32 {
                 ((*win.add(p) as u32) << (2 * shift) ^ (*win.add(p + 1) as u32) << shift ^ *win.add(p + 2) as u32)
                     & hmask
@@ -1115,14 +1123,43 @@ impl Deflater {
             let mut last_h = usize::MAX;
             let mut cnt = 0u32;
             let mut last_h6 = usize::MAX;
-            // A match inside a run of one byte value (solid image areas filter to such runs):
-            // every position whose 6 bytes lie in the run has the same 3- and 6-byte buckets,
-            // so the chains become iota sequences filled in bulk.
+            // One INSERT_STRING at p (hash, chain link, bucket count, 6-byte chain).
+            macro_rules! insert_one {
+                () => {{
+                    ins_h = if consistent || p >= lo + 2 {
+                        direct(p)
+                    } else {
+                        ((ins_h << shift) ^ *win.add(p + (MIN_MATCH - 1)) as u32) & hmask
+                    };
+                    let h = ins_h as usize;
+                    // the bucket written last holds position p - 1 (count cnt)
+                    let e = if h == last_h {
+                        cnt = cnt.wrapping_add(1);
+                        (p - 1) as u32
+                    } else {
+                        let e = *head.add(h);
+                        cnt = (e >> 16).wrapping_add(1);
+                        e
+                    };
+                    *prev.add(p & wmask) = e as u16;
+                    *head.add(h) = if F6 { cnt << 16 | p as u32 } else { p as u32 };
+                    last_h = h;
+                    if F6 {
+                        let h6 = hash6(rd64u(win.add(p)));
+                        let p6 = if h6 == last_h6 { (p - 1) as u32 } else { *head6.add(h6) as u32 };
+                        *head6.add(h6) = p as u16;
+                        last_h6 = h6;
+                        *link6.add(p & wmask) = (cnt << 16) | p6;
+                    }
+                    p += 1;
+                }};
+            }
             if consistent {
                 let v = *win.add(lo);
                 let pat = v as u64 * 0x0101_0101_0101_0101;
                 if rd64u(win.add(lo)) == pat {
-                    let mut end = lo + 8; // window[lo..end] == v
+                    // d = 1: window[lo..end] == v
+                    let mut end = lo + 8;
                     let lim = hi + 6;
                     while end < lim && rd64u(win.add(end)) == pat {
                         end += 8;
@@ -1149,36 +1186,69 @@ impl Deflater {
                     last_h = h;
                     ins_h = h as u32;
                     p = b + 1;
+                } else if (2..=8).contains(&dist) && hi >= lo + 2 * dist {
+                    // period d: window[x] == window[x - d] for x in lo + d..end
+                    let d = dist;
+                    let mut end = lo + d;
+                    let lim = hi + 6;
+                    while end < lim && rd64u(win.add(end)) == rd64u(win.add(end - d)) {
+                        end += 8;
+                    }
+                    while end < lim && *win.add(end) == *win.add(end - d) {
+                        end += 1;
+                    }
+                    // positions lo + d..=b have their 6 bytes in the periodic region
+                    let b = hi.min(end.saturating_sub(6));
+                    if b >= lo + d {
+                        let mut hs = [0usize; 8];
+                        let mut h6s = [0usize; 8];
+                        let mut cs = [0u32; 8];
+                        for r in 0..d {
+                            insert_one!();
+                            hs[r] = last_h;
+                            h6s[r] = last_h6;
+                            cs[r] = cnt;
+                        }
+                        let mut distinct = true;
+                        for i in 0..d {
+                            for j in 0..i {
+                                distinct &= hs[i] != hs[j] && (!F6 || h6s[i] != h6s[j]);
+                            }
+                        }
+                        if distinct {
+                            let mut r = 0;
+                            while p <= b {
+                                cs[r] = cs[r].wrapping_add(1);
+                                *prev.add(p & wmask) = (p - d) as u16;
+                                if F6 {
+                                    *link6.add(p & wmask) = cs[r] << 16 | (p - d) as u32;
+                                }
+                                p += 1;
+                                r += 1;
+                                if r == d {
+                                    r = 0;
+                                }
+                            }
+                            // heads: the last position of every residue
+                            for k in 0..d {
+                                let q = b - k; // residue of q: (q - lo) % d
+                                let rr = (q - lo) % d;
+                                *head.add(hs[rr]) = if F6 { cs[rr] << 16 | q as u32 } else { q as u32 };
+                                if F6 {
+                                    *head6.add(h6s[rr]) = q as u16;
+                                }
+                            }
+                            let rb = (b - lo) % d;
+                            last_h = hs[rb];
+                            last_h6 = h6s[rb];
+                            cnt = cs[rb];
+                            ins_h = hs[rb] as u32;
+                        }
+                    }
                 }
             }
             while p <= hi {
-                // UPDATE_HASH with window[p + 2]
-                ins_h = if consistent || p >= lo + 2 {
-                    direct(p)
-                } else {
-                    ((ins_h << shift) ^ *win.add(p + (MIN_MATCH - 1)) as u32) & hmask
-                };
-                let h = ins_h as usize;
-                // the bucket written last holds position p - 1 (count cnt)
-                let e = if h == last_h {
-                    cnt = cnt.wrapping_add(1);
-                    (p - 1) as u32
-                } else {
-                    let e = *head.add(h);
-                    cnt = (e >> 16).wrapping_add(1);
-                    e
-                };
-                *prev.add(p & wmask) = e as u16;
-                *head.add(h) = if F6 { cnt << 16 | p as u32 } else { p as u32 };
-                last_h = h;
-                if F6 {
-                    let h6 = hash6(rd64u(win.add(p)));
-                    let p6 = if h6 == last_h6 { (p - 1) as u32 } else { *head6.add(h6) as u32 };
-                    *head6.add(h6) = p as u16;
-                    last_h6 = h6;
-                    *link6.add(p & wmask) = (cnt << 16) | p6;
-                }
-                p += 1;
+                insert_one!();
             }
         }
         self.ins_h = ins_h;
@@ -1586,7 +1656,7 @@ impl Deflater {
                 self.lookahead -= self.match_length;
                 if self.match_length <= self.max_lazy_match && self.lookahead >= MIN_MATCH {
                     // positions strstart+1 .. strstart+match_length-1 (all have 3 bytes)
-                    self.insert_range::<false>(self.strstart + 1, self.strstart + self.match_length - 1);
+                    self.insert_range::<false>(self.strstart + 1, self.strstart + self.match_length - 1, self.strstart - self.match_start);
                     self.strstart += self.match_length;
                     self.match_length = 0;
                 } else {
@@ -1670,7 +1740,7 @@ impl Deflater {
                 // zlib: prev_length -= 2; do { if (++strstart <= max_insert) INSERT_STRING }
                 // while (--prev_length != 0);
                 let n = self.prev_length - 2;
-                self.insert_range::<F6>(self.strstart + 1, (self.strstart + n).min(max_insert));
+                self.insert_range::<F6>(self.strstart + 1, (self.strstart + n).min(max_insert), self.strstart - 1 - self.prev_match);
                 self.strstart += n;
                 self.prev_length = 0;
                 self.match_available = false;
@@ -2207,6 +2277,21 @@ mod tests {
         for b in two.iter_mut() {
             *b = (xorshift(&mut s) & 1) as u8;
         }
+        // Runs of short periods (1..=9) over a tiny alphabet: periodic regions whose first
+        // period has distinct or colliding hashes, broken at random points.
+        let mut periodic = Vec::new();
+        while periodic.len() < 400_000 {
+            let r = xorshift(&mut s);
+            let d = 1 + (r % 9) as usize;
+            let pat: Vec<u8> = (0..d).map(|_| [0u8, 1, 255][(xorshift(&mut s) % 3) as usize]).collect();
+            let n = (r >> 8) as usize % 2000;
+            for i in 0..n {
+                periodic.push(pat[i % d]);
+            }
+            if r >> 40 & 1 == 0 {
+                periodic.push(xorshift(&mut s) as u8);
+            }
+        }
         vec![
             ("empty", Vec::new()),
             ("one", vec![b'x']),
@@ -2223,6 +2308,7 @@ mod tests {
             ("img600", img),
             ("twosym250k", two),
             ("fib300k", fib_data(300_000, 5)),
+            ("periodic400k", periodic),
         ]
     }
 
@@ -2259,6 +2345,9 @@ mod tests {
             for strategy in 0..=4 {
                 cases.push((12usize, (level, 15, 9, strategy), 65536usize, "4097r".to_string()));
                 cases.push((6usize, (level, 15, 8, strategy), 1 << 22, "*:4".to_string()));
+                cases.push((15usize, (level, 15, 9, strategy), 65536usize, "7681r".to_string()));
+                cases.push((15usize, (level, 15, 8, strategy), 1 << 22, "*:4".to_string()));
+                cases.push((9usize, (level, 15, 9, strategy), 65536usize, "7681r".to_string()));
             }
         }
         let mut s = seed;
