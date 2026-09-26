@@ -1,1 +1,224 @@
-//! Literal extraction (stub).
+//! Literal / byte-set sequence extraction and the SIMD prefilter built from it.
+//!
+//! `positions(h)` computes a sequence of byte sets S0..Sk-1 such that every match of
+//! `h` starts with bytes b0..bk-1, bi in Si. This covers plain literals, case
+//! insensitive literals (`(?i)passw` -> [pP][aA][sS]...), alternations of literals
+//! (`FILE0|FILE\*|BAAD` -> [FB][IA][LA][ED]) and fixed class prefixes. A `SeqFinder`
+//! scans for the two rarest positions with SIMD and verifies all positions.
+
+use super::hir::{ByteSet, Hir};
+use crate::yara::memchr::{self, ByteSetFinder, Memmem};
+
+/// Approximate byte frequencies (parts per 2^20) measured on a Windows memory image.
+pub const BYTE_FREQ: [u32; 256] = [
+    559442, 13435, 7360, 3913, 4234, 3263, 2149, 2001, 5072, 1729, 1804, 1499, 7719, 1825, 1221, 5686, 4362, 1612,
+    1258, 1139, 1329, 2964, 934, 1031, 2338, 908, 777, 764, 916, 712, 819, 1243, 5456, 1104, 1197, 918, 6537, 942,
+    775, 687, 2738, 1133, 731, 838, 1014, 1499, 1912, 913, 4045, 2245, 1419, 2843, 1479, 1229, 1327, 1015, 3338, 1736,
+    1247, 1445, 905, 938, 800, 1095, 3606, 4416, 1330, 1989, 3995, 2819, 1452, 1155, 19554, 3437, 710, 832, 4594, 2235,
+    1149, 1002, 3577, 874, 959, 1688, 1644, 1434, 1431, 1694, 1326, 619, 766, 902, 1730, 862, 1132, 1896, 1695, 3111,
+    1089, 2176, 2242, 4780, 2348, 1197, 1592, 3133, 635, 940, 2357, 1584, 3071, 3393, 2985, 929, 3091, 3093, 5441,
+    2552, 1185, 1199, 1675, 1376, 539, 577, 903, 691, 808, 3436, 3801, 1234, 780, 3545, 1902, 3441, 634, 631, 1355,
+    7136, 907, 10980, 869, 4515, 600, 718, 1870, 516, 516, 550, 756, 638, 594, 558, 917, 1069, 589, 534, 731, 592,
+    647, 627, 1674, 767, 724, 753, 796, 711, 643, 680, 1030, 648, 783, 610, 794, 617, 654, 666, 1365, 791, 660, 660,
+    816, 693, 1445, 929, 1587, 1231, 1682, 840, 1051, 877, 889, 911, 3995, 1864, 1028, 1776, 1698, 860, 1005, 1549,
+    1409, 1294, 755, 963, 9658, 751, 1162, 997, 1923, 928, 1116, 1039, 869, 871, 1092, 1202, 1516, 1060, 1088, 991,
+    695, 1706, 626, 604, 2148, 893, 744, 581, 1192, 481, 543, 504, 4694, 1658, 621, 1219, 1353, 633, 650, 732, 2175,
+    958, 888, 1897, 774, 650, 1178, 941, 1659, 1252, 1163, 3579, 1115, 1208, 2303, 32775,
+];
+
+/// Estimated probability (parts per 2^20) that a random memory byte is in `s`.
+pub fn set_freq(s: &ByteSet) -> u64 {
+    s.iter().map(|b| BYTE_FREQ[b as usize] as u64).sum()
+}
+
+const MAX_POSITIONS: usize = 32;
+
+/// Required leading byte-set sequence; `complete` = every match of `h` has exactly
+/// this length (so a following concat element may extend it).
+pub fn positions(h: &Hir) -> (Vec<ByteSet>, bool) {
+    let mut out = Vec::new();
+    let complete = pos_into(h, &mut out, 0);
+    if out.len() > MAX_POSITIONS {
+        out.truncate(MAX_POSITIONS);
+        return (out, false);
+    }
+    (out, complete)
+}
+
+fn pos_into(h: &Hir, out: &mut Vec<ByteSet>, depth: usize) -> bool {
+    if out.len() >= MAX_POSITIONS || depth > 200 {
+        return false;
+    }
+    match h {
+        Hir::Empty | Hir::Look(_) => true,
+        Hir::Fail => true,
+        Hir::Class(s) => {
+            out.push(*s);
+            true
+        }
+        Hir::Concat(v) => {
+            for x in v {
+                if !pos_into(x, out, depth + 1) {
+                    return false;
+                }
+            }
+            true
+        }
+        Hir::Alt(v) => {
+            let mut seqs = Vec::with_capacity(v.len());
+            let mut all_complete = true;
+            for x in v {
+                let mut s = Vec::new();
+                all_complete &= pos_into(x, &mut s, depth + 1);
+                seqs.push(s);
+            }
+            let min = seqs.iter().map(|s| s.len()).min().unwrap_or(0);
+            let max = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
+            for i in 0..min {
+                let mut u = ByteSet::EMPTY;
+                for s in &seqs {
+                    u.union(&s[i]);
+                }
+                out.push(u);
+            }
+            all_complete && min == max
+        }
+        Hir::Repeat { min, max, sub, .. } => {
+            if *min == 0 {
+                return *max == Some(0);
+            }
+            for _ in 0..*min {
+                let before = out.len();
+                if !pos_into(sub, out, depth + 1) {
+                    return false;
+                }
+                if out.len() == before || out.len() >= MAX_POSITIONS {
+                    // zero-width body or enough positions
+                    return *max == Some(*min) && out.len() < MAX_POSITIONS;
+                }
+            }
+            *max == Some(*min)
+        }
+        Hir::Capture { sub, .. } => pos_into(sub, out, depth + 1),
+        _ => false,
+    }
+}
+
+/// Union of all bytes any consuming part of `h` can match.
+pub fn bytes_of(h: &Hir) -> ByteSet {
+    let mut s = ByteSet::EMPTY;
+    bytes_into(h, &mut s, 0);
+    s
+}
+
+fn bytes_into(h: &Hir, s: &mut ByteSet, depth: usize) {
+    if depth > 3000 {
+        *s = ByteSet::FULL;
+        return;
+    }
+    match h {
+        Hir::Class(c) => s.union(c),
+        Hir::Concat(v) | Hir::Alt(v) => v.iter().for_each(|x| bytes_into(x, s, depth + 1)),
+        Hir::Repeat { sub, .. } | Hir::Capture { sub, .. } | Hir::Atomic(sub) | Hir::LookAround { sub, .. } => {
+            bytes_into(sub, s, depth + 1)
+        }
+        Hir::Cond { yes, no, .. } => {
+            bytes_into(yes, s, depth + 1);
+            bytes_into(no, s, depth + 1);
+        }
+        Hir::Backref { .. } => *s = ByteSet::FULL,
+        _ => {}
+    }
+}
+
+/// Estimated candidate rate (parts per 2^20) of a position sequence using its two
+/// rarest positions.
+pub fn seq_rate(seq: &[ByteSet]) -> u64 {
+    let mut f: Vec<u64> = seq.iter().map(set_freq).collect();
+    f.sort_unstable();
+    match f.len() {
+        0 => 1 << 20,
+        1 => f[0],
+        _ => ((f[0] * f[1]) >> 20).max(1),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// SeqFinder
+// ---------------------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum Kind {
+    /// Single exact literal.
+    Lit(Memmem),
+    /// Single byte set position (first byte).
+    Set(ByteSetFinder),
+    /// Pair of positions + full verification.
+    Pair { i1: usize, i2: usize },
+}
+
+/// Finds the leftmost position where a byte-set sequence occurs.
+#[derive(Clone, Debug)]
+pub struct SeqFinder {
+    seq: Vec<ByteSet>,
+    kind: Kind,
+    s1: ByteSet,
+    s2: ByteSet,
+}
+
+impl SeqFinder {
+    pub fn new(seq: &[ByteSet]) -> Option<SeqFinder> {
+        if seq.is_empty() || seq.iter().any(|s| s.is_empty()) {
+            return None;
+        }
+        let seq: Vec<ByteSet> = seq.to_vec();
+        if seq.iter().all(|s| s.len() == 1) && seq.len() >= 2 {
+            let lit: Vec<u8> = seq.iter().filter_map(|s| s.as_single()).collect();
+            return Some(SeqFinder { kind: Kind::Lit(Memmem::new(&lit)), s1: seq[0], s2: seq[0], seq });
+        }
+        if seq.len() == 1 {
+            return Some(SeqFinder { kind: Kind::Set(ByteSetFinder::new(&seq[0].to_bools())), s1: seq[0], s2: seq[0], seq });
+        }
+        // Two rarest positions.
+        let mut idx: Vec<usize> = (0..seq.len()).collect();
+        idx.sort_by_key(|&i| (set_freq(&seq[i]), i));
+        let (i1, i2) = (idx[0], idx[1]);
+        Some(SeqFinder { kind: Kind::Pair { i1, i2 }, s1: seq[i1], s2: seq[i2], seq })
+    }
+
+    pub fn len(&self) -> usize {
+        self.seq.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seq.is_empty()
+    }
+
+    pub fn rate(&self) -> u64 {
+        seq_rate(&self.seq)
+    }
+
+    #[inline]
+    fn verify(&self, hay: &[u8], p: usize) -> bool {
+        if p + self.seq.len() > hay.len() {
+            return false;
+        }
+        self.seq.iter().zip(&hay[p..p + self.seq.len()]).all(|(s, &b)| s.contains(b))
+    }
+
+    /// Leftmost p >= from where the sequence matches.
+    pub fn find(&self, hay: &[u8], from: usize) -> Option<usize> {
+        let k = self.seq.len();
+        if from > hay.len() || hay.len() - from < k {
+            return None;
+        }
+        match &self.kind {
+            Kind::Lit(m) => m.find_at(hay, from),
+            Kind::Set(f) => f.find(&hay[..hay.len() - k + 1], from),
+            Kind::Pair { i1, i2 } => {
+                let last = hay.len() - k;
+                memchr::pair_set_find(hay, from, last, *i1, &self.s1, *i2, &self.s2, &mut |q| self.verify(hay, q))
+            }
+        }
+    }
+}

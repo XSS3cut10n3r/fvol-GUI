@@ -14,9 +14,33 @@ import re
 import subprocess
 import sys
 import tempfile
+import signal
 import warnings
 
 warnings.simplefilter("ignore")
+
+
+class Timeout(Exception):
+    pass
+
+
+def _alarm(signum, frame):
+    raise Timeout()
+
+
+signal.signal(signal.SIGALRM, _alarm)
+
+
+def guarded(fn, *a):
+    """Run a python-re oracle call with a 0.25 s budget (python itself backtracks
+    exponentially on some random patterns); returns None on timeout."""
+    signal.setitimer(signal.ITIMER_REAL, 0.25)
+    try:
+        return fn(*a)
+    except Timeout:
+        return None
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -182,10 +206,19 @@ def main():
     cpath = os.path.join(tmp, "cases.tsv")
     opath = os.path.join(tmp, "out.tsv")
     expected = []
+    kept = []
+    timeouts = 0
+    for (p, f, h, mode) in cases:
+        e = guarded(py_iter, p, f, h) if mode == "iter" else guarded(py_groups, p, f, h)
+        if e is None:
+            timeouts += 1
+            continue
+        kept.append((p, f, h, mode))
+        expected.append(e)
+    cases = kept
     with open(cpath, "w") as fh:
         for i, (p, f, h, mode) in enumerate(cases):
             fh.write("%d\t%s\t%d\t%s\t%s\n" % (i, p.hex(), f, h.hex(), mode))
-            expected.append(py_iter(p, f, h) if mode == "iter" else py_groups(p, f, h))
     env = dict(os.environ, RSVOL_REGEX_CASES=cpath, RSVOL_REGEX_OUT=opath)
     cmd = ["cargo", "test", "--profile", args.profile, "--bin", "vol", "yara_regex_difftest_driver", "--", "--ignored", "--nocapture", "--test-threads=1"]
     r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
@@ -210,7 +243,7 @@ def main():
                 shown += 1
                 print("MISMATCH #%d mode=%s flags=%d pattern=%r hay=%r\n   python=%s\n   rsvol =%s %s" % (
                     i, mode, f, p, h, expected[i], g, btdiff.get(i, "")))
-    print("cases=%d mismatches=%d (%.3f%%)" % (len(cases), bad, 100.0 * bad / max(1, len(cases))))
+    print("cases=%d mismatches=%d (%.3f%%) python-timeouts-skipped=%d" % (len(cases), bad, 100.0 * bad / max(1, len(cases)), timeouts))
     sys.exit(1 if bad else 0)
 
 

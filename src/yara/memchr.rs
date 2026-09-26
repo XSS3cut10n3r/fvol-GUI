@@ -373,6 +373,94 @@ mod avx2 {
         None
     }
 
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn pair_set_dispatch(
+        hay: &[u8],
+        from: usize,
+        last: usize,
+        i1: usize,
+        s1: &ByteSet,
+        i2: usize,
+        s2: &ByteSet,
+        verify: &mut dyn FnMut(usize) -> bool,
+    ) -> Option<usize> {
+        use super::vset::{Any, build};
+        unsafe {
+            let a = build(s1);
+            let b = build(s2);
+            macro_rules! go {
+                ($x:expr) => {
+                    match &b {
+                        Any::One(y) => pair_set_g(hay, from, last, i1, $x, i2, y, verify),
+                        Any::Two(y) => pair_set_g(hay, from, last, i1, $x, i2, y, verify),
+                        Any::Three(y) => pair_set_g(hay, from, last, i1, $x, i2, y, verify),
+                        Any::Masked(y) => pair_set_g(hay, from, last, i1, $x, i2, y, verify),
+                        Any::Truffle(y) => pair_set_g(hay, from, last, i1, $x, i2, y, verify),
+                    }
+                };
+            }
+            match &a {
+                Any::One(x) => go!(x),
+                Any::Two(x) => go!(x),
+                Any::Three(x) => go!(x),
+                Any::Masked(x) => go!(x),
+                Any::Truffle(x) => go!(x),
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn pair_set_g<A: super::vset::VSet, B: super::vset::VSet>(
+        hay: &[u8],
+        from: usize,
+        last: usize,
+        i1: usize,
+        a: &A,
+        i2: usize,
+        b: &B,
+        verify: &mut dyn FnMut(usize) -> bool,
+    ) -> Option<usize> {
+        let ptr = hay.as_ptr();
+        let mut p = from;
+        unsafe {
+            while p + 31 <= last {
+                let m1 = a.test(load(ptr.add(p + i1)));
+                let m2 = b.test(load(ptr.add(p + i2)));
+                let mut m = _mm256_movemask_epi8(_mm256_and_si256(m1, m2)) as u32;
+                while m != 0 {
+                    let q = p + m.trailing_zeros() as usize;
+                    if verify(q) {
+                        return Some(q);
+                    }
+                    m &= m - 1;
+                }
+                p += 32;
+            }
+            if p <= last {
+                if last >= 31 {
+                    let j = last - 31;
+                    let m1 = a.test(load(ptr.add(j + i1)));
+                    let m2 = b.test(load(ptr.add(j + i2)));
+                    let mut m = (_mm256_movemask_epi8(_mm256_and_si256(m1, m2)) as u32) >> (p - j);
+                    while m != 0 {
+                        let q = p + m.trailing_zeros() as usize;
+                        if verify(q) {
+                            return Some(q);
+                        }
+                        m &= m - 1;
+                    }
+                } else {
+                    for q in p..=last {
+                        if verify(q) {
+                            return Some(q);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Packed-pair candidate search: returns the first p in [from, last] (inclusive)
     /// such that hay[p+i1]==b1 && hay[p+i2]==b2 (and verified by `verify`).
     /// `last + max(i1,i2) < hay.len()` must hold.
@@ -436,6 +524,149 @@ mod avx2 {
             }
         }
         Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Pair-of-byte-sets search (generalized packed pair)
+// ---------------------------------------------------------------------------------------
+
+use super::regex::hir::ByteSet;
+
+/// Leftmost p in [from, last] with hay[p+i1] in s1, hay[p+i2] in s2 and `verify(p)`.
+/// Requires last + max(i1, i2) < hay.len().
+pub fn pair_set_find(
+    hay: &[u8],
+    from: usize,
+    last: usize,
+    i1: usize,
+    s1: &ByteSet,
+    i2: usize,
+    s2: &ByteSet,
+    verify: &mut dyn FnMut(usize) -> bool,
+) -> Option<usize> {
+    if from > last || last + i1.max(i2) >= hay.len() {
+        return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if last - from >= 32 && has_avx2() {
+            // SAFETY: AVX2 checked; bounds checked above.
+            return unsafe { avx2::pair_set_dispatch(hay, from, last, i1, s1, i2, s2, verify) };
+        }
+    }
+    (from..=last).find(|&p| s1.contains(hay[p + i1]) && s2.contains(hay[p + i2]) && verify(p))
+}
+
+#[cfg(target_arch = "x86_64")]
+mod vset {
+    use super::*;
+
+    pub trait VSet {
+        unsafe fn test(&self, v: __m256i) -> __m256i;
+    }
+    pub struct One(pub __m256i);
+    pub struct Two(pub __m256i, pub __m256i);
+    pub struct Three(pub __m256i, pub __m256i, pub __m256i);
+    pub struct Masked(pub __m256i, pub __m256i);
+    pub struct Truffle {
+        pub lo: __m256i,
+        pub hi: __m256i,
+        pub bits: __m256i,
+    }
+    impl VSet for One {
+        #[inline(always)]
+        unsafe fn test(&self, v: __m256i) -> __m256i {
+            unsafe { _mm256_cmpeq_epi8(v, self.0) }
+        }
+    }
+    impl VSet for Two {
+        #[inline(always)]
+        unsafe fn test(&self, v: __m256i) -> __m256i {
+            unsafe { _mm256_or_si256(_mm256_cmpeq_epi8(v, self.0), _mm256_cmpeq_epi8(v, self.1)) }
+        }
+    }
+    impl VSet for Three {
+        #[inline(always)]
+        unsafe fn test(&self, v: __m256i) -> __m256i {
+            unsafe {
+                _mm256_or_si256(
+                    _mm256_or_si256(_mm256_cmpeq_epi8(v, self.0), _mm256_cmpeq_epi8(v, self.1)),
+                    _mm256_cmpeq_epi8(v, self.2),
+                )
+            }
+        }
+    }
+    impl VSet for Masked {
+        #[inline(always)]
+        unsafe fn test(&self, v: __m256i) -> __m256i {
+            unsafe { _mm256_cmpeq_epi8(_mm256_and_si256(v, self.0), self.1) }
+        }
+    }
+    impl VSet for Truffle {
+        #[inline(always)]
+        unsafe fn test(&self, x: __m256i) -> __m256i {
+            unsafe {
+                let a = _mm256_shuffle_epi8(self.lo, x);
+                let b = _mm256_shuffle_epi8(self.hi, _mm256_xor_si256(x, _mm256_set1_epi8(-128)));
+                let t = _mm256_or_si256(a, b);
+                let h = _mm256_and_si256(_mm256_srli_epi16(x, 4), _mm256_set1_epi8(7));
+                let m = _mm256_shuffle_epi8(self.bits, h);
+                let r = _mm256_and_si256(t, m);
+                _mm256_xor_si256(_mm256_cmpeq_epi8(r, _mm256_setzero_si256()), _mm256_set1_epi8(-1))
+            }
+        }
+    }
+
+    pub enum Any {
+        One(One),
+        Two(Two),
+        Three(Three),
+        Masked(Masked),
+        Truffle(Truffle),
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn build(s: &ByteSet) -> Any {
+        let v: Vec<u8> = s.iter().collect();
+        unsafe {
+            match v.len() {
+                1 => Any::One(One(_mm256_set1_epi8(v[0] as i8))),
+                2 => {
+                    let d = v[0] ^ v[1];
+                    if d.count_ones() == 1 {
+                        Any::Masked(Masked(_mm256_set1_epi8(!d as i8), _mm256_set1_epi8((v[0] & !d) as i8)))
+                    } else {
+                        Any::Two(Two(_mm256_set1_epi8(v[0] as i8), _mm256_set1_epi8(v[1] as i8)))
+                    }
+                }
+                3 => Any::Three(Three(
+                    _mm256_set1_epi8(v[0] as i8),
+                    _mm256_set1_epi8(v[1] as i8),
+                    _mm256_set1_epi8(v[2] as i8),
+                )),
+                _ => {
+                    let mut lo = [0u8; 16];
+                    let mut hi = [0u8; 16];
+                    for &b in &v {
+                        let bit = 1u8 << ((b >> 4) & 7);
+                        if b < 0x80 {
+                            lo[(b & 15) as usize] |= bit;
+                        } else {
+                            hi[(b & 15) as usize] |= bit;
+                        }
+                    }
+                    Any::Truffle(Truffle {
+                        lo: _mm256_broadcastsi128_si256(_mm_loadu_si128(lo.as_ptr() as *const __m128i)),
+                        hi: _mm256_broadcastsi128_si256(_mm_loadu_si128(hi.as_ptr() as *const __m128i)),
+                        bits: _mm256_setr_epi8(
+                            1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128, 1, 2, 4, 8, 16, 32, 64, -128,
+                            1, 2, 4, 8, 16, 32, 64, -128,
+                        ),
+                    })
+                }
+            }
+        }
     }
 }
 
