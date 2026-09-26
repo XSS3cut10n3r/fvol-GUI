@@ -6,7 +6,7 @@
 use crate::context::Context;
 use crate::error::Result;
 use crate::objects::util::array_to_string;
-use crate::plugins::windows::thread_pe_symbols::{CollectedModules, Range, get_process_modules, path_and_symbol_for_address, vads_for_process_cache};
+use crate::plugins::windows::pe_symbols::{CollectedModules, Range, get_process_modules_cached, get_vads_for_process_cache, path_and_symbol_for_address};
 use crate::plugins::windows::threads::list_process_threads;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -74,12 +74,12 @@ impl Plugin for SuspendedThreads {
                 Err(e) if e.is_invalid_address() => continue,
                 Err(e) => return Err(e),
             };
-            if vads_for_process_cache(&mut vads_cache, &owner)?.is_none() {
+            if get_vads_for_process_cache(&mut vads_cache, &owner)?.is_none() {
                 continue;
             }
             // python: `if not proc_modules` (an empty collection is rebuilt next time)
-            if proc_modules.as_ref().is_none_or(|m| m.order.is_empty()) {
-                proc_modules = Some(get_process_modules(k, &mut vads_cache)?);
+            if proc_modules.as_ref().is_none_or(|m| m.is_empty()) {
+                proc_modules = Some(get_process_modules_cached(k, None, &mut vads_cache)?);
             }
             let pm = proc_modules.as_ref().unwrap();
             let vads = &vads_cache[&owner.addr];

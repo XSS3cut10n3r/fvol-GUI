@@ -18,7 +18,7 @@
 use super::container_of;
 use super::idstorage::PageCache;
 use super::timespec::Timespec;
-use super::{LinuxExt, ListIter, vmlinux_of};
+use super::{HListIter, LinuxExt, ListIter, vmlinux_of};
 use crate::error::{Error, Result};
 use crate::objects::util::pointer_to_string;
 use crate::objects::Obj;
@@ -60,6 +60,34 @@ pub const MNT_UNBINDABLE: i128 = 0x2000;
 pub const MNT_FLAGS: [(i128, &str); 6] =
     [(MNT_NOSUID, "nosuid"), (MNT_NODEV, "nodev"), (MNT_NOEXEC, "noexec"), (MNT_NOATIME, "noatime"), (MNT_NODIRATIME, "nodiratime"), (MNT_RELATIME, "relatime")];
 
+/// Iterator of python `dentry.get_subdirs()`: the child `dentry` objects. Yields `Err` once
+/// where python raises (including python's `AttributeError` when the hlist walk of kernels
+/// >= 6.8 yields `None` for an invalid container). An hlist cycle (python loops forever)
+/// ends the walk.
+pub enum SubdirIter {
+    List(ListIter),
+    HList(HListIter, FxHashSet<u64>),
+}
+
+impl Iterator for SubdirIter {
+    type Item = Result<Obj>;
+    fn next(&mut self) -> Option<Result<Obj>> {
+        match self {
+            SubdirIter::List(it) => it.next(),
+            SubdirIter::HList(it, seen) => match it.next()? {
+                Ok(Some(d)) => {
+                    if !seen.insert(d.addr) {
+                        return None;
+                    }
+                    Some(Ok(d))
+                }
+                Ok(None) => Some(Err(Error::msg("AttributeError: 'NoneType' object has no attribute 'vol'"))),
+                Err(e) => Some(Err(e)),
+            },
+        }
+    }
+}
+
 /// Filesystem class extensions on [`Obj`].
 pub trait FsExt {
     // ---- fs_struct
@@ -92,8 +120,9 @@ pub trait FsExt {
     /// `ancestor.addr` (python `ancestor_dentry.vol.offset`). Returns python's
     /// `current_dentry` (the dentry or a `d_parent` pointer object).
     fn d_ancestor(&self, ancestor: &Obj) -> Result<Option<Obj>>;
-    /// python `dentry.get_subdirs()`.
-    fn get_subdirs(&self) -> ListIter;
+    /// python `dentry.get_subdirs()` (`d_children` hlist on kernels >= 6.8, `d_subdirs`
+    /// list_head before).
+    fn get_subdirs(&self) -> SubdirIter;
 
     // ---- inode
     /// python `inode.is_dir` .. `is_sticky` (`S_ISDIR(i_mode)` ...).
@@ -400,24 +429,24 @@ impl FsExt for Obj {
         }
     }
 
-    fn get_subdirs(&self) -> ListIter {
-        let r = (|| -> Result<(Obj, &'static str, String)> {
+    fn get_subdirs(&self) -> SubdirIter {
+        let r = (|| -> Result<SubdirIter> {
             let d = tgt(self)?;
-            let (member, head) = if d.has_member("d_sib") && d.has_member("d_children") {
-                ("d_sib", d.m("d_children")?)
-            } else if d.has_member("d_child") && d.has_member("d_subdirs") {
+            let ty = format!("{}!dentry", d.table().name());
+            if d.has_member("d_sib") && d.has_member("d_children") {
+                // kernels >= 6.8: `d_children` is an hlist_head
+                return Ok(SubdirIter::HList(d.m("d_children")?.hlist_to_list(&ty, "d_sib"), FxHashSet::default()));
+            }
+            let (member, head) = if d.has_member("d_child") && d.has_member("d_subdirs") {
                 ("d_child", d.m("d_subdirs")?)
             } else if d.has_member("d_u") && d.has_member("d_subdirs") {
                 ("d_u", d.m("d_subdirs")?)
             } else {
                 return Err(Error::msg("VolatilityException: Unsupported dentry type"));
             };
-            Ok((head, member, format!("{}!dentry", d.table().name())))
+            Ok(SubdirIter::List(head.list_of(&ty, member)))
         })();
-        match r {
-            Ok((head, member, ty)) => head.list_of(&ty, member),
-            Err(e) => ListIter::failed(e),
-        }
+        r.unwrap_or_else(|e| SubdirIter::List(ListIter::failed(e)))
     }
 
     fn is_dir(&self) -> Result<bool> {
