@@ -1,6 +1,7 @@
-//! Memory layers: physical containers stacked on the input file (raw, LiME, ELF core, crash
-//! dump, hibernation, VMware, QEMU, AVML, Xen ...) and translation layers (Intel 32/PAE/x64/LA57,
-//! with Windows / Linux / Mac PTE semantics) stacked on those.
+//! Memory layers: physical containers stacked on the input file (raw, LiME, ELF core including
+//! QEMU and VirtualBox core dumps, Windows crash dump, VMware, QEMU savevm, AVML, Xen) and
+//! translation layers (Intel 32/PAE/x64/LA57, with Windows / Linux / Mac PTE semantics) stacked
+//! on those. Like volatility3 2.28.2 there is no hibernation file layer.
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 //!

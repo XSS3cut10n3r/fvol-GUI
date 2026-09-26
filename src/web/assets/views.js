@@ -434,7 +434,7 @@ function openImageCard(first) {
   path.addEventListener('input', debounce(browse, 150));
   path.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   const body = el('div.card-b.openbox', {},
-    first ? el('p.prose', { text: 'No memory image is loaded. Enter the path of one (raw, LiME, ELF core, crash dump, hibernation file, VMware/VirtualBox state…). It is only read, never modified.', style: { margin: 0 } }) : el('p.prose', { text: 'Switching images keeps earlier runs in the history, but they belong to the old image.', style: { margin: 0 } }),
+    first ? el('p.prose', { text: 'No memory image is loaded. Enter the path of one (raw, LiME, ELF core such as a QEMU or VirtualBox core dump, Windows crash dump, VMware .vmem, QEMU savevm, AVML…). It is only read, never modified.', style: { margin: 0 } }) : el('p.prose', { text: 'Switching images keeps earlier runs in the history, but they belong to the old image.', style: { margin: 0 } }),
     el('div.row', {}, path, go), syms, list, err);
   card.append(el('div.card-h', {}, el('h3', { text: 'Open a memory image' })), body);
   setTimeout(() => { browse(); path.focus(); }, 0);

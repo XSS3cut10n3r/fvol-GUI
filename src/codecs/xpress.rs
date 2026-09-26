@@ -1,6 +1,7 @@
 //! Microsoft Xpress decompression ([MS-XCA]): "Plain LZ77" (COMPRESSION_FORMAT_XPRESS) and
-//! "LZ77+Huffman" (COMPRESSION_FORMAT_XPRESS_HUFF), as used by Windows hibernation files,
-//! the memory-manager store, prefetch (MAM) files, WIM/WOF, ...
+//! "LZ77+Huffman" (COMPRESSION_FORMAT_XPRESS_HUFF), the formats of the memory-manager store,
+//! prefetch (MAM) files and WIM/WOF (Windows hibernation files use them too, but rsvol, like
+//! volatility3 2.28.2, has no hibernation layer).
 //!
 //! Part of rsvol, a port of Volatility 3 (Volatility Software License 1.0).
 //!

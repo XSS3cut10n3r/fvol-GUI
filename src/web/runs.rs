@@ -397,7 +397,7 @@ pub fn explain(e: &Error, run: &Run) -> ErrInfo {
                 title: format!("No {} kernel found in this image", want.map(os_label).unwrap_or("supported")),
                 message: "The memory image couldn't be matched to this operating system (no kernel page tables were found).".into(),
                 hints: vec![
-                    "Make sure the file is a complete memory image (raw, LiME, ELF core, crash dump, hibernation file...).".into(),
+                    "Make sure the file is a complete memory image (raw, LiME, ELF core, Windows crash dump, VMware, QEMU, AVML...).".into(),
                     "If the image belongs to another OS, use that OS's plugins.".into(),
                 ],
                 detail,
