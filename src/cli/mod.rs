@@ -868,38 +868,48 @@ fn report_error(e: &Error, failure: Option<&RenderFailure>, class: &str, out: &m
     1
 }
 
-/// `CommandLine.process_unsatisfied_exceptions` + the exit message. Each line of `msg` is a
-/// config path, optionally followed by `\t<kind>\t<description>` (see
-/// [`crate::plugins::unsatisfied_requirement`]).
+/// `CommandLine.process_unsatisfied_exceptions` + the exit message.
 fn report_unsatisfied(msg: &str, class: &str, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let parse = |l: &str| -> Option<(String, String, String)> {
+    let is_path = |l: &str| !l.is_empty() && !l.contains(char::is_whitespace);
+    // `plugins::unsatisfied_described` lines: "path\tkind\tdescription"
+    let described = |l: &str| -> Option<(String, &'static str, String)> {
         let mut it = l.splitn(3, '\t');
-        let p = it.next().filter(|p| !p.is_empty() && !p.contains(char::is_whitespace))?;
-        Some((p.to_string(), it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string()))
+        let (p, k, d) = (it.next()?, it.next()?, it.next()?);
+        let k = match k {
+            "layer" => "layer",
+            "symbols" => "symbols",
+            "other" => "other",
+            _ => return None,
+        };
+        is_path(p).then(|| (p.to_string(), k, d.to_string()))
     };
     let lines: Vec<&str> = msg.lines().collect();
-    let parsed: Vec<Option<(String, String, String)>> = lines.iter().map(|l| parse(l)).collect();
-    let items: Vec<(String, String, String)> = if !lines.is_empty() && parsed.iter().all(|p| p.is_some()) {
-        parsed.into_iter().flatten().collect()
+    let reqs: Vec<(String, &'static str, String)> = if !lines.is_empty() && lines.iter().all(|l| is_path(l) || described(l).is_some()) {
+        lines
+            .iter()
+            .map(|l| match described(l) {
+                Some(r) => r,
+                None => {
+                    let kind = if l.ends_with("layer_name") {
+                        "layer"
+                    } else if l.ends_with("symbol_table_name") {
+                        "symbols"
+                    } else {
+                        "other"
+                    };
+                    (l.to_string(), kind, String::new())
+                }
+            })
+            .collect()
     } else {
-        vec![("kernel.layer_name".into(), String::new(), String::new()), ("kernel.symbol_table_name".into(), String::new(), String::new())]
+        vec![("kernel.layer_name".into(), "layer", String::new()), ("kernel.symbol_table_name".into(), "symbols", String::new())]
     };
-    let rel: Vec<String> = items
-        .iter()
-        .map(|(p, k, _)| match k.as_str() {
-            // the kind decides the hints below; bare paths are classified by their suffix
-            "layer" => "layer_name".to_string(),
-            "symbols" => "symbol_table_name".to_string(),
-            "" => p.clone(),
-            _ => String::new(),
-        })
-        .collect();
-    let paths: Vec<String> = items.iter().map(|(r, _, _)| format!("plugins.{class}.{r}")).collect();
+    let paths: Vec<String> = reqs.iter().map(|r| format!("plugins.{class}.{}", r.0)).collect();
     let mut t = String::from("\n");
-    for (p, (_, _, desc)) in paths.iter().zip(&items) {
-        t.push_str(&format!("Unsatisfied requirement {p}: {desc}\n"));
+    for (p, r) in paths.iter().zip(&reqs) {
+        t.push_str(&format!("Unsatisfied requirement {p}: {}\n", r.2));
     }
-    if rel.iter().any(|r| r.ends_with("layer_name")) {
+    if reqs.iter().any(|r| r.1 == "layer") {
         t.push_str(
             "\nA translation layer requirement was not fulfilled.  Please verify that:\n\
              \tA file was provided to create this layer (by -f, --single-location or by config)\n\
@@ -907,7 +917,7 @@ fn report_unsatisfied(msg: &str, class: &str, out: &mut dyn Write, err: &mut dyn
              \tThe file is a valid memory image and was acquired cleanly\n",
         );
     }
-    if rel.iter().any(|r| r.ends_with("symbol_table_name")) {
+    if reqs.iter().any(|r| r.1 == "symbols") {
         t.push_str(
             "\nA symbol table requirement was not fulfilled.  Please verify that:\n\
              \tThe associated translation layer requirement was fulfilled\n\

@@ -1,0 +1,3 @@
+# Plugins whose python output order is nondeterministic run-to-run (python iterates sets keyed by id()/hash).
+# compare.sh accepts these when the sorted outputs are identical ("OK~ ... (order)").
+windows.windows.Windows

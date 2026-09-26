@@ -357,7 +357,12 @@ impl WinExt for Obj {
     fn fast_ref_dereference(&self) -> Result<Obj> {
         let max_fast_ref: u64 = if self.sp.table.is_64bit() { 15 } else { 7 };
         let v = self.m("Object")?.u64()?;
-        Obj::named(self.sp, "pointer", v & !max_fast_ref)
+        let p = Obj::named(self.sp, "pointer", v & !max_fast_ref)?;
+        // python builds the pointer with context.object(), which reads its value right away:
+        // an unreadable target raises InvalidAddressException here (e.g. getsids' "Token
+        // unreadable", privileges skipping the process)
+        p.u64()?;
+        Ok(p)
     }
 
     fn is_valid(&self) -> bool {
@@ -379,6 +384,8 @@ impl WinExt for Obj {
             Some("_ERESOURCE") => super::cache::eresource_is_valid(self).unwrap_or(false),
             Some("_OBJECT_HEADER") => super::pool::object_header_is_valid(self),
             Some("_CMHIVE") => super::registry::cmhive_is_valid(self),
+            Some("tagWINDOWSTATION") | Some("tagDESKTOP") | Some("tagWND") => super::gui::gui_is_valid(self).unwrap_or(true),
+            Some("_TCP_LISTENER") | Some("_TCP_ENDPOINT") | Some("_UDP_ENDPOINT") => super::network::is_valid(self),
             Some("_POOL_TRACKER_BIG_PAGES") => {
                 use super::pool::PoolExt;
                 self.big_page_is_valid().unwrap_or(false)

@@ -192,13 +192,33 @@ pub fn unsatisfied(paths: &[&str]) -> crate::error::Error {
     crate::error::Error::Unsatisfied(paths.join("\n"))
 }
 
-/// [`unsatisfied`] for one python requirement with its description, e.g. a plugin's own
+/// Kind of an unsatisfied requirement (selects the CLI's hint paragraph).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsatKind {
+    /// `TranslationLayerRequirement`
+    Layer,
+    /// `SymbolTableRequirement`
+    Symbols,
+    /// anything else
+    Other,
+}
+
+/// [`unsatisfied`] for requirements python prints with a description, e.g. a plugin's own
 /// `TranslationLayerRequirement(name="primary", description="Memory layer for the kernel")`:
-/// `unsatisfied_requirement("primary", "layer", "Memory layer for the kernel")`. `kind` picks
-/// the CLI's hint: "layer" (TranslationLayerRequirement), "symbols" (SymbolTableRequirement),
-/// anything else none.
-pub fn unsatisfied_requirement(path: &str, kind: &str, description: &str) -> crate::error::Error {
-    crate::error::Error::Unsatisfied(format!("{path}\t{kind}\t{description}"))
+/// "Unsatisfied requirement plugins.<Class>.primary: Memory layer for the kernel".
+pub fn unsatisfied_described(reqs: &[(&str, UnsatKind, &str)]) -> crate::error::Error {
+    let lines: Vec<String> = reqs
+        .iter()
+        .map(|(path, kind, desc)| {
+            let k = match kind {
+                UnsatKind::Layer => "layer",
+                UnsatKind::Symbols => "symbols",
+                UnsatKind::Other => "other",
+            };
+            format!("{path}\t{k}\t{desc}")
+        })
+        .collect();
+    crate::error::Error::Unsatisfied(lines.join("\n"))
 }
 
 /// Every registered plugin, sorted by name.

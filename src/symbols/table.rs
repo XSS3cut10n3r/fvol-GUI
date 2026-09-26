@@ -155,7 +155,7 @@ pub enum Ty {
 
 pub(crate) const MAGIC: &[u8; 8] = b"RSVOLIS1";
 /// Bump when the blob layout or the builder semantics change (invalidates caches).
-pub(crate) const BLOB_VERSION: u32 = 4;
+pub(crate) const BLOB_VERSION: u32 = 5;
 
 /// Section indexes in the header.
 pub(crate) mod sec {
@@ -180,7 +180,7 @@ pub(crate) mod sec {
 /// Record sizes.
 pub(crate) const NODE_SZ: usize = 16;
 pub(crate) const UTYPE_SZ: usize = 32; // name(8) kind(4) size(4) mstart(4) mcount(4) hstart(4) hlen(4)
-pub(crate) const MEMBER_SZ: usize = 32; // name(8) offset(4) pad(4) ty(16)
+pub(crate) const MEMBER_SZ: usize = 32; // name(8) offset(8, i64: ISF offsets may be negative) ty(16)
 pub(crate) const ENUM_SZ: usize = 32; // name(8) base prim(4) size(4) cstart(4) ccount(4) pad(8)
 pub(crate) const CONST_SZ: usize = 16; // name(8) value(8)
 pub(crate) const SYMBOL_SZ: usize = 32; // name(8) address(8) type(4) flags(4) cdata(8)
@@ -648,7 +648,7 @@ impl SymbolTable {
                     if s == nb {
                         // byte-equal to a valid &str, hence valid UTF-8
                         let n = std::str::from_utf8_unchecked(s);
-                        return Some(Member { name: n, offset: rd(rec, 8) as u64, ty: ty_decode(std::slice::from_raw_parts(rec.add(16), 16)) });
+                        return Some(Member { name: n, offset: u64::from_le((rec.add(8) as *const u64).read_unaligned()), ty: ty_decode(std::slice::from_raw_parts(rec.add(16), 16)) });
                     }
                 }
                 i = (i + 1) & mask;
@@ -666,7 +666,7 @@ impl SymbolTable {
         let mend = (mstart + rd32(r, 20) as u64).min(n);
         (mstart..mend).map(move |mi| {
             let rec = ms.get(mi as usize * MEMBER_SZ..(mi as usize + 1) * MEMBER_SZ).unwrap_or(&ZERO_REC);
-            Member { name: self.rec_str(rec), offset: rd32(rec, 8) as u64, ty: ty_decode(&rec[16..32]) }
+            Member { name: self.rec_str(rec), offset: rd64(rec, 8), ty: ty_decode(&rec[16..32]) }
         })
     }
     /// Iterate user type names (ISF order).
@@ -799,8 +799,23 @@ impl SymbolTable {
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
         let idx = self.by_addr.get_or_init(|| {
-            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (self.sym_at(i).address, i)).collect();
-            v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1)))));
+            let _t = crate::util::trace::span("symbol address index");
+            let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (rd64(self.sym_rec(i), 8) & mask, i)).collect();
+            // sort by address (cheap integer keys), then order equal-address runs by name like
+            // python's (address, name) tuples (names are unique: the result is deterministic)
+            v.sort_unstable_by_key(|e| e.0);
+            let mut i = 0;
+            while i < v.len() {
+                let mut j = i + 1;
+                while j < v.len() && v[j].0 == v[i].0 {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    v[i..j].sort_unstable_by(|a, b| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1))));
+                }
+                i = j;
+            }
             v
         });
         let start = idx.partition_point(|e| e.0 < offset);

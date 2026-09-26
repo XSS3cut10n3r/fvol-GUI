@@ -52,7 +52,7 @@ impl Plugin for Crashinfo {
     }
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         // requirement "primary" (a translation layer over the image)
-        let (phys, _) = ctx.physical_arc().map_err(|_| crate::plugins::unsatisfied(&["primary"]))?;
+        let (phys, _) = ctx.physical_arc().map_err(|_| crate::plugins::unsatisfied_described(&[("primary", crate::plugins::UnsatKind::Layer, "Memory layer for the kernel")]))?;
         let Some(h) = crash::find_header(phys) else {
             // vollog.error("This plugin requires a Windows crash dump"); raise
             panic!("No active exception to reraise");

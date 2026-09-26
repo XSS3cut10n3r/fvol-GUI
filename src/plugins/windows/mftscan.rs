@@ -483,7 +483,7 @@ pub fn primary_memory_layer(ctx: &Context) -> Result<LayerRef> {
         Ok(k) => Ok(k.phys),
         // the translation layer was built, only the kernel symbols are missing
         Err(Error::Unsatisfied(s)) if !s.contains("layer_name") => ctx.physical(),
-        Err(_) => Err(crate::plugins::unsatisfied_requirement("primary", "layer", "Memory layer for the kernel")),
+        Err(_) => Err(crate::plugins::unsatisfied_described(&[("primary", crate::plugins::UnsatKind::Layer, "Memory layer for the kernel")])),
     }
 }
 
@@ -731,7 +731,7 @@ mod tests {
                 ""
             }
             fn run(&self, _ctx: &Context, _cfg: &Config, _out: &mut dyn RowSink) -> Result<()> {
-                Err(crate::plugins::unsatisfied_requirement("primary", "layer", "Memory layer for the kernel"))
+                Err(crate::plugins::unsatisfied_described(&[("primary", crate::plugins::UnsatKind::Layer, "Memory layer for the kernel")]))
             }
         }
         static S: Stub = Stub;
