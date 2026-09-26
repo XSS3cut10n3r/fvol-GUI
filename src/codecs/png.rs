@@ -31,6 +31,9 @@ const MAXBLOCK: usize = 65536;
 /// `rgba` (row-major, 4 bytes per pixel). Missing trailing bytes count as 0 (the value of
 /// pixels `Image.new` leaves unset). Pillow refuses to save an empty image ("cannot write
 /// empty image"): for `width == 0 || height == 0` this returns an empty Vec.
+///
+/// Callers converting `putpixel((r, g, b, a))` values: Pillow saturates channel values above
+/// 255 to 255 (e.g. wide framebuffer bitfields), so store `v.min(255) as u8`.
 pub fn png_rgba_pillow(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     if width == 0 || height == 0 {
         return Vec::new();

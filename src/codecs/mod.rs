@@ -14,8 +14,12 @@
 //! * [`lznt1::decompress`] — NTFS / RtlDecompressBuffer LZNT1.
 //! * [`snappy`], [`xpress`] — owned by the formats agent (memory image containers).
 //! * [`crc`] — CRC-32, CRC-64/XZ, CRC-32/BZIP2 (PCLMULQDQ folding).
+//! * [`zlib_exact`] — byte-exact zlib 1.3.2 compressor ([`zlib_exact::Deflater`],
+//!   [`zlib_exact::compress`]) for reproducing files python writes through zlib.
+//! * [`png::png_rgba_pillow`] — Pillow 12.3.0's PNG file for an RGBA image, byte for byte.
 //!
-//! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/codecs_run.sh`.
+//! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/codecs_run.sh`
+//! (zlib_exact / png: `bench/refbench/zlib_exact_run.sh`).
 
 #![allow(dead_code, unexpected_cfgs)]
 
