@@ -89,6 +89,7 @@ type Lazy<T> = OnceLock<std::result::Result<T, String>>;
 pub struct Context {
     pub opts: GlobalOptions,
     physical: Lazy<(Arc<dyn Layer>, LayerRef)>,
+    physical_listing: OnceLock<Vec<crate::automagic::StackEntry>>,
     win: Lazy<WinKernel>,
     linux: Lazy<crate::automagic::linux::LinuxKernel>,
     mac: Lazy<crate::automagic::mac::MacKernel>,
@@ -106,6 +107,7 @@ impl Context {
         Ok(Context {
             opts,
             physical: OnceLock::new(),
+            physical_listing: OnceLock::new(),
             win: OnceLock::new(),
             linux: OnceLock::new(),
             mac: OnceLock::new(),
@@ -141,10 +143,19 @@ impl Context {
     pub fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
         keep_err(self.physical.get_or_init(|| {
             let path = self.image_path().map_err(|e| e.to_string())?;
-            let l = crate::automagic::stack_physical(&path).map_err(|e| e.to_string())?;
+            let (l, listing) = crate::automagic::stack_physical(&path, self.opts.stackers.as_deref()).map_err(|e| e.to_string())?;
+            let _ = self.physical_listing.set(listing);
             let r = leak_layer(l.clone());
             Ok((l, r))
         }))
+    }
+
+    /// python `get_depends(memory_layer)`: (depth, python layer name, python class name) of the
+    /// physical layer stack (depth 0 = `memory_layer`). A kernel translation layer sits on top
+    /// at depth 0, so callers listing it add 1 to these depths (see windows.info).
+    pub fn physical_listing(&self) -> Result<&[crate::automagic::StackEntry]> {
+        self.physical_arc()?;
+        Ok(self.physical_listing.get().map(|v| v.as_slice()).unwrap_or(&[]))
     }
 
     /// The Windows kernel (runs the Windows automagic on first use; cached per image).
@@ -165,6 +176,9 @@ impl Context {
     fn init_windows(&self) -> Result<WinKernel> {
         let _t = crate::util::trace::span("windows kernel init (total)");
         let (phys_arc, phys) = self.physical_arc()?;
+        if !crate::automagic::stacker_enabled(self.opts.stackers.as_deref(), "WindowsIntelStacker") {
+            return Err(Error::Unsatisfied("WindowsIntelStacker disabled by --stackers".into()));
+        }
         let image = self.image_path()?;
         let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
             use crate::automagic::cache::get;
