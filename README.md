@@ -124,10 +124,12 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
 RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static" cargo build --release
 ```
 
-The main SIMD code paths, which cover scanning, JSON parsing and crypto, detect CPU features at
-run time, so a generic build still uses AVX2, AES-NI and SHA-NI where they exist. A few codec and
-search routines are compiled in only when the target enables the feature, so a generic build is
-slightly slower there. Output is identical either way.
+The SIMD code paths, which cover scanning, JSON parsing, crypto, the snappy, Xpress and bzip2
+decoders and the Linux kernel searches, detect CPU features at run time, so a generic build still
+uses AVX2, SSSE3, BMI2, AES-NI and SHA-NI where they exist. Two small helpers, the match length of
+the zlib-exact compressor and the hex digits of the disassembler, use AVX2 or BMI2 only when the
+build enables them, because a run-time check there would cost more than it saves. Output is
+identical either way.
 
 ## No dependencies
 

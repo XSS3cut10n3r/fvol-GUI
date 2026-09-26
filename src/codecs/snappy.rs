@@ -138,7 +138,7 @@ const SLOW_BASE: u64 = 1 << 40;
 const OFFSET_MASK: [u32; 4] = [0, 0xff, 0xffff, 0xffff_ffff];
 
 /// `PATTERN[off][i] = i % off`: pshufb masks replicating an `off`-byte period over 16 bytes.
-#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[cfg(target_arch = "x86_64")]
 static PATTERN: [[[u8; 16]; 4]; 16] = {
     let mut t = [[[0u8; 16]; 4]; 16];
     let mut off = 1;
@@ -154,29 +154,21 @@ static PATTERN: [[[u8; 16]; 4]; 16] = {
 };
 
 /// Write 64 bytes at `d` continuing the `off`-periodic pattern that ends at `d` (LZ77 copy
-/// semantics for an overlapping match, `1 <= off`, plus slop up to 64 bytes).
+/// semantics for an overlapping match, `1 <= off`, plus slop up to 64 bytes). `SSSE3`: use
+/// [`pattern64_ssse3`] (true only inside `decode_fast_ssse3`, on a CPU with SSSE3).
 #[inline(always)]
-unsafe fn pattern64(d: *mut u8, off: usize) {
+unsafe fn pattern64<const SSSE3: bool>(d: *mut u8, off: usize) {
     // SAFETY (whole body): caller guarantees `off` valid bytes before d and 64 writable
     // bytes at d.
     unsafe {
         if off < 16 {
-            #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
-            {
-                use std::arch::x86_64::*;
-                // the 16 bytes at d - off: only the first `off` (valid) ones are selected
-                let v = _mm_loadu_si128(d.sub(off) as *const __m128i);
-                let m = &PATTERN[off];
-                for k in 0..4 {
-                    let p = _mm_shuffle_epi8(v, _mm_loadu_si128(m[k].as_ptr() as *const __m128i));
-                    _mm_storeu_si128(d.add(16 * k) as *mut __m128i, p);
-                }
+            #[cfg(target_arch = "x86_64")]
+            if SSSE3 {
+                pattern64_ssse3(d, off);
+                return;
             }
-            #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
-            {
-                for i in 0..64 {
-                    *d.add(i) = *d.add(i).sub(off);
-                }
+            for i in 0..64 {
+                *d.add(i) = *d.add(i).sub(off);
             }
         } else {
             // off >= 16: each 16-byte chunk only reads bytes already final
@@ -188,12 +180,51 @@ unsafe fn pattern64(d: *mut u8, off: usize) {
     }
 }
 
+/// [`pattern64`] for `off < 16` with pshufb.
+///
+/// # Safety
+/// SSSE3 must be available; as [`pattern64`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+#[inline]
+unsafe fn pattern64_ssse3(d: *mut u8, off: usize) {
+    use std::arch::x86_64::*;
+    // SAFETY: the caller guarantees `off` valid bytes before d and 64 writable bytes at d;
+    // the 16 bytes at d - off are readable (d - off + 16 <= d + 64), only the first `off`
+    // (valid) ones are selected.
+    unsafe {
+        let v = _mm_loadu_si128(d.sub(off) as *const __m128i);
+        let m = &PATTERN[off];
+        for k in 0..4 {
+            let p = _mm_shuffle_epi8(v, _mm_loadu_si128(m[k].as_ptr() as *const __m128i));
+            _mm_storeu_si128(d.add(16 * k) as *mut __m128i, p);
+        }
+    }
+}
+
 /// The unchecked-width inner loop: runs while the input has `1 + SLOP` bytes after the tag
 /// and the output `SLOP` bytes of room, and stops (at an element boundary, without consuming
 /// it) on anything unusual: long literals, bad offsets, the end of the slack, `op >= limit`.
 /// Every element it does decode is valid, so errors are reported by the checked loop.
+/// The SSSE3 build is chosen at run time, so portable builds keep it.
 #[inline(never)]
 fn decode_fast(src: &[u8], out: &mut [u8], ip: &mut usize, op: &mut usize, limit: usize) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("ssse3") {
+        // SAFETY: SSSE3 is available.
+        return unsafe { decode_fast_ssse3(src, out, ip, op, limit) };
+    }
+    decode_fast_impl::<false>(src, out, ip, op, limit)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn decode_fast_ssse3(src: &[u8], out: &mut [u8], ip: &mut usize, op: &mut usize, limit: usize) {
+    decode_fast_impl::<true>(src, out, ip, op, limit)
+}
+
+#[inline(always)]
+fn decode_fast_impl<const SSSE3: bool>(src: &[u8], out: &mut [u8], ip: &mut usize, op: &mut usize, limit: usize) {
     let n = src.len();
     if n < 1 + SLOP || out.len() < SLOP || limit == 0 {
         return;
@@ -228,7 +259,7 @@ fn decode_fast(src: &[u8], out: &mut [u8], ip: &mut usize, op: &mut usize, limit
                 if off == 0 || off > o {
                     break;
                 }
-                pattern64(dp.add(o), off);
+                pattern64::<SSSE3>(dp.add(o), off);
             } else {
                 let s = std::hint::select_unpredictable(ty == 0, sp.add(i + 1), dp.add(o - off) as *const u8);
                 let d = dp.add(o);
