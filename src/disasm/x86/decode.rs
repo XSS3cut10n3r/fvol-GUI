@@ -29,6 +29,22 @@ fn is_legacy_prefix(b: u8) -> bool {
     matches!(b, 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 | 0x67)
 }
 
+/// Prefix byte classes: bit 0 legacy prefix, bit 1 REX (0x40-0x4F, 64-bit mode only).
+static PFX_CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut b = 0;
+    while b < 256 {
+        let v = b as u8;
+        if matches!(v, 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 | 0x67) {
+            t[b] = 1;
+        } else if v & 0xF0 == 0x40 {
+            t[b] = 2;
+        }
+        b += 1;
+    }
+    t
+};
+
 const VEX_NONE: u8 = 0;
 const VEX_VEX: u8 = 1;
 const VEX_EVEX: u8 = 2;
@@ -63,6 +79,7 @@ struct St<'a> {
     vvvv_hi: u8, // 32-bit mode: ignored vvvv bit 3 (still must be 0 when vvvv is unused)
     is4: u8,
     vsib: u8,   // VSIB index register class (0 = normal SIB)
+    rel: u8,    // 1 + index of the relative branch operand (0 = none)
 }
 
 impl St<'_> {
@@ -118,11 +135,15 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     // LLVM-7 style mandatory prefix: the last F2/F3 immediately followed by 0F/66/REX, else a 66
     // immediately followed by 0F/REX (only if no F2/F3 was mandatory).
     let mut mand = 0u8;
+    let pfx_mask = 1 | ((m64 as u8) << 1);
     loop {
         if i >= n {
             return false;
         }
         let b = d[i];
+        if PFX_CLASS[b as usize] & pfx_mask == 0 {
+            break; // not a prefix: fast exit (common case)
+        }
         if m64 && b & 0xF0 == 0x40 {
             let mut j = i + 1;
             while j < n && d[j] & 0xF0 == 0x40 {
@@ -207,6 +228,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         mosz: 4,
         vvvv_hi: 0,
         is4: 0,
+        rel: 0,
     };
 
     // ------------------------------------------------------------------ opcode / vector prefixes
@@ -443,43 +465,44 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     } else {
         let modrm_pos = st.pos;
         let (mm, have_modrm) = if modrm_pos < n { (d[modrm_pos], true) } else { (0, false) };
-        let sz = |s: u8| -> u8 {
+        let sz = |s: u8| -> u64 {
             match s {
                 2 => 0,
                 4 => 1,
                 _ => 2,
             }
         };
-        let w = if st.vex != VEX_NONE { st.w } else { rexw };
-        let mut sel: [u8; NSEL] = [
-            m64 as u8,
-            pfx as u8,
-            w as u8,
-            st.l,
-            st.evex_b as u8,
-            (mm >> 6 == 3) as u8,
-            (mm >> 3) & 7,
-            mm & 7,
-            st.rex & 1,
-            sz(osz_def),
-            sz(osz_d64),
-            sz(st.asz),
-            has66 as u8,
-        ];
         let root = node;
-        node = match walk(t, root, &sel, have_modrm) {
-            Some(x) => x,
-            None => return false,
-        };
-        if node == 0 && rexw && pfx != 0 && st.vex == VEX_NONE && map != MAP_1 {
-            // capstone/LLVM REX.W contexts inherit the no-prefix (W0) entries
-            sel[SEL_PFX as usize] = 0;
-            sel[SEL_W as usize] = 0;
-            node = match walk(t, root, &sel, have_modrm) {
+        if root != 0 && root & LEAF == 0 {
+            // decision node: selector values packed 4 bits each, in SEL_* order (built only when
+            // the opcode actually needs one)
+            let w = if st.vex != VEX_NONE { st.w } else { rexw };
+            let mut sw: u64 = (m64 as u64)
+                | (pfx as u64) << (4 * SEL_PFX)
+                | (w as u64) << (4 * SEL_W)
+                | (st.l as u64) << (4 * SEL_L)
+                | (st.evex_b as u64) << (4 * SEL_B)
+                | ((mm >> 6 == 3) as u64) << (4 * SEL_MOD)
+                | (((mm >> 3) & 7) as u64) << (4 * SEL_REG)
+                | ((mm & 7) as u64) << (4 * SEL_RM)
+                | ((st.rex & 1) as u64) << (4 * SEL_REXB)
+                | sz(osz_def) << (4 * SEL_O)
+                | sz(osz_d64) << (4 * SEL_D)
+                | sz(st.asz) << (4 * SEL_A)
+                | (has66 as u64) << (4 * SEL_H66);
+            node = match walk(t, root, sw, have_modrm) {
                 Some(x) => x,
                 None => return false,
             };
-            fallback = true;
+            if node == 0 && rexw && pfx != 0 && st.vex == VEX_NONE && map != MAP_1 {
+                // capstone/LLVM REX.W contexts inherit the no-prefix (W0) entries
+                sw &= !((0xF << (4 * SEL_PFX)) | (0xF << (4 * SEL_W)));
+                node = match walk(t, root, sw, have_modrm) {
+                    Some(x) => x,
+                    None => return false,
+                };
+                fallback = true;
+            }
         }
         if node == 0 {
             return false;
@@ -505,6 +528,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             mnem: 0,
             alias: 0,
             dn: 0,
+            vsib: 0,
+            kmask: false,
         };
         st.osz = osz_def;
         if !operands(&mut st, &e, out, addr, mode, 0) {
@@ -633,12 +658,12 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             nn
         };
     }
-    for o in &e.ops[..e.nops as usize] {
-        if o.src == S_VSIB {
-            st.vsib = o.cls;
-        } else if o.src == S_KMASK {
-            deco &= 0x7F;
-        }
+    // (precomputed from the operand list: last S_VSIB class, any S_KMASK)
+    if e.vsib != 0 {
+        st.vsib = e.vsib;
+    }
+    if e.kmask {
+        deco &= 0x7F;
     }
 
     if lockrep == 0xF0 && flags & F_LOCK == 0 {
@@ -728,19 +753,48 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
 
 /// Walk the decision tree from `node`; `None` if a ModRM selector is needed but missing.
 #[inline(always)]
-fn walk(t: &Tables, mut node: u32, sel: &[u8; NSEL], have_modrm: bool) -> Option<u32> {
+fn walk(t: &Tables, mut node: u32, sw: u64, have_modrm: bool) -> Option<u32> {
     while node != 0 && node & LEAF == 0 {
         let off = node as usize;
-        let kind = t.nodes[off] as usize;
-        if !have_modrm && (SEL_MOD as usize..=SEL_RM as usize).contains(&kind) {
+        let kind = t.nodes[off];
+        if !have_modrm && kind.wrapping_sub(SEL_MOD) <= SEL_RM - SEL_MOD {
             return None;
         }
-        node = t.nodes[off + 1 + sel[kind] as usize];
+        let v = (sw.wrapping_shr(kind.wrapping_mul(4)) & 15) as usize;
+        node = t.nodes[off + 1 + v];
     }
     Some(node)
 }
 
-#[inline]
+/// `KEEP[n]`: mask keeping the low `n` bytes of a little-endian u128.
+static KEEP: [u128; 16] = {
+    let mut t = [0u128; 16];
+    let mut k = 1;
+    while k < 16 {
+        t[k] = (1u128 << (8 * k)) - 1;
+        k += 1;
+    }
+    t
+};
+
+/// The first `len` bytes of `d` (`len <= d.len() <= 15`), zero padded to 15.
+#[inline(always)]
+fn insn_bytes(d: &[u8], len: usize) -> [u8; 15] {
+    let mut out = [0u8; 15];
+    if let Some(w) = d.first_chunk::<15>() {
+        // full window: one fixed-size copy + mask instead of a variable-length memcpy
+        let mut x = [0u8; 16];
+        x[..15].copy_from_slice(w);
+        let v = u128::from_le_bytes(x) & KEEP[len & 15];
+        out.copy_from_slice(&v.to_le_bytes()[..15]);
+    } else {
+        let len = len.min(d.len());
+        out[..len].copy_from_slice(&d[..len]);
+    }
+    out
+}
+
+#[inline(always)]
 fn finish(st: &St, out: &mut Insn, addr: u64, mode: Mode, opcode: [u8; 4]) -> bool {
     let len = st.pos;
     if len > 15 || len > st.n {
@@ -749,13 +803,13 @@ fn finish(st: &St, out: &mut Insn, addr: u64, mode: Mode, opcode: [u8; 4]) -> bo
     out.address = addr;
     out.size = len as u8;
     out.mode = mode;
-    out.bytes = [0; 15];
-    out.bytes[..len].copy_from_slice(&st.d[..len]);
+    out.bytes = insn_bytes(st.d, len);
     out.opcode = opcode;
     out.rex = st.rex;
-    // resolve relative branch targets now that the length is known
-    for k in 0..out.op_count as usize {
-        if out.ofmt[k] & OF_REL != 0 {
+    // resolve the relative branch target now that the length is known
+    if st.rel != 0 {
+        let k = st.rel as usize - 1;
+        if k < out.op_count as usize && k < MAX_OPS && out.ofmt[k] & OF_REL != 0 {
             if let Operand::Imm(rel) = out.operands[k] {
                 let mut tgt = addr.wrapping_add(len as u64).wrapping_add(rel as u64);
                 if mode != Mode::X86_64 {
@@ -1079,16 +1133,29 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
             };
         }
     }
-    let modrm = st.modrm;
-    let is_reg = modrm >> 6 == 3;
-    let rexr = if st.rex & 4 != 0 { 8 } else { 0 };
-    let rexb = if st.rex & 1 != 0 { 8 } else { 0 };
     out.op_count = e.nops;
     out.ofmt = [0; MAX_OPS];
     out.evex = 0;
     out.sae = 0;
-    for k in 0..e.nops as usize {
-        let s = e.ops[k];
+    for k in 0..(e.nops as usize).min(MAX_OPS) {
+        if !operand(st, e, k, &mem, out, m64, op) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Decode explicit operand `k` (spec `s`). Kept out of line: inlined into the operand loop, the
+/// many per-source invariants get hoisted into a costly prologue.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn operand(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
+    let s = e.ops[k];
+    let modrm = st.modrm;
+    let is_reg = modrm >> 6 == 3;
+    let rexr = if st.rex & 4 != 0 { 8 } else { 0 };
+    let rexb = if st.rex & 1 != 0 { 8 } else { 0 };
+    {
         let o = match s.src {
             S_REG => {
                 let mut num = ((modrm >> 3) & 7) | rexr;
@@ -1119,7 +1186,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     if s.src == S_RMREG {
                         return false;
                     }
-                    let mut mm = mem;
+                    let mut mm = *mem;
                     mm.size = memsize_for(st, s.cls, s.mk);
                     Operand::Mem(mm)
                 }
@@ -1279,6 +1346,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     }
                 };
                 out.ofmt[k] |= OF_REL;
+                st.rel = k as u8 + 1;
                 Operand::Imm(rel)
             }
             S_MOFFS => {
@@ -1328,7 +1396,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     out.ofmt[k + 1] = if s.cls == 0 { OF_FARSEP } else { 0 };
                     out.op_count = out.op_count.max(k as u8 + 2);
                 }
-                continue;
+                return true;
             }
             _ => Operand::None,
         };

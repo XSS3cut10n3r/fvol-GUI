@@ -189,6 +189,10 @@ pub(crate) struct Entry {
     pub dn: u8,
     /// First alias mnemonic id (cmpXXps style predicates), 0 if none.
     pub alias: u16,
+    /// (derived) register class of the last S_VSIB operand, 0 if none.
+    pub vsib: u8,
+    /// (derived) has an S_KMASK operand.
+    pub kmask: bool,
 }
 
 const CMP_PREDS: [&str; 32] = [
@@ -633,6 +637,13 @@ impl Builder {
                 }
                 e.ops[i] = parse_op(t.trim())?;
                 e.nops += 1;
+            }
+        }
+        for o in &e.ops[..e.nops as usize] {
+            if o.src == S_VSIB {
+                e.vsib = o.cls;
+            } else if o.src == S_KMASK {
+                e.kmask = true;
             }
         }
         for t in flags_s.split_whitespace() {
