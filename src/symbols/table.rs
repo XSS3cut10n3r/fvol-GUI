@@ -155,7 +155,7 @@ pub enum Ty {
 
 pub(crate) const MAGIC: &[u8; 8] = b"RSVOLIS1";
 /// Bump when the blob layout or the builder semantics change (invalidates caches).
-pub(crate) const BLOB_VERSION: u32 = 4;
+pub(crate) const BLOB_VERSION: u32 = 5;
 
 /// Section indexes in the header.
 pub(crate) mod sec {
@@ -180,7 +180,7 @@ pub(crate) mod sec {
 /// Record sizes.
 pub(crate) const NODE_SZ: usize = 16;
 pub(crate) const UTYPE_SZ: usize = 32; // name(8) kind(4) size(4) mstart(4) mcount(4) hstart(4) hlen(4)
-pub(crate) const MEMBER_SZ: usize = 32; // name(8) offset(4) pad(4) ty(16)
+pub(crate) const MEMBER_SZ: usize = 32; // name(8) offset(8, i64: ISF offsets may be negative) ty(16)
 pub(crate) const ENUM_SZ: usize = 32; // name(8) base prim(4) size(4) cstart(4) ccount(4) pad(8)
 pub(crate) const CONST_SZ: usize = 16; // name(8) value(8)
 pub(crate) const SYMBOL_SZ: usize = 32; // name(8) address(8) type(4) flags(4) cdata(8)
@@ -648,7 +648,7 @@ impl SymbolTable {
                     if s == nb {
                         // byte-equal to a valid &str, hence valid UTF-8
                         let n = std::str::from_utf8_unchecked(s);
-                        return Some(Member { name: n, offset: rd(rec, 8) as u64, ty: ty_decode(std::slice::from_raw_parts(rec.add(16), 16)) });
+                        return Some(Member { name: n, offset: u64::from_le((rec.add(8) as *const u64).read_unaligned()), ty: ty_decode(std::slice::from_raw_parts(rec.add(16), 16)) });
                     }
                 }
                 i = (i + 1) & mask;
@@ -666,7 +666,7 @@ impl SymbolTable {
         let mend = (mstart + rd32(r, 20) as u64).min(n);
         (mstart..mend).map(move |mi| {
             let rec = ms.get(mi as usize * MEMBER_SZ..(mi as usize + 1) * MEMBER_SZ).unwrap_or(&ZERO_REC);
-            Member { name: self.rec_str(rec), offset: rd32(rec, 8) as u64, ty: ty_decode(&rec[16..32]) }
+            Member { name: self.rec_str(rec), offset: rd64(rec, 8), ty: ty_decode(&rec[16..32]) }
         })
     }
     /// Iterate user type names (ISF order).

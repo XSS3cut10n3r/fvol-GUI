@@ -712,7 +712,7 @@ impl Field {
                 _ => return Err(Error::Symbol(format!("AttributeError: no attribute {part}"))),
             };
             let m = table.member(ut, part).ok_or_else(|| Error::Symbol(format!("AttributeError: no attribute {part}")))?;
-            off += m.offset;
+            off = off.wrapping_add(m.offset);
             ty = m.ty;
         }
         Ok(Field { offset: off, ty, sp: None })
