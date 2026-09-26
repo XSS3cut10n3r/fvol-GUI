@@ -11,6 +11,7 @@ pub mod library_list;
 pub mod lsof;
 pub mod malware;
 pub mod mountinfo;
+pub mod pagecache;
 pub mod pidhashtable;
 pub mod proc;
 pub mod psaux;
@@ -31,6 +32,9 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&lsof::Lsof);
     v.push(&malware::malfind::Malfind);
     v.push(&mountinfo::MountInfo);
+    v.push(&pagecache::Files);
+    v.push(&pagecache::InodePages);
+    v.push(&pagecache::RecoverFs);
     v.push(&malware::malfind::MalfindDeprecated);
     v.push(&malware::process_spoofing::ProcessSpoofing);
     v.push(&pidhashtable::PIDHashTable);
