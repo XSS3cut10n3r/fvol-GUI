@@ -61,6 +61,7 @@ pub(crate) fn gen_data(seed: u64, n: usize) -> Vec<u8> {
 fn codec_bench() {
     use crate::codecs::{snappy, xpress};
     let Ok(dir) = std::env::var("RSVOL_CODEC_BENCH") else { return };
+    pin_bench_thread();
     let reps: usize = std::env::var("RSVOL_BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
     let load = |name: &str| -> Vec<(usize, Vec<u8>)> {
         let d = std::fs::read(format!("{dir}/{name}")).unwrap();
@@ -106,5 +107,21 @@ fn codec_bench() {
             best = best.min(t.elapsed().as_secs_f64());
         }
         println!("{name:<12} rsvol {:8.1} MB/s  ({} chunks, best of {reps})", total as f64 / best / 1e6, v.len());
+    }
+}
+
+/// Pin the benchmark thread to the CPU in RSVOL_BENCH_CPU (hybrid P/E-core machines make
+/// unpinned timings meaningless). The C reference harness honours the same variable.
+pub(crate) fn pin_bench_thread() {
+    unsafe extern "C" {
+        fn sched_setaffinity(pid: i32, size: usize, mask: *const u64) -> i32;
+    }
+    if let Some(cpu) = std::env::var("RSVOL_BENCH_CPU").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let mut mask = [0u64; 16];
+        if cpu < 1024 {
+            mask[cpu / 64] = 1 << (cpu % 64);
+            // SAFETY: plain syscall wrapper with a valid mask buffer
+            unsafe { sched_setaffinity(0, std::mem::size_of_val(&mask), mask.as_ptr()) };
+        }
     }
 }

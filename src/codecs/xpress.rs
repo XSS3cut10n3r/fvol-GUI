@@ -52,6 +52,20 @@ fn copy_match(out: &mut [u8], op: usize, off: usize, len: usize) -> Result<usize
         return Err(XpressError::BadOffset);
     }
     let room = out.len() - op;
+    if off >= 8 && len <= 24 && room >= 24 {
+        // the common short match: exactly three unconditional word copies, no loop
+        // SAFETY: src [op-off, op-off+24) and dst [op, op+24) are inside `out` (room >= 24);
+        // off >= 8 makes word-wise forward copying equal to byte-wise LZ77 copying.
+        unsafe {
+            let p = out.as_mut_ptr();
+            let s = p.add(op - off);
+            let d = p.add(op);
+            (d as *mut u64).write_unaligned((s as *const u64).read_unaligned());
+            (d.add(8) as *mut u64).write_unaligned((s.add(8) as *const u64).read_unaligned());
+            (d.add(16) as *mut u64).write_unaligned((s.add(16) as *const u64).read_unaligned());
+        }
+        return Ok(op + len);
+    }
     if off >= 8 && room >= len + 8 {
         // 8-byte word copies (may write up to 7 bytes past op+len, inside `out`, overwritten
         // later). Equivalent to a forward byte copy: every word read ends at or before the

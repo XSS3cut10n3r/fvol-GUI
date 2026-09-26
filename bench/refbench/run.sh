@@ -11,6 +11,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 RAW="${1:-/home/user/cbc2/task2/memory-dirty.raw}"
 N="${2:-2048}"
 REPS="${3:-7}"
+export RSVOL_BENCH_CPU="${RSVOL_BENCH_CPU:-2}"   # pin both sides to one P-core
 WORK="${WORK:-/tmp/rsvol-refbench}"
 mkdir -p "$WORK"
 cd "$WORK"

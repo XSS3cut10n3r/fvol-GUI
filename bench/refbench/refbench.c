@@ -10,7 +10,9 @@
  *   xpress_huff.vec  wimlib XPRESS (LZ77+Huffman)     -> reference: wimlib_decompress
  *   xpress_lz77.vec  samba lzxpress_compress (plain)  -> reference: lzxpress_decompress
  */
+#define _GNU_SOURCE
 #include <fcntl.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,6 +145,13 @@ static void bench(const char *label, struct vec v, decode_fn fn, void *ctx, int 
 }
 
 int main(int argc, char **argv) {
+    const char *cpu = getenv("RSVOL_BENCH_CPU");
+    if (cpu) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(atoi(cpu), &set);
+        sched_setaffinity(0, sizeof set, &set);
+    }
     if (argc >= 5 && !strcmp(argv[1], "mkvec")) return mkvec(argv[2], argv[3], atol(argv[4]));
     if (argc >= 4 && !strcmp(argv[1], "bench")) {
         int reps = atoi(argv[3]);
