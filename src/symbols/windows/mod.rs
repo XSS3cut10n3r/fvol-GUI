@@ -15,6 +15,7 @@ pub mod ext;
 pub mod kdbg;
 pub mod pdb;
 pub mod pe;
+pub mod pool;
 pub mod token;
 pub mod vad;
 pub mod versions;
