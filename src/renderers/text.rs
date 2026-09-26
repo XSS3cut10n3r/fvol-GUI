@@ -354,6 +354,7 @@ fn push_default(out: &mut Vec<u8>, v: &Value) {
         Value::LayerBytes { data, .. } => push_bytes_repr(out, data),
         Value::Unreadable | Value::Unparsable | Value::NotAvailable => out.push(b'-'),
         Value::NotApplicable => out.extend_from_slice(b"N/A"),
+        Value::None => out.extend_from_slice(b"None"),
     }
 }
 

@@ -20,14 +20,13 @@ use std::sync::Arc;
 /// itself for raw images) and the python `get_depends` listing of it (names after
 /// construction magic: memory_layer, base_layer, ...; depth 0 = the physical layer).
 /// `path` is the local file with the image's data, `url` python's location of the image.
-pub fn stack_physical(path: &Path, url: Option<&str>, offline: bool, stackers: Option<&[String]>) -> Result<(Arc<dyn Layer>, Vec<StackEntry>)> {
+pub fn stack_physical(path: &Path, url: Option<&str>, offline: bool, stackers: Option<&[String]>) -> Result<Stacked> {
     let _t = crate::util::trace::span("container stacking");
     let file = Arc::new(FileLayer::open(path)?);
-    let s = crate::layers::containers::stack_with(file, &StackOptions { location: Some(path), url, offline, stackers })?;
-    Ok((s.layer, s.layers))
+    crate::layers::containers::stack_with(file, &StackOptions { location: Some(path), url, offline, stackers })
 }
 
-pub use crate::layers::containers::StackEntry;
+pub use crate::layers::containers::{StackEntry, Stacked};
 use crate::layers::containers::StackOptions;
 
 /// python `--stackers` filter for an OS stacker (e.g. "WindowsIntelStacker"): true when it may

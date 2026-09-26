@@ -75,7 +75,7 @@ fn check_expect(expect: &Path) -> usize {
             "XenCoreDumpLayer" => elf::stack_xen(&base).ok(),
             "QemuSuspendLayer" => qemu::stack(&base).ok(),
             "AVMLLayer" => avml::stack(&base).ok(),
-            "VmwareLayer" => vmware::stack(&base, &main, None, false).ok().map(|(l, _)| l),
+            "VmwareLayer" => vmware::stack(&base, &main, None, false, &mut false).ok().map(|(l, _)| l),
             "WindowsCrashDump32Layer" | "WindowsCrashDump64Layer" => crash::stack(&base).ok(),
             _ => None,
         };

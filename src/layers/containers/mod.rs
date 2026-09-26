@@ -207,6 +207,10 @@ pub struct Stacked {
     pub stackers: Vec<Stacker>,
     /// Dependency listing of the physical layer in python `get_depends` order.
     pub layers: Vec<StackEntry>,
+    /// Names of the native symbol tables python's container layers append to the symbol space
+    /// while stacking, in order (only VMware's `vmware` table). python's
+    /// `verify_table_versions` fails on them (`NativeTable` has no `producer`).
+    pub native_tables: Vec<&'static str>,
 }
 
 /// Detect the container format(s) of `file` and return the physical memory layer (the file
@@ -248,6 +252,7 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
     let mut nodes = vec![Node { class: "FileLayer", deps: vec![], location: None, layer: Some(NodeLayer::File(file.clone())) }];
     let mut top_node = 0usize;
     let mut used = Vec::new();
+    let mut native_tables = Vec::new();
     'outer: loop {
         for k in 0..remaining.len() {
             let st = remaining[k];
@@ -261,10 +266,18 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
                 Stacker::WindowsCrashDump => crash::stack(&top),
                 // python: only on the FileLayer itself, and it needs the file location
                 Stacker::Vmware => match (&location, top_node) {
-                    (Some(loc), 0) => vmware::stack(&top, loc, opts.url, opts.offline).map(|(l, meta)| {
-                        meta_location = Some(meta);
-                        l
-                    }),
+                    (Some(loc), 0) => {
+                        let mut table = false;
+                        let r = vmware::stack(&top, loc, opts.url, opts.offline, &mut table).map(|(l, meta)| {
+                            meta_location = Some(meta);
+                            l
+                        });
+                        // python: `if "vmware" not in symbol_space: append(NativeTable(..))`
+                        if table && !native_tables.contains(&"vmware") {
+                            native_tables.push("vmware");
+                        }
+                        r
+                    }
                     _ => Err(Error::Layer("vmware: not a file layer / unknown location".into())),
                 },
             };
@@ -297,7 +310,7 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
             _ => {}
         }
     }
-    Ok(Stacked { layer: top.layer, stackers: used, layers })
+    Ok(Stacked { layer: top.layer, stackers: used, layers, native_tables })
 }
 
 /// python layer names after ConstructionMagic (post-order construction, requirement name with
