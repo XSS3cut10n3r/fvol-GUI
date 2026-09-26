@@ -90,44 +90,57 @@ impl Tree {
         Ok(())
     }
 
-    /// python `yield_processes(pid, descendant)`: the rows in output order (a trailing Err is
-    /// where python raised). Rows are computed afterwards; this only fixes the order.
+    /// python `yield_processes(pid, descendant)` (recursive in python, an explicit stack here):
+    /// appends the rows' process indices in output order; an Err is where python raised.
+    /// Rows are computed afterwards; this only fixes the order.
     fn walk(
         &self,
         idx: usize,
-        descendant: bool,
         done: &mut FxHashSet<u64>,
         filter: &dyn Fn(&Obj) -> Result<bool>,
         order: &mut Vec<usize>,
     ) -> Result<()> {
-        let pid = self.procs[idx].0;
-        if !done.insert(pid) {
-            return Ok(());
+        // (children of a visited process in python set order, next child, descendant flag of
+        // that process, its `descendant or not filter_func(proc)` once evaluated)
+        struct Frame {
+            kids: Vec<u64>,
+            next: usize,
+            descendant: bool,
+            idx: usize,
+            child_desc: Option<bool>,
         }
-        if !self.ancestors.contains(&pid) && !descendant {
-            return Ok(());
-        }
-        order.push(idx);
-        let proc = self.procs[idx].1;
-        if let Some(kids) = self.children.get(&pid) {
-            let mut d = None;
-            for child in kids.iter() {
-                // `descendant or not filter_func(proc)` is evaluated per child
-                let desc = match d {
-                    Some(v) => v,
-                    None => {
-                        let v = descendant || !filter(&proc)?;
-                        d = Some(v);
-                        v
-                    }
-                };
-                match self.index.get(&child) {
-                    Some(&ci) => self.walk(ci, desc, done, filter, order)?,
-                    None => return Err(Error::msg(format!("KeyError: {child}"))),
+        let mut stack: Vec<Frame> = Vec::new();
+        let mut pending = Some((idx, false));
+        loop {
+            if let Some((i, descendant)) = pending.take() {
+                let pid = self.procs[i].0;
+                if done.insert(pid) && (self.ancestors.contains(&pid) || descendant) {
+                    order.push(i);
+                    let kids = self.children.get(&pid).map(|k| k.iter().collect()).unwrap_or_default();
+                    stack.push(Frame { kids, next: 0, descendant, idx: i, child_desc: None });
                 }
             }
+            let Some(top) = stack.last_mut() else { return Ok(()) };
+            if top.next >= top.kids.len() {
+                stack.pop();
+                continue;
+            }
+            let child = top.kids[top.next];
+            top.next += 1;
+            // `descendant or not filter_func(proc)` is evaluated per child (same result each time)
+            let desc = match top.child_desc {
+                Some(v) => v,
+                None => {
+                    let v = top.descendant || !filter(&self.procs[top.idx].1)?;
+                    top.child_desc = Some(v);
+                    v
+                }
+            };
+            match self.index.get(&child) {
+                Some(&ci) => pending = Some((ci, desc)),
+                None => return Err(Error::msg(format!("KeyError: {child}"))),
+            }
         }
-        Ok(())
     }
 }
 
@@ -171,7 +184,7 @@ fn run_tree(ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
     let mut walk_err = None;
     for i in 0..t.procs.len() {
         if t.levels[i] == 1 {
-            if let Err(e) = t.walk(i, false, &mut done, &filter, &mut order) {
+            if let Err(e) = t.walk(i, &mut done, &filter, &mut order) {
                 walk_err = Some(e);
                 break;
             }
