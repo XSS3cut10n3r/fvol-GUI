@@ -5,7 +5,7 @@ N=3
 if [ "$1" = "-n" ]; then N=$2; shift 2; fi
 LIST=${1:-/home/user/rs-vol/bench/win_noarg.txt}
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
-OURS=/home/user/rs-vol/target/release/vol
+OURS=${OURS:-/home/user/rs-vol/target/release/vol}
 VOLRS=/home/user/cbc2/vol-rs/target/release/vol-rs
 T=$(mktemp -d)
 best() { # cmd...

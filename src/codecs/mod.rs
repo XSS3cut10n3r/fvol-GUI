@@ -45,6 +45,7 @@ pub mod inflate;
 pub mod lzma;
 pub(crate) mod lzma_enc;
 pub mod lznt1;
+pub mod png;
 pub mod snappy;
 #[cfg(test)]
 mod testdata;
@@ -53,6 +54,7 @@ pub mod xz;
 pub mod xz_enc;
 pub mod zip;
 pub mod zlib;
+pub mod zlib_exact;
 #[cfg(test)]
 mod bench;
 

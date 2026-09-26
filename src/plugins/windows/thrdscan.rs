@@ -10,7 +10,7 @@ use crate::context::{Context, WinKernel};
 use crate::error::Result;
 use crate::objects::Obj;
 use crate::plugins::windows::poolscanner::{builtin_constraints, generate_pool_scan_each};
-use crate::plugins::windows::thread_pe_symbols::{Range, filepath_for_address, get_proc_vads_with_file_paths};
+use crate::plugins::windows::pe_symbols::{Range, filepath_for_address, get_proc_vads_with_file_paths};
 use crate::plugins::{Config, Plugin, TimeKind, TimelineEvent};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::WinExt;

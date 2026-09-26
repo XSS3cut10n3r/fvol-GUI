@@ -54,13 +54,14 @@ pub mod module_extract;
 pub mod modules;
 pub mod network;
 pub mod search;
+pub mod tainting;
 pub mod timespec;
 pub mod utilities;
 pub mod vmcoreinfo;
 
 pub use caps::CapsExt;
 pub use ext::{HListIter, LinuxExt, ListIter};
-pub use fs::FsExt;
+pub use fs::{FsExt, SubdirIter};
 pub use network::NetExt;
 
 /// Every Linux extension trait (`use crate::symbols::linux::prelude::*`).

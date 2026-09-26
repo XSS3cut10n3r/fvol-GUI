@@ -155,6 +155,27 @@ mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning
 | `dos_header.get_nt_header()` / `reconstruct()` / `nt.get_sections()` | `crate::symbols::windows::pe::{get_nt_header, reconstruct, get_sections, write_pieces}` |
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
+| `mft.MFTEntry` / `MFTFileName` / `MFTAttribute` (`windows/mft` ISF) | `crate::symbols::windows::mft::{MftEntry, MftFileName, MftAttribute}` (`attributes()`, `standard_information_entries()`, `filename_entries()`, `longest_filename()`, `resident_data_attributes()`, `alternate_data_streams()`, `get_full_name()`, `get_resident_filename()`, `get_resident_filecontent()`) |
+| `MFTScan.enumerate_mft_records(ctx, path, primary)` | `crate::plugins::windows::mftscan::{enumerate_mft_records, enumerate_mft_batches}(layer, ...)` (yara `/FILE0\|FILE\*\|BAAD/` semantics, parse on the scan workers); layer = `mftscan::primary_memory_layer(ctx)?` |
+| `mbr.PARTITION_TABLE` / `PARTITION_ENTRY` (`windows/mbr` ISF) | `crate::symbols::windows::mbr::{PartitionTable, PartitionEntry}` |
+
+### PE files: pefile, pe_symbols, verinfo
+
+| python | rust |
+|---|---|
+| `pe_data = BytesIO(); for off, d in dos.reconstruct(): seek/write` (to parse it) | `let (view, err) = pe::reconstruct_view(&dos);` — lazy page view, reads only what is parsed; `err: Option<ReconError>` (`is_invalid_or_value()` = what `except (InvalidAddressException, ValueError)` catches; the view keeps the pieces written before it) |
+| `pefile.PE(data=pe_data.getvalue(), fast_load=True)` | `crate::symbols::windows::pefile::PeFile::parse(&view)?` (`PeError::Format` = PEFormatError, `PeError::Attribute` = AttributeError); works on `&[u8]`/`Vec<u8>` too |
+| `pe.parse_data_directories([EXPORT])` + `pe.DIRECTORY_ENTRY_EXPORT.symbols` | `pe.parse_exports()` → `Option<ExportDir>` (`.symbols: Vec<Export{ordinal, address, name, forwarder}>`) |
+| `pe.parse_data_directories([IMPORT])` + `pe.DIRECTORY_ENTRY_IMPORT` | `pe.parse_imports()` → `Option<Vec<ImportDesc{dll, time_date_stamp, imports: Vec<Import{name, ordinal, address}>}>>` |
+| `pe.parse_data_directories([RESOURCE])` + `pe.VS_FIXEDFILEINFO` | `pe.parse_version_info()` → `Vec<FixedFileInfo>` (empty = AttributeError) |
+| `pe.OPTIONAL_HEADER.ImageBase` / `pe.sections` / `get_data(rva, n)` / `get_string_at_rva` | `pe.optional_header.image_base` / `pe.sections` / same names |
+| `VerInfo.get_version_information(ctx, pe_table, layer, base)` | `crate::plugins::windows::verinfo::get_version_information(pe_table, Some(layer), base)` |
+| `PESymbols.addresses_for_process_symbols(ctx, path, kernel, {"ntdll.dll": {"names": [...]}})` | `pe_symbols::addresses_for_process_symbols(ctx, k, &vec![("ntdll.dll".into(), WantedSymbols::names(&[..]))])?` → `Vec<(module, Vec<(name, addr)>)>` |
+| `PESymbols.get_kernel_modules / get_process_modules(ctx, kernel, filter)` | `pe_symbols::get_kernel_modules(k, Some(&filter))?` / `get_process_modules(k, Some(&filter))?` → `CollectedModules` |
+| `PESymbols.find_symbols(ctx, path, wanted, collected)` | `pe_symbols::find_symbols(ctx, &wanted, &collected)?` → `(found, missing)` |
+| `PESymbols.path_and_symbol_for_address(ctx, path, collected, ranges, addr)` | `pe_symbols::path_and_symbol_for_address(ctx, &collected, &ranges, addr)?` |
+| `PESymbols.get_vads_for_process_cache / get_proc_vads_with_file_paths / filepath_for_address / range_info_for_address / filename_for_path` | same names in `crate::plugins::windows::pe_symbols` |
+| `PEDump.dump_pe_at_base / dump_kernel_pe_at_base` | `crate::plugins::windows::pedump::{dump_pe_at_base, dump_kernel_pe_at_base}` |
 
 ## Linux (`use crate::symbols::linux::prelude::*` - LinuxExt, FsExt, CapsExt, NetExt, ...)
 
@@ -199,7 +220,7 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `LinuxUtilities.files_descriptors_for_process(ctx, table, task, files_only)` | `utilities::files_descriptors_for_process(&task, files_only)` → `Vec<Result<(fd, filp, path)>>` |
 | `LinuxUtilities.walk_internal_list(...)` / `convert_fourcc_code(c)` | `utilities::{walk_internal_list, convert_fourcc_code}` |
 | `fs_struct.get_root_dentry() / get_root_mnt()`, `files_struct.get_fds() / get_max_fds()` | `FsExt` same names |
-| `qstr.name_as_str()`, `dentry.path() / is_root() / is_subdir() / d_ancestor() / get_subdirs()` | `FsExt`: `name_as_str`, `dentry_path`, `is_root`, `is_subdir`, `d_ancestor`, `get_subdirs` |
+| `qstr.name_as_str()`, `dentry.path() / is_root() / is_subdir() / d_ancestor() / get_subdirs()` | `FsExt`: `name_as_str`, `dentry_path`, `is_root`, `is_subdir`, `d_ancestor`, `get_subdirs` (→ `SubdirIter`: `d_children` hlist on >= 6.8) |
 | `inode.is_dir/is_reg/.. / get_inode_type() / get_*_time() / get_file_mode() / get_pages() / get_contents()` | `FsExt` same names (times → `Value`); `dentry.get_inode()` via `LinuxExt::get_inode` (dispatch) |
 | `super_block.major / minor / uuid / get_type() / get_flags_access() / get_flags_opts()` | `FsExt`: `major()`, `minor()`, `uuid()`, `sb_get_type()`, `get_flags_access()`, `get_flags_opts()` |
 | `mount.*` / `vfsmount.*` (get_mnt_sb/root/flags/parent/mountpoint, has_parent, get_vfsmnt_*/get_dentry_*, is_shared/slave/unbindable, get_devname, get_dominating_id, next_peer, is_equal) | `FsExt` same names (dispatch on the struct name) |
@@ -215,6 +236,22 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `kallsyms.Kallsyms(ctx, layer, module)` + `lookup_address / lookup_name / get_*_symbols` | `symbols::linux::kallsyms::Kallsyms::get(vm)?` (built once, cached, thread-safe) + same names → `KasSymbol` |
 | `ModuleExtract.extract_module(ctx, kernel, module)` | `symbols::linux::module_extract::extract_module(vm, &module)?` → `Option<Vec<u8>>` |
 | `linux_constants.KSYM_NAME_LEN / MODULE_* / NM_TYPES_DESC` | `symbols::linux::constants` |
+| `Lsof.list_fds(ctx, kernel, filter, files_only)` / `FDInternal.to_user()` | `plugins::linux::lsof::{list_fds, for_each_fd_user, fd_user}` (parallel per task, python order) |
+| `MountInfo.get_mountinfo(mnt, task)` / `_get_tasks_mountpoints(tasks, by_pids)` / `get_superblocks(ctx, kernel)` | `plugins::linux::mountinfo::{get_mountinfo, tasks_mountpoints, get_superblocks}` |
+| `Files.get_inodes(ctx, kernel, follow_symlinks)` / `InodeInternal.to_user()` | `plugins::linux::pagecache::{get_inodes (streaming), collect_inodes, inode_user_row}` |
+| `InodePages.write_inode_content_to_stream(...)` | `pagecache::inode_page_writes(&inode, page_size)` → `Vec<PageWrite { offset, paddr, len }>` (python's writes; page-cache exceptions end the list) |
+| `sockstat.SockHandlers(ctx, kernel, task).process_sock(sock)` / `Sockstat.list_sockets` | `plugins::linux::sockstat::{SockHandlers::new(vm, &task)?.process_sock(&sk)?, list_sockets, NetDevMaps}` |
+| `ip.Addr/Link` net device enumeration (`net_namespace_list` x `dev_base_head`) | `plugins::linux::ip::net_devices(k)` |
+| python `tarfile.open(mode="w|..")` + `TarInfo`/`addfile` (PAX format, float mtime) | `crate::util::pytar::PyTarWriter` (`add_dir`, `add_symlink`, `begin_file` + `write_content`/`write_zeros`, `close`) |
+| `gzip.GzipFile(fileobj, "wb", 9)` / `zlib.compress` | `crate::codecs::gzip_enc::{GzipEncoder (streaming, parallel), GzipOptions::python(level, mtime), gzip_compress}`, `codecs::deflate_enc` |
+| `tainting.Tainting.get_taints_parsed / get_taints_as_plain_string(ctx, kernel, taints, is_module)`, `linux_constants.TAINT_FLAGS` | `symbols::linux::tainting::{Tainting::new(k)?.get_taints_parsed(taints, is_module)?, TAINT_FLAGS}` (build `Tainting` once per run) |
+| `Modules.get_kset_modules` keeping the `module_kobject.mod` pointer objects | `modules::get_kset_modules_ptrs(k)?` → `(name, pointer Obj, value)` |
+| many `Modules.module_lookup_by_address` calls (e.g. a table of handlers) | `modules::module_lookup_by_addresses(k, &mods, &addrs)` (one symbol-table pass for all kernel addresses; stops at the first `Err`) |
+| `get_symbols_by_absolute_location(addr)` for many addresses | `k.table.symbols_at_exact_many(&rel_offsets)` (one linear pass; `symbols_at(off, 0)` itself answers the first 8 exact lookups linearly, then builds the address index) |
+| `for sn in vmlinux.symbols: vmlinux.get_symbol(sn).address` (whole-table scans) | `k.table.symbol_names_addrs()` → `(raw name bytes, masked address)` |
+| `ModuleDisplayPlugin.generate_results(...)` / `columns_results` (lsmod, check_modules, hidden_modules) | `plugins::linux::lsmod::{generate_results(ctx, k, iter of (vol.offset, module), dump, out), columns()}` |
+| `Hidden_modules.find_hidden_modules / get_lsmod_module_addresses`, `Check_modules.compare_kset_and_lsmod` | `plugins::linux::malware::{hidden_modules, check_modules}` same names |
+| `Check_idt.get_idt_type`, `IOMem.parse_resource`, `Boottime.get_time_namespaces_bootime` | `plugins::linux::{malware::check_idt::get_idt_type, iomem::parse_resource, boottime::get_time_namespaces_boottime}` |
 
 ## Mac (`use crate::symbols::mac::MacExt`)
 
@@ -363,6 +400,20 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
 | `UnloadedModules.create_unloadedmodules_table / list_unloadedmodules` | same names in `unloadedmodules` |
 | `DebugRegisters._get_debug_info(ethread)` | `debugregisters::get_debug_info(&t)?` |
 
+### Services, malware helpers (`crate::plugins::windows::*`, package W5)
+
+| python | rust |
+|---|---|
+| `SvcScan.get_prereq_info(...)` (services ISF + registry `ImagePath` / `ServiceDll` map) | `svcscan::get_prereq_info(ctx, k)?` → `Prereq { table, binary_map }` |
+| `SvcScan.service_scan(...)` / `SvcList.service_list(...)` (rows of `get_record_tuple`) | `svcscan::service_scan(k, &pre, &mut \|row\| ..)` / `svclist::service_list(k, &pre, f)` → `ServiceRow { values, name, key }` |
+| `SvcScan.enumerate_vista_or_later_header(...)` / `SERVICE_RECORD.traverse()` | `svcscan::enumerate_vista_or_later_header(table, &map, layer, offset, f)` (row offsets are the `PrevEntry` pointers' own addresses, like python) |
+| `pslist.PsList.create_name_filter(["services.exe"])` / `create_active_process_filter()` | `svcscan::services_filter` / `malware::processghosting::active_process_filter` |
+| `Malfind.is_vad_empty(layer, vad)` / `list_injection_sites(...)` | `malware::malfind::is_vad_empty(layer, start, size)?` / `malware::malfind::list_injection_sites(&proc, &pv)` |
+| `YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `vadyarascan::yarascan_option_requirements()` / `vadyarascan::rules_from_config(cfg)?` |
+| `scanners.RegExScanner(pattern)` (DOTALL, `chunk_size` rule) | `vadregexscan::regex_scanner(&re)` → `FnScanner` |
+| `DirectSystemCalls` / `IndirectSystemCalls` machinery (`syscall_finder_type`, `_is_syscall_block`, `_generator`) | `malware::direct_system_calls::{SyscallFinder, DIRECT, run_finder}`, `malware::indirect_system_calls::INDIRECT` |
+| a python dict keyed by int (insertion order) | `malware::hollowprocesses::OrderedMap<V>` |
+
 ## Plugins & output
 
 * A plugin is a unit struct implementing `crate::plugins::Plugin` (see `src/plugins/windows/pslist.rs`),
@@ -373,6 +424,9 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
   `Value::NotApplicable` ("N/A"), `UnparsableValue()` = `Value::Unparsable` ("-").
 * Files: `let (file, name) = ctx.create_output_file(&sanitize_filename(..))?;` — `name` is the
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
+* A plugin's own unsatisfied requirement (e.g. `TranslationLayerRequirement(name="primary",
+  description=...)`): `Err(crate::plugins::unsatisfied_described(&[("primary", UnsatKind::Layer,
+  "Memory layer for the kernel")]))` prints python's message (kinds: Layer, Symbols, Other).
 * Errors: return `Err(e)`; python's "skip this row on InvalidAddressException" is
   `match row() { Err(e) if e.is_invalid_address() => continue, ... }`.
   An `Error::Msg` / `Error::Symbol` whose text starts with a python builtin exception name
