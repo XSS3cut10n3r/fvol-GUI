@@ -380,6 +380,7 @@ impl WinExt for Obj {
             Some("_OBJECT_HEADER") => super::pool::object_header_is_valid(self),
             Some("_CMHIVE") => super::registry::cmhive_is_valid(self),
             Some("tagWINDOWSTATION") | Some("tagDESKTOP") | Some("tagWND") => super::gui::gui_is_valid(self).unwrap_or(true),
+            Some("_TCP_LISTENER") | Some("_TCP_ENDPOINT") | Some("_UDP_ENDPOINT") => super::network::is_valid(self),
             Some("_POOL_TRACKER_BIG_PAGES") => {
                 use super::pool::PoolExt;
                 self.big_page_is_valid().unwrap_or(false)
