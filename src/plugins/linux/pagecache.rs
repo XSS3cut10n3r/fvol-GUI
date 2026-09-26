@@ -892,6 +892,12 @@ trait FinishWrite: Write + Send {
     fn finish(self: Box<Self>) -> std::io::Result<()>;
 }
 
+impl<W: Write + Send> FinishWrite for crate::codecs::xz_enc::XzEncoder<W> {
+    fn finish(self: Box<Self>) -> std::io::Result<()> {
+        (*self).finish()?.flush()
+    }
+}
+
 impl<W: Write + Send> FinishWrite for crate::codecs::bzip2_enc::Bzip2Encoder<W> {
     fn finish(self: Box<Self>) -> std::io::Result<()> {
         (*self).finish()?.flush()
@@ -923,7 +929,9 @@ fn open_compressor(format: &str, file: std::fs::File, mtime: u32) -> Result<Box<
         }
         // python `bz2.BZ2File(fileobj, "w", compresslevel=9)`
         "bz2" => Ok(Box::new(crate::codecs::bzip2_enc::Bzip2Encoder::new(w, 9))),
-        other => Err(Error::msg(format!("compression format {other} not supported yet"))),
+        // python `lzma.LZMAFile(fileobj, "w", preset=None)` (preset 6, CRC64 check)
+        "xz" => Ok(Box::new(crate::codecs::xz_enc::XzEncoder::new(w, 6))),
+        other => Err(Error::msg(format!("ValueError: unknown compression format {other:?}"))),
     }
 }
 
