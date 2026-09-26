@@ -216,6 +216,16 @@ impl Rules {
                 Err(_) => &mut fresh,
             };
             for (i, r) in self.rules.iter().enumerate() {
+                // libyara's required_eval shortcut: such a rule is false (not
+                // evaluated) unless one of its strings matched.
+                if r.required
+                    && !(r.strings.0..r.strings.1).any(|g| matches.get(g as usize).is_some_and(|v| !v.is_empty()))
+                {
+                    if let (true, Some(u)) = (r.global, ns_unsatisfied.get_mut(r.ns as usize)) {
+                        *u = true;
+                    }
+                    continue;
+                }
                 let v = {
                     let mut ctx = Ctx { data, matches, rule_matched: &rule_matched, entry_point: &mut entry_point };
                     self.prog.run(r.code.0 as usize, r.code.1 as usize, &mut ctx, scratch, &mut mem)

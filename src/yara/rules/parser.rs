@@ -40,6 +40,9 @@ pub struct CRule {
     pub strings: (u32, u32),
     /// Code range in [`Program::code`].
     pub code: (u32, u32),
+    /// libyara `required_strings > 0`: the condition can only be true when
+    /// some string of the rule matched, so the rule is not evaluated otherwise.
+    pub required: bool,
 }
 
 /// Per-string compile information (global index).
@@ -128,14 +131,29 @@ struct Expr {
     primary: bool,
     /// Pool index of a literal text string.
     str_const: Option<u32>,
+    /// libyara `required_strings.count`: > 0 when the expression can only be
+    /// true if at least one string of the rule matched.
+    req: u32,
 }
 
 impl Expr {
     fn prim(ty: Ty, ival: i64) -> Expr {
-        Expr { ty, ival, primary: true, str_const: None }
+        Expr { ty, ival, primary: true, str_const: None, req: 0 }
     }
     fn boolean() -> Expr {
-        Expr { ty: Ty::Bool, ival: UNDEF, primary: false, str_const: None }
+        Expr { ty: Ty::Bool, ival: UNDEF, primary: false, str_const: None, req: 0 }
+    }
+    fn required(req: u32) -> Expr {
+        Expr { req, ..Expr::boolean() }
+    }
+    /// Count as seen through `boolean_expression: expression` (non-boolean
+    /// expressions reset it).
+    fn bool_req(self) -> u32 {
+        if self.ty == Ty::Bool {
+            self.req
+        } else {
+            0
+        }
     }
 }
 
@@ -422,6 +440,7 @@ impl<'a, 'c> Parser<'a, 'c> {
             meta: Vec::new(),
             strings: (sstart, sstart),
             code: (0, 0),
+            required: false,
         });
         self.c.rule_index.insert((self.ns, name.clone()), idx);
         self.rule = idx;
@@ -509,7 +528,6 @@ impl<'a, 'c> Parser<'a, 'c> {
         self.expect_char(b':', "':'")?;
         let code_start = self.c.prog.code.len() as u32;
         let e = self.boolean_expression()?;
-        let _ = e;
         if !self.is_char(b'}') {
             return self.unexpected("'}'");
         }
@@ -538,6 +556,7 @@ impl<'a, 'c> Parser<'a, 'c> {
         let r = &mut self.c.rules[idx as usize];
         r.strings = (sstart, send);
         r.code = (code_start, code_end);
+        r.required = e.bool_req() > 0;
         Ok(())
     }
 
@@ -820,7 +839,7 @@ impl<'a, 'c> Parser<'a, 'c> {
             self.emit(Op::Or);
             let t = self.here();
             self.patch(j, t);
-            l = Expr::boolean();
+            l = Expr::required(l.bool_req().min(r.bool_req()));
         }
         Ok(l)
     }
@@ -836,7 +855,7 @@ impl<'a, 'c> Parser<'a, 'c> {
             self.emit(Op::And);
             let t = self.here();
             self.patch(j, t);
-            l = Expr::boolean();
+            l = Expr::required(l.bool_req().saturating_add(r.bool_req()));
         }
         Ok(l)
     }
@@ -876,7 +895,7 @@ impl<'a, 'c> Parser<'a, 'c> {
                 if !self.is_kw(Kw::Of) {
                     return self.unexpected("<of>");
                 }
-                self.of_expr()
+                self.of_expr(q != Kw::None)
             }
             Tok::StrId(id) => {
                 self.advance();
@@ -895,7 +914,7 @@ impl<'a, 'c> Parser<'a, 'c> {
                     let r = self.string_ref(&id, RefKind::Found)?;
                     self.emit(Op::Found(r));
                 }
-                Ok(Expr::boolean())
+                Ok(Expr::required(1))
             }
             Tok::Char(b'(') => {
                 self.advance();
@@ -973,13 +992,13 @@ impl<'a, 'c> Parser<'a, 'c> {
             }
             Tok::Kw(Kw::Of) => {
                 self.for_expression_check(e)?;
-                return self.of_expr();
+                return self.of_expr(e.ty == Ty::Int && !undef(e.ival) && e.ival > 0);
             }
             Tok::Char(b'%') => {
                 // Only reached for `primary % of` (binary() stopped before it).
                 self.advance(); // '%'
                 self.advance(); // `of`
-                return self.of_set(Some(e));
+                return self.of_set(Some(e), false);
             }
             _ => return Ok(e),
         };
@@ -1013,10 +1032,11 @@ impl<'a, 'c> Parser<'a, 'c> {
         }
     }
 
-    /// `<quantifier already emitted> of <set> [in range | at expr]`.
-    fn of_expr(&mut self) -> PResult<Expr> {
+    /// `<quantifier already emitted> of <set> [in range | at expr]`;
+    /// `q_req`: the quantifier is `all`, `any` or a positive constant.
+    fn of_expr(&mut self, q_req: bool) -> PResult<Expr> {
         self.advance(); // `of`
-        self.of_set(None)
+        self.of_set(None, q_req)
     }
 
     /// The `primary_expression '%' _OF_ ...` checks (run once the set is parsed).
@@ -1028,8 +1048,10 @@ impl<'a, 'c> Parser<'a, 'c> {
         Ok(())
     }
 
-    /// The set after `of`; `percent` = the percentage expression of `N% of`.
-    fn of_set(&mut self, percent: Option<Expr>) -> PResult<Expr> {
+    /// The set after `of`; `percent` = the percentage expression of `N% of`
+    /// (libyara leaves that expression typed as an integer, so it never counts
+    /// as requiring strings; neither do rule sets).
+    fn of_set(&mut self, percent: Option<Expr>, q_req: bool) -> PResult<Expr> {
         let is_rule_set = self.is_char(b'(') && matches!(self.peek2(), Tok::Ident(_));
         if is_rule_set {
             let set = self.rule_set()?;
@@ -1065,7 +1087,7 @@ impl<'a, 'c> Parser<'a, 'c> {
         } else {
             self.emit(Op::OfStrings(set));
         }
-        Ok(Expr::boolean())
+        Ok(Expr::required(q_req as u32))
     }
 
     /// string_set: `them` or `( $a, $b*, ... )`. Marks strings referenced and
@@ -1481,7 +1503,7 @@ impl<'a, 'c> Parser<'a, 'c> {
                 self.advance();
                 let i = self.str_const(s);
                 self.emit(Op::Push(STR_BASE + i as i64));
-                Ok(Expr { ty: Ty::Str, ival: UNDEF, primary: true, str_const: Some(i) })
+                Ok(Expr { ty: Ty::Str, ival: UNDEF, primary: true, str_const: Some(i), req: 0 })
             }
             Tok::Regex { src, nocase, dotall } => {
                 self.advance();

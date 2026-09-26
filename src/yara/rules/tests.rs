@@ -438,6 +438,45 @@ fn yara_rules_max_depth_fits_small_stack() {
     assert!(h.join().is_ok());
 }
 
+/// libyara `required_strings` per rule (grammar.y counting rules).
+#[test]
+fn yara_rules_required_strings() {
+    let req = |cond: &str| -> bool {
+        let src = format!("rule r {{ strings: $a = \"x\" $b = \"y\" condition: ({cond}) or ($a and $b and false) }}");
+        let direct = format!("rule r {{ strings: $a = \"x\" $b = \"y\" condition: {cond} and ($a or $b or true) }}");
+        let r1 = Rules::compile(&src).unwrap_or_else(|e| panic!("{cond}: {e}"));
+        let r2 = Rules::compile(&direct).unwrap_or_else(|e| panic!("{cond}: {e}"));
+        // `X or (2 required)` = min(req(X), 2); `X and (min(1,1,0)=0)` = req(X).
+        assert_eq!(r1.rules[0].required, r2.rules[0].required, "{cond}");
+        r2.rules[0].required
+    };
+    assert!(req("$a"));
+    assert!(req("$a at 5"));
+    assert!(req("$a in (0..5)"));
+    assert!(req("any of them"));
+    assert!(req("all of ($a, $b)"));
+    assert!(req("2 of them"));
+    assert!(req("(1 + 1) of them in (0..10)"));
+    assert!(req("any of them at 0"));
+    assert!(req("$a and true"));
+    assert!(req("($a or $b) and not $a"));
+    assert!(!req("none of them"));
+    assert!(!req("0 of them"));
+    assert!(!req("#a of them"));
+    assert!(!req("50% of them"));
+    assert!(!req("not $a"));
+    assert!(!req("$a or true"));
+    assert!(!req("true"));
+    assert!(!req("#a == 0"));
+    assert!(!req("for any of them : ($)"));
+    assert!(!req("defined $a"));
+    // Skipping a required rule when nothing matched changes nothing, also for
+    // global rules (their namespace becomes unsatisfied either way).
+    let src = r#"global rule g { strings: $a = "x" condition: $a } rule other { condition: true }"#;
+    assert!(names(src, b"", &[vec![]]).is_empty());
+    assert_eq!(names(src, b"", &[vec![m(0, 1)]]), vec!["g", "other"]);
+}
+
 #[test]
 fn yara_rules_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
