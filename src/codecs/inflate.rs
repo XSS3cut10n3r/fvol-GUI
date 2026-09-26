@@ -2,14 +2,19 @@
 //!
 //! * 64-bit bit buffer with a branchless 8-byte refill (bits above `bitcount` always hold the
 //!   true next input bits, so OR-ing a fresh load on top is harmless).
-//! * Table-driven Huffman decoding: one u32 entry per lookup carries the decoded value, the
-//!   number of code bits, the number of extra bits and flags; codes longer than the primary
-//!   table width go through a second-level subtable.
+//! * Table-driven Huffman decoding (libdeflate style): one u32 entry per lookup carries the
+//!   decoded value and the *total* number of bits to consume (code + extra bits), so a
+//!   length or distance and its extra bits leave the bit buffer with a single shift; the
+//!   extra bits are then extracted from the saved buffer. Codes longer than the primary table
+//!   width go through a second-level subtable.
 //! * The fast loop needs no bounds checks: it runs while at least `FAST_IN` input bytes and
-//!   `FAST_OUT` output bytes of capacity remain, so one refill covers a whole
-//!   length/distance pair and match copies may over-write in 16/32-byte chunks.
+//!   `FAST_OUT` output bytes of capacity remain; one refill covers up to three literals or a
+//!   whole length/distance pair, the next literal/length entry is looked up right after the
+//!   refill (its latency overlaps the match copy), and copies may over-write in 16/32-byte
+//!   chunks.
 //! * Output goes straight into the spare capacity of the caller's `Vec` (no zero fill); the
-//!   window is simply everything this stream has produced so far.
+//!   window is simply everything this stream has produced so far. Allocation failures are
+//!   errors, never aborts.
 
 use crate::error::{Error, Result};
 use std::sync::OnceLock;
@@ -18,12 +23,16 @@ const LIT_BITS: u32 = 11;
 const DIST_BITS: u32 = 8;
 const PRE_BITS: u32 = 7;
 
-// Entry layout: bits 0..4 = code length to consume, bits 8..11 = extra bits (or subtable
-// bits), flags in bits 12..15, value in bits 16..31.
-const F_LIT: u32 = 1 << 12;
+// Entry layout: bits 0..7 = bits to consume (code length + extra bits; the primary width for
+// subtable pointers), bits 8..11 = code length (shift of the extra bits within the saved bit
+// buffer; subtable width for pointers), flags in bits 12..15 and 31, value in bits 16..30.
+const F_BAD: u32 = 1 << 12;
 const F_EOB: u32 = 1 << 13;
 const F_SUB: u32 = 1 << 14;
-const F_BAD: u32 = 1 << 15;
+/// Anything but a literal or a length / distance: subtable pointer, end of block, bad code.
+const F_EXC: u32 = 1 << 15;
+const F_LIT: u32 = 1 << 31;
+const BAD: u32 = F_EXC | F_BAD;
 
 const LEN_BASE: [u16; 29] =
     [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
@@ -35,31 +44,47 @@ const DIST_BASE: [u16; 30] = [
 const DIST_EXTRA: [u8; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
 const PRECODE_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
-/// Input bytes that must remain for the fast loop (a refill reads 8 bytes; one iteration
-/// consumes at most 48 bits and refills at most twice).
-const FAST_IN: usize = 32;
+/// Input bytes that must remain for the fast loop (each iteration refills once, reading 8
+/// bytes).
+const FAST_IN: usize = 16;
 /// Output capacity that must remain for the fast loop: longest match + copy over-run.
 const FAST_OUT: usize = 258 + 64;
+/// Largest possible expansion of DEFLATE data (a 258-byte match in 2 bits).
+const MAX_RATIO: usize = 1032;
 
 fn corrupt(what: &str) -> Error {
     Error::Msg(format!("inflate: corrupt data ({what})"))
 }
 
-fn litlen_entry(sym: usize) -> u32 {
+fn alloc_error() -> Error {
+    Error::Msg("inflate: out of memory".into())
+}
+
+/// Entry for literal/length symbol `sym` whose code has `l` bits (beyond the table index
+/// consumed so far).
+fn litlen_entry(sym: usize, l: u32) -> u32 {
     match sym {
-        0..=255 => F_LIT | ((sym as u32) << 16),
-        256 => F_EOB,
-        257..=285 => ((LEN_BASE[sym - 257] as u32) << 16) | ((LEN_EXTRA[sym - 257] as u32) << 8),
-        _ => F_BAD,
+        0..=255 => F_LIT | ((sym as u32) << 16) | l,
+        256 => F_EXC | F_EOB | l,
+        257..=285 => {
+            let x = LEN_EXTRA[sym - 257] as u32;
+            ((LEN_BASE[sym - 257] as u32) << 16) | (l << 8) | (l + x)
+        }
+        _ => BAD,
     }
 }
 
-fn dist_entry(sym: usize) -> u32 {
-    if sym < 30 { ((DIST_BASE[sym] as u32) << 16) | ((DIST_EXTRA[sym] as u32) << 8) } else { F_BAD }
+fn dist_entry(sym: usize, l: u32) -> u32 {
+    if sym < 30 {
+        let x = DIST_EXTRA[sym] as u32;
+        ((DIST_BASE[sym] as u32) << 16) | (l << 8) | (l + x)
+    } else {
+        BAD
+    }
 }
 
-fn pre_entry(sym: usize) -> u32 {
-    (sym as u32) << 16
+fn pre_entry(sym: usize, l: u32) -> u32 {
+    ((sym as u32) << 16) | l
 }
 
 /// Kind of code being built (zlib's rules for incomplete codes differ).
@@ -71,7 +96,12 @@ enum Kind {
 }
 
 /// Builds a two-level decode table for canonical Huffman code `lens` into `table`.
-fn build_table(lens: &[u8], bits: u32, entry: fn(usize) -> u32, kind: Kind, table: &mut Vec<u32>) -> Result<()> {
+fn build_table(lens: &[u8], bits: u32, kind: Kind, table: &mut Vec<u32>) -> Result<()> {
+    let entry: fn(usize, u32) -> u32 = match kind {
+        Kind::Pre => pre_entry,
+        Kind::Lit => litlen_entry,
+        Kind::Dist => dist_entry,
+    };
     let mut count = [0u16; 16];
     for &l in lens {
         count[l as usize] += 1;
@@ -79,16 +109,16 @@ fn build_table(lens: &[u8], bits: u32, entry: fn(usize) -> u32, kind: Kind, tabl
     count[0] = 0;
     let max_len = (1..16).rev().find(|&l| count[l] != 0).unwrap_or(0);
     table.clear();
-    table.resize(1 << bits, F_BAD);
+    table.resize(1 << bits, BAD);
     if max_len == 0 {
         // No codes at all: every lookup is invalid (legal for a distance code that is never
         // used; the literal/length code is rejected by the caller since EOB is missing).
         return if kind == Kind::Pre { Err(corrupt("empty code length code")) } else { Ok(()) };
     }
     let mut left: i32 = 1;
-    for l in 1..16 {
+    for &c in &count[1..16] {
         left <<= 1;
-        left -= count[l] as i32;
+        left -= c as i32;
         if left < 0 {
             return Err(corrupt("over-subscribed Huffman code"));
         }
@@ -104,36 +134,32 @@ fn build_table(lens: &[u8], bits: u32, entry: fn(usize) -> u32, kind: Kind, tabl
         next[l] = code;
     }
     let mask = (1u32 << bits) - 1;
-    // Pass 1: longest code per primary-table prefix (for subtable sizes).
-    let mut sub_len = vec![0u8; if max_len as u32 > bits { 1 << bits } else { 0 }];
+    // Pass 1: bit-reversed codes and the longest code per primary-table prefix.
+    let mut sub_len = [0u8; 1 << LIT_BITS];
     let mut codes = [0u32; 320];
-    {
-        let mut nx = next;
-        for (sym, &l) in lens.iter().enumerate() {
-            if l == 0 {
-                continue;
-            }
-            let c = nx[l as usize];
-            nx[l as usize] += 1;
-            let rev = c.reverse_bits() >> (32 - l as u32);
-            codes[sym] = rev;
-            if l as u32 > bits {
-                let p = (rev & mask) as usize;
-                sub_len[p] = sub_len[p].max(l);
-            }
+    for (sym, &l) in lens.iter().enumerate() {
+        if l == 0 {
+            continue;
+        }
+        let c = next[l as usize];
+        next[l as usize] += 1;
+        let rev = c.reverse_bits() >> (32 - l as u32);
+        codes[sym] = rev;
+        if l as u32 > bits {
+            let p = (rev & mask) as usize;
+            sub_len[p] = sub_len[p].max(l);
         }
     }
     // Pass 2: fill.
-    let mut sub_start = vec![0u32; sub_len.len()];
+    let mut sub_start = [0u32; 1 << LIT_BITS];
     for (sym, &l) in lens.iter().enumerate() {
         if l == 0 {
             continue;
         }
         let l = l as u32;
         let rev = codes[sym];
-        let e = entry(sym);
         if l <= bits {
-            let v = e | l;
+            let v = entry(sym, l);
             let mut i = rev as usize;
             while i < (1 << bits) {
                 table[i] = v;
@@ -145,11 +171,12 @@ fn build_table(lens: &[u8], bits: u32, entry: fn(usize) -> u32, kind: Kind, tabl
             if sub_start[p] == 0 {
                 let start = table.len() as u32;
                 sub_start[p] = start;
-                table.resize(table.len() + (1 << sbits), F_BAD);
-                table[p] = F_SUB | (start << 16) | (sbits << 8) | bits;
+                table.try_reserve(1 << sbits).map_err(|_| alloc_error())?;
+                table.resize(table.len() + (1 << sbits), BAD);
+                table[p] = F_EXC | F_SUB | (start << 16) | (sbits << 8) | bits;
             }
             let start = sub_start[p] as usize;
-            let v = e | (l - bits);
+            let v = entry(sym, l - bits);
             let mut i = (rev >> bits) as usize;
             while i < (1 << sbits) {
                 table[start + i] = v;
@@ -174,9 +201,9 @@ fn fixed_tables() -> &'static Tables {
         lens[256..280].fill(7);
         lens[280..].fill(8);
         let mut lit = Vec::new();
-        build_table(&lens, LIT_BITS, litlen_entry, Kind::Lit, &mut lit).expect("fixed litlen table");
+        build_table(&lens, LIT_BITS, Kind::Lit, &mut lit).expect("fixed litlen table");
         let mut dist = Vec::new();
-        build_table(&[5u8; 32], DIST_BITS, dist_entry, Kind::Dist, &mut dist).expect("fixed dist table");
+        build_table(&[5u8; 32], DIST_BITS, Kind::Dist, &mut dist).expect("fixed dist table");
         Tables { lit, dist }
     })
 }
@@ -251,6 +278,7 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
                 }
                 bits.ip += 4;
                 let src = input.get(bits.ip..bits.ip + len).ok_or_else(|| corrupt("truncated stored block"))?;
+                out.try_reserve(len).map_err(|_| alloc_error())?;
                 out.extend_from_slice(src);
                 bits.ip += len;
             }
@@ -270,7 +298,7 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
                     plens[i] = bits.take(input, 3) as u8;
                 }
                 bits.check(input)?;
-                build_table(&plens, PRE_BITS, pre_entry, Kind::Pre, &mut pre)?;
+                build_table(&plens, PRE_BITS, Kind::Pre, &mut pre)?;
                 let n = hlit + hdist;
                 let mut i = 0;
                 while i < n {
@@ -281,7 +309,7 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
                     if e & F_BAD != 0 {
                         return Err(corrupt("invalid code length code"));
                     }
-                    let l = e & 31;
+                    let l = e & 0xFF;
                     bits.buf >>= l;
                     bits.count -= l;
                     let sym = (e >> 16) as u8;
@@ -316,8 +344,8 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
                 if lens[256] == 0 {
                     return Err(corrupt("missing end-of-block code"));
                 }
-                build_table(&lens[..hlit], LIT_BITS, litlen_entry, Kind::Lit, &mut dynamic.lit)?;
-                build_table(&lens[hlit..n], DIST_BITS, dist_entry, Kind::Dist, &mut dynamic.dist)?;
+                build_table(&lens[..hlit], LIT_BITS, Kind::Lit, &mut dynamic.lit)?;
+                build_table(&lens[hlit..n], DIST_BITS, Kind::Dist, &mut dynamic.dist)?;
                 decode_block(input, &mut bits, out, start, &dynamic.lit, &dynamic.dist)?;
             }
             _ => return Err(corrupt("invalid block type")),
@@ -344,23 +372,48 @@ fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, 
     let mut cap = out.capacity();
     let mut base = out.as_mut_ptr();
 
+    // Drops the bits of entry `e` (code + extra bits).
     macro_rules! consume {
-        ($n:expr) => {{
-            let n = $n;
+        ($e:expr) => {{
+            let n = $e & 0xFF;
             buf >>= n;
             cnt -= n;
         }};
     }
-
+    // Extra-bits value of entry `e`, from the bit buffer as it was before consuming `e`.
+    macro_rules! extra {
+        ($saved:expr, $e:expr) => {{
+            let e = $e;
+            (($saved & ((1u64 << (e & 0xFF)) - 1)) >> ((e >> 8) & 0xF)) as usize
+        }};
+    }
+    // Subtable lookup for pointer entry `e` (its primary bits are already consumed).
+    macro_rules! sub {
+        ($t:expr, $e:expr) => {{
+            let e = $e;
+            // SAFETY: build_table allocated 2^((e >> 8) & 15) entries at e >> 16.
+            unsafe { *$t.get_unchecked((e >> 16) as usize + (buf & ((1u64 << ((e >> 8) & 0xF)) - 1)) as usize) }
+        }};
+    }
     // Grows the output so at least FAST_OUT bytes of capacity follow `pos`.
     macro_rules! grow {
-        () => {{
+        ($need:expr) => {{
             // SAFETY: bytes [0, pos) have been written.
             unsafe { out.set_len(pos) };
-            let want = (pos - start).max(1 << 16) + FAST_OUT;
-            out.reserve(want);
+            let want = ((pos - start).max(1 << 16)).max($need) + FAST_OUT;
+            out.try_reserve(want).map_err(|_| alloc_error())?;
             cap = out.capacity();
             base = out.as_mut_ptr();
+        }};
+    }
+    macro_rules! done {
+        () => {{
+            bits.buf = buf;
+            bits.count = cnt;
+            bits.ip = ip;
+            // SAFETY: bytes [0, pos) have been written.
+            unsafe { out.set_len(pos) };
+            return Ok(());
         }};
     }
 
@@ -369,70 +422,88 @@ fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, 
         if ip + FAST_IN <= in_len && pos + FAST_OUT <= cap {
             let in_end = in_len - FAST_IN;
             let out_end = cap - FAST_OUT;
+            // Branchless refill to >= 56 bits (ip <= in_end, so 8 bytes are readable).
+            macro_rules! refill {
+                () => {{
+                    // SAFETY: ip + 8 <= in_len (see FAST_IN).
+                    let w = u64::from_le(unsafe { (inp.add(ip) as *const u64).read_unaligned() });
+                    buf |= w << cnt;
+                    ip += ((63 - cnt) >> 3) as usize;
+                    cnt |= 56;
+                }};
+            }
+            // SAFETY (all table lookups below): masked indices < primary table size.
+            macro_rules! lit_lookup {
+                () => {
+                    unsafe { *lt.get_unchecked((buf & LMASK) as usize) }
+                };
+            }
+            refill!();
+            let mut e = lit_lookup!();
+            // Invariant at the top: >= 56 valid bits and `e` is the entry for them.
             while ip <= in_end && pos <= out_end {
-                // SAFETY: ip + 8 <= in_len.
-                let w = u64::from_le(unsafe { (inp.add(ip) as *const u64).read_unaligned() });
-                buf |= w << cnt;
-                ip += ((63 - cnt) >> 3) as usize;
-                cnt |= 56;
-
-                // SAFETY: masked indices < primary table size; subtable indices were
-                // allocated by build_table for exactly this width.
-                let mut e = unsafe { *lt.get_unchecked((buf & LMASK) as usize) };
-                if e & F_SUB != 0 {
-                    consume!(LIT_BITS);
-                    e = unsafe { *lt.get_unchecked((e >> 16) as usize + (buf & ((1 << ((e >> 8) & 15)) - 1)) as usize) };
-                }
+                let mut saved = buf;
+                consume!(e);
                 if e & F_LIT != 0 {
-                    consume!(e & 31);
-                    // SAFETY: pos < cap - FAST_OUT.
+                    // Up to three literals per refill (<= 45 bits).
+                    // SAFETY: pos < out_end; three literals fit in FAST_OUT.
                     unsafe { *base.add(pos) = (e >> 16) as u8 };
                     pos += 1;
-                    // A second and third literal fit in the remaining >= 41 bits.
-                    let mut e2 = unsafe { *lt.get_unchecked((buf & LMASK) as usize) };
-                    if e2 & F_LIT != 0 {
-                        consume!(e2 & 31);
-                        unsafe { *base.add(pos) = (e2 >> 16) as u8 };
+                    e = lit_lookup!();
+                    if e & F_LIT != 0 {
+                        consume!(e);
+                        unsafe { *base.add(pos) = (e >> 16) as u8 };
                         pos += 1;
-                        e2 = unsafe { *lt.get_unchecked((buf & LMASK) as usize) };
-                        if e2 & F_LIT != 0 {
-                            consume!(e2 & 31);
-                            unsafe { *base.add(pos) = (e2 >> 16) as u8 };
+                        e = lit_lookup!();
+                        if e & F_LIT != 0 {
+                            consume!(e);
+                            unsafe { *base.add(pos) = (e >> 16) as u8 };
                             pos += 1;
+                            e = lit_lookup!();
                         }
                     }
+                    // >= 11 valid bits remain, so `e` is valid; top up for the next symbol.
+                    refill!();
                     continue;
                 }
-                if e & (F_EOB | F_BAD) != 0 {
-                    consume!(e & 31);
-                    if e & F_BAD != 0 {
+                if e & F_EXC != 0 {
+                    if e & F_SUB != 0 {
+                        e = sub!(lt, e);
+                        saved = buf;
+                        consume!(e);
+                        if e & F_LIT != 0 {
+                            unsafe { *base.add(pos) = (e >> 16) as u8 };
+                            pos += 1;
+                            refill!();
+                            e = lit_lookup!();
+                            continue;
+                        }
+                    }
+                    if e & F_EXC != 0 {
+                        if e & F_EOB != 0 {
+                            done!();
+                        }
                         return Err(corrupt("invalid literal/length code"));
                     }
-                    bits.buf = buf;
-                    bits.count = cnt;
-                    bits.ip = ip;
-                    // SAFETY: bytes [0, pos) have been written.
-                    unsafe { out.set_len(pos) };
-                    return Ok(());
                 }
-                // Length.
-                consume!(e & 31);
-                let extra = (e >> 8) & 15;
-                let len = (e >> 16) as usize + (buf & ((1u64 << extra) - 1)) as usize;
-                consume!(extra);
-                // Distance (48 bits max per pair: still covered by this refill).
+                // Length (<= 20 bits) + distance (<= 28 bits) fit in the >= 56 bits.
+                let len = (e >> 16) as usize + extra!(saved, e);
                 let mut d = unsafe { *dt.get_unchecked((buf & DMASK) as usize) };
-                if d & F_SUB != 0 {
-                    consume!(DIST_BITS);
-                    d = unsafe { *dt.get_unchecked((d >> 16) as usize + (buf & ((1 << ((d >> 8) & 15)) - 1)) as usize) };
+                saved = buf;
+                consume!(d);
+                if d & F_EXC != 0 {
+                    if d & F_SUB != 0 {
+                        d = sub!(dt, d);
+                        saved = buf;
+                        consume!(d);
+                    }
+                    if d & F_EXC != 0 {
+                        return Err(corrupt("invalid distance code"));
+                    }
                 }
-                if d & F_BAD != 0 {
-                    return Err(corrupt("invalid distance code"));
-                }
-                consume!(d & 31);
-                let dextra = (d >> 8) & 15;
-                let dist = (d >> 16) as usize + (buf & ((1u64 << dextra) - 1)) as usize;
-                consume!(dextra);
+                let dist = (d >> 16) as usize + extra!(saved, d);
+                refill!();
+                e = lit_lookup!();
                 if dist > pos - start {
                     return Err(corrupt("distance too far back"));
                 }
@@ -442,14 +513,14 @@ fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, 
             }
             if ip <= in_end {
                 // Output space ran low.
-                grow!();
+                grow!(0);
                 continue;
             }
         }
 
         // ---------------- careful single step ----------------
         if pos + FAST_OUT > cap && ip + FAST_IN <= in_len {
-            grow!();
+            grow!(0);
             continue;
         }
         if cnt < 48 {
@@ -459,50 +530,45 @@ fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, 
             cnt = b.count;
             ip = b.ip;
         }
+        let mut saved = buf;
         let mut e = lt[(buf & LMASK) as usize];
+        consume!(e);
         if e & F_SUB != 0 {
-            consume!(LIT_BITS);
-            e = lt[(e >> 16) as usize + (buf & ((1 << ((e >> 8) & 15)) - 1)) as usize];
-        }
-        consume!(e & 31);
-        if e & F_BAD != 0 {
-            return Err(corrupt("invalid literal/length code"));
+            e = sub!(lt, e);
+            saved = buf;
+            consume!(e);
         }
         if ip * 8 - cnt as usize > in_len * 8 {
             return Err(corrupt("truncated input"));
         }
         if e & F_LIT != 0 {
             if pos >= cap {
-                grow!();
+                grow!(1);
             }
             // SAFETY: pos < cap.
             unsafe { *base.add(pos) = (e >> 16) as u8 };
             pos += 1;
             continue;
         }
-        if e & F_EOB != 0 {
-            bits.buf = buf;
-            bits.count = cnt;
-            bits.ip = ip;
-            // SAFETY: bytes [0, pos) have been written.
-            unsafe { out.set_len(pos) };
-            return Ok(());
+        if e & F_EXC != 0 {
+            if e & F_EOB != 0 {
+                done!();
+            }
+            return Err(corrupt("invalid literal/length code"));
         }
-        let extra = (e >> 8) & 15;
-        let len = (e >> 16) as usize + (buf & ((1u64 << extra) - 1)) as usize;
-        consume!(extra);
+        let len = (e >> 16) as usize + extra!(saved, e);
         let mut d = dt[(buf & DMASK) as usize];
+        saved = buf;
+        consume!(d);
         if d & F_SUB != 0 {
-            consume!(DIST_BITS);
-            d = dt[(d >> 16) as usize + (buf & ((1 << ((d >> 8) & 15)) - 1)) as usize];
+            d = sub!(dt, d);
+            saved = buf;
+            consume!(d);
         }
-        if d & F_BAD != 0 {
+        if d & F_EXC != 0 {
             return Err(corrupt("invalid distance code"));
         }
-        consume!(d & 31);
-        let dextra = (d >> 8) & 15;
-        let dist = (d >> 16) as usize + (buf & ((1u64 << dextra) - 1)) as usize;
-        consume!(dextra);
+        let dist = (d >> 16) as usize + extra!(saved, d);
         if ip * 8 - cnt as usize > in_len * 8 {
             return Err(corrupt("truncated input"));
         }
@@ -510,7 +576,7 @@ fn decode_block(input: &[u8], bits: &mut Bits, out: &mut Vec<u8>, start: usize, 
             return Err(corrupt("distance too far back"));
         }
         if pos + len > cap {
-            grow!();
+            grow!(len);
         }
         for i in 0..len {
             // SAFETY: pos + len <= cap, dist <= pos - start.
@@ -556,7 +622,7 @@ unsafe fn copy_fast(base: *mut u8, src: usize, dst: usize, len: usize) {
                 *d.add(i) = *s.add(i);
                 i += 1;
             }
-            let period = dist * ((8 + dist - 1) / dist);
+            let period = dist * 8_usize.div_ceil(dist);
             while i < period.min(len) {
                 *d.add(i) = *d.add(i - dist);
                 i += 1;
@@ -571,15 +637,22 @@ unsafe fn copy_fast(base: *mut u8, src: usize, dst: usize, len: usize) {
 
 /// Decompresses a raw DEFLATE stream.
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len().saturating_mul(4).clamp(1 << 12, 1 << 28));
+    let mut out = Vec::new();
+    // Size hint only; a failed reservation just means growing later.
+    let _ = out.try_reserve(data.len().saturating_mul(4).clamp(1 << 12, 1 << 28));
     inflate_into(data, &mut out)?;
     Ok(out)
 }
 
 /// Decompresses a raw DEFLATE stream whose uncompressed size is known (e.g. from a ZIP
-/// directory); fails if the output size differs.
+/// directory); fails if the output size differs. An impossible `size` (more than DEFLATE
+/// can expand `data` to) fails without allocating.
 pub fn decompress_sized(data: &[u8], size: usize) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(size.saturating_add(FAST_OUT));
+    if size > data.len().saturating_mul(MAX_RATIO).saturating_add(MAX_RATIO) {
+        return Err(corrupt("uncompressed size mismatch"));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(size.saturating_add(FAST_OUT)).map_err(|_| alloc_error())?;
     inflate_into(data, &mut out)?;
     if out.len() != size {
         return Err(corrupt("uncompressed size mismatch"));
