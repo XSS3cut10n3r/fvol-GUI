@@ -113,8 +113,8 @@ pub struct Insn {
     /// Length in bytes (1..=15).
     pub size: u8,
     pub mode: Mode,
-    /// Raw instruction bytes (`bytes[..size]`).
-    pub bytes: [u8; 15],
+    /// Raw instruction bytes (`bytes[..size]`, zero padded; 16 so it is one vector store).
+    pub bytes: [u8; 16],
     pub op_count: u8,
     pub operands: [Operand; MAX_OPS],
     /// Mnemonic id (index into the mnemonic table).
@@ -141,7 +141,7 @@ impl Default for Insn {
             address: 0,
             size: 0,
             mode: Mode::X86_64,
-            bytes: [0; 15],
+            bytes: [0; 16],
             op_count: 0,
             operands: [Operand::None; MAX_OPS],
             mnem: 0,

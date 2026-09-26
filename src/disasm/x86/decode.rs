@@ -76,6 +76,7 @@ const VEX_XOP: u8 = 3;
 
 struct St<'a> {
     d: &'a [u8],
+    data: &'a [u8], // the caller's whole buffer (d = data[..min(len, 15)])
     n: usize,
     pos: usize,
     m64: bool,
@@ -264,6 +265,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
 
     let mut st = St {
         d,
+        data,
         n,
         pos: i,
         m64,
@@ -884,27 +886,25 @@ static KEEP: [u128; 16] = {
     t
 };
 
-/// The first `len` bytes of `d` (`len <= d.len() <= 15`), zero padded to 15.
+/// The first `len` bytes of `data` (`len <= 15`), zero padded to 16.
 #[inline(always)]
-fn insn_bytes(d: &[u8], len: usize) -> [u8; 15] {
-    let mut out = [0u8; 15];
-    if let Some(w) = d.first_chunk::<15>() {
-        // full window: one fixed-size copy + mask instead of a variable-length memcpy
-        let mut x = [0u8; 16];
-        x[..15].copy_from_slice(w);
-        let v = u128::from_le_bytes(x) & KEEP[len & 15];
-        out.copy_from_slice(&v.to_le_bytes()[..15]);
+fn insn_bytes(data: &[u8], len: usize) -> [u8; 16] {
+    if let Some(w) = data.first_chunk::<16>() {
+        // one 16-byte load + mask instead of a variable-length memcpy
+        (u128::from_le_bytes(*w) & KEEP[len & 15]).to_le_bytes()
     } else {
-        let len = len.min(d.len());
-        out[..len].copy_from_slice(&d[..len]);
+        let mut out = [0u8; 16];
+        let len = len.min(data.len()).min(15);
+        out[..len].copy_from_slice(&data[..len]);
+        out
     }
-    out
 }
 
 #[inline(always)]
 fn finish<const FULL: bool>(st: &St, out: &mut Insn, addr: u64, mode: Mode, opcode: [u8; 4]) -> bool {
     let len = st.pos;
-    if len > 15 || len > st.n {
+    if len > st.n {
+        // (st.n <= 15)
         return false;
     }
     out.size = len as u8;
@@ -913,7 +913,7 @@ fn finish<const FULL: bool>(st: &St, out: &mut Insn, addr: u64, mode: Mode, opco
     }
     out.address = addr;
     out.mode = mode;
-    out.bytes = insn_bytes(st.d, len);
+    out.bytes = insn_bytes(st.data, len);
     out.opcode = opcode;
     out.rex = st.rex;
     // resolve the relative branch target now that the length is known
