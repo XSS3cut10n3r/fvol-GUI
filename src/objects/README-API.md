@@ -244,6 +244,14 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `ip.Addr/Link` net device enumeration (`net_namespace_list` x `dev_base_head`) | `plugins::linux::ip::net_devices(k)` |
 | python `tarfile.open(mode="w|..")` + `TarInfo`/`addfile` (PAX format, float mtime) | `crate::util::pytar::PyTarWriter` (`add_dir`, `add_symlink`, `begin_file` + `write_content`/`write_zeros`, `close`) |
 | `gzip.GzipFile(fileobj, "wb", 9)` / `zlib.compress` | `crate::codecs::gzip_enc::{GzipEncoder (streaming, parallel), GzipOptions::python(level, mtime), gzip_compress}`, `codecs::deflate_enc` |
+| `tainting.Tainting.get_taints_parsed / get_taints_as_plain_string(ctx, kernel, taints, is_module)`, `linux_constants.TAINT_FLAGS` | `symbols::linux::tainting::{Tainting::new(k)?.get_taints_parsed(taints, is_module)?, TAINT_FLAGS}` (build `Tainting` once per run) |
+| `Modules.get_kset_modules` keeping the `module_kobject.mod` pointer objects | `modules::get_kset_modules_ptrs(k)?` → `(name, pointer Obj, value)` |
+| many `Modules.module_lookup_by_address` calls (e.g. a table of handlers) | `modules::module_lookup_by_addresses(k, &mods, &addrs)` (one symbol-table pass for all kernel addresses; stops at the first `Err`) |
+| `get_symbols_by_absolute_location(addr)` for many addresses | `k.table.symbols_at_exact_many(&rel_offsets)` (one linear pass; `symbols_at(off, 0)` itself answers the first 8 exact lookups linearly, then builds the address index) |
+| `for sn in vmlinux.symbols: vmlinux.get_symbol(sn).address` (whole-table scans) | `k.table.symbol_names_addrs()` → `(raw name bytes, masked address)` |
+| `ModuleDisplayPlugin.generate_results(...)` / `columns_results` (lsmod, check_modules, hidden_modules) | `plugins::linux::lsmod::{generate_results(ctx, k, iter of (vol.offset, module), dump, out), columns()}` |
+| `Hidden_modules.find_hidden_modules / get_lsmod_module_addresses`, `Check_modules.compare_kset_and_lsmod` | `plugins::linux::malware::{hidden_modules, check_modules}` same names |
+| `Check_idt.get_idt_type`, `IOMem.parse_resource`, `Boottime.get_time_namespaces_bootime` | `plugins::linux::{malware::check_idt::get_idt_type, iomem::parse_resource, boottime::get_time_namespaces_boottime}` |
 
 ## Mac (`use crate::symbols::mac::MacExt`)
 
@@ -391,6 +399,20 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
 | `Callbacks.create_callback_symbol_table / scan / list_notify_routines / list_registry_callbacks / list_bugcheck(_reason)_callbacks` | same names in `callbacks` → `Vec<Result<CallbackEntry { kind, address, detail }>>` |
 | `UnloadedModules.create_unloadedmodules_table / list_unloadedmodules` | same names in `unloadedmodules` |
 | `DebugRegisters._get_debug_info(ethread)` | `debugregisters::get_debug_info(&t)?` |
+
+### Services, malware helpers (`crate::plugins::windows::*`, package W5)
+
+| python | rust |
+|---|---|
+| `SvcScan.get_prereq_info(...)` (services ISF + registry `ImagePath` / `ServiceDll` map) | `svcscan::get_prereq_info(ctx, k)?` → `Prereq { table, binary_map }` |
+| `SvcScan.service_scan(...)` / `SvcList.service_list(...)` (rows of `get_record_tuple`) | `svcscan::service_scan(k, &pre, &mut \|row\| ..)` / `svclist::service_list(k, &pre, f)` → `ServiceRow { values, name, key }` |
+| `SvcScan.enumerate_vista_or_later_header(...)` / `SERVICE_RECORD.traverse()` | `svcscan::enumerate_vista_or_later_header(table, &map, layer, offset, f)` (row offsets are the `PrevEntry` pointers' own addresses, like python) |
+| `pslist.PsList.create_name_filter(["services.exe"])` / `create_active_process_filter()` | `svcscan::services_filter` / `malware::processghosting::active_process_filter` |
+| `Malfind.is_vad_empty(layer, vad)` / `list_injection_sites(...)` | `malware::malfind::is_vad_empty(layer, start, size)?` / `malware::malfind::list_injection_sites(&proc, &pv)` |
+| `YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `vadyarascan::yarascan_option_requirements()` / `vadyarascan::rules_from_config(cfg)?` |
+| `scanners.RegExScanner(pattern)` (DOTALL, `chunk_size` rule) | `vadregexscan::regex_scanner(&re)` → `FnScanner` |
+| `DirectSystemCalls` / `IndirectSystemCalls` machinery (`syscall_finder_type`, `_is_syscall_block`, `_generator`) | `malware::direct_system_calls::{SyscallFinder, DIRECT, run_finder}`, `malware::indirect_system_calls::INDIRECT` |
+| a python dict keyed by int (insertion order) | `malware::hollowprocesses::OrderedMap<V>` |
 
 ## Plugins & output
 

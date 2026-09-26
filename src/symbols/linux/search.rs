@@ -102,6 +102,38 @@ impl crate::layers::scan::Scanner for FastBytesScanner {
             }
         });
     }
+    // two-phase form: identical physical ranges mapped at several virtual addresses (the
+    // kernel direct map, vmalloc aliases) are searched once, big chunks are streamed
+    fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
+        let cs = self.chunk_size();
+        Needle::new(&self.needle).for_each(data, |i| {
+            if (i as u64) < cs {
+                out.push((i as u64, 0));
+                true
+            } else {
+                false
+            }
+        });
+        true
+    }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<u64>) {
+        hits.extend(matches.iter().map(|m| data_offset + m.0));
+    }
+    fn stream_window(&self) -> Option<usize> {
+        if self.needle.is_empty() { None } else { Some(self.needle.len()) }
+    }
+    fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
+        // occurrences may overlap: every start in [from, limit) is independent
+        let cs_limit = self.chunk_size().saturating_sub(base).min(limit as u64) as usize;
+        if from < cs_limit {
+            let end = (cs_limit + self.needle.len() - 1).min(data.len());
+            Needle::new(&self.needle).for_each(&data[from..end], |i| {
+                out.push((base + (from + i) as u64, 0));
+                true
+            });
+        }
+        limit
+    }
 }
 
 /// python `scanners.MultiStringScanner(patterns)` (leftmost-longest, non-overlapping) with the

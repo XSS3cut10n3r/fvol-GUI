@@ -9,7 +9,7 @@ P=$1; shift
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
 REF=${REF:-/home/user/rs-vol/bench/ref/py/$P.txt}
 OUTDIR=${OUTDIR:-/home/user/rs-vol/bench/out}
-mkdir -p $OUTDIR/dump/$P
+rm -rf $OUTDIR/dump/$P; mkdir -p $OUTDIR/dump/$P
 s=$(date +%s%N)
 $BIN -q $GLOBAL_ARGS -o $OUTDIR/dump/$P -f $IMG $P "$@" > $OUTDIR/$P.txt 2> $OUTDIR/$P.err
 rc=$?

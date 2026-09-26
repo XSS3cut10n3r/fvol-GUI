@@ -54,6 +54,7 @@ pub mod module_extract;
 pub mod modules;
 pub mod network;
 pub mod search;
+pub mod tainting;
 pub mod timespec;
 pub mod utilities;
 pub mod vmcoreinfo;
