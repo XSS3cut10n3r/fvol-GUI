@@ -125,7 +125,10 @@ pub fn hint_and_notes(phys: &dyn Layer, want_notes: bool, on_hint: impl FnOnce(O
     // still collecting notes (python's generator has neither raised nor been stopped)
     let mut notes_open = want_notes;
     let matches_release = |rel: &[u8], v: &VmCoreInfo| matches!(v.get("OSRELEASE"), Some(VmValue::Str(s)) if s.as_bytes() == rel);
-    crate::layers::scan::scan_each_progressive_max(phys, &scanner, crate::util::par::threads(), |h| h.0, |(off, kind)| {
+    // batches of 4, 8, 16 chunks, then a stream with one chunk per core in flight: cheap when
+    // the deciding note is early (noble: 160 MB in), little ramp-up when it is late (jammy's
+    // first valid note is 2.17 GB in)
+    crate::layers::scan::scan_each_ramp(phys, &scanner, 4, crate::util::par::threads(), |h| h.0, |(off, kind)| {
         if kind == 0 {
             // the first banner: the hint
             if let Some(cb) = on_hint.take() {

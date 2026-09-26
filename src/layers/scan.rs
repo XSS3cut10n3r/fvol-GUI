@@ -987,7 +987,18 @@ where
 /// first hit may be far into the layer (the VMCOREINFO note of a 3 GiB image can sit at
 /// 1.3 GiB), batches of about one chunk per core keep the memory bus busy and read at most
 /// one batch past the hit.
-pub fn scan_each_progressive_max<S, F, O>(layer: &dyn Layer, scanner: &S, max_batch: usize, offset_of: O, mut f: F)
+pub fn scan_each_progressive_max<S, F, O>(layer: &dyn Layer, scanner: &S, max_batch: usize, offset_of: O, f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+    O: Fn(&S::Hit) -> u64,
+{
+    scan_each_ramp(layer, scanner, 2, max_batch, offset_of, f)
+}
+
+/// [`scan_each_progressive_max`] whose batches start at `first` chunks (doubling up to
+/// `max_batch`, then streaming); `first >= max_batch` streams from the start.
+pub fn scan_each_ramp<S, F, O>(layer: &dyn Layer, scanner: &S, first: usize, max_batch: usize, offset_of: O, mut f: F)
 where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
@@ -1002,7 +1013,7 @@ where
     // python default section: (min_address, max_address - min_address)
     let section_end = layer.max_address();
     let max_batch = max_batch.max(2);
-    let (mut i0, mut batch) = (0usize, 2usize);
+    let (mut i0, mut batch) = (0usize, first.max(1));
     while i0 < n {
         if batch >= max_batch {
             // the rest in one streamed scan, `max_batch` chunks ahead of the consumer: every

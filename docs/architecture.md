@@ -91,8 +91,10 @@ full builder's own resolver the first time a plugin asks for it. The table API i
 unit test compares every type, member, symbol and enum of a lazy table with the full table for
 every ISF on the test machine. A document the full builder would not accept, or would treat
 specially (repeated names, for python's dictionary semantics), is not taken lazily. For the
-64 MB Ubuntu 24.04 kernel ISF, the lazy index takes about 15 ms instead of the full build's
-50 ms.
+64 MB Ubuntu 24.04 kernel ISF, the lazy index takes about 13 ms instead of the full build's
+47 ms on a 20-thread desktop CPU; on the 32-vCPU benchmark VM a first `linux.pslist` went from
+0.51 s to 0.11 s, faster than vol-rs with a warm cache (see
+[bench/vm/BENCHMARKS.md](../bench/vm/BENCHMARKS.md)).
 
 The full binary table of a lazy table is built after the plugin's output is complete: `main`
 flushes the output and then hands each such ISF to a helper process, this executable started in
@@ -112,7 +114,9 @@ than a row older than three days, append new files) and reads only the files tha
 read. python resolves a banner to the last matching row, so its choice among ISFs sharing a
 banner depends on the history of its database; replaying it gives the same choice. When the
 index has to read new files, a quick scan of the image for the kernel version tells it which
-kernel table to build first, on another thread. When the index is seeded from python's cache,
+kernel table to build first, on another thread; a big ISF under a `linux/` or `mac/` directory
+is then indexed lazily right away and its identifier read from that index, one pass over the
+JSON instead of two. When the index is seeded from python's cache,
 the likely kernel ISF, the only one or the only one of the image's kernel release, is loaded
 while the image is searched for its VMCOREINFO notes; one scan of the image finds both the
 kernel version and the notes. For Windows, the kernel table named by the first
