@@ -473,16 +473,19 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                 // from the JSON it decompresses anyway, guided by the image's banner (found by a
                 // quick scan meanwhile)
                 crate::symbols::store::keep_decoded_for(Some("linux"));
-                std::thread::scope(|s| {
-                    let hint = std::thread::Builder::new().name("rsvol-hint".into()).spawn_scoped(s, || {
-                        crate::symbols::store::set_banner_hint(crate::automagic::banner_hint(*phys, b"Linux version ", b" ("));
+                let phys: LayerRef = *phys;
+                let hint = std::sync::Mutex::new(None);
+                let d = crate::symbols::store::identifier_index_with(ctx.symbol_path(), &|| {
+                    let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
+                        crate::symbols::store::set_banner_hint(crate::automagic::banner_hint(phys, b"Linux version ", b" ("));
                     });
-                    let d = crate::symbols::store::identifier_index(ctx.symbol_path()).dictionary("linux");
-                    if let Ok(h) = hint {
-                        let _ = h.join();
-                    }
-                    d
+                    *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
                 })
+                .dictionary("linux");
+                if let Some(h) = hint.into_inner().unwrap_or_else(|e| e.into_inner()) {
+                    let _ = h.join();
+                }
+                d
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
             let found = run(*phys, &banners, &allow);

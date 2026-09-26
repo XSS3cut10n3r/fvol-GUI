@@ -971,6 +971,12 @@ pub struct IdentifierIndex {
 impl IdentifierIndex {
     /// Build/refresh the index: only new or modified files are (decompressed and) parsed.
     pub fn update(path: &SymbolPath) -> IdentifierIndex {
+        Self::update_with(path, &|| {})
+    }
+
+    /// [`IdentifierIndex::update`]; `on_work` runs first when ISFs other than the shipped ones
+    /// must be (re)read.
+    pub fn update_with(path: &SymbolPath, on_work: &dyn Fn()) -> IdentifierIndex {
         let cache_path = paths::rsvol_cache_dir().join("identifiers.cache");
         // entries for every symbol path ever indexed are kept, so alternating `-s` dirs does
         // not rewrite (or re-extract) the cache on each run
@@ -994,6 +1000,10 @@ impl IdentifierIndex {
                 _ => true,
             })
             .collect();
+        // (shipped ISFs are never kernel ISFs: re-reading only those needs no hint)
+        if todo.iter().any(|&i| !matches!(locs[i], IsfLocation::Embedded { .. })) {
+            on_work();
+        }
         let fresh = extract_all(&locs, &todo, |k, ident| {
             let i = todo[k];
             let (os, identifier) = ident.unwrap_or_default();
@@ -1285,6 +1295,12 @@ fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
 /// SymbolCacheMagic update), built/refreshed on first use for `path`.
 /// `identifier_index(p).dictionary("linux")` = python `get_identifier_dictionary("linux")`.
 pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
+    identifier_index_with(path, &|| {})
+}
+
+/// [`identifier_index`]; `on_work` runs when ISFs must actually be read (a cold or stale
+/// index), e.g. to start a banner-hint scan only then.
+pub fn identifier_index_with(path: &SymbolPath, on_work: &dyn Fn()) -> &'static IdentifierIndex {
     // one index per distinct search path (a process normally has exactly one)
     type Key = (SymbolPath, Option<String>);
     static INDEX: std::sync::Mutex<Vec<(Key, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
@@ -1294,7 +1310,7 @@ pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
         return i;
     }
     let _t = crate::util::trace::span("identifier index update");
-    let mut index = IdentifierIndex::update(path);
+    let mut index = IdentifierIndex::update_with(path, on_work);
     // python SymbolCacheMagic: remote rows are (re)inserted after the local scan, so they come
     // last and win `find_location` / `get_identifier_dictionary` ties
     if let Some(url) = &remote {

@@ -145,16 +145,18 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
         // with the image's banner (a quick scan, meanwhile) the index builds the matching kernel
         // ISF from the JSON it decompresses anyway; no guessing among many mac kernels
         symbols::store::keep_decoded_for_with(Some("mac"), false);
-        let d = std::thread::scope(|s| {
-            let hint = std::thread::Builder::new().name("rsvol-hint".into()).spawn_scoped(s, || {
+        let hint = std::sync::Mutex::new(None);
+        let d = symbols::store::identifier_index_with(symbols::symbol_path(), &|| {
+            let phys = phys.clone();
+            let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
                 symbols::store::set_banner_hint(crate::automagic::banner_hint(phys.as_ref(), b"Darwin Kernel Version ", b":"));
             });
-            let d = symbols::store::identifier_index(symbols::symbol_path()).dictionary("mac");
-            if let Ok(h) = hint {
-                let _ = h.join();
-            }
-            d
-        });
+            *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
+        })
+        .dictionary("mac");
+        if let Some(h) = hint.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            let _ = h.join();
+        }
         symbols::store::keep_decoded_for(None);
         d
     };
