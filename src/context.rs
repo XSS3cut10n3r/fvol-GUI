@@ -249,7 +249,8 @@ impl Context {
             return Err(self.unsatisfied(&Error::msg("WindowsIntelStacker disabled by --stackers"), LAYER));
         }
         let image = self.image_path()?;
-        let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
+        let cache_kind = format!("win{}", crate::automagic::stackers_key(self.opts.stackers.as_deref()));
+        let cached = crate::automagic::cache::load(&image, &cache_kind).and_then(|kv| {
             use crate::automagic::cache::get;
             let num = |k: &str| get(&kv, k).and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
             Some(crate::automagic::windows::WinAutomagic {
@@ -308,7 +309,7 @@ impl Context {
                 let a = WinAutomagic { dtb: d.dtb, mode: d.mode, kvo: k.kvo, pdb_name: k.pdb.pdb_name, guid: k.pdb.guid, age: k.pdb.age };
                 crate::automagic::cache::store(
                     &image,
-                    "win",
+                    &cache_kind,
                     &[
                         ("dtb", format!("{:#x}", a.dtb)),
                         ("mode", format!("{:?}", a.mode)),

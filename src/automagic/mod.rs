@@ -39,6 +39,16 @@ pub fn stacker_enabled(stackers: Option<&[String]>, class: &str) -> bool {
     }
 }
 
+/// Automagic cache key material for `--stackers`: a kernel found on one physical stack (e.g. a
+/// crash dump's layer) says nothing about another (the same file read raw when
+/// `--stackers=WindowsIntelStacker` leaves the crash dump stacker out). Empty by default.
+pub fn stackers_key(stackers: Option<&[String]>) -> String {
+    match stackers {
+        Some(s) => format!("-{}", paths::hex(s.join("\0").as_bytes())),
+        None => String::new(),
+    }
+}
+
 /// `prefix` + the version token that follows it + `sep` (`Linux version 6.8.0-139-generic (`,
 /// `Darwin Kernel Version 13.1.0:`) from the first `prefix` in `phys`, found by a quick
 /// progressive scan. The first copy in memory may be console output rather than the kernel's
