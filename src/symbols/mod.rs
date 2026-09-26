@@ -11,6 +11,7 @@ pub mod embedded;
 pub mod isf;
 pub mod linux;
 pub mod mac;
+pub mod pycache;
 pub mod store;
 pub mod table;
 pub mod windows;

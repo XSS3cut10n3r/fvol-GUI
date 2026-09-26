@@ -181,6 +181,7 @@ files downloaded by either tool are shared.
 | ---------------------------------- | ----------------------------------------------- | ---------------------------------------------------------- |
 | Binary symbol tables               | `~/.cache/rsvol/isf/*.isfb`                     | A warm symbol table load is one `mmap`, with no JSON parse |
 | Symbol file identifier index       | `~/.cache/rsvol/identifiers.cache`              | Finds the ISF for a kernel banner or PDB without rereading |
+| python's identifier cache (read)   | `~/.cache/volatility3/identifier.cache`         | Seeds the identifier index, and picks python's ISF        |
 | Kernel discovery results           | `~/.cache/rsvol/automagic/`                     | Warm runs skip the DTB, KDBG and banner scans              |
 | Raw scan hits                      | `~/.cache/rsvol/scan/`, capped at 256 MiB       | Scanning plugins replay hits instead of rereading memory   |
 | `isfinfo --live` results           | `~/.cache/rsvol/isfinfo.cache`                  | Warm `isfinfo` runs parse no files                         |
@@ -194,6 +195,14 @@ comes first.
 
 Downloads are named like python's, `data_` and the SHA-512 of the URL, and like python's they are
 never checked for changes on the server.
+
+When python volatility3 has run on this machine, rsvol reads its identifier cache (never writes
+it; `--cache-path` selects it as for python) instead of reading every symbol file on the search
+path. It takes python's entries exactly as python's own cache update would keep them and reads
+only the files python would read again, so a first run with a large symbol pack costs
+milliseconds instead of hundreds. When several ISFs carry the same banner, for example `x.json`
+next to `x.json.xz`, rsvol loads the one python would load. Set `RSVOL_NO_PY_IDENT_SEED=1` to
+build the index from the symbol files alone.
 
 To empty the caches, run any plugin with `--clear-cache` or delete the directory. Like python's
 `--clear-cache`, which deletes every `*.cache` file in its cache directory, downloads included,
@@ -233,6 +242,7 @@ same contents. If you modify an image in place and restore its timestamp, clear 
 | `RSVOL_NO_SIMD=1`        | Use the scalar search kernels for scanning instead of AVX2.                         |
 | `RSVOL_TRACE=1`          | Print timing spans to stderr.                                                       |
 | `RSVOL_VOL3_ROOT=<DIR>`  | Use the symbol directories of the python volatility3 checkout at `<DIR>`.           |
+| `RSVOL_NO_PY_IDENT_SEED=1` | Do not seed the identifier index from python's identifier cache.                  |
 
 ## Verification
 

@@ -194,6 +194,12 @@ rsvol searches for symbol files, called ISF files, in this order:
 File names may end in `.json`, `.json.xz`, `.json.gz` or `.json.bz2`, and may sit inside `.zip`
 archives.
 
+Linux and macOS kernel ISFs are found by the kernel banner. When several ISFs on the search path
+carry the same banner, rsvol loads the one python volatility3 would load, which it learns from
+python's identifier cache, `~/.cache/volatility3/identifier.cache` or the one under
+`--cache-path`. Without that file, or with `RSVOL_NO_PY_IDENT_SEED=1`, the last one in search
+order wins.
+
 To use a remote list of symbol files, pass its URL with `-u`. rsvol downloads the list and the
 files it needs once, with `curl`, and keeps them in `~/.cache/rsvol/` as `data_<SHA512>.cache`:
 

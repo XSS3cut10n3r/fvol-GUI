@@ -121,6 +121,11 @@ impl Context {
         }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         symbols::set_remote_isf_url(opts.remote_isf_url.clone(), opts.offline);
+        // the identifier index is seeded from python's identifier cache (python --clear-cache
+        // deletes that first)
+        symbols::store::set_python_identifier_cache(
+            (!opts.clear_cache).then(|| symbols::pycache::db_path(opts.cache_path.as_deref())),
+        );
         Ok(Context {
             opts,
             remote_image: OnceLock::new(),

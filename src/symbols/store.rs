@@ -389,7 +389,7 @@ pub fn python_install() -> Option<PathBuf> {
 }
 
 /// [`python_install`], computed once per process.
-fn python_install_cached() -> Option<&'static Path> {
+pub(crate) fn python_install_cached() -> Option<&'static Path> {
     static PY: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     PY.get_or_init(python_install).as_deref()
 }
@@ -638,20 +638,56 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
     // the build is parallel: start the pool's workers while this thread decompresses
     crate::util::pool::warm();
     let json = match take_kept(loc, &url) {
-        Some(j) => std::borrow::Cow::Owned(j),
+        Some(j) => JsonSrc::Bytes(std::borrow::Cow::Owned(j)),
         None => {
             let _t = crate::util::trace::span("isf read+decompress");
-            loc.read()?
+            json_for_build(loc)?
         }
     };
     let blob = build_remember(&url, cf, json, opts, true)?;
     SymbolTable::from_blob(Blob::Shared(blob), name, &url)
 }
 
+/// ISF JSON to build a table from: bytes (decompressed, embedded, kept by the identifier
+/// index), or a plain `.json` file mapped in place.
+enum JsonSrc {
+    Bytes(std::borrow::Cow<'static, [u8]>),
+    Mapped(crate::util::mmap::MapWindow),
+}
+
+impl std::ops::Deref for JsonSrc {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            JsonSrc::Bytes(b) => b,
+            JsonSrc::Mapped(m) => m.as_slice(),
+        }
+    }
+}
+
+/// The JSON of `loc` for a build. A plain `.json` file (a dwarf2json kernel ISF is 50-100 MB)
+/// is mapped, pre-faulted, from the page cache: reading it first faults in and zeroes a fresh
+/// buffer of that size, then copies (28-40 ms for the 46 / 64 MB jammy / noble ISFs vs 7-10 ms
+/// to map; the parse from the mapping is a little slower, net 4-9 ms per cold kernel load).
+fn json_for_build(loc: &IsfLocation) -> Result<JsonSrc> {
+    if let IsfLocation::File(p) = loc
+        && p.as_os_str().as_encoded_bytes().ends_with(b".json")
+    {
+        let f = std::fs::File::open(p)?;
+        let len = f.metadata()?.len() as usize;
+        if len > 0
+            && let Ok(m) = crate::util::mmap::MapWindow::new(&f, 0, len, true)
+        {
+            return Ok(JsonSrc::Mapped(m));
+        }
+    }
+    Ok(JsonSrc::Bytes(loc.read()?))
+}
+
 /// Build the blob of an ISF's JSON, remember it in-process ([`BUILT`]) and write its cache
 /// file in the background (overlapping the plugin run; joined before exit), where the JSON is
 /// freed too.
-fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: std::borrow::Cow<'static, [u8]>, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
+fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: JsonSrc, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
     let blob = {
         let _t = crate::util::trace::span("isf parse+build");
         let b = if parallel { build_blob(&json, opts) } else { super::isf::build_blob_serial(&json, opts) };
@@ -708,7 +744,7 @@ fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool)
             let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
             if !known {
                 let _t = crate::util::trace::span("isf speculative build (identifier index, banner hint)");
-                let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+                let _ = build_remember(&url, cf, JsonSrc::Bytes(std::borrow::Cow::Owned(json)), &BuildOptions::default(), false);
             }
         }
         return;
@@ -722,7 +758,7 @@ fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool)
         let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
         if !known {
             let _t = crate::util::trace::span("isf speculative build (identifier index)");
-            let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+            let _ = build_remember(&url, cf, JsonSrc::Bytes(std::borrow::Cow::Owned(json)), &BuildOptions::default(), false);
         }
         return;
     }
@@ -951,13 +987,307 @@ fn identifier_from(win: Option<(String, String, u64)>, mac: Option<String>, linu
     None
 }
 
-/// The identifier index over a symbol path, persisted in `~/.cache/rsvol/identifiers.cache`.
+/// `IdentEntry::os` of a file that could not be read (opening / decompressing failed), as
+/// opposed to "" (read, no identifier): python's `update()` stores no row for it.
+const UNREADABLE: &str = "?";
+
+/// `IdentEntry` (os, identifier) fields of an [`extract_all`] result.
+fn entry_fields(ident: std::result::Result<Option<(String, Vec<u8>)>, ()>) -> (String, Vec<u8>) {
+    match ident {
+        Ok(Some(x)) => x,
+        Ok(None) => (String::new(), Vec::new()),
+        Err(()) => (UNREADABLE.to_string(), Vec::new()),
+    }
+}
+
+/// "windows" / "mac" / "linux" as a static str (python's `IdentifierProcessor`s), else None.
+fn static_os(os: &str) -> Option<&'static str> {
+    ["windows", "mac", "linux"].into_iter().find(|o| *o == os)
+}
+
+/// The identifier index over a symbol path: which ISF an identifier (banner, PDB) resolves to.
+///
+/// When python volatility3's own identifier cache exists (`~/.cache/volatility3/identifier.cache`,
+/// or `--cache-path`), the index is SEEDED from it (see [`IdentifierIndex::build`]): python's
+/// rows are taken exactly as python's `SqliteCache.update()` would keep them, in python's rowid
+/// order, so every identifier resolves to the ISF python would load (python's choice among ISFs
+/// sharing an identifier depends on its database's history); only the ISFs python would (re)scan
+/// are read, through rsvol's own per-file index. Otherwise (`RSVOL_NO_PY_IDENT_SEED=1`,
+/// `--clear-cache`, no readable python database) rsvol indexes every ISF itself, in search-path
+/// order. rsvol's per-file results persist in `~/.cache/rsvol/identifiers.cache`.
 pub struct IdentifierIndex {
     pub entries: Vec<IdentEntry>,
     locations: Vec<IsfLocation>,
+    /// [`seed_state`] when the index was built
+    seed_state: String,
+    /// per entry, for an index seeded from python's database: python's `cached` time of a row
+    /// python keeps as it is (not rescanned this time)
+    py_cached: Option<Vec<Option<super::pycache::NaiveTime>>>,
+}
+
+/// python's identifier cache as set by [`set_python_identifier_cache`] (unset: python's default).
+static PY_DB: std::sync::RwLock<Option<Option<PathBuf>>> = std::sync::RwLock::new(None);
+
+/// The python identifier cache to seed the identifier index from (python's `CACHE_PATH` after
+/// `--cache-path`), or `None` never to seed (`--clear-cache`: python deletes its cache first).
+/// Set by `Context::new`.
+pub fn set_python_identifier_cache(db: Option<PathBuf>) {
+    *PY_DB.write().unwrap_or_else(|e| e.into_inner()) = Some(db);
+}
+
+/// The python database the identifier index is seeded from, or `None` (seeding disabled:
+/// `RSVOL_NO_PY_IDENT_SEED=1`, `--clear-cache`).
+fn py_seed_db() -> Option<PathBuf> {
+    if std::env::var_os("RSVOL_NO_PY_IDENT_SEED").is_some_and(|v| !v.is_empty() && v != "0") {
+        return None;
+    }
+    match &*PY_DB.read().unwrap_or_else(|e| e.into_inner()) {
+        Some(db) => db.clone(),
+        None => Some(super::pycache::db_path(None)),
+    }
+}
+
+/// What seeding the identifier index depends on: off, python's database absent, or its path
+/// and (size, mtime) -- python rewrites the file whenever its update() changes a row.
+fn seed_state() -> String {
+    match py_seed_db() {
+        None => "off".into(),
+        Some(p) => match paths::file_stamp(&p) {
+            Some((s, m)) => format!("db\0{}\0{s}\0{m}", p.display()),
+            None => "absent".into(),
+        },
+    }
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    let h = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let b = s.as_bytes();
+    if b.len() % 2 != 0 {
+        return None;
+    }
+    b.chunks(2).map(|p| Some(h(p[0])? << 4 | h(p[1])?)).collect()
+}
+
+/// (size, mtime) of a file as 24 bytes (all ones when it cannot be stat'ed).
+fn stamp_bytes(p: &Path) -> Vec<u8> {
+    let (s, m) = paths::file_stamp(p).unwrap_or((u64::MAX, -1));
+    let mut v = s.to_le_bytes().to_vec();
+    v.extend_from_slice(&m.to_le_bytes());
+    v
+}
+
+/// Whether a choice cached with [`IdentifierIndex::choice_deps`] still holds: the same seeding
+/// state (python's database unchanged), every candidate ISF of the identifier unchanged, and
+/// no row python trusts due for a rescan yet.
+pub fn choice_deps_hold(kv: &[(String, String)]) -> bool {
+    choice_deps_hold_at(kv, &seed_state(), super::pycache::utc_now())
+}
+
+/// [`choice_deps_hold`] for seeding state `state` at time `now`.
+fn choice_deps_hold_at(kv: &[(String, String)], state: &str, now: i64) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let get = |k: &str| kv.iter().find(|(a, _)| a == k).map(|(_, b)| b.as_str());
+    if get("idseed") != Some(paths::hex(state.as_bytes()).as_str()) {
+        return false;
+    }
+    if let Some(c) = get("idcands") {
+        let Some(b) = unhex(c) else { return false };
+        let mut rest = b.as_slice();
+        while !rest.is_empty() {
+            let Some(n) = rest.get(..4).map(|l| u32::from_le_bytes(l.try_into().unwrap()) as usize) else { return false };
+            let Some(item) = rest.get(4..4 + n + 24) else { return false };
+            let p = Path::new(std::ffi::OsStr::from_bytes(&item[..n]));
+            if stamp_bytes(p) != item[n..] {
+                return false;
+            }
+            rest = &rest[4 + n + 24..];
+        }
+    }
+    if let Some(u) = get("iduntil") {
+        match u.parse::<i64>() {
+            Ok(u) if now < u => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// python's `update()` reading the new / stale ISFs `todo` (url, location): through rsvol's
+/// per-file index (`identifiers.cache`, URL + size + mtime), extracting what it lacks (in
+/// parallel; `on_work` first when that includes files other than the shipped ones). `None` =
+/// python's read raises (the file cannot be opened / decompressed).
+fn scan_for_python(todo: &[(&str, &IsfLocation)], on_work: &dyn Fn()) -> Vec<Option<super::pycache::Scanned>> {
+    let cache_path = paths::rsvol_cache_dir().join("identifiers.cache");
+    let mut all = read_ident_cache(&cache_path);
+    let mut by_url: crate::util::FxHashMap<String, usize> = all.iter().enumerate().map(|(i, e)| (e.url.clone(), i)).collect();
+    let locs: Vec<IsfLocation> = todo.iter().map(|(_, l)| (*l).clone()).collect();
+    let stamps: Vec<Option<u64>> = todo.iter().map(|(u, l)| l.stamp_with_url(u)).collect();
+    // a file that cannot be stat'ed cannot be opened either: no row
+    let need: Vec<usize> = (0..todo.len())
+        .filter(|&i| match (by_url.get(todo[i].0), stamps[i]) {
+            (Some(&j), Some(s)) => all[j].stamp != s,
+            (None, Some(_)) => true,
+            (_, None) => false,
+        })
+        .collect();
+    if need.iter().any(|&i| !matches!(locs[i], IsfLocation::Embedded { .. })) {
+        on_work();
+    }
+    let fresh = extract_all(&locs, &need, |k, ident| {
+        let i = need[k];
+        let (os, identifier) = entry_fields(ident);
+        IdentEntry { url: todo[i].0.to_string(), stamp: stamps[i].unwrap_or(0), os, identifier }
+    });
+    let changed = !fresh.is_empty();
+    for e in fresh {
+        match by_url.get(&e.url) {
+            Some(&j) => all[j] = e,
+            None => {
+                by_url.insert(e.url.clone(), all.len());
+                all.push(e);
+            }
+        }
+    }
+    let out = (0..todo.len())
+        .map(|i| {
+            stamps[i]?;
+            let e = &all[*by_url.get(todo[i].0)?];
+            match e.os.as_str() {
+                UNREADABLE => None,
+                "" => Some(super::pycache::Scanned { identifier: None, os: None, stats: [0; 4] }),
+                os => Some(super::pycache::Scanned { identifier: Some(e.identifier.clone()), os: static_os(os), stats: [0; 4] }),
+            }
+        })
+        .collect();
+    if changed {
+        // off the critical path (joined before exit)
+        crate::util::bg::spawn(move || write_ident_cache(&cache_path, &all));
+    }
+    out
 }
 
 impl IdentifierIndex {
+    /// Build the index for `path` (+ the `-u` identifier list `remote`): seeded from python's
+    /// identifier cache when possible (see the type's docs), else rsvol's own. `on_work` runs
+    /// first when ISFs other than the shipped ones must be read.
+    pub fn build(path: &SymbolPath, remote: Option<&str>, on_work: &dyn Fn()) -> IdentifierIndex {
+        let state = seed_state();
+        let mut index = match Self::seeded(path, remote, on_work) {
+            Some(i) => i,
+            None => {
+                let mut index = Self::update_with(path, on_work);
+                // python SymbolCacheMagic: remote rows are (re)inserted after the local scan, so
+                // they come last and win `find_location` / `get_identifier_dictionary` ties
+                if let Some(url) = remote {
+                    match remote_identifiers(url) {
+                        Ok(list) => {
+                            for (os, identifier, location) in list {
+                                index.entries.push(IdentEntry { url: location.clone(), stamp: 0, os, identifier });
+                                index.locations.push(IsfLocation::Url(location));
+                            }
+                        }
+                        Err(e) => eprintln!("rsvol: remote ISF list {url}: {e}"),
+                    }
+                }
+                index
+            }
+        };
+        index.seed_state = state;
+        index
+    }
+
+    /// The index seeded from python's identifier cache (`None`: seeding disabled, or no
+    /// readable python database): python's rows after an emulated `SqliteCache.update()`
+    /// (`symbols::pycache`), in rowid order. The ISFs that update() would (re)scan are read
+    /// through rsvol's per-file index ([`scan_for_python`]).
+    fn seeded(path: &SymbolPath, remote: Option<&str>, on_work: &dyn Fn()) -> Option<IdentifierIndex> {
+        use super::pycache;
+        let db = py_seed_db()?;
+        let rows = {
+            let _t = crate::util::trace::span("identifier index: read python identifier.cache");
+            pycache::read(&db)?
+        };
+        let _t = crate::util::trace::span("identifier index: seeded from python's cache");
+        let roots = pycache::python_symbol_roots(path);
+        Some(Self::from_python_rows(rows, &roots, pycache::utc_now(), remote, |todo| scan_for_python(todo, on_work)))
+    }
+
+    /// [`IdentifierIndex::seeded`] from python's `rows` (rowid order), for the python symbol
+    /// path `roots` at time `now`; `scan` reads what python's update() would (re)scan.
+    fn from_python_rows(
+        mut rows: Vec<super::pycache::CacheRow>,
+        roots: &[Root],
+        now: i64,
+        remote: Option<&str>,
+        scan: impl FnOnce(&[(&str, &IsfLocation)]) -> Vec<Option<super::pycache::Scanned>>,
+    ) -> IdentifierIndex {
+        use super::pycache;
+        let info = pycache::update(&mut rows, roots, now, remote, scan);
+        crate::util::trace::note(|| format!("identifier index: {} rows after python's update(), {} trusted", rows.len(), info.trusted.len()));
+        let mut entries = Vec::new();
+        let mut locations = Vec::new();
+        let mut cached = Vec::new();
+        for r in &rows {
+            // only a bytes identifier with a known OS can match python's lookups
+            let (Some(ident), Some(os)) = (r.identifier_bytes(), r.os().and_then(static_os)) else { continue };
+            let loc = info.on_disk.get(&r.location).cloned().unwrap_or_else(|| pycache::location_of(&r.location));
+            let trusted = r.local && info.trusted.contains(&r.location);
+            cached.push(match &r.cached {
+                crate::util::sqlite::Value::Text(t) if trusted => pycache::fromisoformat(t),
+                _ => None,
+            });
+            entries.push(IdentEntry { url: r.location.clone(), stamp: 0, os: os.to_string(), identifier: ident.to_vec() });
+            locations.push(loc);
+        }
+        IdentifierIndex { entries, locations, seed_state: String::new(), py_cached: Some(cached) }
+    }
+
+    /// Whether the index was seeded from python's identifier cache.
+    pub fn is_seeded(&self) -> bool {
+        self.py_cached.is_some()
+    }
+
+    /// Key material a cached choice for `identifier` (made from this index) depends on beyond
+    /// the symbol path fingerprint, as `key=value` pairs for the automagic caches (checked by
+    /// [`choice_deps_hold`]): the seeding state; for a seeded index also the candidate ISFs
+    /// (every location with the identifier: python rescans a modified one once its row is 3
+    /// days old, which moves it to the end) and when python would first rescan a candidate it
+    /// trusts now although the file is newer than its row.
+    pub fn choice_deps(&self, os: &str, identifier: &[u8]) -> Vec<(&'static str, String)> {
+        use super::pycache;
+        let mut out = vec![("idseed", paths::hex(self.seed_state.as_bytes()))];
+        let Some(py_cached) = &self.py_cached else { return out };
+        let mut cands: Vec<u8> = Vec::new();
+        let mut until: Option<i64> = None;
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.os != os || e.identifier != identifier {
+                continue;
+            }
+            let file = match &self.locations[i] {
+                IsfLocation::File(p) => Some(p),
+                IsfLocation::Zip { zip, .. } => Some(zip),
+                _ => None,
+            };
+            if let Some(f) = file {
+                let b = f.as_os_str().as_encoded_bytes();
+                cands.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                cands.extend_from_slice(b);
+                cands.extend_from_slice(&stamp_bytes(f));
+            }
+            if let Some(c) = py_cached[i]
+                && pycache::update_pathname(&e.url).and_then(|p| pycache::mtime_local(&p)).is_some_and(|ts| c < ts)
+            {
+                let t = pycache::rescan_window_opens(c);
+                until = Some(until.map_or(t, |u| u.min(t)));
+            }
+        }
+        out.push(("idcands", paths::hex(&cands)));
+        if let Some(u) = until {
+            out.push(("iduntil", u.to_string()));
+        }
+        out
+    }
+
     /// Build/refresh the index: only new or modified files are (decompressed and) parsed.
     pub fn update(path: &SymbolPath) -> IdentifierIndex {
         Self::update_with(path, &|| {})
@@ -995,7 +1325,7 @@ impl IdentifierIndex {
         }
         let fresh = extract_all(&locs, &todo, |k, ident| {
             let i = todo[k];
-            let (os, identifier) = ident.unwrap_or_default();
+            let (os, identifier) = entry_fields(ident);
             Some(IdentEntry { url: urls[i].clone(), stamp: stamps[i]?, os, identifier })
         });
         let mut changed = false;
@@ -1021,7 +1351,7 @@ impl IdentifierIndex {
             // off the critical path (joined before exit)
             crate::util::bg::spawn(move || write_ident_cache(&cache_path, &all));
         }
-        IdentifierIndex { entries, locations }
+        IdentifierIndex { entries, locations, seed_state: String::new(), py_cached: None }
     }
 
     /// python `SqliteCache.find_location(identifier, os)`: the LAST matching location.
@@ -1164,10 +1494,11 @@ fn take_kept(loc: &IsfLocation, url: &str) -> Option<Vec<u8>> {
 }
 
 /// Identifier extraction for `todo` (indexes into `locs`) on all cores: `make(k, identifier)`
-/// builds the k-th result (`None` identifier = unreadable / not an ISF). Largest files first;
+/// builds the k-th result (`Ok(None)` = no identifier / not an ISF, `Err` = unreadable: opening
+/// or decompressing failed). Largest files first;
 /// each worker reuses one decode buffer; the worker count keeps the decode buffers within a
 /// memory budget.
-fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usize, Option<(String, Vec<u8>)>) -> R + Sync) -> Vec<R> {
+fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usize, std::result::Result<Option<(String, Vec<u8>)>, ()>) -> R + Sync) -> Vec<R> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     const BUDGET: u64 = 1536 << 20;
     if todo.is_empty() {
@@ -1191,15 +1522,14 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
                 decoded = n;
                 extract_identifier(json)
             })
-            .ok()
-            .flatten();
+            .map_err(drop);
             // the OS the caller is about to load a kernel ISF for: build it now or keep the JSON
-            if let (Some((n, was_decoded)), Some(os), Some((ios, _))) = (decoded, keep_os, &ident)
+            if let (Some((n, was_decoded)), Some(os), Ok(Some((ios, iid)))) = (decoded, keep_os, &ident)
                 && os == ios
             {
                 let mut v = std::mem::take(&mut buf);
                 v.truncate(n);
-                speculate(loc, &ident.as_ref().map(|i| i.1.clone()).unwrap_or_default(), v, was_decoded);
+                speculate(loc, iid, v, was_decoded);
             }
             out.push((k, make(k, ident)));
         }
@@ -1237,10 +1567,12 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
     slots
         .into_iter()
         .enumerate()
-        .map(|(k, r)| r.unwrap_or_else(|| make(k, with_json(&locs[todo[k]], &mut buf, extract_identifier).ok().flatten())))
+        .map(|(k, r)| r.unwrap_or_else(|| make(k, with_json(&locs[todo[k]], &mut buf, extract_identifier).map_err(drop))))
         .collect()
 }
 
+/// rsvol's per-file identifier results (`identifiers.cache`): url, stamp, os, identifier per
+/// entry. Format 3 marks unreadable files (os [`UNREADABLE`]); older files are ignored.
 fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
     let Ok(b) = std::fs::read(path) else { return Vec::new() };
     let mut out = Vec::new();
@@ -1250,7 +1582,7 @@ fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
         *i += n;
         Some(s)
     };
-    if rd(&mut i, 8) != Some(b"RSVOLID2") {
+    if rd(&mut i, 8) != Some(b"RSVOLID3") {
         return out;
     }
     loop {
@@ -1276,7 +1608,7 @@ fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
 
 fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
     let mut b = Vec::new();
-    b.extend_from_slice(b"RSVOLID2");
+    b.extend_from_slice(b"RSVOLID3");
     for e in entries {
         b.extend_from_slice(&(e.url.len() as u32).to_le_bytes());
         b.extend_from_slice(e.url.as_bytes());
@@ -1299,31 +1631,20 @@ pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
 /// [`identifier_index`]; `on_work` runs when ISFs must actually be read (a cold or stale
 /// index), e.g. to start a banner-hint scan only then.
 pub fn identifier_index_with(path: &SymbolPath, on_work: &dyn Fn()) -> &'static IdentifierIndex {
-    // one index per distinct search path (a process normally has exactly one)
-    type Key = (SymbolPath, Option<String>);
+    // one index per distinct search path, `-u` list and seeding state (a process normally has
+    // exactly one; a long-running `vol serve` rebuilds it when python's database changed)
+    type Key = (SymbolPath, Option<String>, String);
     static INDEX: std::sync::Mutex<Vec<(Key, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
     let remote = super::remote_isf_url();
+    let state = seed_state();
     let mut all = INDEX.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, i)) = all.iter().find(|((p, r), _)| p == path && *r == remote) {
+    if let Some((_, i)) = all.iter().find(|((p, r, s), _)| p == path && *r == remote && *s == state) {
         return i;
     }
     let _t = crate::util::trace::span("identifier index update");
-    let mut index = IdentifierIndex::update_with(path, on_work);
-    // python SymbolCacheMagic: remote rows are (re)inserted after the local scan, so they come
-    // last and win `find_location` / `get_identifier_dictionary` ties
-    if let Some(url) = &remote {
-        match remote_identifiers(url) {
-            Ok(list) => {
-                for (os, identifier, location) in list {
-                    index.entries.push(IdentEntry { url: location.clone(), stamp: 0, os, identifier });
-                    index.locations.push(IsfLocation::Url(location));
-                }
-            }
-            Err(e) => eprintln!("rsvol: remote ISF list {url}: {e}"),
-        }
-    }
+    let index = IdentifierIndex::build(path, remote.as_deref(), on_work);
     let i: &'static IdentifierIndex = Box::leak(Box::new(index));
-    all.push(((path.clone(), remote), i));
+    all.push(((path.clone(), remote, i.seed_state.clone()), i));
     i
 }
 
@@ -1655,5 +1976,225 @@ mod tests {
         assert_eq!(paths[2].find_first("windows", "kdbg"), Some(IsfLocation::File(deep.join("windows/sub/dir/kdbg.json.xz"))));
         assert_eq!(paths[2].find_first("linux", "elf"), Some(IsfLocation::File(deep.join("linux/elf.json.gz"))));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // -- identifier index seeded from python's identifier cache ------------------------------
+
+    use crate::symbols::pycache::{self, CacheRow, Scanned};
+    use crate::util::sqlite::Value;
+    use std::borrow::Cow;
+
+    fn b64(s: &[u8]) -> String {
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut o = String::new();
+        for c in s.chunks(3) {
+            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+            for k in 0..4 {
+                o.push(if k <= c.len() { A[(n >> (18 - 6 * k) & 63) as usize] as char } else { '=' });
+            }
+        }
+        o
+    }
+
+    /// A symbol directory with Linux ISFs (`rel` -> banner); returns it canonicalized.
+    fn seed_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rsvol-seed-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (rel, banner) in files {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let json = format!(r#"{{"symbols": {{"linux_banner": {{"constant_data": "{}"}}}}}}"#, b64(banner.as_bytes()));
+            std::fs::write(&p, json).unwrap();
+        }
+        std::fs::canonicalize(&d).unwrap()
+    }
+
+    fn url_of(d: &Path, rel: &str) -> String {
+        paths::path_to_file_uri(&d.join(rel))
+    }
+
+    fn set_mtime(p: &Path, t: i64) {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t as u64)).unwrap();
+    }
+
+    fn t(s: &str) -> i64 {
+        let (d, us) = pycache::fromisoformat(s.as_bytes()).unwrap();
+        d * 86400 + us / 1_000_000
+    }
+
+    /// A python row for a Linux ISF (`cached` as sqlite's `datetime()` writes it).
+    fn row(location: &str, banner: &str, cached: &str, local: bool) -> CacheRow {
+        CacheRow {
+            location: location.to_string(),
+            identifier: Value::Blob(Cow::Owned(banner.as_bytes().to_vec())),
+            operating_system: Value::Text(Cow::Borrowed(b"linux")),
+            hash: Value::Null,
+            stats: [0, 1, 2, 3].map(|_| Value::Int(0)),
+            local,
+            cached: Value::Text(Cow::Owned(cached.as_bytes().to_vec())),
+        }
+    }
+
+    /// python's read of the ISFs update() rescans; records what was read.
+    fn scanner<'a>(read: &'a std::cell::RefCell<Vec<String>>, fail: &'a [String]) -> impl FnOnce(&[(&str, &IsfLocation)]) -> Vec<Option<Scanned>> + 'a {
+        move |todo| {
+            todo.iter()
+                .map(|(u, l)| {
+                    read.borrow_mut().push(u.to_string());
+                    if fail.iter().any(|f| f == u) {
+                        return None;
+                    }
+                    let id = extract_identifier(&l.read().ok()?);
+                    Some(Scanned { identifier: id.as_ref().map(|x| x.1.clone()), os: id.as_ref().and_then(|x| static_os(&x.0)), stats: [0; 4] })
+                })
+                .collect()
+        }
+    }
+
+    fn chosen(idx: &IdentifierIndex, banner: &str) -> Option<String> {
+        idx.dictionary("linux").into_iter().find(|(b, _)| b == banner.as_bytes()).map(|(_, l)| l.url())
+    }
+
+    #[test]
+    fn seeded_index_follows_python_rows() {
+        let d = seed_dir("order", &[("a/k.json", "Linux version 1"), ("b/k.json", "Linux version 1"), ("a/new.json", "Linux version 2")]);
+        let (a, b, new) = (url_of(&d, "a/k.json"), url_of(&d, "b/k.json"), url_of(&d, "a/new.json"));
+        let now = t("2026-09-26 12:00:00");
+        let roots = [Root::Dir(d.clone())];
+        // rsvol's own order (a/ before b/) would pick b/k.json: python's rows say a/k.json
+        let rows = vec![
+            row(&b, "Linux version 1", "2026-09-26 10:00:00", true),
+            row(&a, "Linux version 1", "2026-09-26 10:00:01", true),
+            row(&url_of(&d, "a/gone.json"), "Linux version 3", "2026-09-26 10:00:02", true),
+            row("https://example.org/isf/x.json.xz", "Linux version 4", "2026-09-26 10:00:03", false),
+        ];
+        let read = std::cell::RefCell::new(Vec::new());
+        let idx = IdentifierIndex::from_python_rows(rows, &roots, now, None, scanner(&read, &[]));
+        assert_eq!(chosen(&idx, "Linux version 1"), Some(a.clone()));
+        // a local row whose file is gone is dropped; a remote row stays
+        assert_eq!(chosen(&idx, "Linux version 3"), None);
+        assert_eq!(chosen(&idx, "Linux version 4"), Some("https://example.org/isf/x.json.xz".to_string()));
+        // only the file python's cache does not cover was read
+        assert_eq!(*read.borrow(), vec![new.clone()]);
+        assert_eq!(chosen(&idx, "Linux version 2"), Some(new));
+        assert_eq!(idx.find(b"Linux version 1", "linux").map(|l| l.url()), Some(a));
+        assert!(idx.is_seeded());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn seeded_index_python_staleness() {
+        let d = seed_dir("stale", &[("a/k.json", "Linux version 1"), ("b/k.json", "Linux version 1")]);
+        let (pa, pb) = (d.join("a/k.json"), d.join("b/k.json"));
+        let (a, b) = (url_of(&d, "a/k.json"), url_of(&d, "b/k.json"));
+        let now = t("2026-09-26 12:00:00");
+        let roots = [Root::Dir(d.clone())];
+        set_mtime(&pb, t("2026-08-01 00:00:00"));
+        let run = |cached: &str, fail: &[String]| {
+            let rows = vec![row(&a, "Linux version 1", cached, true), row(&b, "Linux version 1", cached, true)];
+            let read = std::cell::RefCell::new(Vec::new());
+            let idx = IdentifierIndex::from_python_rows(rows, &roots, now, None, scanner(&read, fail));
+            (chosen(&idx, "Linux version 1"), read.into_inner())
+        };
+        // a/k.json modified after it was cached, the row is older than 3 days: rescanned, and
+        // the re-inserted row (new rowid) wins
+        set_mtime(&pa, t("2026-09-20 00:00:00"));
+        assert_eq!(run("2026-09-01 00:00:00", &[]), (Some(a.clone()), vec![a.clone()]));
+        // ... unless python fails to read it: the old row stays where it was
+        assert_eq!(run("2026-09-01 00:00:00", &[a.clone()]), (Some(b.clone()), vec![a.clone()]));
+        // a row cached within 3 days is trusted even though the file is newer
+        set_mtime(&pa, t("2026-09-26 11:00:00") + 86400);
+        assert_eq!(run("2026-09-24 00:00:00", &[]), (Some(b.clone()), vec![]));
+        // the window opens at midnight UTC: cached on 09-22 -> examined from 09-26 00:00
+        assert_eq!(run("2026-09-22 23:59:59", &[]), (Some(a.clone()), vec![a.clone()]));
+        assert_eq!(run("2026-09-23 00:00:00", &[]), (Some(b.clone()), vec![]));
+        // an old row whose file is older than the row: trusted
+        set_mtime(&pa, t("2026-08-01 00:00:00"));
+        assert_eq!(run("2026-09-01 00:00:00", &[]), (Some(b.clone()), vec![]));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn seeded_index_update_abort_and_remote() {
+        let d = seed_dir("abort", &[("a/k.json", "Linux version 1"), ("a/new.json", "Linux version 2")]);
+        let a = url_of(&d, "a/k.json");
+        let now = t("2026-09-26 12:00:00");
+        let roots = [Root::Dir(d.clone())];
+        // a `cached` value fromisoformat rejects (examined: it sorts before the cutoff) makes
+        // update() raise: the deletions stand, nothing is scanned or inserted
+        let rows = vec![
+            row(&url_of(&d, "a/gone.json"), "Linux version 3", "2026-09-26 10:00:00", true),
+            row(&a, "Linux version 1", "2026-09-01 25:00:00", true),
+        ];
+        let read = std::cell::RefCell::new(Vec::new());
+        let idx = IdentifierIndex::from_python_rows(rows, &roots, now, None, scanner(&read, &[]));
+        assert!(read.borrow().is_empty());
+        assert_eq!(chosen(&idx, "Linux version 1"), Some(a.clone()));
+        assert_eq!(chosen(&idx, "Linux version 2"), None);
+        assert_eq!(chosen(&idx, "Linux version 3"), None);
+        // an empty python database: every ISF is new
+        let read = std::cell::RefCell::new(Vec::new());
+        let idx = IdentifierIndex::from_python_rows(Vec::new(), &roots, now, None, scanner(&read, &[]));
+        assert_eq!(read.borrow().len(), 2);
+        assert_eq!(chosen(&idx, "Linux version 2"), Some(url_of(&d, "a/new.json")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn seeded_choice_deps() {
+        let d = seed_dir("deps", &[("a/k.json", "Linux version 1"), ("b/k.json", "Linux version 1")]);
+        let (pa, pb) = (d.join("a/k.json"), d.join("b/k.json"));
+        let now = pycache::utc_now();
+        let cached = pycache::sql_datetime(now - 3600);
+        // a/k.json is newer than its (recent) row: python rescans it once the row is 3 days old
+        set_mtime(&pa, now + 2 * 86400);
+        set_mtime(&pb, now - 30 * 86400);
+        let rows = vec![row(&url_of(&d, "a/k.json"), "Linux version 1", &cached, true), row(&url_of(&d, "b/k.json"), "Linux version 1", &cached, true)];
+        let read = std::cell::RefCell::new(Vec::new());
+        let mut idx = IdentifierIndex::from_python_rows(rows, &[Root::Dir(d.clone())], now, None, scanner(&read, &[]));
+        idx.seed_state = "state-1".into();
+        let kv: Vec<(String, String)> = idx.choice_deps("linux", b"Linux version 1").into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let until = pycache::rescan_window_opens(pycache::fromisoformat(cached.as_bytes()).unwrap());
+        assert!(kv.contains(&("iduntil".to_string(), until.to_string())));
+        assert!(choice_deps_hold_at(&kv, "state-1", now));
+        assert!(!choice_deps_hold_at(&kv, "state-2", now));
+        assert!(!choice_deps_hold_at(&kv, "state-1", until));
+        // a candidate touched (python may rescan it, the choice may change)
+        set_mtime(&pb, now - 29 * 86400);
+        assert!(!choice_deps_hold_at(&kv, "state-1", now));
+        // unseeded: only the seeding state matters
+        let own = IdentifierIndex { entries: Vec::new(), locations: Vec::new(), seed_state: "off".into(), py_cached: None };
+        let kv: Vec<(String, String)> = own.choice_deps("linux", b"x").into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        assert_eq!(kv.len(), 1);
+        assert!(choice_deps_hold_at(&kv, "off", now) && !choice_deps_hold_at(&kv, "absent", now));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// python's database read end to end (written by the sqlite3 CLI when installed).
+    #[test]
+    fn seeded_index_from_sqlite_file() {
+        let d = seed_dir("sqlite", &[("a/k.json", "Linux version 1"), ("b/k.json", "Linux version 1")]);
+        let db = d.join("identifier.cache");
+        let (a, b) = (url_of(&d, "a/k.json"), url_of(&d, "b/k.json"));
+        let sql = format!(
+            "CREATE TABLE database_info (schema_version INT DEFAULT 1); INSERT INTO database_info VALUES (1);
+             CREATE TABLE cache (location TEXT UNIQUE NOT NULL, identifier TEXT, operating_system TEXT, hash TEXT,stats_base_types INT DEFAULT 0, stats_types INT DEFAULT 0, stats_enums INT DEFAULT 0, stats_symbols INT DEFAULT 0, local BOOL, cached DATETIME);
+             INSERT INTO cache (location, identifier, operating_system, local, cached) VALUES ('{b}', CAST('Linux version 1' AS BLOB), 'linux', 1, datetime('now'));
+             INSERT INTO cache (location, identifier, operating_system, local, cached) VALUES ('{a}', CAST('Linux version 1' AS BLOB), 'linux', 1, datetime('now'));
+             INSERT OR REPLACE INTO cache (location, identifier, operating_system, local, cached) VALUES ('{b}', CAST('Linux version 1' AS BLOB), 'linux', 1, datetime('now'));"
+        );
+        let Ok(st) = std::process::Command::new("sqlite3").arg(&db).arg(&sql).status() else { return };
+        assert!(st.success());
+        let rows = pycache::read(&db).unwrap();
+        assert_eq!(rows.iter().map(|r| r.location.as_str()).collect::<Vec<_>>(), vec![a.as_str(), b.as_str()]);
+        let read = std::cell::RefCell::new(Vec::new());
+        let idx = IdentifierIndex::from_python_rows(rows, &[Root::Dir(d.clone())], pycache::utc_now(), None, scanner(&read, &[]));
+        assert!(read.borrow().is_empty());
+        assert_eq!(chosen(&idx, "Linux version 1"), Some(b));
+        // another schema version: python recreates the database
+        let _ = std::process::Command::new("sqlite3").arg(&db).arg("UPDATE database_info SET schema_version = 2").status();
+        assert!(pycache::read(&db).is_none());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
