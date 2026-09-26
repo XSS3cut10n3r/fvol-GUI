@@ -236,6 +236,14 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `kallsyms.Kallsyms(ctx, layer, module)` + `lookup_address / lookup_name / get_*_symbols` | `symbols::linux::kallsyms::Kallsyms::get(vm)?` (built once, cached, thread-safe) + same names → `KasSymbol` |
 | `ModuleExtract.extract_module(ctx, kernel, module)` | `symbols::linux::module_extract::extract_module(vm, &module)?` → `Option<Vec<u8>>` |
 | `linux_constants.KSYM_NAME_LEN / MODULE_* / NM_TYPES_DESC` | `symbols::linux::constants` |
+| `tainting.Tainting.get_taints_parsed / get_taints_as_plain_string(ctx, kernel, taints, is_module)`, `linux_constants.TAINT_FLAGS` | `symbols::linux::tainting::{Tainting::new(k)?.get_taints_parsed(taints, is_module)?, TAINT_FLAGS}` (build `Tainting` once per run) |
+| `Modules.get_kset_modules` keeping the `module_kobject.mod` pointer objects | `modules::get_kset_modules_ptrs(k)?` → `(name, pointer Obj, value)` |
+| many `Modules.module_lookup_by_address` calls (e.g. a table of handlers) | `modules::module_lookup_by_addresses(k, &mods, &addrs)` (one symbol-table pass for all kernel addresses; stops at the first `Err`) |
+| `get_symbols_by_absolute_location(addr)` for many addresses | `k.table.symbols_at_exact_many(&rel_offsets)` (one linear pass; `symbols_at(off, 0)` itself answers the first 8 exact lookups linearly, then builds the address index) |
+| `for sn in vmlinux.symbols: vmlinux.get_symbol(sn).address` (whole-table scans) | `k.table.symbol_names_addrs()` → `(raw name bytes, masked address)` |
+| `ModuleDisplayPlugin.generate_results(...)` / `columns_results` (lsmod, check_modules, hidden_modules) | `plugins::linux::lsmod::{generate_results(ctx, k, iter of (vol.offset, module), dump, out), columns()}` |
+| `Hidden_modules.find_hidden_modules / get_lsmod_module_addresses`, `Check_modules.compare_kset_and_lsmod` | `plugins::linux::malware::{hidden_modules, check_modules}` same names |
+| `Check_idt.get_idt_type`, `IOMem.parse_resource`, `Boottime.get_time_namespaces_bootime` | `plugins::linux::{malware::check_idt::get_idt_type, iomem::parse_resource, boottime::get_time_namespaces_boottime}` |
 
 ## Mac (`use crate::symbols::mac::MacExt`)
 
