@@ -429,6 +429,30 @@ impl Index {
         Ok(Index { pos, esc, chunks, utf8 })
     }
 
+    /// Serial stage 1 into a recycled position vector (see [`Index::recycle`]): a worker
+    /// indexing many documents faults its index memory in once.
+    pub fn build_serial_reusing(buf: &[u8], mut pos: Vec<u32>) -> Result<Index> {
+        if buf.len() >= u32::MAX as usize - 64 {
+            return Err(Error::msg("JSON document too large"));
+        }
+        pos.clear();
+        let mut esc = Vec::new();
+        let st = index_range(buf, 0, buf.len(), &mut pos, &mut esc);
+        if st.bad {
+            return Err(Error::msg("JSON parse error: invalid control character in string"));
+        }
+        if st.prev_in_string != 0 {
+            return Err(Error::msg("JSON parse error: unterminated string"));
+        }
+        let chunks = vec![Chunk { start: 0, end: buf.len() as u32, first: 0, len: pos.len() as u32, depth: 0 }];
+        Ok(Index { pos, esc, chunks, utf8: std::str::from_utf8(buf).is_ok() })
+    }
+
+    /// The position vector, for [`Index::build_serial_reusing`].
+    pub fn recycle(self) -> Vec<u32> {
+        self.pos
+    }
+
     /// A walker over the whole document.
     pub fn walker<'d, 'a>(&'d self, buf: &'a [u8]) -> Walker<'d, 'a> {
         Walker { buf, pos: &self.pos, esc: &self.esc, i: 0, utf8: self.utf8, depth: 0 }

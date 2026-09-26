@@ -620,10 +620,21 @@ fn cache_file_bytes(blob: &[u8], key: &[u8]) -> Vec<u8> {
     cache_file_parts(blob, key, &len).concat()
 }
 
+/// Blobs built in this process, by cache key: the cache file is written in the background,
+/// so a second load of the same ISF (e.g. the Linux stacker's table and the kernel's, which
+/// differ only in the symbol mask) shares the blob instead of rebuilding it.
+static BUILT: std::sync::Mutex<Vec<(Vec<u8>, std::sync::Arc<Vec<u8>>)>> = std::sync::Mutex::new(Vec::new());
+
 /// Load a symbol table from `loc` (binary cache first). `name` is the table name.
 pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
     let url = loc.url();
     let cf = cache_file(loc, &url, opts);
+    if let Some((_, key)) = &cf {
+        let built = BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|b| b.0 == *key).map(|b| b.1.clone());
+        if let Some(b) = built {
+            return SymbolTable::from_blob(Blob::Shared(b), name, &url);
+        }
+    }
     if let Some((cf, key)) = &cf {
         if let Ok(f) = std::fs::File::open(cf) {
             if let Ok(m) = Mmap::map(&f) {
@@ -635,15 +646,21 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
             }
         }
     }
-    let json = {
-        let _t = crate::util::trace::span("isf read+decompress");
-        loc.read()?
+    let json = match take_kept(loc, &url) {
+        Some(j) => std::borrow::Cow::Owned(j),
+        None => {
+            let _t = crate::util::trace::span("isf read+decompress");
+            loc.read()?
+        }
     };
     let blob = {
         let _t = crate::util::trace::span("isf parse+build");
         build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?
     };
     let blob = std::sync::Arc::new(blob);
+    if let Some((_, key)) = &cf {
+        BUILT.lock().unwrap_or_else(|e| e.into_inner()).push((key.clone(), blob.clone()));
+    }
     // the cache file is written in the background (overlapping the plugin run; joined
     // before exit), and the decompressed JSON is freed there too
     let writer = blob.clone();
@@ -679,10 +696,17 @@ pub struct IdentEntry {
     pub identifier: Vec<u8>,
 }
 
-/// Extract (os, identifier) from ISF JSON without building the table.
+/// Extract (os, identifier) from ISF JSON without building the table (python's identifier
+/// processors; the document must parse). The byte parser: in the identifier index many
+/// workers extract at once while decompressing, and there a structural index's extra memory
+/// traffic costs more than its faster skipping saves (measured: ~100 ms slower index).
 pub fn extract_identifier(json: &[u8]) -> Option<(String, Vec<u8>)> {
-    use crate::util::json::{Kind, Parser};
-    let mut p = Parser::new(json);
+    extract_identifier_with(&mut crate::util::json::Parser::new(json))
+}
+
+/// [`extract_identifier`] through any pull parser.
+pub fn extract_identifier_with<'a, P: crate::util::jsonidx::Pull<'a>>(p: &mut P) -> Option<(String, Vec<u8>)> {
+    use crate::util::json::Kind;
     let mut win: Option<(String, String, u64)> = None;
     let mut linux: Option<String> = None;
     let mut mac: Option<String> = None;
@@ -844,30 +868,79 @@ fn estimated_json_size(loc: &IsfLocation) -> u64 {
 /// The (decompressed) JSON of `loc`, decoded into the reusable `buf` when possible (plain and
 /// `.xz` files: no per-file allocation, pages faulted in once per worker), then `f(json)`.
 pub(crate) fn with_json<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
-    match loc {
-        IsfLocation::Embedded { data, .. } => Ok(f(data)),
-        IsfLocation::File(p) => {
-            let name = p.to_string_lossy();
-            if name.ends_with(".xz") {
-                let raw = std::fs::read(p)?;
-                let n = crate::codecs::xz::decompress_reuse(&raw, buf, false)?;
-                Ok(f(&buf[..n]))
-            } else if name.ends_with(".json") {
-                use std::io::Read;
-                let mut file = std::fs::File::open(p)?;
-                let len = file.metadata()?.len() as usize;
-                if buf.len() < len {
-                    buf.clear();
-                    buf.resize(len, 0);
-                }
-                file.read_exact(&mut buf[..len])?;
-                Ok(f(&buf[..len]))
-            } else {
-                Ok(f(&loc.read()?))
-            }
+    with_json_len(loc, buf, |j, _| f(j))
+}
+
+/// [`with_json`]; `f` also gets `Some(n)` when the JSON was decompressed into `buf[..n]`.
+fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8], Option<usize>) -> R) -> Result<R> {
+    let owned;
+    let (json, decoded): (&[u8], Option<usize>) = match loc {
+        IsfLocation::Embedded { data, .. } => (data, None),
+        IsfLocation::File(p) if p.to_string_lossy().ends_with(".xz") => {
+            let raw = std::fs::read(p)?;
+            let n = crate::codecs::xz::decompress_reuse(&raw, buf, false)?;
+            (&buf[..n], Some(n))
         }
-        _ => Ok(f(&loc.read()?)),
+        IsfLocation::File(p) if p.to_string_lossy().ends_with(".json") => {
+            use std::io::Read;
+            let mut file = std::fs::File::open(p)?;
+            let len = file.metadata()?.len() as usize;
+            if buf.len() < len {
+                buf.clear();
+                buf.resize(len, 0);
+            }
+            file.read_exact(&mut buf[..len])?;
+            (&buf[..len], None)
+        }
+        _ => {
+            owned = loc.read()?;
+            (&owned, None)
+        }
+    };
+    Ok(f(json, decoded))
+}
+
+/// OS whose decompressed ISFs the identifier index keeps (see [`keep_decoded_for`]).
+static KEEP_OS: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// Decompressed ISFs kept by the identifier index: source identity -> JSON.
+static KEPT: std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Memory the kept JSON may use.
+const KEEP_BUDGET: usize = 512 << 20;
+
+/// While building the identifier index, keep the decompressed JSON of the ISFs identified as
+/// `os` (within [`KEEP_BUDGET`]): the automagic that asked for the index loads one of them next,
+/// and [`load`] then skips its decompression. `None` stops keeping and frees what is kept
+/// (in the background).
+pub fn keep_decoded_for(os: Option<&'static str>) {
+    *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner()) = os;
+    if os.is_none() {
+        let kept = std::mem::take(&mut *KEPT.lock().unwrap_or_else(|e| e.into_inner()));
+        if !kept.is_empty() {
+            crate::util::bg::spawn(move || drop(kept));
+        }
     }
+}
+
+fn keep_decoded(loc: &IsfLocation, json: Vec<u8>) {
+    let Some(id) = source_identity(loc, &loc.url()) else { return };
+    let mut k = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    let used: usize = k.iter().map(|e| e.1.capacity()).sum();
+    if used + json.capacity() <= KEEP_BUDGET {
+        k.push((id, json));
+    }
+}
+
+/// The kept decompressed JSON of `loc` (taken: used once).
+fn take_kept(loc: &IsfLocation, url: &str) -> Option<Vec<u8>> {
+    let mut k = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    if k.is_empty() {
+        return None;
+    }
+    let id = source_identity(loc, url)?;
+    let i = k.iter().position(|e| e.0 == id)?;
+    Some(k.swap_remove(i).1)
 }
 
 /// Identifier extraction for `todo` (indexes into `locs`) on all cores: `make(k, identifier)`
@@ -886,12 +959,28 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
     let max_est = est.iter().copied().max().unwrap_or(1).max(1);
     let threads = crate::util::par::threads().min(todo.len()).min((BUDGET / max_est).max(1) as usize);
     let next = AtomicUsize::new(0);
+    let keep_os = *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner());
     let work = |out: &mut Vec<(usize, R)>| {
         let mut buf = Vec::new();
         loop {
             let j = next.fetch_add(1, Ordering::Relaxed);
             let Some(&k) = order.get(j) else { break };
-            let ident = with_json(&locs[todo[k]], &mut buf, extract_identifier).ok().flatten();
+            let loc = &locs[todo[k]];
+            let mut decoded = None;
+            let ident = with_json_len(loc, &mut buf, |json, n| {
+                decoded = n;
+                extract_identifier(json)
+            })
+            .ok()
+            .flatten();
+            // keep the decoded JSON of the OS the caller is about to load a kernel ISF for
+            if let (Some(n), Some(os), Some((ios, _))) = (decoded, keep_os, &ident)
+                && os == ios
+            {
+                let mut v = std::mem::take(&mut buf);
+                v.truncate(n);
+                keep_decoded(loc, v);
+            }
             out.push((k, make(k, ident)));
         }
     };
@@ -1115,6 +1204,35 @@ mod tests {
             );
         }
         println!("SymbolPath::new {t_new:?}");
+    }
+
+    /// Identifier extraction: indexed walk vs the byte parser (same answers, speed).
+    /// `RSVOL_BENCH_JSON=a.json[:b.json...] cargo test --release ident_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ident_bench() {
+        for path in std::env::var("RSVOL_BENCH_JSON").unwrap().split(':') {
+            let data = std::fs::read(path).unwrap();
+            let best = |f: &mut dyn FnMut()| {
+                let mut b = f64::MAX;
+                for _ in 0..10 {
+                    let t = std::time::Instant::now();
+                    f();
+                    b = b.min(t.elapsed().as_secs_f64());
+                }
+                b * 1e3
+            };
+            let indexed = |d: &[u8]| {
+                let idx = crate::util::jsonidx::Index::build_with(d, false).ok()?;
+                extract_identifier_with(&mut idx.walker(d))
+            };
+            let a = indexed(&data);
+            let b = extract_identifier_with(&mut crate::util::json::Parser::new(&data));
+            assert_eq!(a, b);
+            let ti = best(&mut || drop(indexed(&data)));
+            let tb = best(&mut || drop(extract_identifier_with(&mut crate::util::json::Parser::new(&data))));
+            println!("{path}: {:.1} MB  indexed {ti:.2} ms  byte parser {tb:.2} ms  -> {:?}", data.len() as f64 / 1e6, a.map(|x| x.0));
+        }
     }
 
     /// The ISF cache trailer: only the exact key matches (a colliding file name is a miss).

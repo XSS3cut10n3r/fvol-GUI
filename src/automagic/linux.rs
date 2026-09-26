@@ -469,10 +469,15 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
         None => {
             let banners = {
                 let _t = span("linux banners (identifier index)");
+                // the stackers load the matching kernel ISF next: keep the linux ISFs the index
+                // decompresses anyway
+                crate::symbols::store::keep_decoded_for(Some("linux"));
                 crate::symbols::store::identifier_index(ctx.symbol_path()).dictionary("linux")
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
-            let a = run(*phys, &banners, &allow).ok_or_else(|| {
+            let found = run(*phys, &banners, &allow);
+            crate::symbols::store::keep_decoded_for(None);
+            let a = found.ok_or_else(|| {
                 let why = if banners.is_empty() {
                     "No Linux banners found - if this is a linux plugin, please check your symbol files location"
                 } else {
