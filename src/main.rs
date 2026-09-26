@@ -18,6 +18,7 @@ pub mod plugins;
 pub mod renderers;
 pub mod symbols;
 pub mod util;
+pub mod web;
 pub mod yara;
 
 /// The banner volatility3 prints as the first line of output.

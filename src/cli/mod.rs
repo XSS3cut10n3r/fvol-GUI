@@ -70,6 +70,10 @@ impl Write for RawStdout {
 /// Entry point; returns the process exit code.
 pub fn main() -> i32 {
     let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+    // `vol serve ...`: the built-in web UI (python volatility has no plugin or option by that name)
+    if argv.get(1).map(String::as_str) == Some("serve") {
+        return crate::web::main(&argv[2..]);
+    }
     let plugins = crate::plugins::all();
     let mut out = RawStdout::new();
     let mut err = std::io::stderr();

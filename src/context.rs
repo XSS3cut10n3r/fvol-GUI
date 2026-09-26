@@ -353,9 +353,29 @@ impl Context {
     /// `file_handle.preferred_filename` holds after `close()` (plugins that read it before
     /// closing, like `pedump.dump_pe`, print the preferred name instead).
     pub fn create_output_file(&self, preferred_name: &str) -> Result<(File, String)> {
-        let _g = self.output_lock.lock().unwrap();
-        crate::cli::files::create(&self.opts.output_dir, preferred_name)
+        let _g = self.output_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = OUTPUT_DIR_OVERRIDE.with(|d| d.borrow().clone());
+        crate::cli::files::create(dir.as_deref().unwrap_or(&self.opts.output_dir), preferred_name)
     }
+}
+
+thread_local! {
+    static OUTPUT_DIR_OVERRIDE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with [`Context::create_output_file`] writing into `dir` (instead of
+/// `opts.output_dir`) for calls made on this thread. `vol serve` uses it to give every plugin
+/// run its own output directory while all runs share one `Context`.
+pub fn with_output_dir<R>(dir: &str, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            OUTPUT_DIR_OVERRIDE.with(|d| *d.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(OUTPUT_DIR_OVERRIDE.with(|d| d.borrow_mut().replace(dir.to_string())));
+    f()
 }
 
 #[cfg(test)]
