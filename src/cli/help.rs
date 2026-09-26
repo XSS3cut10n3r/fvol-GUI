@@ -78,12 +78,26 @@ pub fn can_colorize() -> bool {
     unsafe { isatty(1) == 1 }
 }
 
+thread_local! {
+    /// (terminal columns, colour) forced by `cli::Settings` (tests)
+    static OVERRIDES: std::cell::Cell<(Option<usize>, Option<bool>)> = const { std::cell::Cell::new((None, None)) };
+}
+
+/// Force the terminal width / colour decision for this thread (None = detect).
+pub fn set_overrides(columns: Option<usize>, color: Option<bool>) {
+    OVERRIDES.with(|o| o.set((columns, color)));
+}
+
 pub fn theme() -> Theme {
-    if can_colorize() { COLOR } else { NO_COLOR }
+    let color = OVERRIDES.with(|o| o.get().1).unwrap_or_else(can_colorize);
+    if color { COLOR } else { NO_COLOR }
 }
 
 /// `shutil.get_terminal_size().columns`
 pub fn terminal_columns() -> usize {
+    if let Some(c) = OVERRIDES.with(|o| o.get().0) {
+        return c;
+    }
     if let Some(c) = std::env::var("COLUMNS").ok().and_then(|v| v.trim().parse::<i64>().ok()) {
         if c > 0 {
             return c as usize;

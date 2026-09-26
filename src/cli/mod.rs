@@ -19,7 +19,7 @@ use crate::context::{Context, GlobalOptions};
 use crate::error::Error;
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::text::{self, RenderFailure, RenderOptions};
-use argparse::{Action, Conv, Exit, Kind, Namespace, Nargs, Parser, PyVal};
+use argparse::{Action, Conv, Exit, Kind, Nargs, Parser, PyVal};
 use json::Json;
 use std::io::Write;
 use std::rc::Rc;
@@ -35,6 +35,10 @@ pub struct Settings {
     pub cache_path: Option<String>,
     /// Working directory used for the `-o` default and relative paths.
     pub cwd: Option<String>,
+    /// Terminal width for help formatting (default: `COLUMNS` / the tty / 80).
+    pub columns: Option<usize>,
+    /// Force colour on / off in help output (default: python's `can_colorize()` rules).
+    pub color: Option<bool>,
 }
 
 /// stdout without std's line buffering or locking: the renderers hand it large blocks.
@@ -74,6 +78,7 @@ pub fn run(
     err: &mut dyn Write,
     s: &Settings,
 ) -> i32 {
+    help::set_overrides(s.columns, s.color);
     let code = match run_inner(argv, plugins, out, err, s) {
         Ok(code) => code,
         Err(Exit::Help(t)) => {
@@ -87,6 +92,7 @@ pub fn run(
     };
     let _ = out.flush();
     let _ = err.flush();
+    help::set_overrides(None, None);
     code
 }
 
@@ -303,20 +309,6 @@ fn pyval_to_cv(v: &PyVal) -> Option<ConfigValue> {
         PyVal::Str(s) => ConfigValue::Str(s.clone()),
         PyVal::List(l) => ConfigValue::List(l.iter().filter_map(pyval_to_cv).collect()),
     })
-}
-
-/// Flatten a config JSON object into dotted keys (volatility3 HierarchicalDict).
-fn flatten(prefix: &str, j: &Json, out: &mut Vec<(String, Json)>) {
-    if let Json::Obj(items) = j {
-        for (k, v) in items {
-            let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-            if matches!(v, Json::Obj(_)) {
-                flatten(&key, v, out);
-            } else {
-                out.push((key, v.clone()));
-            }
-        }
-    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -580,9 +572,15 @@ fn run_inner(
             Ok(j) => j,
             Err(e) => return Ok(traceback(err, &format!("json.decoder.JSONDecodeError: {}", e.0))),
         };
-        let mut flat = Vec::new();
-        flatten("", &j, &mut flat);
-        for (k, v) in flat {
+        // HierarchicalDict(json_val): keys are dotted paths, nested dicts are rejected
+        let items = match &j {
+            Json::Obj(items) => items.clone(),
+            _ => return Ok(traceback(err, "AttributeError: object has no attribute 'items'")),
+        };
+        if items.iter().any(|(_, v)| matches!(v, Json::Obj(_))) {
+            return Ok(traceback(err, "TypeError: Invalid type stored in configuration: <class 'dict'>"));
+        }
+        for (k, v) in items {
             if !k.contains('.') {
                 if let Some(cv) = json_to_cv(&v) {
                     cfg.set(&k, cv);
@@ -888,7 +886,5 @@ fn report_unsatisfied(msg: &str, class: &str, out: &mut dyn Write, err: &mut dyn
     1
 }
 
-#[allow(dead_code)]
-fn namespace_json(ns: &Namespace) -> String {
-    Json::Obj(ns.vals.iter().map(|(k, v)| (k.clone(), pyval_to_json(v))).collect()).dump(None)
-}
+#[cfg(test)]
+mod tests;

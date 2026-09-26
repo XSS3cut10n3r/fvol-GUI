@@ -358,8 +358,10 @@ impl Parser {
         self.formatter().format_help(self)
     }
 
+    /// `ArgumentParser.format_usage()` (a single trailing newline)
     pub fn format_usage(&self) -> String {
-        self.formatter().format_usage(self)
+        let u = self.formatter().format_usage(self);
+        format!("{}\n", u.trim_matches('\n'))
     }
 
     /// `ArgumentParser.error`: the full stderr text; exit status 2.
