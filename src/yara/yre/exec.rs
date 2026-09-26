@@ -38,6 +38,14 @@ fn is_word(data: &[u8], at: usize, cs: usize) -> bool {
     if cs == 2 { r && data.get(at + 1) == Some(&0) } else { r }
 }
 
+#[derive(Clone, Copy, Default)]
+struct FNode {
+    input: isize,
+    round: u32,
+    prev: u32,
+    next: u32,
+}
+
 #[derive(Clone)]
 struct Fiber {
     alive: bool,
@@ -56,10 +64,8 @@ pub struct Machine {
     head: u32,
     tail: u32,
     splits: Vec<Vec<u8>>,
-    // fast exec
-    pos: Vec<(isize, u32)>,
-    pos2: Vec<(isize, u32)>,
-    pending: Vec<(isize, u32)>,
+    // fast exec position list
+    fnodes: Vec<FNode>,
 }
 
 /// Outcome of an execution.
@@ -490,7 +496,11 @@ impl Machine {
         Ok(matches)
     }
 
-    /// `yr_re_fast_exec` (hex strings without alternatives).
+    /// `yr_re_fast_exec` (hex strings without alternatives). The position list is a
+    /// linked list exactly like libyara's: new positions are inserted after the first
+    /// node with a larger input scanning forward from the current node, and a node's
+    /// own input is advanced in place afterwards, so the list is NOT always sorted —
+    /// and "first node reaching MATCH" is list order, not the shortest match.
     pub fn fast_exec(
         &mut self,
         prog: &Program,
@@ -507,85 +517,96 @@ impl Machine {
         let bwd_size = pos.min(data.len());
         let max_bytes = if backwards { bwd_size.min(SCAN_LIMIT) } else { fwd_size.min(SCAN_LIMIT) } as isize;
         let input_data = pos as isize;
-        // positions: (input, round), kept sorted by input pointer (for backwards the
-        // C code compares pointers too, so larger = closer to input_data).
-        self.pos.clear();
-        self.pos.push((if backwards { input_data - 1 } else { input_data }, 0));
+        let rd = |p: isize| -> Option<u8> { if p >= 0 { data.get(p as usize).copied() } else { None } };
+        // nodes: (input, round, prev, next)
+        let nodes = &mut self.fnodes;
+        nodes.clear();
+        nodes.push(FNode { input: if backwards { input_data - 1 } else { input_data }, round: 0, prev: NIL, next: NIL });
+        let mut first: u32 = 0;
+        let mut last: u32 = 0;
         let mut round: u32 = 0;
         let mut ip = start_ip as usize;
-        loop {
-            if self.pos.is_empty() {
-                return -1;
-            }
+        while first != NIL {
             let Some(op) = prog.ops.get(ip).copied() else { return -1 };
-            let mut out = std::mem::take(&mut self.pos2);
-            out.clear();
-            let list = std::mem::take(&mut self.pos);
-            let mut i = 0usize;
-            // Newly created positions for round+1 are inserted in sorted order; we
-            // model the linked list with a vector rebuilt per round.
-            let mut pending = std::mem::take(&mut self.pending);
-            pending.clear();
-            while i < list.len() {
-                let (inp, r) = list[i];
-                i += 1;
-                if r != round {
-                    // position created for a later round (kept)
-                    out.push((inp, r));
+            let mut current = first;
+            while current != NIL {
+                let next = nodes[current as usize].next;
+                if nodes[current as usize].round != round {
+                    current = next;
                     continue;
                 }
+                let inp = nodes[current as usize].input;
                 let bytes_matched = if backwards { input_data - inp - 1 } else { inp - input_data };
-                let rd = |p: isize| -> Option<u8> { if p >= 0 { data.get(p as usize).copied() } else { None } };
                 let mut matched = false;
-                let mut newinp = inp;
                 match op {
                     Op::Any => {
                         if bytes_matched < max_bytes {
                             matched = true;
-                            newinp = inp + incr;
+                            nodes[current as usize].input += incr;
                         }
                     }
                     Op::Literal(v) => {
                         if bytes_matched < max_bytes && rd(inp) == Some(v) {
                             matched = true;
-                            newinp = inp + incr;
+                            nodes[current as usize].input += incr;
                         }
                     }
                     Op::NotLiteral(v) => {
                         if bytes_matched < max_bytes && rd(inp).is_some_and(|c| c != v) {
                             matched = true;
-                            newinp = inp + incr;
+                            nodes[current as usize].input += incr;
                         }
                     }
                     Op::MaskedLiteral(v, m) => {
                         if bytes_matched < max_bytes && rd(inp).is_some_and(|c| c & m == v) {
                             matched = true;
-                            newinp = inp + incr;
+                            nodes[current as usize].input += incr;
                         }
                     }
                     Op::MaskedNotLiteral(v, m) => {
                         if bytes_matched < max_bytes && rd(inp).is_some_and(|c| c & m != v) {
                             matched = true;
-                            newinp = inp + incr;
+                            nodes[current as usize].input += incr;
                         }
                     }
                     Op::RepeatAny { min, max, .. } => {
                         if bytes_matched + (min as isize) < max_bytes {
                             matched = true;
                             let next_op = prog.ops.get(ip + 1).copied();
+                            let mut ins = current;
                             for j in (min as isize + 1)..=(max as isize) {
                                 if bytes_matched + j >= max_bytes {
                                     break;
                                 }
                                 let next_input = inp + j * incr;
+                                loop {
+                                    let nx = nodes[ins as usize].next;
+                                    if nx != NIL && nodes[nx as usize].input <= next_input {
+                                        ins = nx;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if nodes[ins as usize].round == round + 1 && nodes[ins as usize].input == next_input {
+                                    continue;
+                                }
                                 if let Some(Op::Literal(v)) = next_op {
                                     if rd(next_input) != Some(v) {
                                         continue;
                                     }
                                 }
-                                pending.push((next_input, round + 1));
+                                let after = nodes[ins as usize].next;
+                                let id = nodes.len() as u32;
+                                nodes.push(FNode { input: next_input, round: round + 1, prev: ins, next: after });
+                                nodes[ins as usize].next = id;
+                                if after != NIL {
+                                    nodes[after as usize].prev = id;
+                                }
+                                if ins == last {
+                                    last = id;
+                                }
                             }
-                            newinp = inp + (min as isize) * incr;
+                            nodes[current as usize].input += (min as isize) * incr;
                         }
                     }
                     Op::Match => {
@@ -594,37 +615,38 @@ impl Machine {
                             let len = bytes_matched.min(max_bytes).max(0) as usize;
                             cb(start.max(0) as usize, len);
                         } else {
-                            self.pos = list;
-                            self.pos2 = out;
                             return bytes_matched as i64;
                         }
                     }
                     _ => {}
                 }
                 if matched {
-                    out.push((newinp, round + 1));
-                }
-            }
-            // Merge pending positions (dedupe positions already present for round+1).
-            if !pending.is_empty() {
-                for &p in pending.iter() {
-                    if !out.iter().any(|q| q.0 == p.0 && q.1 == p.1) {
-                        out.push(p);
+                    nodes[current as usize].round = round + 1;
+                } else {
+                    // unlink
+                    let (pv, nx) = (nodes[current as usize].prev, nodes[current as usize].next);
+                    if current == first {
+                        first = nx;
+                    }
+                    if current == last {
+                        last = pv;
+                    }
+                    if pv != NIL {
+                        nodes[pv as usize].next = nx;
+                    }
+                    if nx != NIL {
+                        nodes[nx as usize].prev = pv;
                     }
                 }
+                current = next;
             }
-            self.pending = pending;
-            // Keep the list sorted by pointer value (stable for equal inputs).
-            out.sort_by(|a, b| a.0.cmp(&b.0));
-            // For Match in exhaustive mode all positions were consumed.
-            if matches!(op, Op::Match) {
+            if nodes.len() > 1 << 22 {
+                // pathological growth guard (libyara would be equally slow)
                 return -1;
             }
-            self.pos = out;
-            self.pos2 = list;
             round += 1;
             ip += 1;
-            // Skip over the op arguments: ops are one slot each in our encoding.
         }
+        -1
     }
 }

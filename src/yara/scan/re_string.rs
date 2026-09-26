@@ -524,4 +524,13 @@ mod tests {
         let rs = ReString::new_hex("{ 61 [1-] (41|42) (41|42) 41 }", &m, Some(5)).unwrap();
         assert!(scan_reference(&rs, &data).is_empty());
     }
+
+    #[test]
+    fn yara_re_string_fast_exec_list_order() {
+        // libyara's fast-exec position list is not sorted: first-in-list wins (len 11).
+        let data = b"\xf2 bB\x00\x02 \x00ckx9x\x00AaA\x00aAa aA\x00\xde\x009\xefa\xe8\x00b sI@c\x00a\xed\x00bcA\x06";
+        let rs = ReString::new_hex("{ 41 [0-2] [2-4] 41 [2-4] 00 }", &Modifiers::default(), None).unwrap();
+        let got: Vec<(usize, usize)> = scan_reference(&rs, data).iter().map(|x| (x.offset, x.len)).collect();
+        assert_eq!(got, vec![(14, 11), (16, 11), (19, 8)]);
+    }
 }

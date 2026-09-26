@@ -106,6 +106,9 @@ def gen_hex(r):
             if r.random() < 0.15:
                 j = r.choice(["[0-300]", "[201]", "[150-250]", "[3-]", "[-]"])
             items.append(j)
+            while r.random() < 0.3:
+                a = r.randint(0, 3)
+                items.append("[%d-%d]" % (a, a + r.randint(0, 3)))
         items.append(tok(0))
     return "{ " + " ".join(items) + " }"
 
