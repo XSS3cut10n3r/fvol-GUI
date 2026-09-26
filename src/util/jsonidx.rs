@@ -361,7 +361,7 @@ impl Index {
         // chunk boundaries: just after a '\n' near every CHUNK bytes
         let mut bounds = vec![0usize];
         if threads > 1 {
-            let target = CHUNK.max(buf.len() / (threads * 4)).max(64 << 10);
+            let target = CHUNK.max(buf.len() / (threads * 2)).max(64 << 10);
             let mut at = target;
             while at < buf.len() {
                 match memchr_nl(&buf[at..(at + (64 << 10)).min(buf.len())]) {
@@ -383,7 +383,10 @@ impl Index {
             let utf8 = std::str::from_utf8(&buf[s..e]).is_ok();
             (out, esc, st, utf8)
         };
+        let _t0 = crate::util::trace::span("stage1: chunks");
         let parts: Vec<(Vec<u32>, Vec<u32>, State, bool)> = if n == 1 { vec![run(0)] } else { crate::util::par::par_map(n, run) };
+        drop(_t0);
+        let _t1 = crate::util::trace::span("stage1: concat");
         let mut chunks = Vec::with_capacity(n);
         let mut depth: i64 = 0;
         let mut total = 0usize;
@@ -418,6 +421,9 @@ impl Index {
             // SAFETY: all `total` entries were written above
             unsafe { pos.set_len(total) };
             let esc = parts.iter().flat_map(|p| p.1.iter().copied()).collect();
+            drop(_t1);
+            let _t2 = crate::util::trace::span("stage1: drop parts");
+            drop(parts);
             (pos, esc)
         };
         Ok(Index { pos, esc, chunks, utf8 })
@@ -427,6 +433,71 @@ impl Index {
     pub fn walker<'d, 'a>(&'d self, buf: &'a [u8]) -> Walker<'d, 'a> {
         Walker { buf, pos: &self.pos, esc: &self.esc, i: 0, utf8: self.utf8, depth: 0 }
     }
+
+    /// The top two levels of a document shaped `{"key": value, ...}`, found on all cores
+    /// (each stage-1 chunk walks its own entries from its known start depth), in document
+    /// order: every key of the root object ([`Ev::TopKey`]), every bracket opening / closing a
+    /// top-level value ([`Ev::Open1`] / [`Ev::Close1`]) and every string at depth 2 that
+    /// follows `{` or `,` ([`Ev::Key2`]: the member keys of top-level objects; also strings in
+    /// top-level arrays, which consumers ignore). Enough to split the members of each
+    /// top-level object into ranges that parse independently. Not a validation: consumers
+    /// check the grammar while parsing.
+    pub fn top_events(&self, buf: &[u8]) -> Vec<(u32, Ev)> {
+        let byte = |p: u32| buf.get(p as usize).copied().unwrap_or(0);
+        let walk = |c: usize| -> Vec<(u32, Ev)> {
+            let ch = self.chunks[c];
+            let (first, end) = (ch.first as usize, (ch.first + ch.len) as usize);
+            let mut out = Vec::new();
+            let mut d = ch.depth as i64;
+            let mut prev = if first > 0 { byte(self.pos[first - 1]) } else { 0 };
+            let mut e = first;
+            while e < end {
+                let c = byte(self.pos[e]);
+                match c {
+                    b'{' | b'[' => {
+                        if d == 1 {
+                            out.push((e as u32, Ev::Open1));
+                        }
+                        d += 1;
+                    }
+                    b'}' | b']' => {
+                        d -= 1;
+                        if d == 1 {
+                            out.push((e as u32, Ev::Close1));
+                        }
+                    }
+                    b'"' => {
+                        if prev == b'{' || prev == b',' {
+                            if d == 1 {
+                                out.push((e as u32, Ev::TopKey));
+                            } else if d == 2 {
+                                out.push((e as u32, Ev::Key2));
+                            }
+                        }
+                        e += 1; // the closing quote (same chunk: chunks never split a string)
+                    }
+                    _ => {}
+                }
+                prev = c;
+                e += 1;
+            }
+            out
+        };
+        let n = self.chunks.len();
+        if n == 1 {
+            return walk(0);
+        }
+        crate::util::par::par_map(n, walk).into_iter().flatten().collect()
+    }
+}
+
+/// See [`Index::top_events`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ev {
+    TopKey,
+    Open1,
+    Close1,
+    Key2,
 }
 
 #[inline]
@@ -547,7 +618,7 @@ impl<'d, 'a> Walker<'d, 'a> {
 
     /// The string whose opening quote is entry `i` (closing quote = entry `i + 1`).
     #[inline(always)]
-    fn string_at(&self, i: usize) -> Result<Cow<'a, str>> {
+    pub fn string_at(&self, i: usize) -> Result<Cow<'a, str>> {
         let (Some(&o), Some(&c)) = (self.pos.get(i), self.pos.get(i + 1)) else { return Err(self.err("unterminated string")) };
         let (o, c) = (o as usize + 1, c as usize);
         if c < o || self.buf.get(c) != Some(&b'"') {
@@ -1035,6 +1106,21 @@ mod tests {
         })
         .unwrap();
         assert_eq!(keep2, 42);
+    }
+
+    /// Cost of one `par_for` round (thread spawn + join) on this machine.
+    #[test]
+    #[ignore]
+    fn spawn_round_cost() {
+        for n in [1usize, 4, 20] {
+            let t = std::time::Instant::now();
+            for _ in 0..50 {
+                crate::util::par::par_for(n, |i| {
+                    std::hint::black_box(i);
+                });
+            }
+            println!("par_for({n}) round: {:.1} us", t.elapsed().as_secs_f64() * 1e6 / 50.0);
+        }
     }
 
     /// Parallel stage 1 (newline-aligned chunks) equals the single-chunk index.
