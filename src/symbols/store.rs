@@ -727,15 +727,10 @@ impl IdentifierIndex {
                 _ => true,
             })
             .collect();
-        // bounded: each item may decompress a 50-100 MB ISF (8 x 100 MB peak)
-        let fresh: Vec<Option<IdentEntry>> = crate::util::par::par_map_bounded(todo.len(), 8, |k| {
+        let fresh = extract_all(&locs, &todo, |k, ident| {
             let i = todo[k];
-            let stamp = stamps[i]?;
-            let (os, identifier) = match locs[i].read() {
-                Ok(json) => extract_identifier(&json).unwrap_or_default(),
-                Err(_) => Default::default(),
-            };
-            Some(IdentEntry { url: urls[i].clone(), stamp, os, identifier })
+            let (os, identifier) = ident.unwrap_or_default();
+            Some(IdentEntry { url: urls[i].clone(), stamp: stamps[i]?, os, identifier })
         });
         let mut changed = false;
         for e in fresh.into_iter().flatten() {
@@ -789,6 +784,110 @@ impl IdentifierIndex {
             (id, self.locations[i].clone())
         }).collect()
     }
+}
+
+/// Rough decompressed size of an ISF location (for scheduling and the memory budget):
+/// compressed files are assumed to expand ~30x (dwarf2json / pdbconv output compresses
+/// 15-20x with xz).
+fn estimated_json_size(loc: &IsfLocation) -> u64 {
+    let (name, size) = match loc {
+        IsfLocation::Embedded { data, .. } => return data.len() as u64,
+        IsfLocation::File(p) => (p.to_string_lossy().into_owned(), std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)),
+        IsfLocation::Zip { member, .. } => (member.clone(), 64 << 20),
+        IsfLocation::Url(u) => (u.clone(), 64 << 20),
+    };
+    if name.ends_with(".json") { size } else { size.saturating_mul(30) }
+}
+
+/// The (decompressed) JSON of `loc`, decoded into the reusable `buf` when possible (plain and
+/// `.xz` files: no per-file allocation, pages faulted in once per worker), then `f(json)`.
+pub(crate) fn with_json<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
+    match loc {
+        IsfLocation::Embedded { data, .. } => Ok(f(data)),
+        IsfLocation::File(p) => {
+            let name = p.to_string_lossy();
+            if name.ends_with(".xz") {
+                let raw = std::fs::read(p)?;
+                let n = crate::codecs::xz::decompress_reuse(&raw, buf, false)?;
+                Ok(f(&buf[..n]))
+            } else if name.ends_with(".json") {
+                use std::io::Read;
+                let mut file = std::fs::File::open(p)?;
+                let len = file.metadata()?.len() as usize;
+                if buf.len() < len {
+                    buf.clear();
+                    buf.resize(len, 0);
+                }
+                file.read_exact(&mut buf[..len])?;
+                Ok(f(&buf[..len]))
+            } else {
+                Ok(f(&loc.read()?))
+            }
+        }
+        _ => Ok(f(&loc.read()?)),
+    }
+}
+
+/// Identifier extraction for `todo` (indexes into `locs`) on all cores: `make(k, identifier)`
+/// builds the k-th result (`None` identifier = unreadable / not an ISF). Largest files first;
+/// each worker reuses one decode buffer; the worker count keeps the decode buffers within a
+/// memory budget.
+fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usize, Option<(String, Vec<u8>)>) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const BUDGET: u64 = 1536 << 20;
+    if todo.is_empty() {
+        return Vec::new();
+    }
+    let est: Vec<u64> = todo.iter().map(|&i| estimated_json_size(&locs[i])).collect();
+    let mut order: Vec<usize> = (0..todo.len()).collect();
+    order.sort_by_key(|&k| std::cmp::Reverse(est[k]));
+    let max_est = est.iter().copied().max().unwrap_or(1).max(1);
+    let threads = crate::util::par::threads().min(todo.len()).min((BUDGET / max_est).max(1) as usize);
+    let next = AtomicUsize::new(0);
+    let work = |out: &mut Vec<(usize, R)>| {
+        let mut buf = Vec::new();
+        loop {
+            let j = next.fetch_add(1, Ordering::Relaxed);
+            let Some(&k) = order.get(j) else { break };
+            let ident = with_json(&locs[todo[k]], &mut buf, extract_identifier).ok().flatten();
+            out.push((k, make(k, ident)));
+        }
+    };
+    let mut parts: Vec<Vec<(usize, R)>> = if threads <= 1 {
+        let mut v = Vec::new();
+        work(&mut v);
+        vec![v]
+    } else {
+        std::thread::scope(|s| {
+            let hs: Vec<_> = (1..threads)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut v = Vec::new();
+                        work(&mut v);
+                        v
+                    })
+                })
+                .collect();
+            let mut v = Vec::new();
+            work(&mut v);
+            let mut parts: Vec<_> = hs.into_iter().map(|h| h.join().unwrap_or_default()).collect();
+            parts.push(v);
+            parts
+        })
+    };
+    let mut slots: Vec<Option<R>> = (0..todo.len()).map(|_| None).collect();
+    for p in parts.iter_mut() {
+        for (k, r) in p.drain(..) {
+            slots[k] = Some(r);
+        }
+    }
+    // a worker that panicked lost its items: recompute them here (never silently drop entries)
+    let mut buf = Vec::new();
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(k, r)| r.unwrap_or_else(|| make(k, with_json(&locs[todo[k]], &mut buf, extract_identifier).ok().flatten())))
+        .collect()
 }
 
 fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {

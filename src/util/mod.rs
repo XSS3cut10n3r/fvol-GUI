@@ -3,6 +3,7 @@
 
 pub mod fxhash;
 pub mod json;
+pub mod jsonidx;
 pub mod mmap;
 pub mod par;
 pub mod paths;
