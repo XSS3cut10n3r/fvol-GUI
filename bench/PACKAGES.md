@@ -30,9 +30,8 @@ Round A = foundations (start right after core merges). Round B = dependents.
 - **L2 linux kernel**, **L3 linux fs/net**, **M1 mac**.
 
 ## Perf follow-ups (later)
-- crypto still < OpenSSL on bulk: SHA1/SHA256 0.9x, MD5 0.77x, DES 0.38x (small 0.64x), AES128-CBC 0.72x,
-  small AES 0.75-0.96x (per-call Vec alloc / key schedule). Wins: all small-message hash/HMAC/RC4 (1.2-3.4x),
-  AES256-ECB bulk 1.03x.
+- crypto: DONE. Beats OpenSSL on SHA1 (1.12x), RC4 (1.35x), DES (2.6-2.9x), AES (1.9-2.0x bulk, 5-7x small),
+  all small-message hashes (2.4-5.3x); MD5/SHA256 bulk tie (1.00-1.02x) at the measured hardware dependency floor.
 
 ## Wave 2 (launched after core merge 0630ba6)
 Running: W1 scanners+kernel objects, W2a process, W2b PE/files, W3 registry, W4 net+gui, G generic,
