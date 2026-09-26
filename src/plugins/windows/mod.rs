@@ -8,6 +8,7 @@ pub mod driverirp;
 pub mod drivermodule;
 pub mod driverscan;
 pub mod filescan;
+pub mod handles;
 pub mod info;
 pub mod malware;
 pub mod modscan;
@@ -27,6 +28,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&drivermodule::DriverModule);
     v.push(&driverscan::DriverScan);
     v.push(&filescan::FileScan);
+    v.push(&handles::Handles);
     v.push(&info::Info);
     v.push(&malware::drivermodule::DriverModule);
     v.push(&modscan::ModScan);
