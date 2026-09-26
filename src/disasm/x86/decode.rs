@@ -61,6 +61,7 @@ struct St<'a> {
     has66: bool,
     mosz: u8, // operand size used for memory size keywords
     vvvv_hi: u8, // 32-bit mode: ignored vvvv bit 3 (still must be 0 when vvvv is unused)
+    z16: bool,
     is4: u8,
     vsib: u8,   // VSIB index register class (0 = normal SIB)
 }
@@ -206,6 +207,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         has66,
         mosz: 4,
         vvvv_hi: 0,
+        z16: false,
         is4: 0,
     };
 
@@ -306,8 +308,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         opcode = [op, 0, 0, 0];
         let _ = (lockrep, has66, rex);
     } else if b == 0x62 && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
-        // EVEX
-        if st.pos + 3 > n {
+        // EVEX (a LOCK or REX prefix makes it invalid)
+        if st.pos + 3 > n || lockrep == 0xF0 || rex != 0 {
             return false;
         }
         let p0 = d[st.pos];
@@ -455,7 +457,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             m64 as u8,
             pfx as u8,
             w as u8,
-            st.l,
+            if st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3 { 2 } else { st.l },
             st.evex_b as u8,
             (mm >> 6 == 3) as u8,
             (mm >> 3) & 7,
@@ -545,7 +547,15 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         osz_def
     };
 
-    if flags & F_NOVVVV != 0 && (st.vvvv | st.vvvv_hi) != 0 && st.vex != VEX_NONE {
+    if flags & F_NOVVVV != 0 && st.vex != VEX_NONE {
+        let uses_vsib = e.ops[..e.nops as usize].iter().any(|o| o.src == S_VSIB);
+        let v = if uses_vsib { st.vvvv & 15 } else { st.vvvv };
+        if (v | st.vvvv_hi) != 0 {
+            return false;
+        }
+    }
+    if st.vex == VEX_EVEX && st.evex_b && e.ops[..e.nops as usize].iter().any(|o| o.src == S_VSIB) {
+        // gathers / scatters: no embedded broadcast
         return false;
     }
     st.has66 = has66;
@@ -566,9 +576,16 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 // F2/F3 context: the 32/64-bit variant is matched (no 16-bit equivalent)
                 st.mosz = if rexw { 8 } else { 4 };
             }
+            if pfx == 1 && rexw {
+                // hint nops (/z keyword) have no 64-bit variant: the 16-bit one wins
+                st.z16 = true;
+            }
         } else if pfx == 1 && rexw {
             st.mosz = 2;
         }
+    } else if map == MAP_1 && flags & F_D64 != 0 && has66 {
+        // push/pop memory forms: 66 wins over REX.W for the memory size
+        st.mosz = 2;
     }
 
     // EVEX decorations / validity
@@ -674,6 +691,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         let last = out.op_count as usize - 1;
         if let Operand::Imm(v) = out.operands[last] {
             let lim = if flags & F_CMP8 != 0 { 8 } else { 32 };
+            let v = if st.vex == VEX_EVEX { v & 0x1F } else { v };
             if (v as u64) < lim {
                 out.mnem = e.alias + v as u16;
                 out.op_count -= 1;
@@ -837,7 +855,7 @@ fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
             _ => MemSize::Qword,
         },
         K_Z => {
-            if st.mosz == 2 {
+            if st.mosz == 2 || st.z16 {
                 MemSize::Word
             } else {
                 MemSize::Dword
@@ -1097,6 +1115,8 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 let mut num = ((modrm >> 3) & 7) | rexr;
                 if is_vec_class(s.cls) {
                     num |= st.evex_rr;
+                } else if st.evex_rr != 0 {
+                    return false;
                 }
                 let r = reg_for(st, s.cls, num);
                 if r == 0 {
@@ -1152,6 +1172,8 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
             S_ACC => {
                 let size = if s.cls == C_A {
                     if m64 { st.asz } else { 4 }
+                } else if s.cls == C_N {
+                    if m64 { 8 } else { 4 }
                 } else if s.cls == C_Z && st.osz == 8 {
                     4
                 } else {

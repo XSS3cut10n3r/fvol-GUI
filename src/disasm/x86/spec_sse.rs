@@ -32,14 +32,14 @@ pub(crate) const SPEC: &str = r#"
 0f 01 @d5 : xend
 0f 01 @d6 : xtest
 0f 01 @d7 : enclu
-0f 01 @d8 : vmrun aAX
+0f 01 @d8 : vmrun nAX
 0f 01 @d9 : vmmcall
-0f 01 @da : vmload aAX
-0f 01 @db : vmsave aAX
+0f 01 @da : vmload nAX
+0f 01 @db : vmsave nAX
 0f 01 @dc : stgi
 0f 01 @dd : clgi
 0f 01 @de : skinit eax
-0f 01 @df : invlpga aAX, ecx
+0f 01 @df : invlpga nAX, ecx
 0f 01 @ee : rdpkru
 0f 01 @ef : wrpkru
 0f 01 @f8 : swapgs

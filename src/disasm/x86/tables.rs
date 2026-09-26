@@ -450,6 +450,7 @@ fn parse_op(tok: &str) -> Result<OpSpec, String> {
         "eAX" => return Ok(OpSpec { src: S_ACC, cls: C_V, mk: 0 }),
         "zAX" => return Ok(OpSpec { src: S_ACC, cls: C_Z, mk: 0 }),
         "aAX" => return Ok(OpSpec { src: S_ACC, cls: C_A, mk: 0 }),
+        "nAX" => return Ok(OpSpec { src: S_ACC, cls: C_N, mk: 0 }),
         "far" => return Ok(OpSpec { src: S_FARPTR, cls: 0, mk: 0 }),
         "farc" => return Ok(OpSpec { src: S_FARPTR, cls: 1, mk: 0 }),
         _ => {}
@@ -707,8 +708,9 @@ impl Builder {
         let best = list.iter().map(|r| r.spec).max().unwrap_or(0);
         let winners: Vec<&&Raw> = list.iter().filter(|r| r.spec == best).collect();
         if winners.len() > 1 {
-            let e0 = winners[0].entry;
-            if winners.iter().any(|w| w.entry != e0) {
+            let e0 = &self.entries[winners[0].entry as usize];
+            let same = |e: &Entry| e.mnem == e0.mnem && e.nops == e0.nops && e.ops == e0.ops && e.flags == e0.flags;
+            if winners.iter().any(|w| !same(&self.entries[w.entry as usize])) {
                 self.errors.push(format!(
                     "{ctx}: ambiguous entries at lines {:?}",
                     winners.iter().map(|w| w.line).collect::<Vec<_>>()
