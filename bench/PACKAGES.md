@@ -39,7 +39,7 @@ L1 linux ext+process, M1 mac. Pending: W5 malware+services (after disasm + yara 
 L3 linux fs/net (after L1's extensions land).
 - snappy/xpress: DONE (snappy 2.4x system libsnappy / 1.22x -march=native build, xpress-huffman 1.65x wimlib, lz77 4.1x).
 - regex/yara: DONE. 1.28-20x best of PCRE2-JIT/RE2 on every refbench case, compile faster than PCRE2-JIT, 5.7-16x libyara.
-- codecs: xz single-block 0.97-0.99x liblzma (cold ISF path only; binary ISF cache hides it).
+- codecs: DONE. xz beats liblzma 5.8.3 1.10-2.6x (x86-64 asm symbol loop); inflate/zlib/gzip 2.2-4.5x zlib; bzip2 1.6-4.6x libbz2; lznt1 2.7-3.9x; snappy 2.4x; xpress 1.65-4.1x.
 - core: level-by-level page-table range walker (memmap all-procs 42M rows = 19 s, strings, statistics use per-page translate).
 - statistics requires kernel symbols; python only needs the memory layer.
 
@@ -64,3 +64,8 @@ Windows 1809 98/98, Linux 62/62 on each of 4 images (6.8 + 5.15, ELF + LiME), ma
 (isfinfo references refreshed: they depend on the live symbol-dir contents; ours == a fresh python run.)
 448 unit tests. Remaining: perf passes (scan cache, cold start, output pipeline/range walker), final
 benchmarks (ubuntu-vm), docs.
+
+## Hardening wave (2026-09-26)
+A option x renderer parity sweep | B robustness fuzzing (mutated images) | C more test images (Win7/XP/x86,
+old/new/32-bit Linux) + refs + multi-image checkers | D lazy symbol table for first-ever runs.
+Also running: compressed-image inputs (gz/bz2/xz), vmscan/vmcoreinfo warm paths.
