@@ -59,6 +59,7 @@ pub struct Machine {
     // fast exec
     pos: Vec<(isize, u32)>,
     pos2: Vec<(isize, u32)>,
+    pending: Vec<(isize, u32)>,
 }
 
 /// Outcome of an execution.
@@ -523,7 +524,8 @@ impl Machine {
             let mut i = 0usize;
             // Newly created positions for round+1 are inserted in sorted order; we
             // model the linked list with a vector rebuilt per round.
-            let mut pending: Vec<(isize, u32)> = Vec::new();
+            let mut pending = std::mem::take(&mut self.pending);
+            pending.clear();
             while i < list.len() {
                 let (inp, r) = list[i];
                 i += 1;
@@ -605,12 +607,13 @@ impl Machine {
             }
             // Merge pending positions (dedupe positions already present for round+1).
             if !pending.is_empty() {
-                for p in pending {
+                for &p in pending.iter() {
                     if !out.iter().any(|q| q.0 == p.0 && q.1 == p.1) {
                         out.push(p);
                     }
                 }
             }
+            self.pending = pending;
             // Keep the list sorted by pointer value (stable for equal inputs).
             out.sort_by(|a, b| a.0.cmp(&b.0));
             // For Match in exhaustive mode all positions were consumed.
