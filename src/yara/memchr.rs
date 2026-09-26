@@ -463,9 +463,10 @@ mod avx2 {
 
     /// Packed-pair candidate search: returns the first p in [from, last] (inclusive)
     /// such that hay[p+i1]==b1 && hay[p+i2]==b2 (and verified by `verify`).
-    /// `last + max(i1,i2) < hay.len()` must hold.
+    /// `last + max(i1,i2) < hay.len()` must hold. Returns Err(resume) when false
+    /// candidates are too frequent (caller switches to a worst-case-linear search).
     #[target_feature(enable = "avx2")]
-    pub unsafe fn pair_find(
+    pub unsafe fn pair_find<F: FnMut(usize) -> bool>(
         hay: &[u8],
         from: usize,
         last: usize,
@@ -473,15 +474,35 @@ mod avx2 {
         b1: u8,
         i2: usize,
         b2: u8,
-        verify: &mut dyn FnMut(usize) -> bool,
-        budget: &mut isize,
+        mut verify: F,
     ) -> Result<Option<usize>, usize> {
         let ptr = hay.as_ptr();
         let v1 = _mm256_set1_epi8(b1 as i8);
         let v2 = _mm256_set1_epi8(b2 as i8);
         let mut p = from;
+        let mut fails: usize = 0;
         unsafe {
-            // Main loop: need p + 31 <= last
+            while p + 63 <= last {
+                let a0 = _mm256_cmpeq_epi8(load(ptr.add(p + i1)), v1);
+                let b0 = _mm256_cmpeq_epi8(load(ptr.add(p + i2)), v2);
+                let a1 = _mm256_cmpeq_epi8(load(ptr.add(p + 32 + i1)), v1);
+                let b1v = _mm256_cmpeq_epi8(load(ptr.add(p + 32 + i2)), v2);
+                let m0 = _mm256_movemask_epi8(_mm256_and_si256(a0, b0)) as u32 as u64;
+                let m1 = _mm256_movemask_epi8(_mm256_and_si256(a1, b1v)) as u32 as u64;
+                let mut m = m0 | (m1 << 32);
+                while m != 0 {
+                    let q = p + m.trailing_zeros() as usize;
+                    if verify(q) {
+                        return Ok(Some(q));
+                    }
+                    fails += 1;
+                    if fails > 64 + ((q - from) >> 4) {
+                        return Err(q + 1);
+                    }
+                    m &= m - 1;
+                }
+                p += 64;
+            }
             while p + 31 <= last {
                 let a = _mm256_cmpeq_epi8(load(ptr.add(p + i1)), v1);
                 let b = _mm256_cmpeq_epi8(load(ptr.add(p + i2)), v2);
@@ -491,14 +512,9 @@ mod avx2 {
                     if verify(q) {
                         return Ok(Some(q));
                     }
-                    *budget -= 1;
                     m &= m - 1;
                 }
                 p += 32;
-                if *budget < 0 {
-                    return Err(p);
-                }
-                *budget += 1;
             }
             if p <= last {
                 // Overlapping tail if possible.
@@ -817,12 +833,9 @@ impl Memmem {
         #[cfg(target_arch = "x86_64")]
         {
             if last - from >= 32 && has_avx2() {
-                let mut budget: isize = 64;
-                let mut verify = |q: usize| hay[q..q + m] == *n;
+                let verify = |q: usize| hay[q..q + m] == *n;
                 // SAFETY: AVX2 checked; last + max(i1, i2) < hay.len() since i1,i2 < m.
-                let r = unsafe {
-                    avx2::pair_find(hay, from, last, self.i1, n[self.i1], self.i2, n[self.i2], &mut verify, &mut budget)
-                };
+                let r = unsafe { avx2::pair_find(hay, from, last, self.i1, n[self.i1], self.i2, n[self.i2], verify) };
                 return match r {
                     Ok(x) => x,
                     Err(resume) => self.tw.find(hay, resume, n),

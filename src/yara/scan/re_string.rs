@@ -171,12 +171,10 @@ impl ReString {
                 map.push((pi as u32, ai as u32));
             }
         }
-        // FIXED_OFFSET only survives for (non-chained) literal strings.
-        let fixed = if !chained && matches!(parts.first().map(|p| &p.kind), Some(PartKind::Literal(_))) {
-            fixed_offset
-        } else {
-            None
-        };
+        // FIXED_OFFSET survives only when the (head) part is a literal: libyara clears it
+        // for non-literal parts and for every non-head chain part, and `$x at N`
+        // refers to the head fragment.
+        let fixed = if matches!(parts.first().map(|p| &p.kind), Some(PartKind::Literal(_))) { fixed_offset } else { None };
         Ok(ReString {
             parts,
             atoms: specs,
@@ -216,7 +214,7 @@ impl ReString {
         if offset >= data.len() {
             return;
         }
-        if let Some(fo) = self.fixed_offset {
+        if let (Some(fo), 0) = (self.fixed_offset, pi) {
             if fo != offset as i64 {
                 return;
             }
@@ -507,4 +505,23 @@ fn fullword_ok(data: &[u8], off: usize, len: usize, wide: bool) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yara_re_string_chained_fixed_head() {
+        // libyara keeps FIXED_OFFSET on a literal head of a chained hex string.
+        let mut data = b"xxxxaxxAABA".to_vec();
+        data.extend(std::iter::repeat_n(b'x', 40));
+        data.extend(b"AxBBA");
+        let m = Modifiers::default();
+        let rs = ReString::new_hex("{ 61 [1-] (41|42) (41|42) 41 }", &m, Some(4)).unwrap();
+        let got: Vec<(usize, usize)> = scan_reference(&rs, &data).iter().map(|x| (x.offset, x.len)).collect();
+        assert_eq!(got, vec![(4, 7)]);
+        let rs = ReString::new_hex("{ 61 [1-] (41|42) (41|42) 41 }", &m, Some(5)).unwrap();
+        assert!(scan_reference(&rs, &data).is_empty());
+    }
 }
