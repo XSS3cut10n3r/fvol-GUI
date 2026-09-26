@@ -51,9 +51,46 @@ fn copy_match(out: &mut [u8], op: usize, off: usize, len: usize) -> Result<usize
     if off == 0 || off > op {
         return Err(XpressError::BadOffset);
     }
-    let len = len.min(out.len() - op);
+    let room = out.len() - op;
+    if off >= 8 && room >= len + 8 {
+        // 8-byte word copies (may write up to 7 bytes past op+len, inside `out`, overwritten
+        // later). Equivalent to a forward byte copy: every word read ends at or before the
+        // first byte the same word writes because off >= 8.
+        // SAFETY: src [op-off, op-off+len+7] and dst [op, op+len+7] are inside `out`
+        // (room >= len + 8).
+        unsafe {
+            let p = out.as_mut_ptr();
+            let mut k = 0;
+            while k < len {
+                let w = (p.add(op - off + k) as *const u64).read_unaligned();
+                (p.add(op + k) as *mut u64).write_unaligned(w);
+                k += 8;
+            }
+        }
+        return Ok(op + len);
+    }
+    if off == 1 && room >= len + 8 {
+        // run of one byte: 8-byte stores of the repeated byte
+        let v = u64::from_ne_bytes([out[op - 1]; 8]);
+        // SAFETY: writes stay below op + len + 8 <= out.len()
+        unsafe {
+            let p = out.as_mut_ptr();
+            let mut k = 0;
+            while k < len {
+                (p.add(op + k) as *mut u64).write_unaligned(v);
+                k += 8;
+            }
+        }
+        return Ok(op + len);
+    }
+    let len = len.min(room);
     let src = op - off;
-    if off >= len {
+    if len <= 32 {
+        // short (overlapping) matches: a plain forward byte loop beats memmove calls
+        for k in 0..len {
+            out[op + k] = out[src + k];
+        }
+    } else if off >= len {
         out.copy_within(src..src + len, op);
     } else {
         // periodic pattern: doubling non-overlapping copies (see snappy.rs)
@@ -90,69 +127,76 @@ pub fn lz77_decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, Xpres
             ip += 4;
             flag_count = 32;
         }
+        // run of literal flags (zero bits from bit flag_count-1 downwards): one memcpy
+        let window = ((flags as u64) << (64 - flag_count)) | ((1u64 << (64 - flag_count)) - 1);
+        let lits = window.leading_zeros();
+        if lits > 0 {
+            let k = (lits as usize).min(n - ip).min(out.len() - op);
+            out[op..op + k].copy_from_slice(&input[ip..ip + k]);
+            op += k;
+            ip += k;
+            if k < lits as usize {
+                // input or output exhausted inside the run
+                return Ok(op);
+            }
+            flag_count -= lits;
+            continue;
+        }
         flag_count -= 1;
-        if flags & (1u32 << flag_count) == 0 {
-            if ip >= n {
-                return Ok(op);
-            }
-            out[op] = input[ip];
-            op += 1;
-            ip += 1;
-        } else {
-            if ip == n {
-                // regular end of stream
-                return Ok(op);
-            }
-            if n - ip < 2 {
-                return Err(XpressError::Truncated);
-            }
-            let mb = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
-            ip += 2;
-            let mut len = mb & 7;
-            let off = (mb >> 3) + 1;
-            if len == 7 {
-                if last_half == 0 {
-                    if ip >= n {
-                        return Err(XpressError::Truncated);
-                    }
-                    len = (input[ip] & 0xf) as usize;
-                    last_half = ip;
-                    ip += 1;
-                } else {
-                    len = (input[last_half] >> 4) as usize;
-                    last_half = 0;
+        // match flag
+        if ip == n {
+            // regular end of stream
+            return Ok(op);
+        }
+        if n - ip < 2 {
+            return Err(XpressError::Truncated);
+        }
+        let mb = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
+        ip += 2;
+        let mut len = mb & 7;
+        let off = (mb >> 3) + 1;
+        if len == 7 {
+            if last_half == 0 {
+                if ip >= n {
+                    return Err(XpressError::Truncated);
                 }
-                if len == 15 {
-                    if ip >= n {
+                len = (input[ip] & 0xf) as usize;
+                last_half = ip;
+                ip += 1;
+            } else {
+                len = (input[last_half] >> 4) as usize;
+                last_half = 0;
+            }
+            if len == 15 {
+                if ip >= n {
+                    return Err(XpressError::Truncated);
+                }
+                len = input[ip] as usize;
+                ip += 1;
+                if len == 255 {
+                    if n - ip < 2 {
                         return Err(XpressError::Truncated);
                     }
-                    len = input[ip] as usize;
-                    ip += 1;
-                    if len == 255 {
-                        if n - ip < 2 {
+                    len = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
+                    ip += 2;
+                    if len == 0 {
+                        if n - ip < 4 {
                             return Err(XpressError::Truncated);
                         }
-                        len = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
-                        ip += 2;
-                        if len == 0 {
-                            if n - ip < 4 {
-                                return Err(XpressError::Truncated);
-                            }
-                            len = u32::from_le_bytes([input[ip], input[ip + 1], input[ip + 2], input[ip + 3]]) as usize;
-                            ip += 4;
-                        }
-                        if len < 15 + 7 {
-                            return Err(XpressError::BadLength);
-                        }
-                        len -= 15 + 7;
+                        len = u32::from_le_bytes([input[ip], input[ip + 1], input[ip + 2], input[ip + 3]]) as usize;
+                        ip += 4;
                     }
-                    len += 15;
+                    if len < 15 + 7 {
+                        return Err(XpressError::BadLength);
+                    }
+                    len -= 15 + 7;
                 }
-                len += 7;
+                len += 15;
             }
-            len += 3;
-            op = copy_match(out, op, off, len)?;
+            len += 7;
         }
+        len += 3;
+        op = copy_match(out, op, off, len)?;
     }
     Ok(op)
 }
@@ -171,28 +215,102 @@ pub fn lz77_decompress(input: &[u8], out_len: usize) -> Result<Vec<u8>, XpressEr
 // ---------------------------------------------------------------------------------------------
 
 const HUFF_SYMBOLS: usize = 512;
-const HUFF_BITS: u32 = 15;
+const HUFF_MAX_LEN: usize = 15;
 const HUFF_BLOCK: usize = 65536;
+/// Primary lookup table bits: 2 KiB entries * 2 bytes stay in L1; longer codes (rare symbols)
+/// take the canonical slow path.
+const FAST_BITS: u32 = 11;
 
-/// Build the 2^15-entry direct decoding table from the 256-byte code length table.
-fn build_table(lengths: &[u8; HUFF_SYMBOLS], table: &mut [u16]) -> Result<(), XpressError> {
-    let mut pos = 0usize;
-    for bl in 1..=HUFF_BITS as u8 {
-        let entries = 1usize << (HUFF_BITS - bl as u32);
-        for (sym, &l) in lengths.iter().enumerate() {
-            if l == bl {
-                if pos + entries > table.len() {
-                    return Err(XpressError::BadTable);
-                }
-                table[pos..pos + entries].fill(sym as u16);
-                pos += entries;
-            }
+/// Canonical Huffman decoder for one block. The spec's 2^15 direct table assigns code space
+/// in (length, symbol) order, i.e. standard canonical codes.
+struct HuffTable {
+    /// (symbol << 4) | length for codes of length <= FAST_BITS, 0 = longer code.
+    fast: [u16; 1 << FAST_BITS],
+    first_code: [u32; HUFF_MAX_LEN + 1],
+    count: [u32; HUFF_MAX_LEN + 1],
+    offset: [u16; HUFF_MAX_LEN + 1],
+    sorted: [u16; HUFF_SYMBOLS],
+}
+
+impl HuffTable {
+    fn new() -> HuffTable {
+        HuffTable {
+            fast: [0; 1 << FAST_BITS],
+            first_code: [0; HUFF_MAX_LEN + 1],
+            count: [0; HUFF_MAX_LEN + 1],
+            offset: [0; HUFF_MAX_LEN + 1],
+            sorted: [0; HUFF_SYMBOLS],
         }
     }
-    if pos != table.len() {
-        return Err(XpressError::BadTable);
+
+    /// Build from the 256-byte table of 4-bit lengths. The spec requires the lengths to fill
+    /// the code space exactly.
+    fn build(&mut self, table: &[u8]) -> Result<(), XpressError> {
+        let mut count = [0u32; HUFF_MAX_LEN + 1];
+        for &b in table {
+            count[(b & 0xf) as usize] += 1;
+            count[(b >> 4) as usize] += 1;
+        }
+        count[0] = 0;
+        let mut code = 0u32;
+        let mut off = 0u16;
+        for l in 1..=HUFF_MAX_LEN {
+            self.first_code[l] = code;
+            self.offset[l] = off;
+            if code + count[l] > 1 << l {
+                return Err(XpressError::BadTable);
+            }
+            code = (code + count[l]) << 1;
+            off += count[l] as u16;
+        }
+        if code != 1 << (HUFF_MAX_LEN + 1) {
+            return Err(XpressError::BadTable);
+        }
+        self.count = count;
+        let mut next = self.offset;
+        for (i, &b) in table.iter().enumerate() {
+            for (sym, l) in [(2 * i, (b & 0xf) as usize), (2 * i + 1, (b >> 4) as usize)] {
+                if l != 0 {
+                    self.sorted[next[l] as usize] = sym as u16;
+                    next[l] += 1;
+                }
+            }
+        }
+        let mut pos = 0usize;
+        for l in 1..=FAST_BITS as usize {
+            let span = 1usize << (FAST_BITS as usize - l);
+            let o = self.offset[l] as usize;
+            for &sym in &self.sorted[o..o + count[l] as usize] {
+                self.fast[pos..pos + span].fill((sym << 4) | l as u16);
+                pos += span;
+            }
+        }
+        self.fast[pos..].fill(0);
+        Ok(())
     }
-    Ok(())
+
+    /// Decode the symbol at the top of `bits`: (symbol, code length).
+    #[inline(always)]
+    fn decode(&self, bits: u32) -> (usize, u32) {
+        let e = self.fast[(bits >> (32 - FAST_BITS)) as usize];
+        if e != 0 {
+            return ((e >> 4) as usize, (e & 15) as u32);
+        }
+        self.decode_slow(bits)
+    }
+
+    #[cold]
+    fn decode_slow(&self, bits: u32) -> (usize, u32) {
+        for l in FAST_BITS as usize + 1..=HUFF_MAX_LEN {
+            let c = bits >> (32 - l);
+            let i = c.wrapping_sub(self.first_code[l]);
+            if i < self.count[l] {
+                return (self.sorted[self.offset[l] as usize + i as usize] as usize, l as u32);
+            }
+        }
+        // unreachable for a complete code
+        (0, HUFF_MAX_LEN as u32)
+    }
 }
 
 /// Decompress Xpress "LZ77+Huffman" data into `out`; returns the number of bytes produced
@@ -201,45 +319,44 @@ pub fn huffman_decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, Xp
     let n = input.len();
     // Reads past the end of input yield zero bits: the bit reader prefetches up to 4 bytes
     // beyond the last used symbol.
-    let rd16 = |p: usize| -> u32 {
-        if p + 1 < n {
-            u16::from_le_bytes([input[p], input[p + 1]]) as u32
-        } else if p < n {
-            input[p] as u32
-        } else {
-            0
+    #[inline(always)]
+    fn rd16(input: &[u8], p: usize) -> u32 {
+        match input.get(p..p + 2) {
+            Some(b) => u16::from_le_bytes([b[0], b[1]]) as u32,
+            None => input.get(p).map_or(0, |&b| b as u32),
         }
-    };
-    let mut table = vec![0u16; 1 << HUFF_BITS];
-    let mut lengths = [0u8; HUFF_SYMBOLS];
+    }
+    let mut table = HuffTable::new();
     let mut ip = 0usize;
     let mut op = 0usize;
     while op < out.len() {
         if n.saturating_sub(ip) < 256 {
             return Err(XpressError::Truncated);
         }
-        for (i, &b) in input[ip..ip + 256].iter().enumerate() {
-            lengths[2 * i] = b & 0xf;
-            lengths[2 * i + 1] = b >> 4;
-        }
-        build_table(&lengths, &mut table)?;
+        table.build(&input[ip..ip + 256])?;
         ip += 256;
-        let mut bits: u32 = (rd16(ip) << 16) | rd16(ip + 2);
+        let mut bits: u32 = (rd16(input, ip) << 16) | rd16(input, ip + 2);
         ip += 4;
         let mut extra: i32 = 16;
         let block_end = op.saturating_add(HUFF_BLOCK).min(out.len());
+        // Branchless refill: whether 16 more bits are needed is data dependent (~50% per
+        // symbol), so a branch here mispredicts constantly.
+        #[inline(always)]
+        fn refill(input: &[u8], bits: &mut u32, extra: &mut i32, ip: &mut usize) {
+            let need = (*extra < 0) as u32;
+            let w = rd16(input, *ip);
+            *bits |= (w << ((-*extra) as u32 & 15)) & 0u32.wrapping_sub(need);
+            *extra += 16 * need as i32;
+            *ip += 2 * need as usize;
+        }
         while op < block_end {
-            let sym = table[(bits >> (32 - HUFF_BITS)) as usize] as usize;
-            let bl = lengths[sym] as u32;
+            let (sym, bl) = table.decode(bits);
             bits <<= bl;
             extra -= bl as i32;
-            if extra < 0 {
-                bits |= rd16(ip) << (-extra) as u32;
-                extra += 16;
-                ip += 2;
-            }
+            refill(input, &mut bits, &mut extra, &mut ip);
             if sym < 256 {
-                out[op] = sym as u8;
+                // SAFETY: op < block_end <= out.len()
+                unsafe { *out.get_unchecked_mut(op) = sym as u8 };
                 op += 1;
                 continue;
             }
@@ -275,11 +392,12 @@ pub fn huffman_decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, Xp
                 len += 15;
             }
             len += 3;
-            let off = if obits == 0 { 1 } else { ((bits >> (32 - obits)) as usize) + (1usize << obits) };
-            bits = if obits == 0 { bits } else { bits << obits };
+            // obits <= 15; shifting a u64 keeps obits == 0 well defined
+            let off = (((bits as u64) << obits) >> 32) as usize + (1usize << obits);
+            bits = ((bits as u64) << obits) as u32;
             extra -= obits as i32;
             if extra < 0 {
-                bits |= rd16(ip) << (-extra) as u32;
+                bits |= rd16(input, ip) << (-extra) as u32;
                 extra += 16;
                 ip += 2;
             }

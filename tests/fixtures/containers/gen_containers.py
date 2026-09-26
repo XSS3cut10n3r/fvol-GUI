@@ -394,6 +394,28 @@ def queries(layer, rng, n):
     return out
 
 
+def expect(main, rng, nq):
+    """Write MAIN's .expect (python's stacking decision, maximum_address and reads)."""
+    ctx, names = py_stack(main)
+    top = ctx.layers[names[0]]
+    lines = ["STACK " + " ".join(type(ctx.layers[n]).__name__ for n in names), f"MAX {top.maximum_address:x}"]
+    for a, ln in queries(top, rng, nq):
+        try:
+            d = top.read(a, ln)
+            lines.append(f"R {a:x} {ln:x} {fnv64(d):016x}")
+        except exceptions.InvalidAddressException:
+            lines.append(f"R {a:x} {ln:x} X")
+        try:
+            d = top.read(a, ln, pad=True)
+            lines.append(f"P {a:x} {ln:x} {fnv64(d):016x}")
+        except exceptions.InvalidAddressException:
+            pass
+    stem = os.path.splitext(main)[0]
+    with open(stem + ".expect", "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"{os.path.basename(main):24s} {os.path.getsize(main):11d} bytes  stack={lines[0][6:]}")
+
+
 def gen(raw, outdir, scale, nq, seed):
     mem = Memory(raw, seed)
     rng = random.Random(seed)
@@ -405,31 +427,22 @@ def gen(raw, outdir, scale, nq, seed):
             p = main if sfx == "" else main[: -len(ext)] + sfx
             with open(p, "wb") as f:
                 f.write(data)
-        ctx, names = py_stack(main)
-        top = ctx.layers[names[0]]
-        lines = ["STACK " + " ".join(type(ctx.layers[n]).__name__ for n in names), f"MAX {top.maximum_address:x}"]
-        for a, ln in queries(top, rng, nq):
-            try:
-                d = top.read(a, ln)
-                lines.append(f"R {a:x} {ln:x} {fnv64(d):016x}")
-            except exceptions.InvalidAddressException:
-                lines.append(f"R {a:x} {ln:x} X")
-            try:
-                d = top.read(a, ln, pad=True)
-                lines.append(f"P {a:x} {ln:x} {fnv64(d):016x}")
-            except exceptions.InvalidAddressException:
-                pass
-        with open(os.path.join(outdir, name + ".expect"), "w") as f:
-            f.write("\n".join(lines) + "\n")
-        print(f"{name:16s} {os.path.getsize(main):9d} bytes  stack={lines[0][6:]}")
+        expect(main, rng, nq)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("raw")
-    ap.add_argument("outdir")
+    ap.add_argument("raw", nargs="?")
+    ap.add_argument("outdir", nargs="?")
     ap.add_argument("--scale", type=int, default=1)
     ap.add_argument("--queries", type=int, default=120)
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--expect-only", nargs="+", metavar="FILE",
+                    help="only write .expect files for existing containers")
     a = ap.parse_args()
-    gen(a.raw, a.outdir, a.scale, a.queries, a.seed)
+    if a.expect_only:
+        rng = random.Random(a.seed)
+        for p in a.expect_only:
+            expect(p, rng, a.queries)
+    else:
+        gen(a.raw, a.outdir, a.scale, a.queries, a.seed)

@@ -74,21 +74,54 @@ pub fn uncompressed_len(src: &[u8]) -> Result<(usize, usize), SnappyError> {
 
 /// Decompress a raw snappy block into `dst`, returning the number of bytes written
 /// (== the preamble length). `dst` must be at least that large.
+pub fn decompress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, SnappyError> {
+    let mut st = Partial::start(src)?;
+    decompress_continue(src, dst, &mut st, usize::MAX)?;
+    Ok(st.ulen)
+}
+
+/// Resumable decoding state of one raw snappy block: lets a reader decode only the prefix it
+/// needs and continue later (random reads into large compressed frames).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Partial {
+    /// Next input position.
+    pub ip: usize,
+    /// Bytes of output produced so far.
+    pub op: usize,
+    /// Total uncompressed length (from the preamble).
+    pub ulen: usize,
+}
+
+impl Partial {
+    /// Parse the length preamble.
+    pub fn start(src: &[u8]) -> Result<Partial, SnappyError> {
+        let (ulen, ip) = uncompressed_len(src)?;
+        Ok(Partial { ip, op: 0, ulen })
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.op >= self.ulen
+    }
+}
+
+/// Continue decoding `src` into `dst` (which holds the `st.op` bytes produced so far) until
+/// at least `want` bytes are available (`want >= ulen`: decode and validate the whole block).
 ///
 /// Fast paths (like libsnappy): short literals and copies are done with fixed 16-byte
 /// unaligned moves when both buffers have slack, instead of variable-length memcpy calls.
 /// Every fast path is guarded by explicit bounds checks; the slow path handles buffer ends.
-pub fn decompress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, SnappyError> {
-    let (ulen, mut ip) = uncompressed_len(src)?;
-    if dst.len() < ulen {
+pub fn decompress_continue(src: &[u8], dst: &mut [u8], st: &mut Partial, want: usize) -> Result<(), SnappyError> {
+    let ulen = st.ulen;
+    if dst.len() < ulen || st.op > ulen {
         return Err(SnappyError::OutputTooSmall);
     }
     let out = &mut dst[..ulen];
-    let mut op = 0usize;
+    let limit = if want >= ulen { usize::MAX } else { want };
+    let (mut ip, mut op) = (st.ip, st.op);
     let n = src.len();
     let sp = src.as_ptr();
     let dp = out.as_mut_ptr();
-    while ip < n {
+    while ip < n && op < limit {
         // SAFETY: ip < n
         let tag = unsafe { *sp.add(ip) };
         ip += 1;
@@ -154,10 +187,13 @@ pub fn decompress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, SnappyError>
             }
         }
     }
-    if op != ulen {
+    st.ip = ip;
+    st.op = op;
+    if ip >= n && op != ulen {
+        // the stream ended before (or produced more than) the announced length
         return Err(SnappyError::BadLength);
     }
-    Ok(ulen)
+    Ok(())
 }
 
 /// LZ77-style back reference: copy `len` (<= 64) bytes from `op - off` to `op` (may overlap).
@@ -530,29 +566,22 @@ mod tests {
         }
     }
 
-    /// Throughput benchmark: RSVOL_SNAPPY_BENCH=<file of (u32 len, raw snappy block)*>
-    /// cargo test --release snappy_bench -- --ignored --nocapture
     #[test]
-    #[ignore]
-    fn snappy_bench() {
-        let Ok(path) = std::env::var("RSVOL_SNAPPY_BENCH") else { return };
-        let data = std::fs::read(path).unwrap();
-        let mut blocks = Vec::new();
-        let mut i = 0;
-        while i + 4 <= data.len() {
-            let n = u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
-            blocks.push(&data[i + 4..i + 4 + n]);
-            i += 4 + n;
-        }
+    fn resumable_prefix_decoding() {
+        use crate::codecs::testdata::{fixture, gen_data};
+        let c = fixture("snappy_block64k.bin");
+        let want = gen_data(6, 65536);
         let mut out = vec![0u8; 65536];
-        let mut total = 0usize;
-        let t = std::time::Instant::now();
-        for _ in 0..5 {
-            for b in &blocks {
-                total += decompress_into(b, &mut out).unwrap();
-            }
+        let mut st = Partial::start(&c).unwrap();
+        for need in [1usize, 100, 5000, 5001, 40000, 65536] {
+            decompress_continue(&c, &mut out, &mut st, need).unwrap();
+            assert!(st.op >= need);
+            assert_eq!(&out[..need], &want[..need]);
         }
-        let dt = t.elapsed().as_secs_f64();
-        println!("rsvol snappy: {:.1} MB/s ({} blocks)", total as f64 / dt / 1e6, blocks.len());
+        assert!(st.is_complete());
+        // a truncated stream fails once the decoder reaches the end
+        let mut st = Partial::start(&c[..c.len() / 2]).unwrap();
+        assert!(decompress_continue(&c[..c.len() / 2], &mut out, &mut st, 10).is_ok());
+        assert!(decompress_continue(&c[..c.len() / 2], &mut out, &mut st, 65536).is_err());
     }
 }

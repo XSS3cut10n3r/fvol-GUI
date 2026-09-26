@@ -105,6 +105,8 @@ const CACHE_SLOTS: usize = 64;
 
 struct Slot {
     idx: usize,
+    /// Resumable decoder state: only the prefix a reader needed has been decoded.
+    st: snappy::Partial,
     buf: Vec<u8>,
 }
 
@@ -115,7 +117,7 @@ struct BlockCache {
 
 impl BlockCache {
     fn new() -> BlockCache {
-        BlockCache { slots: (0..CACHE_SLOTS).map(|_| Mutex::new(Slot { idx: usize::MAX, buf: Vec::new() })).collect() }
+        BlockCache { slots: (0..CACHE_SLOTS).map(|_| Mutex::new(Slot { idx: usize::MAX, st: snappy::Partial::default(), buf: Vec::new() })).collect() }
     }
 }
 
@@ -471,37 +473,58 @@ impl SegmentedLayer {
         }
     }
 
+    /// Bytes `[inner, inner + out.len())` of decoded block `bi`. Minimum work: a read of the
+    /// whole block decodes straight into the caller's buffer; smaller reads decode only the
+    /// prefix they need into the block's cache slot and later reads resume from there.
     fn copy_block(&self, bi: usize, inner: usize, out: &mut [u8]) -> std::result::Result<(), ()> {
         let (Some(cache), Some(b)) = (self.cache.as_ref(), self.blocks.get(bi)) else {
             return Err(());
         };
-        let ulen = b.ulen as usize;
-        if inner.checked_add(out.len()).is_none_or(|e| e > ulen) {
+        if self.codec != Codec::Snappy {
             return Err(());
+        }
+        let ulen = b.ulen as usize;
+        let need = inner.checked_add(out.len()).ok_or(())?;
+        if need > ulen {
+            return Err(());
+        }
+        let owned;
+        let comp: &[u8] = match &self.file {
+            Some(f) => f.slice(b.off, b.clen as usize).ok_or(())?,
+            None => {
+                let mut v = vec![0u8; b.clen as usize];
+                self.lower.read(b.off, &mut v).map_err(|_| ())?;
+                owned = v;
+                &owned
+            }
+        };
+        if inner == 0 && out.len() == ulen {
+            return match snappy::decompress_into(comp, out) {
+                Ok(n) if n == ulen => Ok(()),
+                _ => Err(()),
+            };
         }
         let slot = &cache.slots[bi % CACHE_SLOTS];
         let mut g = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let g = &mut *g;
         if g.idx != bi {
             g.idx = usize::MAX;
+            g.st = snappy::Partial::start(comp).map_err(|_| ())?;
+            if g.st.ulen != ulen {
+                return Err(());
+            }
             if g.buf.len() < ulen {
                 g.buf.resize(ulen, 0);
             }
-            let ok = match &self.file {
-                Some(f) => match f.slice(b.off, b.clen as usize) {
-                    Some(comp) => decode(self.codec, comp, &mut g.buf[..ulen]),
-                    None => false,
-                },
-                None => {
-                    let mut comp = vec![0u8; b.clen as usize];
-                    self.lower.read(b.off, &mut comp).is_ok() && decode(self.codec, &comp, &mut g.buf[..ulen])
-                }
-            };
-            if !ok {
-                return Err(());
-            }
             g.idx = bi;
         }
-        out.copy_from_slice(&g.buf[inner..inner + out.len()]);
+        if g.st.op < need
+            && snappy::decompress_continue(comp, &mut g.buf[..ulen], &mut g.st, need).is_err()
+        {
+            g.idx = usize::MAX;
+            return Err(());
+        }
+        out.copy_from_slice(&g.buf[inner..need]);
         Ok(())
     }
 
@@ -574,12 +597,6 @@ fn mergeable(a: &Run, b: &Run) -> bool {
     }
 }
 
-fn decode(codec: Codec, comp: &[u8], out: &mut [u8]) -> bool {
-    match codec {
-        Codec::Snappy => matches!(snappy::decompress_into(comp, out), Ok(n) if n == out.len()),
-        Codec::None => false,
-    }
-}
 
 impl Layer for SegmentedLayer {
     fn name(&self) -> &str {
