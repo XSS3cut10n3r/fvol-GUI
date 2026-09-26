@@ -122,10 +122,30 @@ fn seg_reg(prefix: u8) -> u8 {
 }
 
 pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
+    match mode {
+        Mode::X86_64 => decode_impl::<true, true>(data, addr, mode, out),
+        Mode::X86_32 => decode_impl::<true, false>(data, addr, mode, out),
+    }
+}
+
+/// Instructions with legacy prefixes (restart of the specialized path below).
+#[inline(never)]
+fn decode_prefixed(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
+    match mode {
+        Mode::X86_64 => decode_impl::<false, true>(data, addr, mode, out),
+        Mode::X86_32 => decode_impl::<false, false>(data, addr, mode, out),
+    }
+}
+
+/// The decoder. `NOLEG = true` is the common-case instantiation: it hands any instruction with a
+/// legacy (non-REX) prefix to the `false` one, so all legacy prefix state is compile-time
+/// constant there and the prefix rules below fold away. Same source for both.
+#[inline(always)]
+fn decode_impl<const NOLEG: bool, const M64: bool>(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
     let t = tables();
     let n = data.len().min(15);
     let d = &data[..n];
-    let m64 = mode == Mode::X86_64;
+    let m64 = M64; // == (mode == Mode::X86_64), a constant per instantiation
     let mut i = 0usize;
     let mut lockrep = 0u8;
     let mut segp = 0u8;
@@ -160,6 +180,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             rex = d[j - 1];
             i = j;
             break;
+        }
+        if NOLEG {
+            return decode_prefixed(data, addr, mode, out);
         }
         match b {
             0xF0 | 0xF2 | 0xF3 => {
@@ -884,6 +907,7 @@ fn gpr_by_size(n: u8, size: u8, rex: bool) -> u8 {
     gpr(n, size, rex)
 }
 
+#[inline(always)]
 fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
     let mk = if mk == K_DEF {
         match cls {
@@ -985,7 +1009,7 @@ fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
 
 /// Register id for register class `cls` and register number `num` (already REX-extended).
 /// Returns 0 when invalid.
-#[inline]
+#[inline(always)]
 fn reg_for(st: &St, cls: u8, num: u8) -> u8 {
     let rexp = st.rex != 0;
     match cls {
@@ -1159,6 +1183,7 @@ fn parse_mem(st: &mut St) -> Option<Mem> {
     Some(m)
 }
 
+#[inline(always)]
 fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: u8) -> bool {
     let m64 = mode == Mode::X86_64;
     // ModRM / memory
@@ -1183,19 +1208,37 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
     out.ofmt = [0; MAX_OPS];
     out.evex = 0;
     out.sae = 0;
-    for k in 0..(e.nops as usize).min(MAX_OPS) {
-        if !operand(st, e, k, &mem, out, m64, op) {
+    // The first two operands are expanded inline (straight-line, no loop: in a loop LLVM
+    // hoists the many per-source invariants into a costly prologue); the rest go out of line.
+    let nops = (e.nops as usize).min(MAX_OPS);
+    if nops > 0 {
+        if !operand_inl(st, e, 0, &mem, out, m64, op) {
             return false;
+        }
+        if nops > 1 {
+            if !operand_inl(st, e, 1, &mem, out, m64, op) {
+                return false;
+            }
+            for k in 2..nops {
+                if !operand(st, e, k, &mem, out, m64, op) {
+                    return false;
+                }
+            }
         }
     }
     true
 }
 
-/// Decode explicit operand `k` (spec `s`). Kept out of line: inlined into the operand loop, the
-/// many per-source invariants get hoisted into a costly prologue.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn operand(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
+    operand_inl(st, e, k, mem, out, m64, op)
+}
+
+/// Decode explicit operand `k` (spec `e.ops[k]`).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn operand_inl(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
     let s = e.ops[k];
     let modrm = st.modrm;
     let is_reg = modrm >> 6 == 3;
