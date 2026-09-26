@@ -284,6 +284,34 @@ impl Context {
         symbols::load_location(&loc, &prefix, None, 0)
     }
 
+    /// python `PDBUtility.symbol_table_from_pdb(context, path, layer, pdb_name, offset, size)`:
+    /// find the RSDS record of `pdb_name` (e.g. "tcpip.pdb") inside `[offset, offset+size)` of
+    /// `layer` and load (or download/convert) its ISF.
+    pub fn symbol_table_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<TableRef> {
+        Ok(self.modtable_from_pdb(layer, pdb_name, offset, size)?.1)
+    }
+
+    /// python `PDBUtility.module_from_pdb(...)`: like [`Context::symbol_table_from_pdb`] but
+    /// returns a [`Module`] based at the MZ header found before the RSDS record.
+    pub fn module_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<Module> {
+        let (mz, t) = self.modtable_from_pdb(layer, pdb_name, offset, size)?;
+        let mz = mz.ok_or_else(|| Error::Symbol(format!("No MZ header found for {pdb_name}")))?;
+        Ok(Module::new(layer, t, mz))
+    }
+
+    fn modtable_from_pdb(&self, layer: LayerRef, pdb_name: &str, offset: Option<u64>, size: Option<u64>) -> Result<(Option<u64>, TableRef)> {
+        let start = offset.unwrap_or(layer.min_address());
+        let size = size.unwrap_or_else(|| layer.max_address().wrapping_sub(start));
+        let mut first = None;
+        crate::automagic::windows::pdbname_scan(layer, &[pdb_name.as_bytes()], Some(start), Some(start.wrapping_add(size)), |s| {
+            first = Some(s);
+            false
+        });
+        let s = first.ok_or_else(|| Error::Symbol(format!("Did not find GUID of {pdb_name} in module @ {start:#x}!")))?;
+        let t = self.load_windows_pdb(&s.pdb_name, &s.guid, s.age)?;
+        Ok((s.mz_offset, t))
+    }
+
     /// Create a file in the output directory (volatility3 CLIFileHandler semantics: if the
     /// preferred name already exists a counter is appended, see `cli::files::create`).
     /// Returns the open file and the FINAL file name, which is what python's
@@ -318,6 +346,29 @@ mod bench {
     use super::*;
     use crate::layers::LayerExt;
     use crate::layers::scan::{BytesScanner, scan};
+
+    /// `cargo test --release module_pdb_lookup -- --ignored --nocapture` (needs the test image
+    /// and tcpip.pdb's ISF in a symbol dir): python `PDBUtility.module_from_pdb` for tcpip.sys.
+    #[test]
+    #[ignore]
+    fn module_pdb_lookup() {
+        use crate::symbols::windows::WinExt;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let m = crate::plugins::windows::modules::list_modules(k)
+            .into_iter()
+            .filter_map(|m| m.ok())
+            .find(|m| m.m("BaseDllName").and_then(|n| n.get_string()).map(|n| n.eq_ignore_ascii_case("tcpip.sys")).unwrap_or(false))
+            .unwrap();
+        let base = m.m("DllBase").unwrap().u64().unwrap();
+        let size = m.m("SizeOfImage").unwrap().u64().unwrap();
+        let t = std::time::Instant::now();
+        let md = ctx.module_from_pdb(k.vlayer, "tcpip.pdb", Some(base), Some(size)).unwrap();
+        println!("tcpip.pdb module at {:#x} (DllBase {base:#x}), table {} from {} in {:.2} ms", md.offset, md.table().name(), md.table().isf_url(), t.elapsed().as_secs_f64() * 1e3);
+        assert_eq!(md.offset, base);
+        assert!(md.table().symbol_count() > 0);
+    }
 
     /// `RSVOL_BENCH_IMG=... cargo test --release translation_bench -- --ignored --nocapture`
     /// (run through bench/scripts/limit.sh): page-walk / mapping / virtual-scan throughput.
