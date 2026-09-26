@@ -3,7 +3,7 @@
 //!
 //!   cargo run --release --example disasm_detail_bench -- [testdata/scratch/disasm/ref/real64.ref]
 
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports, unused_assignments)]
 #[path = "../src/disasm/mod.rs"]
 mod disasm;
 
