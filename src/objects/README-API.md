@@ -155,6 +155,9 @@ mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning
 | `dos_header.get_nt_header()` / `reconstruct()` / `nt.get_sections()` | `crate::symbols::windows::pe::{get_nt_header, reconstruct, get_sections, write_pieces}` |
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
+| `mft.MFTEntry` / `MFTFileName` / `MFTAttribute` (`windows/mft` ISF) | `crate::symbols::windows::mft::{MftEntry, MftFileName, MftAttribute}` (`attributes()`, `standard_information_entries()`, `filename_entries()`, `longest_filename()`, `resident_data_attributes()`, `alternate_data_streams()`, `get_full_name()`, `get_resident_filename()`, `get_resident_filecontent()`) |
+| `MFTScan.enumerate_mft_records(ctx, path, primary)` | `crate::plugins::windows::mftscan::{enumerate_mft_records, enumerate_mft_batches}(layer, ...)` (yara `/FILE0\|FILE\*\|BAAD/` semantics, parse on the scan workers); layer = `mftscan::primary_memory_layer(ctx)?` |
+| `mbr.PARTITION_TABLE` / `PARTITION_ENTRY` (`windows/mbr` ISF) | `crate::symbols::windows::mbr::{PartitionTable, PartitionEntry}` |
 
 ### PE files: pefile, pe_symbols, verinfo
 
@@ -324,6 +327,9 @@ and driverscan this way and diffs them against python's output.
   `Value::NotApplicable` ("N/A"), `UnparsableValue()` = `Value::Unparsable` ("-").
 * Files: `let (file, name) = ctx.create_output_file(&sanitize_filename(..))?;` — `name` is the
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
+* A plugin's own unsatisfied requirement (e.g. `TranslationLayerRequirement(name="primary",
+  description=...)`): `Err(crate::plugins::unsatisfied_requirement("primary", "layer", "Memory
+  layer for the kernel"))` prints python's message (kinds: "layer", "symbols", other).
 * Errors: return `Err(e)`; python's "skip this row on InvalidAddressException" is
   `match row() { Err(e) if e.is_invalid_address() => continue, ... }`.
 
