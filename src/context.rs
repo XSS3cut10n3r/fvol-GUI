@@ -115,13 +115,9 @@ impl Context {
     /// Cheap: records options and sets the symbol search path. Nothing is opened or scanned.
     pub fn new(opts: GlobalOptions) -> Result<Context> {
         if opts.clear_cache {
-            // python --clear-cache wipes its identifier cache and cached data; ours are the
-            // identifier index, the automagic results, the binary symbol tables and the scan cache
-            let dir = crate::util::paths::rsvol_cache_dir();
-            let _ = std::fs::remove_file(dir.join("identifiers.cache"));
-            let _ = std::fs::remove_dir_all(dir.join("automagic"));
-            let _ = std::fs::remove_dir_all(dir.join("isf"));
-            let _ = std::fs::remove_dir_all(crate::layers::scancache::cache_root());
+            // python --clear-cache deletes every *.cache in its cache directory (downloads too)
+            // and its identifier cache; the same for ours (python's is only treated as empty)
+            crate::util::paths::clear_cache_dir(&crate::util::paths::rsvol_cache_dir());
         }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         symbols::set_remote_isf_url(opts.remote_isf_url.clone(), opts.offline);
@@ -144,7 +140,7 @@ impl Context {
 
     /// Path of the input image (`-f` or a `file://` `--single-location`). A `http://`,
     /// `https://` or `ftp://` location is downloaded once into the rsvol cache (python
-    /// `ResourceAccessor`: `data_<sha512>.cache`, never re-validated) and that
+    /// `ResourceAccessor`: `data_<sha512>.cache`, reused until `--clear-cache`) and that
     /// file is the image.
     pub fn image_path(&self) -> Result<PathBuf> {
         if let Some(f) = &self.opts.file {

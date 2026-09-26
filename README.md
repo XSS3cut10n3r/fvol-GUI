@@ -193,10 +193,11 @@ comes first.
 Downloads are named like python's, `data_` and the SHA-512 of the URL, and like python's they are
 never checked for changes on the server.
 
-To empty the caches, run any plugin with `--clear-cache` or delete the directory. `--clear-cache`
-removes the symbol tables, the identifier index, the kernel discovery results and the scan
-results. It keeps downloaded files and the `isfinfo` cache, and never deletes anything in
-python's cache directory.
+To empty the caches, run any plugin with `--clear-cache` or delete the directory. Like python's
+`--clear-cache`, which deletes every `*.cache` file in its cache directory, downloads included,
+rsvol's deletes every `*.cache` file in `~/.cache/rsvol`: downloads, the identifier index and the
+`isfinfo` cache. It also removes the symbol tables, the kernel discovery results and the scan
+results. It deletes nothing outside `~/.cache/rsvol`, so converted PDBs and python's own cache stay.
 
 ```bash
 vol --clear-cache -f <IMAGE> windows.info.Info

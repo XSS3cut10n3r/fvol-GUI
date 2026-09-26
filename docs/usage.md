@@ -53,7 +53,8 @@ pass the `.vmem` file and keep the `.vmss` or `.vmsn` file of the same name next
 
 `-f` also takes an `http://`, `https://` or `ftp://` URL, as python does. rsvol downloads the
 image once with `curl` into `~/.cache/rsvol/data_<SHA512>.cache`, named like python's download,
-and reads it from there on later runs without checking the server again. Like python, rsvol retries a download whose TLS certificate fails
+and reads it from there on later runs without checking the server again. `--clear-cache`
+deletes the download. Like python, rsvol retries a download whose TLS certificate fails
 verification without verification, with a warning.
 
 The exit status is 0 on success, 1 when the plugin cannot run or fails, and 2 for a usage error.
