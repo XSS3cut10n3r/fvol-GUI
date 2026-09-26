@@ -1,0 +1,748 @@
+{
+ "columns": [
+  [
+   "PID",
+   "int"
+  ],
+  [
+   "Name",
+   "str"
+  ],
+  [
+   "Offset(V)",
+   "hex"
+  ],
+  [
+   "Flags",
+   "bin"
+  ],
+  [
+   "Raw",
+   "bytes"
+  ],
+  [
+   "Ratio",
+   "float"
+  ],
+  [
+   "Wow64",
+   "bool"
+  ],
+  [
+   "CreateTime",
+   "datetime"
+  ],
+  [
+   "Dump",
+   "hexbytes"
+  ],
+  [
+   "Value",
+   "mtd"
+  ],
+  [
+   "Disasm",
+   "disasm"
+  ],
+  [
+   "Data",
+   "layer"
+  ],
+  [
+   "Comment",
+   "str"
+  ]
+ ],
+ "rows": [
+  [
+   0,
+   [
+    {
+     "t": "int",
+     "v": 4
+    },
+    {
+     "t": "str",
+     "v": "System"
+    },
+    {
+     "t": "int",
+     "v": 251262917058624
+    },
+    {
+     "t": "int",
+     "v": 5
+    },
+    {
+     "t": "bytes",
+     "hex": "deadbeef"
+    },
+    {
+     "t": "float",
+     "v": 1.0
+    },
+    {
+     "t": "bool",
+     "v": false
+    },
+    {
+     "t": "dt",
+     "secs": 1789354424,
+     "us": 0,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": "00"
+    },
+    {
+     "t": "mtd",
+     "hex": "73007600630068006f00730074002e00650078006500",
+     "enc": "utf-16-le",
+     "split": false,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "90c3",
+     "off": 0,
+     "arch": null
+    },
+    {
+     "t": "layer",
+     "hex": "41424344"
+    },
+    {
+     "t": "str",
+     "v": "n"
+    }
+   ]
+  ],
+  [
+   1,
+   [
+    {
+     "t": "int",
+     "v": -1
+    },
+    {
+     "t": "str",
+     "v": "tab\there"
+    },
+    {
+     "t": "int",
+     "v": -255
+    },
+    {
+     "t": "int",
+     "v": -5
+    },
+    {
+     "t": "bytes",
+     "hex": ""
+    },
+    {
+     "t": "float",
+     "v": 0.1
+    },
+    {
+     "t": "bool",
+     "v": true
+    },
+    {
+     "t": "dt",
+     "secs": 1789354424,
+     "us": 123456,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": ""
+    },
+    {
+     "t": "mtd",
+     "hex": "61000000620000006300",
+     "enc": "utf-16-le",
+     "split": true,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "",
+     "off": 16,
+     "arch": null
+    },
+    {
+     "t": "layer",
+     "hex": ""
+    },
+    {
+     "t": "str",
+     "v": ""
+    }
+   ]
+  ],
+  [
+   2,
+   [
+    {
+     "t": "int",
+     "v": 18446744073709551621
+    },
+    {
+     "t": "str",
+     "v": "new\nline"
+    },
+    {
+     "t": "int",
+     "v": 0
+    },
+    {
+     "t": "int",
+     "v": 0
+    },
+    {
+     "t": "bytes",
+     "hex": "00ff7f80"
+    },
+    {
+     "t": "float",
+     "v": 1e+16
+    },
+    {
+     "t": "bool",
+     "v": false
+    },
+    {
+     "t": "dt",
+     "secs": -11644473600,
+     "us": 1,
+     "utc": false
+    },
+    {
+     "t": "bytes",
+     "hex": "000102030405060708090a0b0c0d0e0f"
+    },
+    {
+     "t": "mtd",
+     "hex": "780000007900790000007a007a007a00",
+     "enc": "utf-16-le",
+     "split": false,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "unreadable"
+    },
+    {
+     "t": "layer",
+     "hex": "000102030405060708090a0b0c0d0e0f10"
+    },
+    {
+     "t": "str",
+     "v": "x"
+    }
+   ]
+  ],
+  [
+   3,
+   [
+    {
+     "t": "int",
+     "v": 0
+    },
+    {
+     "t": "str",
+     "v": "quote\"comma,back\\slash"
+    },
+    {
+     "t": "unreadable"
+    },
+    {
+     "t": "unparsable"
+    },
+    {
+     "t": "notapplicable"
+    },
+    {
+     "t": "notavailable"
+    },
+    {
+     "t": "unreadable"
+    },
+    {
+     "t": "notapplicable"
+    },
+    {
+     "t": "unparsable"
+    },
+    {
+     "t": "notavailable"
+    },
+    {
+     "t": "notapplicable"
+    },
+    {
+     "t": "unreadable"
+    },
+    {
+     "t": "str",
+     "v": "y"
+    }
+   ]
+  ],
+  [
+   1,
+   [
+    {
+     "t": "int",
+     "v": 123456789012345678901234567890
+    },
+    {
+     "t": "str",
+     "v": "unicode \u00e9\u4e2d\ud83d\ude00 wide"
+    },
+    {
+     "t": "int",
+     "v": 16
+    },
+    {
+     "t": "int",
+     "v": 1
+    },
+    {
+     "t": "bytes",
+     "hex": "20414243"
+    },
+    {
+     "t": "float",
+     "v": NaN
+    },
+    {
+     "t": "bool",
+     "v": true
+    },
+    {
+     "t": "dt",
+     "secs": 0,
+     "us": 999999,
+     "utc": false
+    },
+    {
+     "t": "bytes",
+     "hex": "414141414141414141414141414141414141414141414141414141414141414141"
+    },
+    {
+     "t": "mtd",
+     "hex": "41424344",
+     "enc": "utf-8",
+     "split": false,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "c3",
+     "off": 4096,
+     "arch": "bogus"
+    },
+    {
+     "t": "layer",
+     "hex": "61"
+    },
+    {
+     "t": "str",
+     "v": "z"
+    }
+   ]
+  ],
+  [
+   0,
+   [
+    {
+     "t": "int",
+     "v": 7
+    },
+    {
+     "t": "str",
+     "v": ""
+    },
+    {
+     "t": "int",
+     "v": 18446744073709551615
+    },
+    {
+     "t": "int",
+     "v": 255
+    },
+    {
+     "t": "bytes",
+     "hex": "5c22"
+    },
+    {
+     "t": "float",
+     "v": -0.0
+    },
+    {
+     "t": "bool",
+     "v": false
+    },
+    {
+     "t": "dt",
+     "secs": 253402300799,
+     "us": 999999,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": "5c225c"
+    },
+    {
+     "t": "mtd",
+     "hex": "310032003300",
+     "enc": "utf-16-le",
+     "split": false,
+     "show_hex": false,
+     "int": 123
+    },
+    {
+     "t": "notavailable"
+    },
+    {
+     "t": "notapplicable"
+    },
+    {
+     "t": "str",
+     "v": " lead"
+    }
+   ]
+  ],
+  [
+   3,
+   [
+    {
+     "t": "int",
+     "v": 8
+    },
+    {
+     "t": "str",
+     "v": "  spaced  "
+    },
+    {
+     "t": "int",
+     "v": 1
+    },
+    {
+     "t": "int",
+     "v": 2
+    },
+    {
+     "t": "bytes",
+     "hex": "0a0d"
+    },
+    {
+     "t": "float",
+     "v": 2.5e-07
+    },
+    {
+     "t": "bool",
+     "v": true
+    },
+    {
+     "t": "dt",
+     "secs": 951782400,
+     "us": 5,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": "0a"
+    },
+    {
+     "t": "mtd",
+     "hex": "00d841",
+     "enc": "utf-16-le",
+     "split": false,
+     "show_hex": true,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "0f0b",
+     "off": 1,
+     "arch": null
+    },
+    {
+     "t": "layer",
+     "hex": "7f80"
+    },
+    {
+     "t": "str",
+     "v": "trail "
+    }
+   ]
+  ],
+  [
+   0,
+   [
+    {
+     "t": "int",
+     "v": 9
+    },
+    {
+     "t": "str",
+     "v": "#hash"
+    },
+    {
+     "t": "int",
+     "v": 3
+    },
+    {
+     "t": "int",
+     "v": 3
+    },
+    {
+     "t": "bytes",
+     "hex": "2c"
+    },
+    {
+     "t": "float",
+     "v": 12345.678
+    },
+    {
+     "t": "bool",
+     "v": false
+    },
+    {
+     "t": "dt",
+     "secs": 1,
+     "us": 0,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": "ff"
+    },
+    {
+     "t": "mtd",
+     "hex": "e9e0",
+     "enc": "latin-1",
+     "split": false,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "90",
+     "off": 0,
+     "arch": null
+    },
+    {
+     "t": "layer",
+     "hex": "22"
+    },
+    {
+     "t": "str",
+     "v": "\""
+    }
+   ]
+  ],
+  [
+   1,
+   [
+    {
+     "t": "int",
+     "v": 10
+    },
+    {
+     "t": "str",
+     "v": "x-\u00e9"
+    },
+    {
+     "t": "int",
+     "v": 4
+    },
+    {
+     "t": "int",
+     "v": 4
+    },
+    {
+     "t": "bytes",
+     "hex": "22"
+    },
+    {
+     "t": "float",
+     "v": 1e-05
+    },
+    {
+     "t": "bool",
+     "v": true
+    },
+    {
+     "t": "dt",
+     "secs": 2,
+     "us": 0,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": "22"
+    },
+    {
+     "t": "mtd",
+     "hex": "e9007400e90000",
+     "enc": "utf-16-le",
+     "split": true,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "90",
+     "off": 0,
+     "arch": null
+    },
+    {
+     "t": "layer",
+     "hex": "5c"
+    },
+    {
+     "t": "str",
+     "v": "\\"
+    }
+   ]
+  ],
+  [
+   1,
+   [
+    {
+     "t": "int",
+     "v": 11
+    },
+    {
+     "t": "str",
+     "v": "-"
+    },
+    {
+     "t": "int",
+     "v": 5
+    },
+    {
+     "t": "int",
+     "v": 5
+    },
+    {
+     "t": "bytes",
+     "hex": "2d"
+    },
+    {
+     "t": "float",
+     "v": Infinity
+    },
+    {
+     "t": "bool",
+     "v": false
+    },
+    {
+     "t": "dt",
+     "secs": 3,
+     "us": 0,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": "2d"
+    },
+    {
+     "t": "mtd",
+     "hex": "2d00",
+     "enc": "utf-16-le",
+     "split": false,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "90",
+     "off": 0,
+     "arch": null
+    },
+    {
+     "t": "layer",
+     "hex": "2d"
+    },
+    {
+     "t": "str",
+     "v": "N/A"
+    }
+   ]
+  ],
+  [
+   2,
+   [
+    {
+     "t": "int",
+     "v": 12
+    },
+    {
+     "t": "str",
+     "v": "N/A"
+    },
+    {
+     "t": "int",
+     "v": 6
+    },
+    {
+     "t": "int",
+     "v": 6
+    },
+    {
+     "t": "bytes",
+     "hex": "00"
+    },
+    {
+     "t": "float",
+     "v": 1.2345678901234568e+17
+    },
+    {
+     "t": "bool",
+     "v": true
+    },
+    {
+     "t": "dt",
+     "secs": 4,
+     "us": 0,
+     "utc": true
+    },
+    {
+     "t": "bytes",
+     "hex": "00"
+    },
+    {
+     "t": "mtd",
+     "hex": "",
+     "enc": "utf-16-le",
+     "split": false,
+     "show_hex": false,
+     "int": null
+    },
+    {
+     "t": "dis",
+     "hex": "90",
+     "off": 0,
+     "arch": null
+    },
+    {
+     "t": "layer",
+     "hex": "00"
+    },
+    {
+     "t": "str",
+     "v": "-"
+    }
+   ]
+  ]
+ ]
+}

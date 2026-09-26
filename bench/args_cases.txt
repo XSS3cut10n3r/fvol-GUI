@@ -1,0 +1,46 @@
+pslist_pid	windows.pslist.PsList --pid 4 728 684
+pslist_phys	windows.pslist.PsList --physical
+pslist_dump	windows.pslist.PsList --pid 728 --dump
+pslist_csv	-r csv windows.pslist.PsList
+pslist_json	-r json windows.pslist.PsList
+pslist_jsonl	-r jsonl windows.pslist.PsList
+pslist_pretty	-r pretty windows.pslist.PsList
+pstree_pretty	-r pretty windows.pstree.PsTree
+pstree_json	-r json windows.pstree.PsTree
+pstree_csv	-r csv windows.pstree.PsTree
+psscan_phys	windows.psscan.PsScan --physical
+dlllist_pid	windows.dlllist.DllList --pid 728
+dlllist_dump	windows.dlllist.DllList --pid 728 --dump
+handles_pid	windows.handles.Handles --pid 728
+vadinfo_pid	windows.vadinfo.VadInfo --pid 728
+vadinfo_dump	windows.vadinfo.VadInfo --pid 728 --dump
+malfind_dump	windows.malware.malfind.Malfind --dump
+printkey_root	windows.registry.printkey.PrintKey
+printkey_key	windows.registry.printkey.PrintKey --key "ControlSet001\Services\Tcpip\Parameters"
+printkey_recurse	windows.registry.printkey.PrintKey --key "Software\Microsoft\Windows\CurrentVersion\Run" --recurse
+hivelist_dump	windows.registry.hivelist.HiveList --dump
+filescan_filter	--filters +Name,svchost windows.filescan.FileScan
+hide_cols	--hide-columns Offset Threads windows.pslist.PsList
+modules_dump	windows.modules.Modules --dump
+driverscan_json	-r json windows.driverscan.DriverScan
+memmap_pid	windows.memmap.Memmap --pid 728
+memmap_dump	windows.memmap.Memmap --pid 728 --dump
+cmdline_pid	windows.cmdline.CmdLine --pid 728 684
+envars_pid	windows.envars.Envars --pid 728
+envars_silent	windows.envars.Envars --silent
+vadyarascan	windows.vadyarascan.VadYaraScan --pid 728 --yara-rules "kernel32"
+yarascan	yarascan.YaraScan --yara-rules "Microsoft"
+regexscan	regexscan.RegExScan --pattern "http://[a-z]+\.com"
+vadregexscan	windows.vadregexscan.VadRegExScan --pid 728 --pattern "lsass"
+dumpfiles_pid	windows.dumpfiles.DumpFiles --pid 728
+pedump	windows.pedump.PEDump --pid 728 --base 0x7ff6a1c20000
+strings_help	windows.strings.Strings -h
+pslist_help	windows.pslist.PsList -h
+main_help	-h
+pesymbols	windows.pe_symbols.PESymbols --source kernel --module ntoskrnl.exe --symbols NtCreateFile
+direct_syscalls	windows.malware.direct_system_calls.DirectSystemCalls
+indirect_syscalls	windows.malware.indirect_system_calls.IndirectSystemCalls
+direct_syscalls_old	windows.direct_system_calls.DirectSystemCalls
+indirect_syscalls_old	windows.indirect_system_calls.IndirectSystemCalls
+vadyarascan_file	windows.vadyarascan.VadYaraScan --pid 728 --yara-rules "{4D 5A 90 00}"
+layerwriter	layerwriter.LayerWriter
