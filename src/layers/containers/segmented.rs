@@ -181,6 +181,8 @@ pub struct SegmentedLayer {
     blocks: Box<[Block]>,
     codec: Codec,
     cache: Option<BlockCache>,
+    /// python `LinearlyMappedLayer` (`Access::Linear`); QEMU / AVML are not.
+    linear: bool,
 }
 
 // SAFETY: `file_data` points into the read-only mapping owned by `file` (an Arc kept for the
@@ -279,7 +281,10 @@ impl SegmentedLayer {
                     continue;
                 }
                 let run = Run { start: s.start, end, src: key_src(&s).1 };
+                // non-linear layers keep python's segments: their mapping() tuples are the
+                // scan's blocks (adjacent same-byte fill pages must stay apart)
                 if let Some(prev) = runs.last_mut()
+                    && access == Access::Linear
                     && prev.end == run.start
                     && mergeable(prev, &run)
                 {
@@ -313,6 +318,7 @@ impl SegmentedLayer {
             blocks: blocks.into_boxed_slice(),
             codec,
             cache,
+            linear: access == Access::Linear,
         }
     }
 
@@ -809,6 +815,10 @@ impl Layer for SegmentedLayer {
 
     fn lower(&self) -> Option<&Arc<dyn Layer>> {
         Some(&self.lower)
+    }
+
+    fn is_linear(&self) -> bool {
+        self.linear
     }
 
     #[inline]

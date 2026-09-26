@@ -330,6 +330,7 @@ with a traceback; the rsvol equivalent is a plugin panic, which the CLI renders 
 | `layer.canonicalize(addr)` | `k.layer.canonicalize(addr)` |
 | `layer.config["kernel_virtual_offset"]` | `layer.as_intel().and_then(\|i\| i.kernel_virtual_offset())` |
 | `isinstance(layer, intel.Intel)` | `layer.as_intel().is_some()` |
+| `isinstance(layer, linear.LinearlyMappedLayer)` (false for AVML / QEMU) | `layer.is_linear()` (scans read non-linear layers through the layer, per segment) |
 
 ## Scanning (python `layer.scan(context, scanner, sections=...)`)
 

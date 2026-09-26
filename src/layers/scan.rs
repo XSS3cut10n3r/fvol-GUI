@@ -228,6 +228,20 @@ fn runs_join(a: &Run, b: &Run) -> bool {
 /// only the runs at piece boundaries (which may continue in the neighbour) are joined and cut
 /// sequentially.
 fn run_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], start: u64, length: u64, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
+    if !layer.is_linear() {
+        // python `_scan_iterator(linear=False)` (AVML, QEMU): every mapping() tuple is its own
+        // block (nothing is coalesced) and is read through the layer itself, whose data is
+        // decoded; the mapped offsets are compressed frames / fill bytes, not the data. Raw
+        // spans still take the direct file path (`chunk_source` via `slice()`).
+        mapping_runs(layer, deps, start, length, &mut |r| {
+            let n = out.len();
+            cut_run(r, chunk, overlap, out);
+            for c in &mut out[n..] {
+                c.src = Src::Layer;
+            }
+        });
+        return;
+    }
     let Some(pieces) = run_pieces(layer, start, length) else {
         let mut pending: Option<Run> = None;
         mapping_runs(layer, deps, start, length, &mut |r| match pending.as_mut() {
