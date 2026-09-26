@@ -126,8 +126,8 @@ fn cluster(mut cl: Vec<Cluster>, cost: &dyn Fn(&[Nib; MAX_WINDOW], usize) -> f64
     let mut best: Vec<(f64, usize)> = vec![(f64::INFINITY, usize::MAX); n];
     let rescan = |cl: &[Cluster], own: &[f64], active: &[bool], a: usize| -> (f64, usize) {
         let mut r = (f64::INFINITY, usize::MAX);
-        for b in 0..cl.len() {
-            if b != a && active[b] {
+        for (b, &act) in active.iter().enumerate() {
+            if b != a && act {
                 let d = delta(cl, own, a, b);
                 if d < r.0 {
                     r = (d, b);
@@ -136,8 +136,8 @@ fn cluster(mut cl: Vec<Cluster>, cost: &dyn Fn(&[Nib; MAX_WINDOW], usize) -> f64
         }
         r
     };
-    for a in 0..n {
-        best[a] = rescan(&cl, &own, &active, a);
+    for (a, bst) in best.iter_mut().enumerate() {
+        *bst = rescan(&cl, &own, &active, a);
     }
     let mut left = n;
     while left > NB {

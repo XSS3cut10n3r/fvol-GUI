@@ -54,23 +54,13 @@ struct Pat {
     /// Window (engine fingerprint) offset inside the pattern and its length.
     w: u32,
     wlen: u32,
-    /// Quick window test at the candidate position (4-byte windows only):
-    /// `(word | wfold) & wmask == wval`; `wmask == 0` disables it.
-    wval: u32,
-    wfold: u32,
-    wmask: u32,
+    /// The pattern is its own window (every engine reports exact window matches, so
+    /// only the bounds need checking).
+    whole: bool,
 }
 
 impl Pat {
-    fn new(string: u32, sub: u32, off: usize, pat: &[u8], fold: &[u8], w: usize, wlen: usize) -> Pat {
-        let (mut wval, mut wfold, mut wmask) = (0u32, 0u32, 0u32);
-        if (1..=4).contains(&wlen) {
-            for j in 0..wlen {
-                wval |= (pat[w + j] as u32) << (8 * j);
-                wfold |= (fold[w + j] as u32) << (8 * j);
-            }
-            wmask = u32::MAX >> (32 - 8 * wlen);
-        }
+    fn new(string: u32, sub: u32, off: usize, pat: &[u8], w: usize, wlen: usize) -> Pat {
         Pat {
             string,
             sub,
@@ -78,18 +68,7 @@ impl Pat {
             len: pat.len() as u32,
             w: w as u32,
             wlen: wlen as u32,
-            wval,
-            wfold,
-            wmask,
-        }
-    }
-
-    /// Cheap rejection of engine false positives: the window bytes at `q`.
-    #[inline(always)]
-    fn window_ok(&self, data: &[u8], q: usize) -> bool {
-        match data.get(q..q + 4) {
-            Some(b) => (u32::from_le_bytes([b[0], b[1], b[2], b[3]]) | self.wfold) & self.wmask == self.wval,
-            None => true,
+            whole: w == 0 && wlen == pat.len() && wlen <= teddy::MAX_WINDOW,
         }
     }
 }
@@ -444,7 +423,7 @@ impl Matcher {
                             let d: Vec<u8> = c.pat.windows(2).map(|w| w[0] ^ w[1]).collect();
                             let zero = vec![0u8; d.len()];
                             let (w, wl) = best_window(&d, &zero, false);
-                            m.dpats.push(Pat::new(si, ci as u32, dbytes.len(), &d, &zero, w, wl));
+                            m.dpats.push(Pat::new(si, ci as u32, dbytes.len(), &d, w, wl));
                             dbytes.extend_from_slice(&d);
                         } else if !m.every_text.contains(&si) {
                             m.every_text.push(si);
@@ -489,7 +468,7 @@ impl Matcher {
 
     fn add_pat(&mut self, string: u32, sub: u32, pat: &[u8], fold: &[u8]) {
         let (w, wl) = best_window(pat, fold, true);
-        self.pats.push(Pat::new(string, sub, self.bytes.len(), pat, fold, w, wl));
+        self.pats.push(Pat::new(string, sub, self.bytes.len(), pat, w, wl));
         self.bytes.extend_from_slice(pat);
         self.folds.extend_from_slice(fold);
     }
@@ -514,7 +493,10 @@ impl Matcher {
         self.raw.run(data, 0, data.len(), &mut st, 0xff, |q, p| {
             raw += 1;
             per[p as usize] += 1;
-            winok += self.pats[p as usize].window_ok(data, q) as usize;
+            let pt = &self.pats[p as usize];
+            let a = (pt.off + pt.w) as usize;
+            let e = a + pt.wlen as usize;
+            winok += eq_at(data, q, &self.bytes[a..e], &self.folds[a..e], 0) as usize;
             let pat = &self.pats[p as usize];
             if let Some(s) = q.checked_sub(pat.w as usize) {
                 let (a, e) = (pat.off as usize, (pat.off + pat.len) as usize);
@@ -724,7 +706,7 @@ impl Matcher {
         }
         // Every engine reports exact window matches, so a pattern that is its own
         // window only needs the bounds check.
-        if pat.wlen == pat.len && pat.wmask == u32::MAX >> (32 - 8 * pat.wlen.min(4)) {
+        if pat.whole {
             if s + pat.len as usize > data.len() {
                 return;
             }
