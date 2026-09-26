@@ -1,8 +1,8 @@
 //! Differential tester for the capstone *detail mode* API of src/disasm (regs_access, detail
 //! operands, opcode bytes) against the reference written by bench/scripts/disasm_detail_diff.py.
 //!
-//!   cargo run --profile fast --example disasm_detail_diff -- cmp /tmp/rsvol-disasm [--only real64] [--show N]
-//!   cargo run --profile fast --example disasm_detail_diff -- bench /tmp/rsvol-disasm/real64.det
+//!   cargo run --profile fast --example disasm_detail_diff -- cmp /home/user/rs-vol/testdata/scratch/disasm/ref [--only real64] [--show N]
+//!   cargo run --profile fast --example disasm_detail_diff -- bench /home/user/rs-vol/testdata/scratch/disasm/ref/real64.det
 //!
 //! `cmp` reads DIR/NAME.det, decodes each window with our decoder and compares, per category,
 //! against capstone:
@@ -12,6 +12,8 @@
 //!   accR/W    regs_access() lists (ordered)      accset    regs_access() as sets
 //!   w_eax     "eax"/"rax" in regs_written        w_r10     "r10" in regs_written (plugin tests)
 //!   riprel    mov/lea operands[1] RIP-relative target (skeleton_key_check)
+//!   text      mnemonic / op_str (the decoder's own diff; detail can only match where text does)
+//!   accset_t  accset mismatches on lines whose text matches
 //! Rates are printed per corpus (unique lines and occurrence weighted); the most frequent
 //! mismatches are shown grouped by (category, mnemonic) and all are written to DIR/NAME.dmis.
 
@@ -37,8 +39,14 @@ fn unhex(s: &str) -> Vec<u8> {
     (0..b.len() / 2).map(|i| (v(b[2 * i]) << 4) | v(b[2 * i + 1])).collect()
 }
 
-const CATS: [&str; 12] =
-    ["opcode", "zero", "ops", "opsacc", "implR", "implW", "accR", "accW", "accset", "w_eax", "w_r10", "riprel"];
+/// Where bench/scripts/disasm_detail_diff.py writes the references (on disk: /tmp is RAM).
+const DEFAULT_DIR: &str = "/home/user/rs-vol/testdata/scratch/disasm/ref";
+
+const NCAT: usize = 14;
+const CATS: [&str; NCAT] = [
+    "opcode", "zero", "ops", "opsacc", "implR", "implW", "accR", "accW", "accset", "w_eax", "w_r10", "riprel",
+    "text", "accset_t",
+];
 
 fn ops_string(insn: &Insn, with_acc: bool) -> String {
     let mut s = String::new();
@@ -146,8 +154,8 @@ fn riprel_ours(insn: &Insn) -> String {
 }
 
 struct Stat {
-    uniq: [u64; 12],
-    wt: [u64; 12],
+    uniq: [u64; NCAT],
+    wt: [u64; NCAT],
 }
 
 fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<String>>) {
@@ -168,7 +176,7 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
         let f = std::fs::File::open(format!("{dir}/{name}.det")).expect("open det");
         let mis = std::fs::File::create(format!("{dir}/{name}.dmis")).expect("create dmis");
         let mut mis = BufWriter::new(mis);
-        let mut st = Stat { uniq: [0; 12], wt: [0; 12] };
+        let mut st = Stat { uniq: [0; NCAT], wt: [0; NCAT] };
         let (mut uniq, mut wtot, mut undecoded) = (0u64, 0u64, 0u64);
         let mut groups: HashMap<(usize, String), (u64, u64, String)> = HashMap::new();
         let t0 = Instant::now();
@@ -204,6 +212,8 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
                 (aw.contains_name("eax") || aw.contains_name("rax")).to_string(),
                 aw.contains_name("r10").to_string(),
                 riprel_ours(&insn),
+                format!("{}\t{}", insn.mnemonic(), insn.op_str()),
+                String::new(),
             ];
             let cs_w = set_of(p[13]);
             let theirs = [
@@ -219,11 +229,16 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
                 (cs_w.contains(&"eax") || cs_w.contains(&"rax")).to_string(),
                 cs_w.contains(&"r10").to_string(),
                 riprel_cs(&p, addr, insn.size as u64),
+                format!("{}\t{}", p[15], p[16]),
+                String::new(),
             ];
             let mut bad_any = false;
-            for c in 0..12 {
+            let acc_bad = set_of(&ours[6]) != set_of(p[12]) || set_of(&ours[7]) != set_of(p[13]);
+            for c in 0..NCAT {
                 let bad = if c == 8 {
-                    set_of(&ours[6]) != set_of(p[12]) || set_of(&ours[7]) != set_of(p[13])
+                    acc_bad
+                } else if c == 13 {
+                    acc_bad && ours[12] == theirs[12]
                 } else {
                     ours[c] != theirs[c]
                 };
@@ -231,7 +246,7 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
                     bad_any = true;
                     st.uniq[c] += 1;
                     st.wt[c] += count;
-                    let (o, t) = if c == 8 {
+                    let (o, t) = if c == 8 || c == 13 {
                         (format!("{} / {}", ours[6], ours[7]), format!("{} / {}", p[12], p[13]))
                     } else {
                         (ours[c].clone(), theirs[c].clone())
@@ -253,7 +268,7 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
             "{name}: {uniq} unique ({wtot} weighted), undecoded {undecoded}, {:.2}s",
             dt.as_secs_f64()
         );
-        for c in 0..12 {
+        for c in 0..NCAT {
             println!(
                 "  {:8} unique {:>8} ({:.4}%)  weighted {:>10} ({:.5}%)",
                 CATS[c],
@@ -265,7 +280,7 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
         }
         let mut gv: Vec<_> = groups.into_iter().collect();
         gv.sort_by(|a, b| (a.0.0, std::cmp::Reverse(a.1.0)).cmp(&(b.0.0, std::cmp::Reverse(b.1.0))));
-        let mut shown_per_cat = [0usize; 12];
+        let mut shown_per_cat = [0usize; NCAT];
         for ((c, mn), (u, w, ex)) in gv {
             if shown_per_cat[c] >= show || cats.as_ref().is_some_and(|v| !v.iter().any(|x| x == CATS[c])) {
                 continue;
@@ -277,33 +292,53 @@ fn cmp(dir: &str, only: Option<Vec<String>>, show: usize, cats: Option<Vec<Strin
 }
 
 fn bench(path: &str) {
+    // flat 16-byte slots: [len, 15 bytes]; mode / address side arrays (no pointer chasing)
     let f = std::fs::File::open(path).expect("open det");
-    let mut wins: Vec<(Mode, u64, Vec<u8>)> = Vec::new();
+    let (mut slots, mut modes, mut addrs) = (Vec::<[u8; 16]>::new(), Vec::new(), Vec::new());
     for line in std::io::BufReader::new(f).lines() {
         let line = line.unwrap();
         let p: Vec<&str> = line.split('\t').collect();
         if p.len() < 5 {
             continue;
         }
-        let mode = if p[1] == "64" { Mode::X86_64 } else { Mode::X86_32 };
-        wins.push((mode, u64::from_str_radix(p[2], 16).unwrap_or(0), unhex(p[3])));
+        let w = unhex(p[3]);
+        let mut s = [0u8; 16];
+        let l = w.len().min(15);
+        s[0] = l as u8;
+        s[1..1 + l].copy_from_slice(&w[..l]);
+        slots.push(s);
+        modes.push(if p[1] == "64" { Mode::X86_64 } else { Mode::X86_32 });
+        addrs.push(u64::from_str_radix(p[2], 16).unwrap_or(0));
     }
+    let n = slots.len().max(1) as f64;
     let mut insn = Insn::default();
-    for round in 0..3 {
-        let t0 = Instant::now();
+    let mut run = |what: u8| {
+        let mut best = f64::MAX;
         let mut acc = 0usize;
-        for (mode, addr, w) in &wins {
-            if x86::decode_into(w, *addr, *mode, &mut insn) {
-                let (r, wr) = insn.regs_access();
-                acc += r.len() + wr.len();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            acc = 0;
+            for i in 0..slots.len() {
+                let s = &slots[i];
+                if x86::decode_into(&s[1..1 + s[0] as usize], addrs[i], modes[i], &mut insn) {
+                    acc += match what {
+                        0 => insn.size as usize,
+                        1 => {
+                            let (r, w) = insn.regs_access();
+                            r.len() + w.len()
+                        }
+                        2 => insn.detail_operands().len(),
+                        _ => insn.regs_written_contains("rax") as usize,
+                    };
+                }
             }
+            best = best.min(t0.elapsed().as_nanos() as f64 / n);
         }
-        let dt = t0.elapsed();
-        println!(
-            "round {round}: {} insns, decode+regs_access {:.1} ns/insn (checksum {acc})",
-            wins.len(),
-            dt.as_nanos() as f64 / wins.len().max(1) as f64
-        );
+        (best, acc)
+    };
+    for (what, name) in [(0u8, "decode"), (1, "decode+regs_access"), (2, "decode+detail_operands"), (3, "decode+regs_written_contains")] {
+        let (ns, acc) = run(what);
+        println!("{:>30}: {:6.1} ns/insn  ({} insns, checksum {acc})", name, ns, slots.len());
     }
 }
 
@@ -500,7 +535,10 @@ fn learn(dir: &str, only: Option<Vec<String>>) {
                     .split('|')
                     .map(|o| {
                         let f: Vec<&str> = o.split(',').collect();
-                        if f[0] == "m" { f[7] } else { f[3] }
+                        let v: u32 = (if f[0] == "m" { f[7] } else { f[3] }).parse().unwrap_or(0);
+                        // capstone sometimes reports uninitialised values (253, 255, ...): keep
+                        // the read / write bits that cs_regs_access looks at
+                        char::from(b'0' + (if v > 3 { v & 3 } else { v }) as u8)
                     })
                     .collect()
             };
@@ -548,10 +586,12 @@ fn learn(dir: &str, only: Option<Vec<String>>) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // optional positional DIR / FILE right after the subcommand
+    let pos = args.get(2).filter(|s| !s.starts_with("--")).cloned();
     let mut only = None;
     let mut show = 20;
     let mut cats: Option<Vec<String>> = None;
-    let mut i = 3;
+    let mut i = if pos.is_some() { 3 } else { 2 };
     while i < args.len() {
         match args[i].as_str() {
             "--only" => {
@@ -570,10 +610,20 @@ fn main() {
         }
         i += 1;
     }
+    let dir = pos.clone().unwrap_or_else(|| DEFAULT_DIR.to_string());
     match args.get(1).map(|s| s.as_str()) {
-        Some("cmp") => cmp(args.get(2).map_or("/tmp/rsvol-disasm", |s| s.as_str()), only, show, cats),
-        Some("bench") => bench(args.get(2).expect("path")),
-        Some("learn") => learn(args.get(2).map_or("/tmp/rsvol-disasm", |s| s.as_str()), only),
-        _ => eprintln!("usage: disasm_detail_diff cmp DIR [--only a,b] [--show N] | bench FILE.det"),
+        Some("cmp") => cmp(&dir, only, show, cats),
+        Some("bench") => bench(&pos.unwrap_or_else(|| format!("{DEFAULT_DIR}/real64.det"))),
+        Some("learn") => learn(&dir, only),
+        Some("uncovered") => {
+            let v = x86::uncovered_mnemonics();
+            println!("{} mnemonics without rules: {}", v.len(), v.join(" "));
+        }
+        _ => eprintln!(
+            "usage: disasm_detail_diff cmp [DIR] [--only a,b] [--show N] [--cat c1,c2]\n\
+             \x20      disasm_detail_diff bench [FILE.det]\n\
+             \x20      disasm_detail_diff learn [DIR] [--only a,b]   (prints a rule spec)\n\
+             \x20      disasm_detail_diff uncovered"
+        ),
     }
 }

@@ -9,6 +9,7 @@ use super::regs::{self, RFLAGS};
 use super::tables::{self, Entry};
 use super::{Insn, Mem, MemSize, Mode, Operand, Reg, MAX_OPS};
 use std::ops::Deref;
+use std::sync::OnceLock;
 
 /// capstone `CS_AC_READ`.
 pub const CS_AC_READ: u8 = 1;
@@ -261,56 +262,86 @@ pub(crate) fn reg_size(r: Reg, mode: Mode) -> u8 {
     }
 }
 
+// per-mnemonic special cases of capstone's detail operands (resolved once per mnemonic id, so
+// the hot path never compares strings)
+const SP_NONE: u8 = 0;
+const SP_LEA: u8 = 1; // bare memory operand sized like the destination
+const SP_JMP: u8 = 2; // far jmp ptr [m]: 8 (64-bit) / 6
+const SP_CALL: u8 = 3; // far call ptr [m]: native
+const SP_LFAR: u8 = 4; // ljmp / lcall [m]: 10 / 6
+const SP_NATIVE: u8 = 5; // bare memory operand of native size
+const SP_ENV: u8 = 6; // fnstenv / fldenv: 28
+const SP_DT: u8 = 7; // sgdt ... lidt: 10 / 6
+const SP_BND: u8 = 8; // bndldx ... bndcn: 16
+const SP_PUSH: u8 = 9; // push imm: operand size
+const SP_FXCH: u8 = 10; // implicit st(0) operand
+const SP_XMM0: u8 = 11; // printed implicit xmm0 is not an operand
+const SP_RCL: u8 = 12; // "rcl m" has a hidden literal 1
+
+fn special_of(m: &str) -> u8 {
+    match m {
+        "lea" => SP_LEA,
+        "jmp" => SP_JMP,
+        "call" => SP_CALL,
+        "ljmp" | "lcall" => SP_LFAR,
+        "les" | "lds" | "lss" | "lfs" | "lgs" | "fxsave" | "fxrstor" | "fxsave64" | "fxrstor64" | "xsave"
+        | "xrstor" | "xsaves" | "xrstors" | "xsavec" | "xsaveopt" | "xsave64" | "xrstor64" | "xsaves64"
+        | "xrstors64" | "xsavec64" | "xsaveopt64" => SP_NATIVE,
+        "fnstenv" | "fldenv" | "fstenv" => SP_ENV,
+        "sgdt" | "sidt" | "lgdt" | "lidt" => SP_DT,
+        "bndldx" | "bndstx" | "bndcl" | "bndcu" | "bndcn" => SP_BND,
+        "push" => SP_PUSH,
+        "fxch" => SP_FXCH,
+        "pblendvb" | "blendvps" | "blendvpd" | "sha256rnds2" => SP_XMM0,
+        "rcl" => SP_RCL,
+        _ => SP_NONE,
+    }
+}
+
+static SPECIAL: OnceLock<Vec<u8>> = OnceLock::new();
+
+#[inline]
+fn special(insn: &Insn) -> u8 {
+    let t = SPECIAL.get_or_init(|| tables::tables().mnems.iter().map(|m| special_of(m)).collect());
+    t.get(insn.mnem as usize).copied().unwrap_or(SP_NONE)
+}
+
 /// Size capstone reports for a memory operand without a printed size keyword.
-fn bare_mem_size(insn: &Insn, p: &Prefixes, ops: &[Operand]) -> u8 {
-    let m64 = insn.mode == Mode::X86_64;
+#[inline]
+fn bare_mem_size(sp: u8, m64: bool, ops: &[Operand]) -> u8 {
     let native = if m64 { 8 } else { 4 };
-    match insn.base_mnemonic() {
-        "lea" => ops.first().map_or(0, |o| match *o {
+    match sp {
+        SP_LEA => ops.first().map_or(0, |o| match *o {
             Operand::Reg(r) => r.size(),
             _ => 0,
         }),
-        // far indirect jmp / call (FF /5, FF /3); "ljmp" / "lcall" when 66 / REX.W is present
-        "jmp" => {
+        SP_JMP => {
             if m64 {
                 8
             } else {
                 6
             }
         }
-        "call" => native,
-        "ljmp" | "lcall" => {
+        SP_CALL | SP_NATIVE => native,
+        SP_LFAR | SP_DT => {
             if m64 {
                 10
             } else {
                 6
             }
         }
-        "les" | "lds" | "lss" | "lfs" | "lgs" | "fxsave" | "fxrstor" | "fxsave64" | "fxrstor64" | "xsave"
-        | "xrstor" | "xsaves" | "xrstors" | "xsavec" | "xsaveopt" | "xsave64" | "xrstor64" | "xsaves64"
-        | "xrstors64" | "xsavec64" | "xsaveopt64" => native,
-        "fnstenv" | "fldenv" | "fstenv" => 28,
-        "sgdt" | "sidt" | "lgdt" | "lidt" => {
-            if m64 {
-                10
-            } else {
-                6
-            }
-        }
-        "bndldx" | "bndstx" | "bndcl" | "bndcu" | "bndcn" => 16,
-        _ => {
-            let _ = p;
-            0
-        }
+        SP_ENV => 28,
+        SP_BND => 16,
+        _ => 0,
     }
 }
 
 /// Build capstone's detail operand list (access flags are filled in by `access.rs`).
-pub(crate) fn cs_operands(insn: &Insn) -> DetailOps {
+pub(crate) fn cs_operands(insn: &Insn, p: &Prefixes) -> DetailOps {
     let mut out = DetailOps::default();
     let ops = insn.ops();
     let e = entry(insn);
-    let p = prefixes(insn);
+    let sp = special(insn);
     let m64 = insn.mode == Mode::X86_64;
     let rexw = p.rex & 8 != 0;
     // capstone's size for branch targets / ret imm16 / enter
@@ -318,6 +349,14 @@ pub(crate) fn cs_operands(insn: &Insn) -> DetailOps {
         if p.has66 || rexw { 4 } else { 8 }
     } else if p.has66 {
         2
+    } else {
+        4
+    };
+    // operand size of push
+    let push_size: u8 = if p.has66 {
+        2
+    } else if m64 {
+        8
     } else {
         4
     };
@@ -343,7 +382,7 @@ pub(crate) fn cs_operands(insn: &Insn) -> DetailOps {
             Operand::Reg(r) => reg_size(r, insn.mode),
             Operand::Mem(ref m) => {
                 if m.size == MemSize::None || m.size == MemSize::Ptr {
-                    bare_mem_size(insn, &p, ops)
+                    bare_mem_size(sp, m64, ops)
                 } else {
                     m.size.bytes()
                 }
@@ -355,27 +394,13 @@ pub(crate) fn cs_operands(insn: &Insn) -> DetailOps {
                 } else if spec.src != tables::S_IMM {
                     // literal 1 of shifts
                     if first { 1 } else { op0_size }
-                } else if first && insn.base_mnemonic() == "push" {
-                    if p.has66 {
-                        2
-                    } else if m64 {
-                        8
-                    } else {
-                        4
-                    }
+                } else if first && sp == SP_PUSH {
+                    push_size
                 } else if first {
                     match spec.cls {
                         tables::I_U8 if out.n == 0 => 1,
                         tables::I_U16 | tables::I_S16 | tables::I_W4 => branch_size,
-                        tables::I_S8N | tables::I_ZN => {
-                            if p.has66 {
-                                2
-                            } else if m64 {
-                                8
-                            } else {
-                                4
-                            }
-                        }
+                        tables::I_S8N | tables::I_ZN => push_size,
                         tables::I_LO4 => 1,
                         _ => {
                             if out.n > 0 {
@@ -398,15 +423,15 @@ pub(crate) fn cs_operands(insn: &Insn) -> DetailOps {
         out.push(DetailOp { op: *o, size, access: 0 });
         k += 1;
     }
-    match insn.base_mnemonic() {
+    match sp {
         // capstone keeps the implicit ST(0) as the first operand
-        "fxch" if out.n == 1 => {
+        SP_FXCH if out.n == 1 => {
             out.insert(0, DetailOp { op: Operand::Reg(Reg(regs::ST0)), size: 10, access: 0 });
         }
         // legacy-SSE forms with an implicit xmm0 (printed, but not a detail operand)
-        "pblendvb" | "blendvps" | "blendvpd" | "sha256rnds2" if out.n == 3 => out.remove(2),
+        SP_XMM0 if out.n == 3 => out.remove(2),
         // D0 /2, D1 /2 on memory: "rcl m" has a hidden literal 1
-        "rcl" if out.n == 1 && out.ops[0].is_mem() => {
+        SP_RCL if out.n == 1 && out.ops[0].is_mem() => {
             out.push(DetailOp { op: Operand::Imm(1), size: 0, access: 0 });
         }
         _ => {}

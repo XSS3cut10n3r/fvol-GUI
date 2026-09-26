@@ -18,7 +18,7 @@ mod spec_vex;
 mod spec_evex;
 mod tables;
 
-pub use access::{learn_features, RegList, MAX_REGS};
+pub use access::{learn_features, uncovered_mnemonics, RegList, MAX_REGS};
 pub use detail::{reg_name, DetailOp, DetailOps, CS_AC_READ, CS_AC_WRITE, MAX_DETAIL_OPS};
 pub use regs::Reg;
 

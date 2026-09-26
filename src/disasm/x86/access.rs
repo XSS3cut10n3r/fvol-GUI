@@ -1,14 +1,93 @@
-//! capstone detail-mode register access (`cs_regs_access`) for the x86 decoder.
+//! capstone *detail mode* for the x86 decoder: `regs_access()`, implicit registers, detail
+//! operands (with `size` / `access`) and `insn.opcode`, matching capstone 5.0.7 (`md.detail =
+//! True`) exactly on real code (0 mismatches over 1.74M unique instructions of Windows / Linux
+//! binaries, both modes; see `examples/disasm_detail_diff.rs`).
 //!
-//! (see the porting guide at the end of this comment block — written once the API settled)
+//! # API (all allocation free; everything is computed on demand from a decoded [`Insn`])
 //!
-//! How it works: capstone's answer is `implicit regs of the LLVM opcode` + `explicit operands
-//! according to their access flags`. Both depend on capstone's per-LLVM-opcode tables, which we
-//! reproduce with a compact rule spec (`access_spec.rs`) keyed by our mnemonic and refined by
-//! operand signature / mode / printed prefix / address size / opcode where capstone's LLVM
-//! opcodes differ. The spec was learned from capstone's own detail output over real code and
-//! opcode sweeps (`examples/disasm_detail_diff.rs learn`) and is compiled once into flat
-//! arrays; a lookup is an index by mnemonic id plus a scan over a handful of rules.
+//! | capstone (python)                     | rsvol                                               |
+//! |---------------------------------------|-----------------------------------------------------|
+//! | `inst.regs_access()` -> (read, write) | `insn.regs_access()` -> `(RegList, RegList)`        |
+//! | `inst.regs_read` / `inst.regs_write`  | `insn.implicit_regs()` -> `(RegList, RegList)`      |
+//! | `inst.reg_name(r)`                    | `insn.reg_name(r)` / `list.name(i)` / `list.names()`|
+//! | `inst.reg_name(r) == "rax"` for any r | `list.contains_name("rax")`, `insn.regs_written_contains("rax")` |
+//! | `inst.operands` (x86 detail)          | `insn.detail_operands()` -> `DetailOps` (`&[DetailOp]`) |
+//! | `op.type` / `.reg` / `.imm` / `.mem`  | `op.op` (`Operand::Reg/Imm/Mem`), `op.reg()`, `op.imm()`, `op.mem()` |
+//! | `op.size` / `op.access`               | `op.size` / `op.access` (`CS_AC_READ` / `CS_AC_WRITE`) |
+//! | `inst.opcode`                         | `insn.capstone_opcode()`; all zero: `insn.opcode_all_zero()` |
+//!
+//! Register names follow capstone, including its mode-dependent name of the flags register:
+//! "eflags" in 32-bit mode, "rflags" in 64-bit mode. `regs_access()` is capstone's
+//! `X86_reg_access`: implicit registers first, then the operands in order (registers by their
+//! access flags, memory operands' segment / base / index as read), de-duplicated except for
+//! segment registers (`cmpsb byte ptr es:[esi], byte ptr es:[edi]` reads "es" twice). Capstone
+//! quirks are reproduced, e.g. `test eax, imm` (A9) lists eax as written, `test [m], r` (84/85)
+//! reads nothing and writes no flags, `push ax` in 64-bit mode uses "esp".
+//!
+//! # Porting the capstone-using plugins
+//!
+//! `windows.malware.direct_system_calls._is_syscall_block` (and `indirect_system_calls`, which
+//! reuses it with other `invalid_ops` / `termination_ops`):
+//! ```text
+//! for insn in x86::disasm(data, address, mode) {           // md.disasm, stops at invalid bytes
+//!     // disasm_bytes += f"{inst.address:#x}: {inst.mnemonic} {inst.op_str}; "
+//!     x86::push_addr(&mut s, insn.address); s.push_str(": ");
+//!     insn.write_mnemonic(&mut s); s.push(' '); insn.write_op_str(&mut s); s.push_str("; ");
+//!     if insn.opcode_all_zero() { break }                  // inst.opcode.count(0) == len(...)
+//!     // `op in [...]` compares the FULL mnemonic: "bnd jmp" / "rep ret" are not "jmp" / "ret"
+//!     if invalid_ops.iter().any(|m| insn.mnemonic_is(m)) { break }
+//!     else if termination_ops.iter().any(|m| insn.mnemonic_is(m)) { end = Some(insn); break }
+//!     else if insn.mnemonic_is("syscall") { ... }
+//!     else {
+//!         // `except capstone.CsError: continue` is dead code: with detail on, cs_regs_access only
+//!         // fails for SKIPDATA pseudo-instructions or diet builds, which md.disasm never yields.
+//!         let (_, w) = insn.regs_access();                 // compute once, test the list
+//!         // python's per-register `if reg in ["eax","rax"]: ... elif reg == "r10": ...` is two
+//!         // independent tests over the list (one register is never both)
+//!         if w.contains_name("eax") || w.contains_name("rax") { found_movreax = true }
+//!         if w.contains_name("r10") { found_movr10 = true }
+//!     }
+//! }
+//! ```
+//! `indirect_system_calls._indirect_syscall_block_target` only reads 6 raw bytes from the layer
+//! at `inst.address` (no disassembler detail needed).
+//!
+//! `windows.skeleton_key_check._get_rip_relative_target` (64-bit, detail on):
+//! ```text
+//! fn rip_relative_target(insn: &Insn) -> Option<u64> {
+//!     let ops = insn.detail_operands();
+//!     // python: inst.operands[1] raises IndexError (not CsError) with < 2 operands; mov / lea,
+//!     // the only callers, always have 2 detail operands
+//!     let m = ops.get(1)?.mem()?;                          // opnd.type != X86_OP_MEM -> None
+//!     if insn.reg_name(m.base) != "rip" { return None }    // reg_name(0) is None != "rip"
+//!     // python ints do not wrap: outside [0, 2^64) the layer read raises -> treat as unreadable
+//!     let t = insn.address as i128 + insn.size as i128 + m.disp as i128;
+//!     u64::try_from(t).ok()
+//! }
+//! ```
+//! and in `_analyze_cdlocatecsystem` compare full mnemonics (`insn.mnemonic_is("int3")`,
+//! `"mov"`, `"lea"`); note `if target_address:` treats a target of 0 as "not found".
+//!
+//! `linux.malware.check_syscall._get_table_info_disassembly` compares `mnemonic == "CMP"`, which
+//! is never true (capstone mnemonics are lowercase), so it always returns 0 and the plugin falls
+//! back to `_get_table_info_other`: port it as `0` without disassembling anything.
+//!
+//! # How it works
+//!
+//! capstone's answer is "implicit registers of the LLVM opcode" + "explicit operands according to
+//! their access flags"; both come from capstone's per-LLVM-opcode tables. We reproduce them with a
+//! compact rule spec (`access_spec.rs`) keyed by our mnemonic and refined, only where capstone's
+//! LLVM opcodes differ, by operand signature, printed prefix, mode, mandatory-prefix / EVEX
+//! context, address size or opcode. The spec is learned from capstone's own detail output
+//! (`examples/disasm_detail_diff.rs learn` over real code, opcode sweeps, random bytes and
+//! EVEX / compare-predicate mutations) and compiled once into flat arrays; a lookup is an index by
+//! mnemonic id plus a scan over a handful of rules. Mnemonics without rules (rare AVX-512 / XOP
+//! forms capstone decodes differently) use a heuristic (destination written, sources read).
+//!
+//! Not reproduced: capstone detail fields other than the above (`prefix`, `rex`, `addr_size`,
+//! `modrm`, `sib*`, `disp`, `*_cc`, `avx_sae`, `avx_rm`, `eflags`, operand `avx_bcast` /
+//! `avx_zero_opmask`, `groups`), and values capstone reads from uninitialised memory (some
+//! AVX-512 access flags come out as 253 / 255, `bndmk`'s memory size changes between runs).
 
 use super::detail::{self, DetailOp, DetailOps, Prefixes};
 use super::regs::{self, RFLAGS};
@@ -231,8 +310,9 @@ fn parse_opc(t: &str) -> Option<u32> {
 /// `examples/disasm_detail_diff.rs`): (coarse sig, full sig, mode, prefix, asz, opcode).
 #[doc(hidden)]
 pub fn learn_features(insn: &Insn) -> [String; 7] {
-    let ops = detail::cs_operands(insn);
     let p = detail::prefixes(insn);
+    let ops = detail::cs_operands(insn, &p);
+
     let full: Vec<String> = ops.iter().map(|o| op_token(op_code(o))).collect();
     let coarse: String = full.iter().map(|t| &t[..1]).collect();
     [
@@ -248,12 +328,18 @@ pub fn learn_features(insn: &Insn) -> [String; 7] {
 
 /// Mandatory-prefix context of a legacy-encoded instruction (capstone/LLVM pick different
 /// opcodes for e.g. `66 0f c8` and `66 f2 0f c8`): 0 none, 1 66, 2 f3, 3 f2, 4 66+f3, 5 66+f2;
-/// plus 8 when REX.W is set; EVEX instructions: 16, 17 with zero-masking.
+/// plus 8 when REX.W is set; EVEX instructions: 16 | 1 (zero-masking) | 2 (EVEX.b);
+/// VEX / XOP: 20 | W.
 fn ctx(insn: &Insn, p: &Prefixes) -> u8 {
+    let at = |k: usize| insn.raw().get(p.op + k).copied().unwrap_or(0);
     match detail::vex_kind(insn, p) {
         detail::VexKind::None => {}
-        detail::VexKind::Evex => return 16 | (insn.evex >> 6 & 1),
-        _ => return 0,
+        detail::VexKind::Evex => {
+            let p2 = at(3);
+            return 16 | (p2 >> 7) | ((p2 >> 3) & 2);
+        }
+        detail::VexKind::Vex2 => return 20,
+        detail::VexKind::Vex3 | detail::VexKind::Xop => return 20 | (at(2) >> 7),
     }
     let base = match p.lockrep {
         0xF3 => 2 + 2 * p.has66 as u8,
@@ -263,13 +349,30 @@ fn ctx(insn: &Insn, p: &Prefixes) -> u8 {
     base | if p.rex & 8 != 0 { 8 } else { 0 }
 }
 
-const CTX_TOKENS: [&str; 18] = [
+const CTX_TOKENS: [&str; 22] = [
     "np", "66", "f3", "f2", "66f3", "66f2", "?6", "?7", "w", "66w", "f3w", "f2w", "66f3w", "66f2w",
-    "?14", "?15", "e", "ez",
+    "?14", "?15", "e", "ez", "eb", "ezb", "v", "vw",
 ];
 
 fn ctx_token(c: u8) -> &'static str {
     CTX_TOKENS.get(c as usize).copied().unwrap_or("?")
+}
+
+/// Decoder mnemonics without any access rule (they use the fallback heuristic).
+#[doc(hidden)]
+pub fn uncovered_mnemonics() -> Vec<&'static str> {
+    let t = super::tables::tables();
+    let r = rules();
+    let mut v: Vec<&'static str> = t
+        .mnems
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| !m.is_empty() && r.by_mnem.get(*i).is_none_or(|x| x.0 == x.1))
+        .map(|(_, m)| *m)
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 // ------------------------------------------------------------------------------------ rules
@@ -305,12 +408,17 @@ struct Rules {
     by_mnem: Vec<(u32, u32)>,
     rules: Vec<Rule>,
     toks: Vec<u8>,
+    /// spec lines whose mnemonic the decoder does not know / that failed to parse (tests)
+    #[allow(dead_code)]
+    unknown: Vec<String>,
+    #[allow(dead_code)]
+    bad: Vec<String>,
 }
 
 static RULES: OnceLock<Rules> = OnceLock::new();
 
 fn rules() -> &'static Rules {
-    RULES.get_or_init(|| compile(super::access_spec::SPEC))
+    RULES.get_or_init(|| compile(&[super::access_spec::MANUAL, super::access_spec::SPEC]))
 }
 
 fn parse_reg_token(t: &str) -> Option<u8> {
@@ -327,7 +435,7 @@ fn parse_reg_token(t: &str) -> Option<u8> {
     Reg::from_name(t).map(|r| r.0)
 }
 
-fn compile(spec: &str) -> Rules {
+fn compile(specs: &[&str]) -> Rules {
     let t = super::tables::tables();
     let mut ids: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
     for (i, m) in t.mnems.iter().enumerate() {
@@ -336,7 +444,9 @@ fn compile(spec: &str) -> Rules {
     // (mnemonic id, line order, rule)
     let mut all: Vec<(u16, usize, Rule)> = Vec::new();
     let mut toks: Vec<u8> = Vec::new();
-    for (ln, line) in spec.lines().enumerate() {
+    let mut unknown = Vec::new();
+    let mut bad = Vec::new();
+    for (ln, line) in specs.iter().flat_map(|s| s.lines()).enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -344,7 +454,10 @@ fn compile(spec: &str) -> Rules {
         let Some((head, body)) = line.split_once('=') else { continue };
         let mut hw = head.split_whitespace();
         let Some(mn) = hw.next() else { continue };
-        let Some(&id) = ids.get(mn) else { continue };
+        let Some(&id) = ids.get(mn) else {
+            unknown.push(line.to_string());
+            continue;
+        };
         let mut r = Rule { pfx: 0xFF, ctx: 0xFF, ..Default::default() };
         let mut ok = true;
         for c in hw {
@@ -436,6 +549,8 @@ fn compile(spec: &str) -> Rules {
         }
         if ok {
             all.push((id, ln, r));
+        } else {
+            bad.push(line.to_string());
         }
     }
     all.sort_by_key(|&(id, ln, _)| (id, ln));
@@ -461,7 +576,7 @@ fn compile(spec: &str) -> Rules {
             }
         }
     }
-    Rules { by_mnem, rules, toks }
+    Rules { by_mnem, rules, toks, unknown, bad }
 }
 
 #[inline]
@@ -482,7 +597,8 @@ pub(crate) struct Info {
 }
 
 pub(crate) fn info(insn: &Insn) -> Info {
-    let mut ops = detail::cs_operands(insn);
+    let p = detail::prefixes(insn);
+    let mut ops = detail::cs_operands(insn, &p);
     let mut read = RegList::new(insn.mode);
     let mut write = RegList::new(insn.mode);
     let rs = rules();
@@ -492,10 +608,9 @@ pub(crate) fn info(insn: &Insn) -> Info {
         codes[k] = op_code(o);
     }
     let n = ops.n as usize;
-    let p = detail::prefixes(insn);
     let mode = if insn.mode == Mode::X86_64 { 2 } else { 1 };
     let mut hit = None;
-    for r in &rs.rules[s as usize..e as usize] {
+    for r in rs.rules.get(s as usize..e as usize).unwrap_or(&[]) {
         if r.mode != 0 && r.mode != mode {
             continue;
         }
@@ -532,25 +647,30 @@ pub(crate) fn info(insn: &Insn) -> Info {
             for k in 0..n {
                 ops.ops[k].access = if k < r.nacc as usize { r.acc[k] } else { 0 };
             }
-            let toks = &rs.toks;
-            for &t in toks.iter().skip(r.rd.0 as usize).take(r.rd.1 as usize) {
+            let span = |(start, len): (u16, u8)| {
+                rs.toks.get(start as usize..start as usize + len as usize).unwrap_or(&[])
+            };
+            for &t in span(r.rd) {
                 read.push(resolve(t, insn.mode));
             }
-            for &t in toks.iter().skip(r.wr.0 as usize).take(r.wr.1 as usize) {
+            for &t in span(r.wr) {
                 write.push(resolve(t, insn.mode));
             }
         }
-        None => fallback(&mut ops),
+        None => fallback(&mut ops, detail::vex_kind(insn, &p) != detail::VexKind::None),
     }
     Info { ops, read, write }
 }
 
-/// Heuristic for mnemonics the spec does not know: destination read+write, sources read.
-fn fallback(ops: &mut DetailOps) {
+/// Heuristic for mnemonics the spec does not know: destination written (VEX/EVEX/XOP) or read+written
+/// (legacy), sources read, immediates 0.
+fn fallback(ops: &mut DetailOps, vex: bool) {
     let n = ops.n as usize;
     for k in 0..n {
         ops.ops[k].access = if ops.ops[k].is_imm() {
             0
+        } else if k == 0 && n > 1 && vex {
+            detail::CS_AC_WRITE
         } else if k == 0 && n > 1 {
             detail::CS_AC_READ | detail::CS_AC_WRITE
         } else {
@@ -611,5 +731,137 @@ impl Insn {
     /// True if `regs_access()`'s read list contains a register named `name`.
     pub fn regs_read_contains(&self, name: &str) -> bool {
         self.regs_access().0.contains_name(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{decode, Mode, Operand};
+    use super::*;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+    }
+
+    fn acc(h: &str, mode: Mode) -> (String, String) {
+        let i = decode(&hex(h), 0x1000, mode).expect("decodes");
+        let (r, w) = i.regs_access();
+        (r.names().collect::<Vec<_>>().join(","), w.names().collect::<Vec<_>>().join(","))
+    }
+
+    #[test]
+    fn disasm_access_spec_compiles_fully() {
+        let r = rules();
+        assert!(r.bad.is_empty(), "unparsable spec lines: {:?}", &r.bad[..r.bad.len().min(5)]);
+        assert!(r.unknown.is_empty(), "unknown mnemonics: {:?}", &r.unknown[..r.unknown.len().min(5)]);
+        assert!(r.rules.len() > 1000);
+    }
+
+    #[test]
+    fn disasm_op_tokens_round_trip() {
+        for code in [0x101u16, 0x102, 0x104, 0x108, 0x100 | b'x' as u16, 0x100 | b'k' as u16, 0x200, 0x204, 0x21C, 0x300, 0x301, 0x308] {
+            assert_eq!(parse_op_token(&op_token(code)), Some(code), "{code:#x}");
+        }
+        for t in ["f6/1", "0f18/4", "0f38f0", "a9", "00"] {
+            assert_eq!(opc_token(parse_opc(t).unwrap()), t);
+        }
+        for i in 0..22u8 {
+            assert_eq!(CTX_TOKENS.iter().position(|t| *t == ctx_token(i)), Some(i as usize));
+        }
+    }
+
+    // expected values produced by capstone 5.0.7 (python bindings, detail=True)
+    #[test]
+    fn disasm_regs_access_matches_capstone() {
+        let m64 = Mode::X86_64;
+        let m32 = Mode::X86_32;
+        assert_eq!(acc("4c8bd1", m64), ("rcx".into(), "r10".into())); // mov r10, rcx
+        assert_eq!(acc("b855000000", m64), ("".into(), "eax".into())); // mov eax, 0x55
+        assert_eq!(acc("31c0", m64), ("eax".into(), "rflags,eax".into())); // xor eax, eax
+        assert_eq!(acc("0f05", m64), ("".into(), "".into())); // syscall
+        assert_eq!(acc("f3a4", m64), ("rdi,rsi,rflags,rcx".into(), "rdi,rsi,rcx".into()));
+        assert_eq!(acc("e800000000", m64), ("rsp,rip".into(), "rsp".into())); // call
+        assert_eq!(acc("50", m64), ("rsp,rax".into(), "rsp".into())); // push rax
+        assert_eq!(acc("666a01", m64), ("esp".into(), "esp".into())); // push 1 (16-bit)
+        assert_eq!(acc("488d0501000000", m64), ("rip".into(), "rax".into())); // lea rax, [rip + 1]
+        assert_eq!(acc("ff2500000000", m64), ("rip".into(), "".into())); // jmp qword ptr [rip]
+        assert_eq!(acc("0000", m64), ("rax,al".into(), "rflags".into())); // add byte ptr [rax], al
+        assert_eq!(acc("64488b042530000000", m64), ("fs".into(), "rax".into()));
+        assert_eq!(acc("d9c9", m64), ("st(0)".into(), "fpsw".into())); // fxch st(1)
+        assert_eq!(acc("62f1fd4958400410", m64), ("zmm0,k1,rax".into(), "zmm0".into()));
+        // 32-bit: the flags register is named "eflags"; segment registers are not de-duplicated
+        assert_eq!(acc("26a6", m32), ("edi,esi,eflags,es,es".into(), "edi,esi,eflags".into()));
+        assert_eq!(acc("a900000000", m32), ("eax".into(), "eflags,eax".into())); // test eax, 0 (!)
+        assert_eq!(acc("8508", m32), ("eax".into(), "".into())); // test [eax], ecx: no flags (!)
+        assert_eq!(acc("f3ab", m32), ("eax,edi,eflags,ecx,es".into(), "edi,ecx".into()));
+        let i = decode(&hex("b855000000"), 0, m64).unwrap();
+        assert!(i.regs_written_contains("eax") && !i.regs_written_contains("rax"));
+        assert!(decode(&hex("4c8bd1"), 0, m64).unwrap().regs_written_contains("r10"));
+    }
+
+    #[test]
+    fn disasm_detail_operands_and_opcode() {
+        // lea rax, [rip + 1]: operands[1] is MEM with base rip (skeleton_key_check)
+        let i = decode(&hex("488d0501000000"), 0x1000, Mode::X86_64).unwrap();
+        let ops = i.detail_operands();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].op, Operand::Reg(Reg(regs::RAX)));
+        assert_eq!((ops[0].size, ops[0].access), (8, 2));
+        let m = ops[1].mem().unwrap();
+        assert_eq!((i.reg_name(m.base), m.disp, ops[1].size, ops[1].access), ("rip", 1, 8, 1));
+        assert_eq!(i.address + i.size as u64 + m.disp as u64, 0x1008);
+        // EVEX: {k1} is its own operand; opcode is the raw EVEX prefix
+        let i = decode(&hex("62f1fd4958400410"), 0, Mode::X86_64).unwrap();
+        assert_eq!(i.detail_operands().len(), 4);
+        assert_eq!(i.capstone_opcode(), [0x62, 0xf1, 0xfd, 0x49]);
+        assert_eq!(decode(&hex("c5f97ec0"), 0, Mode::X86_64).unwrap().capstone_opcode(), [0xc5, 0xf9, 0, 0]);
+        assert_eq!(decode(&hex("660f3a0fd90c"), 0, Mode::X86_32).unwrap().capstone_opcode(), [0x0f, 0x0f, 0, 0]);
+        assert!(decode(&hex("0000"), 0, Mode::X86_64).unwrap().opcode_all_zero());
+        assert!(!decode(&hex("0100"), 0, Mode::X86_64).unwrap().opcode_all_zero());
+        // imm sizes: branch targets are 8 bytes in 64-bit mode, 4 with REX.W / 66
+        let i = decode(&hex("e800000000"), 0x1000, Mode::X86_64).unwrap();
+        assert_eq!((i.detail_operands()[0].imm(), i.detail_operands()[0].size), (Some(0x1005), 8));
+        let i = decode(&hex("48eb00"), 0x1000, Mode::X86_64).unwrap();
+        assert_eq!(i.detail_operands()[0].size, 4);
+        // implicit regs
+        let (r, w) = decode(&hex("f3a4"), 0, Mode::X86_64).unwrap().implicit_regs();
+        assert_eq!(r.names().collect::<Vec<_>>(), ["rdi", "rsi", "rflags", "rcx"]);
+        assert_eq!(w.names().collect::<Vec<_>>(), ["rdi", "rsi", "rcx"]);
+    }
+
+    #[test]
+    fn disasm_regs_access_never_panics_on_random_bytes() {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let prefixes = [0x66u8, 0x67, 0xF2, 0xF3, 0xF0, 0x2E, 0x26, 0x64, 0x65, 0x48, 0x41, 0x4F, 0xC4, 0xC5, 0x62, 0x8F, 0x0F];
+        let mut buf = [0u8; 15];
+        let mut n = 0usize;
+        for it in 0..200_000u32 {
+            for b in buf.iter_mut() {
+                *b = next() as u8;
+            }
+            // bias towards prefixes / escapes
+            let k = (next() % 4) as usize;
+            for b in buf.iter_mut().take(k) {
+                *b = prefixes[(next() % prefixes.len() as u64) as usize];
+            }
+            let mode = if it & 1 == 0 { Mode::X86_64 } else { Mode::X86_32 };
+            let len = 1 + (next() % 15) as usize;
+            if let Some(i) = decode(&buf[..len], next(), mode) {
+                let ops = i.detail_operands();
+                let (r, w) = i.regs_access();
+                let (ir, iw) = i.implicit_regs();
+                assert!(ops.len() <= super::super::MAX_DETAIL_OPS);
+                assert!(r.len() <= MAX_REGS && w.len() <= MAX_REGS && ir.len() <= r.len() && iw.len() <= w.len());
+                let _ = (i.capstone_opcode(), i.regs_written_contains("rax"), r.name(0), w.name(99));
+                n += 1;
+            }
+        }
+        assert!(n > 50_000);
     }
 }

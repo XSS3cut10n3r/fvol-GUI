@@ -5,6 +5,13 @@ Usage (bench venv python, which has capstone; run through bench/scripts/limit.sh
   disasm_detail_diff.py gen   [--dir DIR] [--only real64,real32,...]   write DIR/NAME.det
   disasm_detail_diff.py cmp   [--dir DIR] [--only ...] [--show N]      run examples/disasm_detail_diff.rs
   disasm_detail_diff.py probe 32|64 HEX...                             print capstone's detail view
+  disasm_detail_diff.py gen-mut [--dir DIR]                            write DIR/mut{32,64}.det (EVEX z/aaa/b
+                                                                       and compare-predicate variants of sweep windows)
+  disasm_detail_diff.py learn [--dir DIR] [--only ...]                 relearn the access rules from DIR/*.det and
+                                                                       rewrite SPEC in src/disasm/x86/access_spec.rs
+
+DIR defaults to /home/user/rs-vol/testdata/scratch/disasm/ref (on disk: /tmp is RAM-backed tmpfs).
+Full regeneration: `disasm_diff.py gen` (the .ref corpora), then `gen`, `gen-mut`, `learn`, `cmp`.
 
 `gen` streams DIR/NAME.ref (written by disasm_diff.py gen; one unique instruction window per
 line) through capstone with detail=True, one instruction at a time (constant memory; a single
@@ -26,7 +33,7 @@ import sys
 import capstone
 from capstone import x86
 
-DEFAULT_DIR = "/tmp/rsvol-disasm"
+DEFAULT_DIR = "/home/user/rs-vol/testdata/scratch/disasm/ref"
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CORPORA = ["real64", "real32"]
 
@@ -100,6 +107,79 @@ def gen(dirn, only):
         print(f"  wrote {dst}: {n} lines", file=sys.stderr)
 
 
+LEGACY = {0x66, 0x67, 0xF2, 0xF3, 0xF0, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65}
+
+
+def mutations(bits, win, size, mnemonic):
+    """Targeted variants of one sweep window (coverage for the rule learner):
+    EVEX: z / aaa / b bits of P2;  compare-predicate aliases: every imm8 predicate 0..31."""
+    i = 0
+    while i < len(win) and (win[i] in LEGACY or (bits == 64 and win[i] & 0xF0 == 0x40)):
+        i += 1
+    if i + 4 < len(win) and win[i] == 0x62 and (bits == 64 or win[i + 1] & 0xC0 == 0xC0):
+        p2 = i + 3
+        for z in (0, 1):
+            for aaa in (0, 1, 6):
+                for b in (0, 1):
+                    w = bytearray(win)
+                    w[p2] = (w[p2] & 0x68) | (z << 7) | (b << 4) | aaa
+                    yield bytes(w)
+    if mnemonic.startswith(("vcmp", "cmp", "vpcom", "vpcmp")) and 1 < size <= len(win):
+        for pred in range(32):
+            w = bytearray(win)
+            w[size - 1] = pred
+            yield bytes(w)
+
+
+def gen_mut(dirn):
+    """Write DIR/mut32.det and DIR/mut64.det from mutations of the sweep corpora."""
+    for bits in (64, 32):
+        md = mk(bits)
+        seen = set()
+        n = 0
+        dst = os.path.join(dirn, f"mut{bits}.det")
+        with open(os.path.join(dirn, f"sweep{bits}.ref")) as fi, open(dst + ".tmp", "w") as fo:
+            for line in fi:
+                p = line.rstrip("\n").split("\t")
+                if len(p) < 7 or p[4] == "0":
+                    continue
+                win = bytes.fromhex(p[3])
+                addr = int(p[2], 16)
+                for w in mutations(bits, win, int(p[4]), p[5]):
+                    if w in seen:
+                        continue
+                    seen.add(w)
+                    insn = next(md.disasm(w, addr, 1), None)
+                    if insn is None:
+                        continue
+                    fo.write(f"1\t{bits}\t{addr:x}\t{w.hex()}\t{insn.size}\t{detail_fields(insn)}\t"
+                             f"{insn.mnemonic}\t{insn.op_str}\n")
+                    n += 1
+        os.replace(dst + ".tmp", dst)
+        print(f"  wrote {dst}: {n} lines", file=sys.stderr)
+
+
+LEARN_CORPORA = ["real64", "real32", "sweep64", "sweep32", "rand64", "rand32", "mut64", "mut32"]
+
+
+def learn(dirn, only):
+    """Run the rule learner and replace the SPEC section of access_spec.rs with its output."""
+    names = [n for n in (only or LEARN_CORPORA) if os.path.exists(os.path.join(dirn, f"{n}.det"))]
+    out = subprocess.run(["cargo", "run", "-q", "--profile", "fast", "--example", "disasm_detail_diff",
+                          "--", "learn", dirn, "--only", ",".join(names)],
+                         cwd=REPO, check=True, stdout=subprocess.PIPE, text=True).stdout
+    lines = [l.rstrip() for l in out.splitlines() if l.strip()]
+    rules = [l for l in lines if not l.startswith("#")]
+    path = os.path.join(REPO, "src", "disasm", "x86", "access_spec.rs")
+    src = open(path).read()
+    marker = 'pub(crate) const SPEC: &str = r#"'
+    head = src[: src.index(marker)]
+    with open(path, "w") as f:
+        f.write(head + marker + "\n" + "\n".join(rules) + '\n"#;\n')
+    print(f"  {path}: {len(rules)} rules from {','.join(names)} "
+          f"({len(lines) - len(rules)} unresolvable capstone conflicts dropped)", file=sys.stderr)
+
+
 def probe(bits, hexes):
     md = mk(bits)
     for h in hexes:
@@ -133,6 +213,10 @@ def main():
         i += 1
     if cmd == "gen":
         gen(dirn, only)
+    elif cmd == "learn":
+        learn(dirn, only)
+    elif cmd == "gen-mut":
+        gen_mut(dirn)
     elif cmd == "probe":
         probe(int(rest[0]), rest[1:])
     elif cmd == "cmp":
