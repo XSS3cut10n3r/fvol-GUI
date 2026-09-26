@@ -136,14 +136,6 @@ pub const VMCS_REVISION_IDS: [u32; 5] = [4, 14, 15, 16, 18];
 /// boundary). Every step is a bijection of the state, so keys that differ in one word never
 /// collide; the length is mixed in first.
 pub(crate) fn key_hash(b: &[u8]) -> u64 {
-    #[inline(always)]
-    fn fmix(mut h: u64) -> u64 {
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-        h ^ (h >> 33)
-    }
     let mut h = fmix(0x9e37_79b9_7f4a_7c15 ^ b.len() as u64);
     let (words, rest) = b.as_chunks::<8>();
     for w in words {
@@ -155,6 +147,32 @@ pub(crate) fn key_hash(b: &[u8]) -> u64 {
         h = fmix(h ^ u64::from_le_bytes(w));
     }
     h
+}
+
+/// murmur3 `fmix64`: a bijection that fully mixes every input bit.
+#[inline(always)]
+fn fmix(mut h: u64) -> u64 {
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
+/// [`key_hash`] for payloads (file checksums): four independent lanes over 32-byte blocks, so
+/// the `fmix64` chains run in parallel (~4x the throughput of one chain: a warm vmscan checks
+/// ~110 KB of records), folded at the end. Each lane is a chain of bijections like
+/// [`key_hash`]'s, so payloads differing in one word never collide.
+fn payload_hash(b: &[u8]) -> u64 {
+    let mut h = [0x9e37_79b9_7f4a_7c15 ^ b.len() as u64, 0x6a09_e667_f3bc_c908, 0xbb67_ae85_84ca_a73b, 0x3c6e_f372_fe94_f82b].map(fmix);
+    let (blocks, rest) = b.as_chunks::<32>();
+    for blk in blocks {
+        let (words, _) = blk.as_chunks::<8>();
+        for (h, w) in h.iter_mut().zip(words) {
+            *h = fmix(*h ^ u64::from_le_bytes(*w));
+        }
+    }
+    fmix(fmix(fmix(fmix(h[0] ^ key_hash(rest)) ^ h[1]) ^ h[2]) ^ h[3])
 }
 
 /// Canonical key material builder.
@@ -384,6 +402,35 @@ impl Session {
         g
     }
 
+    /// A record atom ([`Atom::Recs`]) mapped and verified in place: header, key, checksum, hit
+    /// lists, tags below `ntags`, and exactly one record per match.
+    fn load_recs(&self, atom: &Atom, ntags: usize) -> Option<MappedRecs> {
+        let key = self.atom_key(atom);
+        let path = self.atom_path(&key);
+        let Some(map) = std::fs::File::open(&path).ok().and_then(|f| crate::util::mmap::Mmap::map(&f).ok()) else {
+            crate::util::trace::note(|| format!("scan cache: no {atom:?} ({})", path.display()));
+            return None;
+        };
+        let rec_len = atom.rec_len();
+        let m = (|| {
+            let buf = map.as_slice();
+            let (payload, ngroups, nrecs) = verified_payload(buf, KIND_RECS, &key)?;
+            let records = walk_groups(payload, ngroups, nrecs, true, |_, _, tag| (tag as usize) < ntags)?;
+            if (payload.len() - records) as u64 != nrecs.checked_mul(rec_len as u64)? {
+                return None;
+            }
+            let at = buf.len() - payload.len();
+            Some((at..buf.len(), records, ngroups, nrecs))
+        })();
+        match m {
+            Some((payload, records, ngroups, nrecs)) => Some(MappedRecs { map, payload, records, ngroups, nrecs, rec_len }),
+            None => {
+                crate::util::trace::note(|| format!("scan cache: damaged {atom:?} ({})", path.display()));
+                None
+            }
+        }
+    }
+
     /// Write the atoms, then keep the cache under its size cap when this created the image
     /// directory. Sequential: a small-file create + rename costs ~20 us on btrfs and parallel
     /// writers only contend on the directory (measured: 30 atoms 0.9 ms sequential, 1.2 ms on
@@ -511,7 +558,7 @@ fn unzigzag(v: u64) -> i64 {
 }
 
 fn checksum(key: &[u8], payload: &[u8]) -> u64 {
-    key_hash(key) ^ key_hash(payload).rotate_left(17)
+    key_hash(key) ^ payload_hash(payload).rotate_left(17)
 }
 
 /// Serialize `g` (None when too big or malformed).
@@ -567,8 +614,9 @@ fn encode(kind: u32, tagged: bool, key: &[u8], g: &Groups) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Parse and verify a file written by [`encode`] for `key`; None on any mismatch or damage.
-fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
+/// The verified payload of a file written by [`encode`] for `key` (header, key and checksum
+/// checked) with its group and match counts; None on any mismatch or damage.
+fn verified_payload<'b>(buf: &'b [u8], kind: u32, key: &[u8]) -> Option<(&'b [u8], u64, u64)> {
     let u32_at = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
     let u64_at = |o: usize| u64::from_le_bytes(buf[o..o + 8].try_into().unwrap());
     if buf.len() < HEADER || &buf[..8] != MAGIC || u32_at(8) != FORMAT_VERSION || u32_at(12) != kind {
@@ -586,15 +634,16 @@ fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
     if ngroups > plen / 3 || nrecs > plen || nrecs > u32::MAX as u64 {
         return None;
     }
-    let mut g = Groups {
-        starts: Vec::with_capacity(ngroups as usize),
-        ends: Vec::with_capacity(ngroups as usize),
-        rels: Vec::with_capacity(nrecs as usize),
-        tags: Vec::with_capacity(if tagged { nrecs as usize } else { 0 }),
-        data: Vec::new(),
-    };
+    Some((payload, ngroups, nrecs))
+}
+
+/// Walk the hit lists of a verified payload: `f(chunk start, offset in chunk, tag)` for every
+/// match in file order (chunk starts strictly ascending; `f` returns false to reject the file).
+/// Returns where the hit lists end; None when malformed.
+fn walk_groups(payload: &[u8], ngroups: u64, nrecs: u64, tagged: bool, mut f: impl FnMut(u64, u64, u32) -> bool) -> Option<usize> {
     let mut pos = 0usize;
     let mut start = 0u64;
+    let mut seen = 0u64;
     for i in 0..ngroups {
         let d = get_varint(payload, &mut pos)?;
         if i > 0 && d == 0 {
@@ -602,27 +651,39 @@ fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
         }
         start = start.checked_add(d)?;
         let n = get_varint(payload, &mut pos)?;
-        if n == 0 || n > nrecs - g.rels.len() as u64 {
+        if n == 0 || n > nrecs - seen {
             return None;
         }
-        g.starts.push(start);
+        seen += n;
         let mut rel = 0u64;
         for _ in 0..n {
             let v = get_varint(payload, &mut pos)?;
-            if tagged {
+            let tag = if tagged {
                 rel = rel.wrapping_add(unzigzag(v) as u64);
-                let t = get_varint(payload, &mut pos)?;
-                g.tags.push(u32::try_from(t).ok()?);
+                u32::try_from(get_varint(payload, &mut pos)?).ok()?
             } else {
                 rel = rel.checked_add(v)?;
+                0
+            };
+            if !f(start, rel, tag) {
+                return None;
             }
-            g.rels.push(rel);
         }
-        g.ends.push(g.rels.len() as u32);
     }
-    if g.rels.len() as u64 != nrecs {
-        return None;
-    }
+    (seen == nrecs).then_some(pos)
+}
+
+/// Parse and verify a file written by [`encode`] for `key`; None on any mismatch or damage.
+fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
+    let (payload, ngroups, nrecs) = verified_payload(buf, kind, key)?;
+    let mut g = Groups {
+        starts: Vec::with_capacity(ngroups as usize),
+        ends: Vec::with_capacity(ngroups as usize),
+        rels: Vec::with_capacity(nrecs as usize),
+        tags: Vec::with_capacity(if tagged { nrecs as usize } else { 0 }),
+        data: Vec::new(),
+    };
+    let pos = walk_groups(payload, ngroups, nrecs, tagged, |start, rel, tag| g.push(start, rel, tagged.then_some(tag)))?;
     if pos != payload.len() {
         // only record atoms carry bytes after the hit lists (the caller checks their size)
         if kind != KIND_RECS {
@@ -631,6 +692,33 @@ fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
         g.data = payload[pos..].to_vec();
     }
     Some(g)
+}
+
+/// A record atom verified in its mapped file and read in place: a warm vmscan allocates no
+/// buffer for it (on a VM, every fresh heap page is a ~6 us fault).
+struct MappedRecs {
+    map: crate::util::mmap::Mmap,
+    /// the payload's range in the file
+    payload: std::ops::Range<usize>,
+    /// where the records start in the payload (after the hit lists)
+    records: usize,
+    ngroups: u64,
+    nrecs: u64,
+    rec_len: usize,
+}
+
+impl MappedRecs {
+    /// `f(chunk start, offset in chunk, tag, record)` for every match, in chunk order.
+    fn for_each(&self, mut f: impl FnMut(u64, u64, u32, &[u8])) {
+        let payload = &self.map.as_slice()[self.payload.clone()];
+        let data = &payload[self.records..];
+        let mut i = 0usize;
+        walk_groups(payload, self.ngroups, self.nrecs, true, |start, rel, tag| {
+            f(start, rel, tag, &data[i * self.rec_len..(i + 1) * self.rec_len]);
+            i += 1;
+            true
+        });
+    }
 }
 
 /// Write `data` to `path` (in an existing directory) atomically: a temp file unique to this
@@ -1372,56 +1460,34 @@ fn page_start_hits_in(session: &Session, sigs: &[u32], compute: impl FnOnce() ->
 /// the fields its checks read). `spec` must describe `record` completely (which bytes it reads
 /// and how it lays them out): the records are a pure function of the image, cached next to the
 /// raw hits in one atom keyed by `sigs` and `spec`, so a warm run reads neither the image nor
-/// the per-signature atoms. Returns the hits in chunk order and their records, concatenated.
+/// the per-signature atoms (the atom's file is mapped and read in place). Calls
+/// `f(chunk start, offset in chunk, signature index, record)` for every hit, in chunk order.
 /// Missing records are computed from the cached raw hits when those are there.
-pub fn page_start_records<R>(
-    layer: &dyn Layer,
-    sigs: &[u32],
-    spec: &[u8],
-    rec_len: usize,
-    compute: impl FnOnce() -> Vec<(u64, u64, u32)>,
-    record: R,
-) -> (Vec<(u64, u64, u32)>, Vec<u8>)
+pub fn page_start_records<R, F>(layer: &dyn Layer, sigs: &[u32], spec: &[u8], rec_len: usize, compute: impl FnOnce() -> Vec<(u64, u64, u32)>, record: R, f: F)
 where
     R: Fn(u64, u32, &mut [u8]) + Sync,
+    F: FnMut(u64, u64, u32, &[u8]),
 {
     let full = [(layer.min_address(), layer.max_address() - layer.min_address())];
     let secs = scan::coalesce_sections(layer, &full);
-    let Some(session) = Session::new(layer, &secs, true, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP) else {
-        let hits = compute();
-        let recs = page_records(&hits, rec_len, &record);
-        return (hits, recs);
-    };
-    page_start_records_in(&session, sigs, spec, rec_len, compute, record)
+    match Session::new(layer, &secs, true, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP) {
+        Some(session) => page_start_records_in(&session, sigs, spec, rec_len, compute, record, f),
+        None => {
+            let hits = compute();
+            emit_records(&hits, &page_records(&hits, rec_len, &record), rec_len, f);
+        }
+    }
 }
 
-fn page_start_records_in<R>(
-    session: &Session,
-    sigs: &[u32],
-    spec: &[u8],
-    rec_len: usize,
-    compute: impl FnOnce() -> Vec<(u64, u64, u32)>,
-    record: R,
-) -> (Vec<(u64, u64, u32)>, Vec<u8>)
+fn page_start_records_in<R, F>(session: &Session, sigs: &[u32], spec: &[u8], rec_len: usize, compute: impl FnOnce() -> Vec<(u64, u64, u32)>, record: R, f: F)
 where
     R: Fn(u64, u32, &mut [u8]) + Sync,
+    F: FnMut(u64, u64, u32, &[u8]),
 {
-    let mut k = Key(Vec::new());
-    k.bytes(b"page-records/1");
-    k.u64(sigs.len() as u64);
-    for &v in sigs {
-        k.u64(v as u64);
-    }
-    k.bytes(spec);
-    let atom = Atom::Recs(&k.0, rec_len);
-    if let Some(g) = session.load(&atom)
-        && g.tags.iter().all(|&t| (t as usize) < sigs.len())
-    {
-        let mut hits = Vec::with_capacity(g.rels.len());
-        for i in 0..g.starts.len() {
-            hits.extend(g.range(i).map(|j| (g.starts[i], g.rels[j], g.tags[j])));
-        }
-        return (hits, g.data);
+    let key = records_key(sigs, spec);
+    let atom = Atom::Recs(&key, rec_len);
+    if let Some(m) = session.load_recs(&atom, sigs.len()) {
+        return m.for_each(f);
     }
     let hits = page_start_hits_in(session, sigs, compute);
     let mut g = Groups::default();
@@ -1433,7 +1499,26 @@ where
     if ok {
         session.store_all(&[(atom, &g)]);
     }
-    (hits, g.data)
+    emit_records(&hits, &g.data, rec_len, f);
+}
+
+/// The key of the record atom of `sigs` / `spec`.
+fn records_key(sigs: &[u32], spec: &[u8]) -> Vec<u8> {
+    let mut k = Key(Vec::new());
+    k.bytes(b"page-records/1");
+    k.u64(sigs.len() as u64);
+    for &v in sigs {
+        k.u64(v as u64);
+    }
+    k.bytes(spec);
+    k.0
+}
+
+/// `f(chunk start, offset in chunk, signature index, record)` for every hit.
+fn emit_records(hits: &[(u64, u64, u32)], recs: &[u8], rec_len: usize, mut f: impl FnMut(u64, u64, u32, &[u8])) {
+    for (i, &(cs, rel, si)) in hits.iter().enumerate() {
+        f(cs, rel, si, recs.get(i * rec_len..(i + 1) * rec_len).unwrap_or(&[]));
+    }
 }
 
 /// The records of `hits` (in parallel when there are many: one read each).
@@ -1603,6 +1688,41 @@ mod tests {
         assert_ne!(key_hash(&a), key_hash(&b));
         // length matters, zero padding does not alias
         assert_ne!(key_hash(b"abc"), key_hash(b"abc\0"));
+        // payload hash: every single-byte change (each lane, the tail) and every length differs
+        let base: Vec<u8> = (0..301u32).map(|i| (i * 131 % 251) as u8).collect();
+        let mut seen = std::collections::HashSet::new();
+        for n in 0..=base.len() {
+            assert!(seen.insert(payload_hash(&base[..n])), "length {n}");
+        }
+        for i in 0..base.len() {
+            for bit in [0u8, 3, 7] {
+                let mut v = base.clone();
+                v[i] ^= 1 << bit;
+                assert!(seen.insert(payload_hash(&v)), "byte {i} bit {bit}");
+            }
+        }
+        assert_ne!(payload_hash(&[0u8; 64]), payload_hash(&[0u8; 65]));
+    }
+
+    /// Checksum throughput on a vmscan-sized record atom (110 KB):
+    /// `cargo test --profile fast checksum_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn checksum_bench() {
+        let b: Vec<u8> = (0..110_000u32).map(|i| (i * 2654435761u32 >> 13) as u8).collect();
+        let time = |f: &dyn Fn(&[u8]) -> u64| {
+            let mut best = f64::MAX;
+            let mut x = 0;
+            for _ in 0..200 {
+                let t = std::time::Instant::now();
+                x ^= std::hint::black_box(f(std::hint::black_box(&b)));
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            (best * 1e6, x)
+        };
+        let (k, _) = time(&|b| key_hash(b));
+        let (p, _) = time(&|b| payload_hash(b));
+        println!("110 KB: key_hash {k:.1} us, payload_hash {p:.1} us");
     }
 
     #[test]
@@ -1798,6 +1918,24 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    /// [`page_start_records_in`], collected: the hits and their records, concatenated.
+    fn collect_records<R: Fn(u64, u32, &mut [u8]) + Sync>(
+        session: &Session,
+        sigs: &[u32],
+        spec: &[u8],
+        rec_len: usize,
+        compute: impl FnOnce() -> Vec<(u64, u64, u32)>,
+        record: R,
+    ) -> (Vec<(u64, u64, u32)>, Vec<u8>) {
+        let (mut hits, mut recs) = (Vec::new(), Vec::new());
+        page_start_records_in(session, sigs, spec, rec_len, compute, record, |cs, rel, si, r| {
+            assert_eq!(r.len(), rec_len);
+            hits.push((cs, rel, si));
+            recs.extend_from_slice(r);
+        });
+        (hits, recs)
+    }
+
     /// Page-start records: computed once from the raw hits (cached or not), then answered from
     /// one atom without reading anything; keyed by the signatures and the record spec; damaged
     /// or wrongly sized record files are rebuilt, never trusted.
@@ -1831,21 +1969,21 @@ mod tests {
             rec(page, si, r)
         };
         // miss: raw hits computed and stored, records computed and stored
-        let got = page_start_records_in(&session, sigs, b"spec A", 9, || want_hits.clone(), counted);
+        let got = collect_records(&session, sigs, b"spec A", 9, || want_hits.clone(), counted);
         assert_eq!(got, (want_hits.clone(), want_recs.clone()));
         assert_eq!(computed.load(Ordering::Relaxed), 4);
         // hit: nothing computed
-        let got = page_start_records_in(&session, sigs, b"spec A", 9, || panic!("raw hits recomputed"), |_, _, _| panic!("record recomputed"));
+        let got = collect_records(&session, sigs, b"spec A", 9, || panic!("raw hits recomputed"), |_, _, _| panic!("record recomputed"));
         assert_eq!(got, (want_hits.clone(), want_recs.clone()));
         // another spec / record size: records recomputed from the cached raw hits
-        let got = page_start_records_in(&session, sigs, b"spec B", 9, || panic!("raw hits recomputed"), counted);
+        let got = collect_records(&session, sigs, b"spec B", 9, || panic!("raw hits recomputed"), counted);
         assert_eq!(got, (want_hits.clone(), want_recs.clone()));
         assert_eq!(computed.load(Ordering::Relaxed), 8);
         let rec8 = |page: u64, _: u32, r: &mut [u8]| r.copy_from_slice(&data[page as usize + 16..page as usize + 24]);
         let want8: Vec<u8> = want_hits.iter().flat_map(|&(_, a, _)| data[a as usize + 16..a as usize + 24].iter().copied()).collect();
-        let got = page_start_records_in(&session, sigs, b"spec A", 8, || panic!("raw hits recomputed"), rec8);
+        let got = collect_records(&session, sigs, b"spec A", 8, || panic!("raw hits recomputed"), rec8);
         assert_eq!(got, (want_hits.clone(), want8.clone()));
-        let got = page_start_records_in(&session, sigs, b"spec A", 8, || panic!("raw hits recomputed"), |_, _, _| panic!("record recomputed"));
+        let got = collect_records(&session, sigs, b"spec A", 8, || panic!("raw hits recomputed"), |_, _, _| panic!("record recomputed"));
         assert_eq!(got, (want_hits.clone(), want8));
         // damaged record files are rebuilt
         let recs_files = || -> Vec<PathBuf> {
@@ -1870,15 +2008,27 @@ mod tests {
             };
             std::fs::write(f, &bad).unwrap();
         }
+        // well-formed files are rejected too when a tag is beyond the signatures or the records
+        // are not exactly one per match
+        let key = records_key(sigs, b"spec A");
+        let atom = Atom::Recs(&key, 9);
+        let akey = session.atom_key(&atom);
+        for (tag, extra) in [(1u32, 0usize), (2, 0), (0, 1)] {
+            let mut g = Groups::default();
+            g.push(0, 0x1000, Some(tag));
+            g.data = vec![7u8; 9 + extra];
+            std::fs::write(session.atom_path(&akey), encode(KIND_RECS, true, &akey, &g).unwrap()).unwrap();
+            assert_eq!(session.load_recs(&atom, 2).is_some(), tag == 1, "tag {tag} extra {extra}");
+        }
         let before = computed.load(Ordering::Relaxed);
-        let got = page_start_records_in(&session, sigs, b"spec A", 9, || panic!("raw hits recomputed"), counted);
+        let got = collect_records(&session, sigs, b"spec A", 9, || panic!("raw hits recomputed"), counted);
         assert_eq!(got, (want_hits.clone(), want_recs.clone()));
         assert_eq!(computed.load(Ordering::Relaxed), before + 4);
         // no hits at all: an empty atom is a hit too
         let none = [0xdead_beefu32];
-        let got = page_start_records_in(&session, &none, b"spec A", 9, Vec::new, counted);
+        let got = collect_records(&session, &none, b"spec A", 9, Vec::new, counted);
         assert_eq!(got, (vec![], vec![]));
-        let got = page_start_records_in(&session, &none, b"spec A", 9, || panic!("raw hits recomputed"), |_, _, _| panic!("record recomputed"));
+        let got = collect_records(&session, &none, b"spec A", 9, || panic!("raw hits recomputed"), |_, _, _| panic!("record recomputed"));
         assert_eq!(got, (vec![], vec![]));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&p);

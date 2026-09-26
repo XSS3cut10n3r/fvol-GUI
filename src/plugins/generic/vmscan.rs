@@ -138,8 +138,13 @@ fn shipped(loc: &IsfLocation) -> Option<(u32, [u64; 6])> {
     };
     let &(_, rev, offs) = SHIPPED.iter().find(|s| s.0 == name)?;
     if let IsfLocation::File(p) = loc {
+        use std::os::unix::fs::FileExt;
         let want = crate::symbols::store::embedded_file(&format!("generic/vmcs/{name}"))?;
-        if std::fs::read(p).ok()? != want {
+        // one pread of one byte more than the shipped file: a regular file reads short only at
+        // its end (anything else only costs the ISF load)
+        let mut buf = vec![0u8; want.len() + 1];
+        let n = std::fs::File::open(p).ok()?.read_at(&mut buf, 0).ok()?;
+        if buf[..n] != *want {
             return None;
         }
     }
@@ -417,18 +422,18 @@ impl Plugin for Vmscan {
                     _ => spec.push(0),
                 }
             }
-            let (raw, recs) = scancache::page_start_records(layer, &sigs, &spec, rl, compute, |page, si, rec| {
+            let record = |page: u64, si: u32, rec: &mut [u8]| {
                 if let Some(Checks::Fields(f)) = structures.get(si as usize).map(|s| &s.checks) {
                     fill_record(&rd, page, f, mask, rec);
                 }
-            });
-            for (&(start, ps, si), rec) in raw.iter().zip(recs.chunks_exact(rl)) {
-                if let Checks::Fields(f) = &structures[si as usize].checks
+            };
+            scancache::page_start_records(layer, &sigs, &spec, rl, compute, record, |start, ps, si, rec| {
+                if let Some(Checks::Fields(f)) = structures.get(si as usize).map(|s| &s.checks)
                     && let Some(c) = check_record(f, rec)
                 {
                     rows.push((start + ps, si as usize, c));
                 }
-            }
+            });
         }
         for (off, si, (ept, cr3)) in rows {
             out.row(0, vec![Value::Str(structures[si].name.clone()), Value::Int(off as i128), Value::Int(ept as i128), Value::Int(cr3 as i128)])?;
