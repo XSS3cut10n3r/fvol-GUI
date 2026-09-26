@@ -233,7 +233,7 @@ For quick measurements during development:
 
 | Question                                      | Command                                                   |
 | --------------------------------------------- | --------------------------------------------------------- |
-| Faster than vol-rs on every plugin?           | `OURS=<BIN> bench/scripts/bench_vs_volrs.sh [-n <RUNS>] [<LIST>]` |
+| Faster than vol-rs on every plugin?           | `bench/scripts/bench_vs_volrs.sh [-b <BIN>] [-n <RUNS>] [<LIST>]` |
 | Cold and warm start                           | `bench/scripts/coldbench.py`                              |
 | Fixed cost of a CLI invocation                | `bench/scripts/cli_startup.sh <BIN> [<N>]`                |
 | Library throughput vs the C references        | `bench/scripts/refbench.sh`                               |
