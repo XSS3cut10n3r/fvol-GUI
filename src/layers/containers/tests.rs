@@ -739,3 +739,60 @@ fn container_bench() {
         );
     }
 }
+
+/// Two containers of the same memory (e.g. a LiME image and its AVML conversion) must expose
+/// the same address space: identical mapping() coverage and identical bytes everywhere,
+/// read in 1 MiB pieces from all cores.
+///   RSVOL_LAYER_COMPARE=a.lime,b.avml cargo test --release container_compare -- --ignored --nocapture
+#[test]
+#[ignore]
+fn container_compare() {
+    let Ok(pair) = std::env::var("RSVOL_LAYER_COMPARE") else { return };
+    let paths: Vec<PathBuf> = pair.split(',').map(PathBuf::from).collect();
+    assert_eq!(paths.len(), 2, "RSVOL_LAYER_COMPARE=a,b");
+    let layers: Vec<Arc<dyn Layer>> =
+        paths.iter().map(|p| stack_with(open(p), &StackOptions { location: Some(p), stackers: None }).unwrap().layer).collect();
+    let coverage = |l: &Arc<dyn Layer>| {
+        let mut v: Vec<(u64, u64)> = Vec::new();
+        l.mapping(0, l.max_address().saturating_add(1), &mut |m| {
+            match v.last_mut() {
+                Some(last) if last.0 + last.1 == m.offset => last.1 += m.len,
+                _ => v.push((m.offset, m.len)),
+            }
+            true
+        });
+        v
+    };
+    let (ca, cb) = (coverage(&layers[0]), coverage(&layers[1]));
+    assert_eq!(ca, cb, "mapped ranges differ");
+    let mut pieces = Vec::new();
+    for &(o, l) in &ca {
+        let mut a = o;
+        while a < o + l {
+            let k = (o + l - a).min(1 << 20);
+            pieces.push((a, k as usize));
+            a += k;
+        }
+    }
+    let t = std::time::Instant::now();
+    let bad = crate::util::par::par_map(pieces.len(), |i| {
+        let (a, k) = pieces[i];
+        let mut x = vec![0u8; k];
+        let mut y = vec![0u8; k];
+        layers[0].read(a, &mut x).unwrap();
+        layers[1].read(a, &mut y).unwrap();
+        (x != y).then_some(a)
+    });
+    let bad: Vec<u64> = bad.into_iter().flatten().collect();
+    let total: usize = pieces.iter().map(|p| p.1).sum();
+    println!(
+        "{} vs {}: {} bytes in {} runs compared in {:.2} s, {} differing MiB pieces",
+        layers[0].name(),
+        layers[1].name(),
+        total,
+        ca.len(),
+        t.elapsed().as_secs_f64(),
+        bad.len()
+    );
+    assert!(bad.is_empty(), "first differing piece at {:#x}", bad[0]);
+}
