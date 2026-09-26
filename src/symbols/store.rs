@@ -1642,18 +1642,20 @@ pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
 /// [`identifier_index`]; `on_work` runs when ISFs must actually be read (a cold or stale
 /// index), e.g. to start a banner-hint scan only then.
 pub fn identifier_index_with(path: &SymbolPath, on_work: &dyn Fn()) -> &'static IdentifierIndex {
-    // one index per distinct search path (a process normally has exactly one)
-    type Key = (SymbolPath, Option<String>);
+    // one index per distinct search path, `-u` list and seeding state (a process normally has
+    // exactly one; a long-running `vol serve` rebuilds it when python's database changed)
+    type Key = (SymbolPath, Option<String>, String);
     static INDEX: std::sync::Mutex<Vec<(Key, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
     let remote = super::remote_isf_url();
+    let state = seed_state();
     let mut all = INDEX.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, i)) = all.iter().find(|((p, r), _)| p == path && *r == remote) {
+    if let Some((_, i)) = all.iter().find(|((p, r, s), _)| p == path && *r == remote && *s == state) {
         return i;
     }
     let _t = crate::util::trace::span("identifier index update");
     let index = IdentifierIndex::build(path, remote.as_deref(), on_work);
     let i: &'static IdentifierIndex = Box::leak(Box::new(index));
-    all.push(((path.clone(), remote), i));
+    all.push(((path.clone(), remote, i.seed_state.clone()), i));
     i
 }
 

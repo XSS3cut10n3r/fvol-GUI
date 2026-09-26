@@ -93,11 +93,11 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
         Some(a) => a,
         None => {
             // python: the MacIntelStacker built no layer
-            let r = run(phys_arc);
+            let mut index = None;
+            let r = run_indexed(phys_arc, &mut index);
             symbols::store::keep_decoded_for(None);
             let a = r.map_err(|e| unsatisfied(ctx, &e, LAYER))?;
-            // (the index run() used: memoized per process)
-            let deps = symbols::store::identifier_index(symbols::symbol_path()).choice_deps("mac", &a.banner);
+            let deps = index.map(|i| i.choice_deps("mac", &a.banner)).unwrap_or_default();
             cache_store(&image, &fp, &a, deps);
             a
         }
@@ -141,6 +141,11 @@ fn unsatisfied(ctx: &Context, detail: &Error, paths: &[&str]) -> Error {
 /// python `MacIntelStacker.stack` on the physical layer (+ the MacSymbolFinder lookup, which
 /// resolves the same banner to the same ISF). `Err` = no layer (the detail python logs).
 pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
+    run_indexed(phys, &mut None)
+}
+
+/// [`run`]; `index` receives the identifier index the banner -> ISF choice was made from.
+fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store::IdentifierIndex>) -> Result<MacAutomagic> {
     // python: never stack on top of an intel layer
     if phys.as_intel().is_some() {
         return Err(Error::msg("Mac automagic: the memory layer is already a translation layer"));
@@ -151,14 +156,15 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
         // ISF from the JSON it decompresses anyway; no guessing among many mac kernels
         symbols::store::keep_decoded_for_with(Some("mac"), false);
         let hint = std::sync::Mutex::new(None);
-        let d = symbols::store::identifier_index_with(symbols::symbol_path(), &|| {
+        let idx = symbols::store::identifier_index_with(symbols::symbol_path(), &|| {
             let phys = phys.clone();
             let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
                 symbols::store::set_banner_hint(crate::automagic::banner_hint(phys.as_ref(), b"Darwin Kernel Version ", b":"));
             });
             *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
-        })
-        .dictionary("mac");
+        });
+        *index = Some(idx);
+        let d = idx.dictionary("mac");
         if let Some(h) = hint.into_inner().unwrap_or_else(|e| e.into_inner()) {
             let _ = h.join();
         }
