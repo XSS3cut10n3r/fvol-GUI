@@ -64,7 +64,7 @@ fn check_expect(expect: &Path) -> usize {
         .unwrap_or_else(|| panic!("no container for {}", expect.display()));
     let file = open(&main);
     let t = std::time::Instant::now();
-    let st = stack_with(file.clone(), &StackOptions { location: Some(&main), stackers: None }).unwrap();
+    let st = stack_with(file.clone(), &StackOptions { location: Some(&main), ..Default::default() }).unwrap();
     let open_time = t.elapsed();
     let layer = st.layer;
     if std::env::var_os("RSVOL_CONTAINER_VERBOSE").is_some() {
@@ -75,7 +75,7 @@ fn check_expect(expect: &Path) -> usize {
             "XenCoreDumpLayer" => elf::stack_xen(&base).ok(),
             "QemuSuspendLayer" => qemu::stack(&base).ok(),
             "AVMLLayer" => avml::stack(&base).ok(),
-            "VmwareLayer" => vmware::stack(&base, &main).ok(),
+            "VmwareLayer" => vmware::stack(&base, &main, None, false).ok().map(|(l, _)| l),
             "WindowsCrashDump32Layer" | "WindowsCrashDump64Layer" => crash::stack(&base).ok(),
             _ => None,
         };
@@ -165,27 +165,41 @@ fn python_differential_large() {
 fn stack_listing_names() {
     let dir = fixtures_dir();
     let p = dir.join("nested_elf_lime.elf");
-    let st = stack_with(open(&p), &StackOptions { location: Some(&p), stackers: None }).unwrap();
+    let st = stack_with(open(&p), &StackOptions { location: Some(&p), ..Default::default() }).unwrap();
     assert_eq!(st.stackers, vec![Stacker::Elf64, Stacker::Lime]);
     let got: Vec<(usize, &str, &str)> = st.layers.iter().map(|e| (e.depth, e.name.as_str(), e.class)).collect();
     assert_eq!(got, vec![(0, "memory_layer", "LimeLayer"), (1, "base_layer2", "Elf64Layer"), (2, "base_layer", "FileLayer")]);
 
     let p = dir.join("vmware.vmem");
-    let st = stack_with(open(&p), &StackOptions { location: Some(&p), stackers: None }).unwrap();
+    let st = stack_with(open(&p), &StackOptions { location: Some(&p), ..Default::default() }).unwrap();
     let got: Vec<(usize, &str, &str)> = st.layers.iter().map(|e| (e.depth, e.name.as_str(), e.class)).collect();
     assert_eq!(got, vec![(0, "memory_layer", "VmwareLayer"), (1, "base_layer", "FileLayer"), (1, "meta_layer", "FileLayer")]);
+    // python's meta_layer location: the image location with .vmem replaced
+    let meta = |st: &Stacked| st.layers.iter().map(|e| e.location.clone()).collect::<Vec<_>>();
+    let vmss = crate::util::paths::path_to_file_uri(&dir.join("vmware.vmss"));
+    assert_eq!(meta(&st), vec![None, None, Some(vmss)]);
+    let url = "file:///some/where/vmware.vmem";
+    let st = stack_with(open(&p), &StackOptions { location: Some(&p), url: Some(url), ..Default::default() }).unwrap();
+    assert_eq!(meta(&st), vec![None, None, Some("file:///some/where/vmware.vmss".to_string())]);
+    // python tests its location, not the local file: no VMware layer for x.vmem.gz
+    let st = stack_with(open(&p), &StackOptions { location: Some(&p), url: Some("file:///x.vmem.gz"), ..Default::default() }).unwrap();
+    assert_eq!(st.layer.name(), "FileLayer");
+    // a .vmsn is used when there is no .vmss
+    let vmsn = fixtures_dir().join("vmware_vmsn.vmem");
+    let st = stack_with(open(&vmsn), &StackOptions { location: Some(&vmsn), ..Default::default() }).unwrap();
+    assert_eq!(meta(&st)[2].as_deref(), Some(crate::util::paths::path_to_file_uri(&dir.join("vmware_vmsn.vmsn")).as_str()));
 
     // a raw file stays raw
     let raw = temp_file("raw", &vec![0x11u8; 3 * 4096]);
     let st = stack_with(open(&raw), &StackOptions::default()).unwrap();
     assert_eq!(st.layer.name(), "FileLayer");
-    assert_eq!(st.layers, vec![StackEntry { depth: 0, name: "memory_layer".into(), class: "FileLayer" }]);
+    assert_eq!(st.layers, vec![StackEntry { depth: 0, name: "memory_layer".into(), class: "FileLayer", location: None }]);
     std::fs::remove_file(raw).unwrap();
 
     // stacker filter (python automagic.LayerStacker.stackers)
     let p = dir.join("lime.lime");
     let only_elf = vec!["Elf64Stacker".to_string()];
-    let st = stack_with(open(&p), &StackOptions { location: Some(&p), stackers: Some(&only_elf) }).unwrap();
+    let st = stack_with(open(&p), &StackOptions { location: Some(&p), stackers: Some(&only_elf), ..Default::default() }).unwrap();
     assert_eq!(st.layer.name(), "FileLayer");
     assert_eq!(stack(open(&p)).unwrap().name(), "LimeLayer");
 }
@@ -648,7 +662,7 @@ fn container_bench() {
     for (name, main, addrs) in &inputs {
         let file = open(main);
         let t = std::time::Instant::now();
-        let layer = stack_with(file, &StackOptions { location: Some(main), stackers: None }).unwrap().layer;
+        let layer = stack_with(file, &StackOptions { location: Some(main), ..Default::default() }).unwrap().layer;
         let t_open = t.elapsed().as_secs_f64();
         let pages: Vec<u64> = match addrs {
             Some(a) => std::fs::read(a).unwrap().chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect(),
@@ -787,7 +801,7 @@ fn container_compare() {
     let paths: Vec<PathBuf> = pair.split(',').map(PathBuf::from).collect();
     assert_eq!(paths.len(), 2, "RSVOL_LAYER_COMPARE=a,b");
     let layers: Vec<Arc<dyn Layer>> =
-        paths.iter().map(|p| stack_with(open(p), &StackOptions { location: Some(p), stackers: None }).unwrap().layer).collect();
+        paths.iter().map(|p| stack_with(open(p), &StackOptions { location: Some(p), ..Default::default() }).unwrap().layer).collect();
     let coverage = |l: &Arc<dyn Layer>| {
         let mut v: Vec<(u64, u64)> = Vec::new();
         l.mapping(0, l.max_address().saturating_add(1), &mut |m| {

@@ -71,6 +71,8 @@ w("multi.xz", xz(text, "-6") + b"\0" * 8 + xz(noise, "-1"))
 alone = xz(text, "--format=lzma", "-6")
 w("text.lzma", alone)
 w("text.sized.lzma", alone[:5] + struct.pack("<Q", len(text)) + alone[13:])
+# a 4 KiB dictionary over 4 copies of the text: the streaming decoder's window slides
+w("text4.d4k.lzma", xz(text * 4, "--format=lzma", "--lzma1=preset=6,dict=4KiB"))
 
 # Raw LZMA2 and raw LZMA1 (as used by ZIP method 14).
 w("text.lzma2", lzma.compress(text, format=lzma.FORMAT_RAW, filters=[{"id": lzma.FILTER_LZMA2, "preset": 6}]))

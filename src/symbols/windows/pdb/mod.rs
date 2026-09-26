@@ -7,7 +7,7 @@
 //!   * [`pdb_to_isf_json`] / [`pdb_to_isf_json_named`] — python `PdbReader(...).get_json()`
 //!     followed by `json.dumps(indent=2, sort_keys=True)`, byte-identical except for the
 //!     producer datetime;
-//!   * [`download_pdb`] / [`download_and_convert`] — python `PdbRetreiver` /
+//!   * [`fetch_pdb`] / [`download_pdb`] / [`download_and_convert`] — python `PdbRetreiver` /
 //!     `PDBUtility.download_pdb_isf` (curl is used for HTTPS);
 //!   * [`pe_codeview_info`] — python `PDBUtility.get_guid_from_mz` over raw image bytes;
 //!   * [`rsds_scan`], [`find_mz_before`], [`PdbNameScan`] — `PdbSignatureScanner` and the
@@ -20,7 +20,9 @@ mod pe;
 mod reader;
 mod scan;
 
-pub use download::{download_and_convert, download_pdb, isf_relative_path, symbol_server_urls, SYMBOL_SERVER_URL};
+pub use download::{
+    download_and_convert, download_pdb, fetch_pdb, isf_relative_path, pdb_cache_path, set_python_cache, symbol_server_urls, SYMBOL_SERVER_URL,
+};
 pub use pe::{find_mz_before, find_rsds, guid_string, pe_codeview_info, pe_image_size, rsds_scan, rsds_search, CodeViewInfo, PdbNameScan, PdbScanResult, RsdsMatch};
 
 use crate::error::{Error, Result};

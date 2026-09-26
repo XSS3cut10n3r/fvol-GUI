@@ -17,6 +17,8 @@ This README describes rsvol 0.1.0, which tracks volatility3 2.28.2.
   pycryptodome based ones, with python's argument parser, `--help` text and error messages.
 - Windows, Linux and macOS memory images in raw, LiME, ELF core, Windows crash dump, VMware,
   QEMU, AVML and Xen formats, plus Windows swap files through `--single-swap-locations`.
+  Images compressed with gzip, bzip2 or xz are read like python reads them, but decompressed
+  once, in parallel where the format allows, instead of on every read.
 - Median plugin run of about 10 ms on a 5 GiB Windows image, versus 4.5 s for python.
 - One static binary with no dependencies: Rust `std` only, no crates. Codecs, crypto, the
   disassembler, the regex and YARA engines, the PDB parser and the JSON parser are written from
@@ -156,8 +158,9 @@ engine, a PDB to ISF converter, and readers for JSON, zip and SQLite files.
 
 The only external program rsvol runs is `curl`, and only where python volatility3 goes to the
 network: downloading PDB files from the Microsoft symbol server, images given to `-f` or
-`--single-location` as `http://`, `https://` or `ftp://` URLs, and remote ISF lists and files
-named with `-u/--remote-isf-url`. `--offline` disables all of them.
+`--single-location` as `http://`, `https://` or `ftp://` URLs together with the `.vmss` or `.vmsn`
+file next to a remote `.vmem`, and remote ISF lists and files named with `-u/--remote-isf-url`.
+`--offline` disables all of them.
 
 ## Web UI
 
@@ -200,15 +203,25 @@ files downloaded by either tool are shared.
 | Raw scan hits                      | `~/.cache/rsvol/scan/`, capped at 256 MiB       | Scanning plugins replay hits instead of rereading memory   |
 | `isfinfo --live` results           | `~/.cache/rsvol/isfinfo.cache`                  | Warm `isfinfo` runs parse no files                         |
 | Downloads                          | `~/.cache/rsvol/data_<SHA512>.cache`            | Remote images and `-u` files are downloaded once           |
+| Decompressed images                | `~/.cache/rsvol/decompressed/`                  | A `.gz`, `.bz2` or `.xz` image is decompressed once        |
+| Downloaded Windows PDBs            | `~/.cache/volatility3/data_<SHA512>.cache`      | Kept where python keeps them, and shared with python       |
 | Converted Windows PDBs             | `~/.cache/volatility3/symbols/windows/`         | Shared with python volatility3                             |
 
 A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
 directory where the file can be created, as python does: normally
 `~/.cache/volatility3/symbols`, but a writable `-s` directory or python volatility3 installation
-comes first.
+comes first. The PDB itself stays in python's cache directory under the name python gives it,
+`data_` and the SHA-512 of its symbol server URL, or in the `--cache-path` directory. python finds
+it there, and rsvol uses a PDB that python or rsvol downloaded before instead of downloading it
+again.
 
 Downloads are named like python's, `data_` and the SHA-512 of the URL, and like python's they are
 never checked for changes on the server.
+
+A decompressed image is stored with its key: the image location and the canonical path, size and
+modification time of the compressed file. When the compressed file changes, the next run
+decompresses it again and deletes the old copy, and copies of compressed files that no longer
+exist are deleted whenever an image is decompressed. A copy is as big as the uncompressed image.
 
 When python volatility3 has run on this machine, rsvol reads its identifier cache (never writes
 it; `--cache-path` selects it as for python) instead of reading every symbol file on the search
@@ -221,8 +234,11 @@ build the index from the symbol files alone.
 To empty the caches, run any plugin with `--clear-cache` or delete the directory. Like python's
 `--clear-cache`, which deletes every `*.cache` file in its cache directory, downloads included,
 rsvol's deletes every `*.cache` file in `~/.cache/rsvol`: downloads, the identifier index and the
-`isfinfo` cache. It also removes the symbol tables, the kernel discovery results and the scan
-results. It deletes nothing outside `~/.cache/rsvol`, so converted PDBs and python's own cache stay.
+`isfinfo` cache. It also removes the symbol tables, the kernel discovery results, the scan
+results and the decompressed images. It deletes nothing outside `~/.cache/rsvol`, so converted
+PDBs and python's own cache stay. Where python's `--clear-cache` would have deleted a file in its
+own cache, rsvol ignores that file for the run: it does not read python's identifier cache, and
+it downloads a needed PDB again.
 
 ```bash
 vol --clear-cache -f <IMAGE> windows.info.Info
@@ -309,8 +325,12 @@ gates.
   unless `RSVOL_THREADS` says otherwise.
 - **YARA.** Rules that `import` a module such as `pe` fail with "modules are not supported", and
   `--yara-compiled-file` is not supported. Plain rules, strings and conditions work.
-- **Compressed images.** python decompresses an image whose name ends in `.gz`, `.bz2` or `.xz`
-  while reading it; rsvol reads the file as it is.
+- **Compressed images that do not decompress.** A `.gz`, `.bz2` or `.xz` image that is corrupt,
+  truncated or not compressed despite its name stops rsvol before the plugin runs, with the
+  decoder's error on stderr and python's "Unsatisfied requirement" message. python opens such a
+  file lazily and fails while reading it, so plugins that accept the bare file, such as
+  `layerwriter.LayerWriter`, print the decoder's error or a traceback instead. Valid compressed
+  images give python's output.
 - **Corrupt circular lists.** Where python would loop forever on a smeared structure, such as a
   cyclic subsection list in `windows.dumpfiles.DumpFiles`, rsvol stops with an error.
 - **`isfinfo.IsfInfo`** leaves the `hash` column empty for rows it adds to python's identifier

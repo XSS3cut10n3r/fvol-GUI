@@ -53,9 +53,37 @@ pass the `.vmem` file and keep the `.vmss` or `.vmsn` file of the same name next
 
 `-f` also takes an `http://`, `https://` or `ftp://` URL, as python does. rsvol downloads the
 image once with `curl` into `~/.cache/rsvol/data_<SHA512>.cache`, named like python's download,
-and reads it from there on later runs without checking the server again. `--clear-cache`
-deletes the download. Like python, rsvol retries a download whose TLS certificate fails
-verification without verification, with a warning.
+and reads it from there on later runs without checking the server again. For a `.vmem` URL it
+downloads the `.vmss` next to it the same way, or the `.vmsn` when there is no `.vmss`.
+`--clear-cache` deletes the downloads. Like python, rsvol retries a download whose TLS
+certificate fails verification without verification, with a warning.
+
+### Compressed images
+
+An image whose name ends in `.gz`, `.bz2` or `.xz` is decompressed, as python does, whether it is
+a file or a URL. Decompression happens once: the first run writes the uncompressed image to
+`~/.cache/rsvol/decompressed/` and later runs read that copy, so they cost no more than runs on
+the uncompressed image. Plan for the disk space of the uncompressed image. Output is the same
+as for the uncompressed image, and configurations written by `configwriter.ConfigWriter` or
+`--save-config` name the compressed file, as python's do.
+
+```bash
+vol -f memory.raw.xz windows.pslist.PsList     # first run: decompresses, then runs
+vol -f memory.raw.xz windows.psscan.PsScan     # later runs: no decompression
+```
+
+- The extension decides, as in python without the optional `magic` module: `x.raw.gz` is
+  decompressed, a gzip file named `x.raw` is read as it is, and `x.gz.xz` is un-xz'd and then
+  gunzipped. Extensions are case-sensitive, so `x.GZ` is read as it is.
+- `.xz` files may also hold legacy `.lzma` data, as python's `lzma` module accepts.
+- xz files with several blocks, such as those from `xz -T0`, bzip2 files and gzip files with
+  several members, such as those from `bgzip`, decompress on all cores. A single-member gzip
+  file, such as the output of plain `gzip`, is one stream and decompresses on one core.
+- The copy is kept until `--clear-cache`, or until the next decompression after the compressed
+  file changed (size or modification time) or was deleted. `RSVOL_CACHE` moves the cache to a
+  disk with more room.
+- `.vmem` detection uses the name as given, as python does, so a compressed `x.vmem.gz` is
+  read as a raw image without its `.vmss`.
 
 The exit status is 0 on success, 1 when the plugin cannot run or fails, and 2 for a usage error.
 rsvol prints no progress output, so `-q` is accepted but changes nothing.
@@ -75,7 +103,10 @@ rsvol prints no progress output, so `-q` is accepted but changes nothing.
    [Control where symbol files are found](#control-where-symbol-files-are-found)) in which it can
    be created. That is normally `~/.cache/volatility3/symbols/`, but a writable `-s` directory
    or python volatility3 installation comes first. python finds the file as well, and later runs
-   on any image of the same Windows build need no network.
+   on any image of the same Windows build need no network. The downloaded PDB stays where python
+   keeps its downloads, `~/.cache/volatility3/data_<SHA512>.cache` (the SHA-512 of the PDB's
+   symbol server URL), or in the `--cache-path` directory. If the converted file is lost, the
+   next run converts that PDB again instead of downloading it, and so does python.
 
 2. Run the plugins you need. A typical triage sequence:
 

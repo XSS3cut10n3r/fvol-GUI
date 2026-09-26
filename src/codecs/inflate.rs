@@ -319,7 +319,60 @@ pub fn inflate_into(input: &[u8], out: &mut Vec<u8>) -> Result<usize> {
 
 /// As [`inflate_into`], also computing `check` over the bytes this stream appends.
 pub(crate) fn inflate_into_check(input: &[u8], out: &mut Vec<u8>, check: &mut Check) -> Result<usize> {
-    let start = out.len();
+    inflate_core(input, out, check, |_, _, _| Ok(()))
+}
+
+/// DEFLATE's window: the farthest a match can reach back.
+const WINDOW: usize = 32 << 10;
+
+/// Streams a raw DEFLATE stream into `sink` with bounded memory, decoding into `buf`, which
+/// may hold earlier output not emitted yet (never used as history). Whenever `buf` holds
+/// `chunk` bytes not emitted, they are emitted (at a block boundary), keeping only this
+/// stream's last 32 KiB as history. On return `buf` holds only output not emitted yet (all
+/// of it was, if anything was emitted during the call). `check` covers this stream's output.
+/// Returns the number of input bytes consumed.
+pub(crate) fn inflate_stream(
+    input: &[u8],
+    check: &mut Check,
+    sink: &mut dyn super::sink::Sink,
+    chunk: usize,
+    buf: &mut Vec<u8>,
+) -> Result<usize> {
+    // buf[..hist] was emitted already (history only)
+    let mut hist = 0usize;
+    let used = inflate_core(input, buf, check, |out, start, check| {
+        if out.len() - hist >= chunk {
+            // SAFETY: out[..len] initialised.
+            unsafe { check.update(out.as_ptr(), out.len()) };
+            let keep = (out.len() - *start).min(WINDOW);
+            sink.flush(out, hist, keep)?;
+            hist = out.len();
+            // everything left is this stream's own output
+            *start = 0;
+            check.done = hist;
+        }
+        Ok(())
+    })?;
+    if hist > 0 {
+        sink.flush(buf, hist, 0)?;
+    }
+    Ok(used)
+}
+
+/// [`inflate_into_check`] giving up (with an error) once the output of this stream exceeds
+/// `max` bytes (checked at block boundaries).
+pub(crate) fn inflate_into_check_max(input: &[u8], out: &mut Vec<u8>, check: &mut Check, max: usize) -> Result<usize> {
+    inflate_core(input, out, check, |out, start, _| if out.len() - *start > max { Err(corrupt("output limit")) } else { Ok(()) })
+}
+
+/// The block loop. `after_block(out, start, check)` runs after every block but the last and
+/// may emit and drop output (adjusting `start`, where this stream's output begins in `out`,
+/// and `check.done`); the in-memory decoders pass a no-op.
+fn inflate_core<F>(input: &[u8], out: &mut Vec<u8>, check: &mut Check, mut after_block: F) -> Result<usize>
+where
+    F: FnMut(&mut Vec<u8>, &mut usize, &mut Check) -> Result<()>,
+{
+    let mut start = out.len();
     check.done = start;
     let mut bits = Bits { buf: 0, count: 0, ip: 0 };
     let mut dynamic = Tables { lit: Vec::with_capacity(4096), dist: Vec::with_capacity(1024) };
@@ -417,6 +470,7 @@ pub(crate) fn inflate_into_check(input: &[u8], out: &mut Vec<u8>, check: &mut Ch
         if last {
             break;
         }
+        after_block(out, &mut start, check)?;
     }
     bits.check(input)?;
     // SAFETY: out[..len] initialised.
