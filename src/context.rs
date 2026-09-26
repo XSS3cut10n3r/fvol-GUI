@@ -243,42 +243,13 @@ impl Context {
     }
 
     /// Create a file in the output directory (volatility3 CLIFileHandler semantics: if the
-    /// preferred name already exists a counter is appended). Returns the open file and the
-    /// final file name (as plugins print it).
+    /// preferred name already exists a counter is appended, see `cli::files::create`).
+    /// Returns the open file and the FINAL file name, which is what python's
+    /// `file_handle.preferred_filename` holds after `close()` (plugins that read it before
+    /// closing, like `pedump.dump_pe`, print the preferred name instead).
     pub fn create_output_file(&self, preferred_name: &str) -> Result<(File, String)> {
         let _g = self.output_lock.lock().unwrap();
-        let dir = if self.opts.output_dir.is_empty() { "." } else { self.opts.output_dir.as_str() };
-        std::fs::create_dir_all(dir)?;
-        let path: PathBuf = [dir, preferred_name].iter().collect();
-        let final_path = unique_path(&path);
-        let f = File::create(&final_path)?;
-        Ok((f, preferred_name.to_string()))
-    }
-}
-
-/// python `CLIFileHandler._get_final_filename`: `name-1.ext`, `name-2.ext`, ... if taken.
-fn unique_path(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
-    }
-    let s = path.to_string_lossy().into_owned();
-    // os.path.splitext: extension of the last component, ignoring leading dots
-    let (dir, base) = match s.rfind('/') {
-        Some(i) => (&s[..=i], &s[i + 1..]),
-        None => ("", s.as_str()),
-    };
-    let lead = base.len() - base.trim_start_matches('.').len();
-    let (stem, ext) = match base[lead..].rfind('.') {
-        Some(i) => (&base[..lead + i], &base[lead + i..]),
-        None => (base, ""),
-    };
-    let mut counter = 1;
-    loop {
-        let p = PathBuf::from(format!("{dir}{stem}-{counter}{ext}"));
-        if !p.exists() {
-            return p;
-        }
-        counter += 1;
+        crate::cli::files::create(&self.opts.output_dir, preferred_name)
     }
 }
 

@@ -5,7 +5,6 @@
 
 use crate::context::{Context, WinKernel};
 use crate::error::{Error, Result};
-use crate::layers::Layer;
 use crate::objects::{LayerRef, Obj, Space};
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -75,8 +74,11 @@ pub fn find_session_layer(layers: &[LayerRef], base: u64) -> Option<LayerRef> {
 
 /// python `PEDump.dump_pe(context, pe_table, layer, open_method, file_name, base)`: the file is
 /// always created and committed; returns the printed name, or None when reconstruction failed.
+/// python returns `preferred_filename` inside the `with` block (before close), i.e. the
+/// requested name even when the file got a `-N` suffix.
 pub fn dump_pe(ctx: &Context, pe_table: TableRef, layer: LayerRef, file_name: &str, base: u64) -> Option<String> {
-    let (mut f, printed) = ctx.create_output_file(file_name).ok()?;
+    let (mut f, _final_name) = ctx.create_output_file(file_name).ok()?;
+    let printed = file_name.to_string();
     let dos = Obj::named(Space::on(layer, pe_table), "_IMAGE_DOS_HEADER", base).ok()?;
     let (pieces, err) = pe::reconstruct(&dos);
     let _ = pe::write_pieces(&mut f, &pieces);
