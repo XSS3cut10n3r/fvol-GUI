@@ -61,7 +61,7 @@ pub mod vmcoreinfo;
 
 pub use caps::CapsExt;
 pub use ext::{HListIter, LinuxExt, ListIter};
-pub use fs::FsExt;
+pub use fs::{FsExt, SubdirIter};
 pub use network::NetExt;
 
 /// Every Linux extension trait (`use crate::symbols::linux::prelude::*`).
