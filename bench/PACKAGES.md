@@ -46,3 +46,9 @@ L3 linux fs/net (after L1's extensions land).
 ## Queue (launch as agent slots free up; 20-concurrent cap)
 1. perf pass snappy/xpress + container layers   2. W5 malware+services (needs disasm merged)
 3. L2 linux kernel, L3 linux fs/net (need L1 extensions merged)
+
+## Dedupe list (cleanup pass later)
+- src/plugins/windows/thread_pe_symbols.rs (W1 private) -> W2b pe_symbols (symbol names currently empty!)
+- handles.rs private registry key naming -> W3 RegExt helpers
+- hivescan private list_big_pools -> W1 bigpools::list_big_pools_each
+- core RSDS scanner duplicates symbols::windows::pdb::rsds_scan
