@@ -703,6 +703,11 @@ fn load_known(url: &str, cf: &Option<(PathBuf, Vec<u8>)>, name: &str) -> Option<
 /// Load a symbol table from `loc` (binary cache first). `name` is the table name.
 pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
     let url = loc.url();
+    if let IsfLocation::File(p) = loc
+        && let Some(t) = load_pending(p, name, &url, opts)
+    {
+        return t;
+    }
     let cf = cache_file(loc, &url, opts);
     let lock = cf.as_ref().map(|(_, k)| key_lock(k));
     let _g = lock.as_ref().map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
@@ -797,6 +802,19 @@ fn deferred_mode() -> &'static str {
 /// the next run of any plugin maps the finished blob. If the helper cannot be started, the
 /// blob is built on a background thread that `main` joins before exit.
 pub fn finish_deferred() {
+    super::windows::pdb::finish_ahead();
+    // converted PDB tables first: their files are what python and the next run look for
+    let writes = std::mem::take(&mut *PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner()));
+    for p in writes {
+        if deferred_mode() != "thread" && spawn_helper_spec(&format!("X{}", p.job.encode())) {
+            crate::util::trace::note(|| format!("pdb isf: helper started for {}", p.job.path.display()));
+            continue;
+        }
+        crate::util::bg::spawn(move || {
+            let _t = crate::util::trace::span("pdb isf write (deferred, in-process)");
+            p.job.run_with(&p.json);
+        });
+    }
     let jobs = std::mem::take(&mut *DEFERRED.lock().unwrap_or_else(|e| e.into_inner()));
     let mode = deferred_mode();
     for j in jobs {
@@ -849,8 +867,13 @@ fn parse_helper_spec(spec: &str) -> Option<IsfLocation> {
 /// Start the helper process for `loc`'s blob: this executable with [`HELPER_ENV`] set, stdio
 /// on /dev/null, not waited for (it detaches itself, see [`run_helper`]).
 fn spawn_helper(loc: &IsfLocation) -> bool {
+    helper_spec(loc).is_some_and(|s| spawn_helper_spec(&s))
+}
+
+/// Start the helper process with [`HELPER_ENV`] = `spec`.
+fn spawn_helper_spec(spec: &str) -> bool {
     use std::os::unix::process::CommandExt;
-    let (Some(spec), Some(exe)) = (helper_spec(loc), paths::current_exe()) else { return false };
+    let Some(exe) = paths::current_exe() else { return false };
     std::process::Command::new(exe)
         .arg0("rsvol-isfb-helper")
         .env(HELPER_ENV, spec)
@@ -876,8 +899,20 @@ unsafe extern "C" {
 /// exclusive non-blocking lock next to the blob); the blob is written through a temporary
 /// file and a rename, and only if the ISF did not change while it was read. Returns the exit
 /// status (nothing is printed).
+///
+/// A spec `X<job>` (see `pdb::IsfWrite`) first writes a converted PDB's `.json.xz` (at normal
+/// priority: python and the next run look for that file), then its blob.
 pub fn run_helper(spec: &std::ffi::OsStr) -> i32 {
     const SCHED_IDLE: i32 = 5;
+    let idle = || {
+        let param = 0i32;
+        // SAFETY: plain syscalls on this process
+        unsafe {
+            if sched_setscheduler(0, SCHED_IDLE, &param) != 0 {
+                setpriority(0, 0, 19);
+            }
+        }
+    };
     // SAFETY: plain syscalls on this process
     unsafe {
         setsid();
@@ -886,19 +921,38 @@ pub fn run_helper(spec: &std::ffi::OsStr) -> i32 {
                 close(fd);
             }
         }
-        let param = 0i32;
-        if sched_setscheduler(0, SCHED_IDLE, &param) != 0 {
-            setpriority(0, 0, 19);
-        }
     }
+    if let Some(job) = spec.to_str().and_then(|s| s.strip_prefix('X')) {
+        let Some(job) = super::windows::pdb::IsfWrite::decode(job) else { return 2 };
+        setpriority_background();
+        let Some((json, stamp)) = job.run() else { return 1 };
+        idle();
+        // (the JSON is the file's unless another run replaced the file meanwhile)
+        let json = (paths::file_stamp(&job.path) == Some(stamp)).then_some(json);
+        return match write_blob_locked(&IsfLocation::File(job.path), json) {
+            Some(()) => 0,
+            None => 1,
+        };
+    }
+    idle();
     let Some(loc) = spec.to_str().and_then(parse_helper_spec) else { return 2 };
-    match write_blob_locked(&loc) {
+    match write_blob_locked(&loc, None) {
         Some(()) => 0,
         None => 1,
     }
 }
 
-fn write_blob_locked(loc: &IsfLocation) -> Option<()> {
+/// A lower (but not idle) CPU priority: work whose result others wait for, off the output path.
+fn setpriority_background() {
+    // SAFETY: plain syscall on this process
+    unsafe {
+        setpriority(0, 0, 5);
+    }
+}
+
+/// Build and write the blob of `loc` (from `json` when given: the content of the file as it
+/// is now), see [`run_helper`].
+fn write_blob_locked(loc: &IsfLocation, json: Option<Vec<u8>>) -> Option<()> {
     use std::os::fd::AsRawFd;
     const LOCK_EX: i32 = 2;
     const LOCK_NB: i32 = 4;
@@ -925,7 +979,10 @@ fn write_blob_locked(loc: &IsfLocation) -> Option<()> {
         done();
         return Some(());
     }
-    let json = json_for_build(loc).ok()?;
+    let json = match json {
+        Some(j) => JsonBuf::Owned(j),
+        None => json_for_build(loc).ok()?,
+    };
     let blob = super::isf::build_blob(&json, &opts).ok()?;
     // the source must be the one the key describes (not modified while it was read)
     if cache_file(loc, &url, &opts).map(|c| c.1).as_ref() != Some(&key) {
@@ -2088,11 +2145,20 @@ pub fn identifier_index_with(path: &SymbolPath, on_work: &dyn Fn()) -> &'static 
     i
 }
 
+/// python's identifier of a Windows PDB: `<pdb name>|<GUID>|<age>`.
+fn windows_identifier(pdb_name: &str, guid: &str, age: u32) -> String {
+    format!("{}|{}|{}", pdb_name.trim_matches('\0'), guid.to_uppercase(), age)
+}
+
 /// The first steps of [`find_windows_isf`]: an ISF found by name (canonical layout
-/// `<root>/windows/<pdb>/<GUID>-<AGE>.json*`, then python's rglob), without the identifier
-/// index or a download. Cheap (a few stats), for speculative loading.
+/// `<root>/windows/<pdb>/<GUID>-<AGE>.json*`, then python's rglob), or the one this process
+/// converted for the PDB (its file is written after the output, see [`finish_deferred`]),
+/// without the identifier index or a download. Cheap (a few stats), for speculative loading.
 pub fn find_windows_isf_local(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32) -> Option<IsfLocation> {
     let pdb_name = pdb_name.trim_matches('\0');
+    if let Some(p) = pending_path(pdb_name, guid, age) {
+        return Some(IsfLocation::File(p));
+    }
     let filter = format!("{}/{}-{}", pdb_name, guid.to_uppercase(), age);
     // fast path: the canonical layout <root>/windows/<pdb>/<GUID>-<AGE>.json*
     for root in &path.roots {
@@ -2106,6 +2172,15 @@ pub fn find_windows_isf_local(path: &SymbolPath, pdb_name: &str, guid: &str, age
         }
     }
     path.find_first("windows", &filter)
+}
+
+/// The ISF [`find_windows_isf`] returns, found without a download: python's identifier-cache
+/// choice (the same memoized answer the final lookup reads), else an ISF named by the PDB.
+/// For the speculative kernel table load while the kernel scan runs: with several copies of
+/// one GUID on the search path it is the copy python loads, never the first one by name.
+pub fn find_windows_isf_no_download(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32) -> Option<IsfLocation> {
+    let ident = windows_identifier(pdb_name, guid, age);
+    find_location_cached(path, ident.as_bytes(), "windows").or_else(|| find_windows_isf_local(path, pdb_name, guid, age))
 }
 
 /// Bump when what a cached [`find_location_cached`] answer means changes.
@@ -2130,18 +2205,29 @@ fn choice_file(path: &SymbolPath, identifier: &[u8], os: &str) -> (PathBuf, Stri
 /// `~/.cache/rsvol/isfchoice/` with its dependencies ([`IdentifierIndex::choice_deps`]), so a
 /// later run with the same python database and search path skips building the index.
 pub fn find_location_cached(path: &SymbolPath, identifier: &[u8], os: &str) -> Option<IsfLocation> {
+    choice_cached(path, identifier, os).unwrap_or_else(|| choice_from_index(path, identifier, os))
+}
+
+/// The [`find_location_cached`] answer kept by an earlier run, if it still holds.
+fn choice_cached(path: &SymbolPath, identifier: &[u8], os: &str) -> Option<Option<IsfLocation>> {
     let (file, key) = choice_file(path, identifier, os);
-    if let Ok(s) = std::fs::read_to_string(&file) {
-        let mut lines = s.lines();
-        if lines.next().and_then(|l| l.strip_prefix("key=")) == Some(key.as_str()) {
-            let kv: Vec<(String, String)> = lines.filter_map(|l| l.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect();
-            if let Some(loc) = kv.iter().find(|(k, _)| k == "loc").map(|(_, v)| v.clone())
-                && choice_deps_hold(&kv)
-            {
-                return (!loc.is_empty()).then(|| super::pycache::location_of(&unhex(&loc).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()));
-            }
-        }
+    let s = std::fs::read_to_string(&file).ok()?;
+    let mut lines = s.lines();
+    if lines.next().and_then(|l| l.strip_prefix("key=")) != Some(key.as_str()) {
+        return None;
     }
+    let kv: Vec<(String, String)> = lines.filter_map(|l| l.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let loc = kv.iter().find(|(k, _)| k == "loc").map(|(_, v)| v.clone())?;
+    if !choice_deps_hold(&kv) {
+        return None;
+    }
+    Some((!loc.is_empty()).then(|| super::pycache::location_of(&unhex(&loc).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default())))
+}
+
+/// The [`find_location_cached`] answer from the identifier index (built or refreshed now when
+/// needed), kept for later runs.
+fn choice_from_index(path: &SymbolPath, identifier: &[u8], os: &str) -> Option<IsfLocation> {
+    let (file, key) = choice_file(path, identifier, os);
     let idx = {
         // an index that has to read ISFs decompresses the one the caller loads next: it builds
         // the tables of exactly the ISFs with this identifier on the way (the load finds them)
@@ -2168,23 +2254,103 @@ pub fn find_location_cached(path: &SymbolPath, identifier: &[u8], os: &str) -> O
 /// python's identifier cache gives `<pdb>|<GUID>|<age>` (the last row: with the same ISF in
 /// several symbol directories, the one python's database lists last), else an ISF named
 /// `windows/<pdb>/<GUID>-<AGE>.json*`, else download + convert.
+///
+/// When the identifier index has to be built and no ISF is named by the PDB (a conversion is
+/// likely next), a PDB already in python's cache is converted meanwhile, in memory. In the
+/// one-shot CLI (see [`set_lazy_tables`]) the converted table's `.json.xz` is written after the
+/// output (by the helper process, see [`finish_deferred`]); this run uses the JSON it holds.
 pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
-    let ident = format!("{}|{}|{}", pdb_name.trim_matches('\0'), guid.to_uppercase(), age);
-    if let Some(l) = find_location_cached(path, ident.as_bytes(), "windows") {
-        return Ok(l);
-    }
-    if let Some(l) = find_windows_isf_local(path, pdb_name, guid, age) {
+    let ident = windows_identifier(pdb_name, guid, age);
+    let local = match choice_cached(path, ident.as_bytes(), "windows") {
+        Some(Some(l)) => return Ok(l),
+        Some(None) => find_windows_isf_local(path, pdb_name, guid, age),
+        None => {
+            let local = find_windows_isf_local(path, pdb_name, guid, age);
+            if local.is_none() && !offline {
+                super::windows::pdb::convert_ahead(pdb_name.trim_matches('\0'), guid, age, false);
+            }
+            if let Some(l) = choice_from_index(path, ident.as_bytes(), "windows") {
+                return Ok(l);
+            }
+            local
+        }
+    };
+    if let Some(l) = local {
         return Ok(l);
     }
     let pdb_name = pdb_name.trim_matches('\0');
     // download + convert into the first writable directory of the search path, like python's
     // `download_pdb_isf` over `symbols.__path__` (the embedded roots are not directories)
     let dirs: Vec<PathBuf> = path.roots.iter().filter_map(|r| if let Root::Dir(d) = r { Some(d.clone()) } else { None }).collect();
-    let (out, json) = super::windows::pdb::download_and_convert(pdb_name, &guid.to_uppercase(), age, &dirs, offline)?;
+    let defer = lazy_tables_on() && std::env::var_os("RSVOL_PDB_ISF_WRITE").is_none_or(|v| v != "sync");
+    let (out, json, job) = super::windows::pdb::download_and_convert_with(pdb_name, &guid.to_uppercase(), age, &dirs, offline, defer)?;
     let loc = IsfLocation::File(out);
-    // the load that follows builds the table from this JSON instead of decompressing the file
-    keep_decoded(&loc, json);
+    match job {
+        // the load that follows builds the table from this JSON (the file does not exist yet)
+        Some(job) => {
+            let key = (pdb_name.to_string(), guid.to_uppercase(), age);
+            PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner()).push(PendingIsf { key, job, json: std::sync::Arc::new(json), table: None });
+        }
+        // the load that follows builds the table from this JSON instead of decompressing the file
+        None => keep_decoded(&loc, json),
+    }
     Ok(loc)
+}
+
+/// A converted PDB table of this run whose `.json.xz` is written after the output.
+struct PendingIsf {
+    /// (pdb name, GUID, age)
+    key: (String, String, u32),
+    job: super::windows::pdb::IsfWrite,
+    json: std::sync::Arc<Vec<u8>>,
+    /// the table built from `json` (default options), shared by every load of it
+    table: Option<PendingTable>,
+}
+
+enum PendingTable {
+    Lazy(std::sync::Arc<LazyCore>),
+    Blob(std::sync::Arc<Vec<u8>>),
+}
+
+/// The converted tables whose files are still to be written (see [`find_windows_isf`]).
+static PENDING_ISF: std::sync::Mutex<Vec<PendingIsf>> = std::sync::Mutex::new(Vec::new());
+
+/// The final path of the table this run converted for a PDB, while its file is pending.
+fn pending_path(pdb_name: &str, guid: &str, age: u32) -> Option<PathBuf> {
+    let g = PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner());
+    g.iter().find(|p| p.key.0 == pdb_name && p.key.1 == guid.to_uppercase() && p.key.2 == age).map(|p| p.job.path.clone())
+}
+
+/// [`load`] of a pending converted table (the file at `path` is written later): built from the
+/// JSON in memory once, then shared. `None` when `path` is not pending.
+fn load_pending(path: &Path, name: &str, url: &str, opts: &BuildOptions) -> Option<Result<SymbolTable>> {
+    let mut g = PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner());
+    let p = g.iter_mut().find(|p| p.job.path == path)?;
+    if opts.natives.is_some() {
+        // (not how a PDB table is loaded: built as asked, not kept)
+        let blob = build_blob(&p.json, opts).map_err(|e| Error::msg(format!("{url}: {e}")));
+        return Some(blob.and_then(|b| SymbolTable::from_blob(Blob::Shared(std::sync::Arc::new(b)), name, url)));
+    }
+    if p.table.is_none() {
+        let lazy = if lazy_tables_on() && p.json.len() >= LAZY_MIN { LazyCore::build(JsonBuf::Shared(p.json.clone()), opts).ok() } else { None };
+        p.table = Some(match lazy {
+            Some(core) => {
+                crate::util::trace::note(|| format!("lazy table: {url} (converted; file pending)"));
+                PendingTable::Lazy(std::sync::Arc::new(core))
+            }
+            None => {
+                let _t = crate::util::trace::span("isf parse+build");
+                match build_blob(&p.json, opts) {
+                    Ok(b) => PendingTable::Blob(std::sync::Arc::new(b)),
+                    Err(e) => return Some(Err(Error::msg(format!("{url}: {e}")))),
+                }
+            }
+        });
+    }
+    Some(match p.table.as_ref()? {
+        PendingTable::Lazy(c) => SymbolTable::from_lazy(c.clone(), name, url),
+        PendingTable::Blob(b) => SymbolTable::from_blob(Blob::Shared(b.clone()), name, url),
+    })
 }
 
 #[cfg(test)]
@@ -2695,6 +2861,59 @@ mod tests {
         assert_eq!(kv.len(), 2);
         assert!(choice_deps_hold_at(&kv, "off", now) && !choice_deps_hold_at(&kv, "absent", now));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// One kernel GUID in two symbol directories: python's database lists b/ last, so python
+    /// (and the final lookup) loads b/'s copy, while the first copy by name is a/'s. The
+    /// speculative kernel load must take python's choice
+    /// ([`find_windows_isf_no_download`]), not the name lookup.
+    #[test]
+    fn windows_duplicate_guid_python_choice() {
+        let d = seed_dir("wdup", &[("x.json", "Linux version 0")]);
+        let json = r#"{"metadata": {"windows": {"pdb": {"GUID": "AB", "age": 1, "database": "k.pdb"}}}}"#;
+        for sub in ["a", "b"] {
+            let p = d.join(sub).join("windows/k.pdb/AB-1.json");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, json).unwrap();
+        }
+        let (a, b) = (url_of(&d, "a/windows/k.pdb/AB-1.json"), url_of(&d, "b/windows/k.pdb/AB-1.json"));
+        let win = |loc: &str| CacheRow {
+            operating_system: Value::Text(Cow::Borrowed(b"windows")),
+            identifier: Value::Blob(Cow::Owned(b"k.pdb|AB|1".to_vec())),
+            ..row(loc, "", "2026-09-26 10:00:00", true)
+        };
+        let roots = [Root::Dir(d.join("a")), Root::Dir(d.join("b"))];
+        let read = std::cell::RefCell::new(Vec::new());
+        let idx = IdentifierIndex::from_python_rows(vec![win(&a), win(&b)], &roots, t("2026-09-26 12:00:00"), None, scanner(&read, &[]));
+        assert!(read.borrow().is_empty());
+        assert_eq!(idx.find(b"k.pdb|AB|1", "windows").map(|l| l.url()), Some(b));
+        let sp = SymbolPath { roots: roots.to_vec(), download_dir: d.join("dl") };
+        assert_eq!(find_windows_isf_local(&sp, "k.pdb", "ab", 1).map(|l| l.url()), Some(a));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A table converted this run whose `.json.xz` is written after the output: the lookup by
+    /// name finds it where python finds the file, and every load of it is served from the JSON
+    /// in memory (the file does not exist), sharing one table.
+    #[test]
+    fn pending_converted_table() {
+        let d = std::env::temp_dir().join(format!("rsvol-pending-{}", std::process::id()));
+        let path = d.join("windows/p.pdb/ABC-7.json.xz");
+        let job = super::super::windows::pdb::IsfWrite { pdb: d.join("x"), pdb_name: "p.pdb".into(), datetime: "t".into(), tmp: path.with_extension("tmp"), path: path.clone() };
+        let json = std::sync::Arc::new(super::super::isf::tests::ISF.as_bytes().to_vec());
+        PENDING_ISF.lock().unwrap().push(PendingIsf { key: ("p.pdb".into(), "ABC".into(), 7), job, json, table: None });
+        let sp = SymbolPath { roots: vec![Root::Dir(d.clone())], download_dir: d.clone() };
+        assert_eq!(find_windows_isf_local(&sp, "p.pdb\0", "abc", 7), Some(IsfLocation::File(path.clone())));
+        assert_eq!(find_windows_isf_local(&sp, "p.pdb", "abc", 8), None);
+        let loc = IsfLocation::File(path.clone());
+        let a = load(&loc, "a", &BuildOptions::default()).unwrap();
+        let b = load(&loc, "b", &BuildOptions::default()).unwrap();
+        for t in [&a, &b] {
+            assert_eq!(t.get_symbol("sym1").unwrap().address, 4096);
+            assert_eq!(t.pdb_info().unwrap().guid, "ABC");
+        }
+        assert!(!path.exists());
+        PENDING_ISF.lock().unwrap().retain(|p| p.job.path != path);
     }
 
     /// python's database read end to end (written by the sqlite3 CLI when installed).

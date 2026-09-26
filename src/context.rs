@@ -293,12 +293,9 @@ impl Context {
                 age: get(&kv, "age")?.parse().ok()?,
             })
         });
-        // A kernel symbol table loading speculatively on another thread: when the kernel search
-        // has to scan the whole image (no valid KDBG), the module-list candidate is known long
-        // before the scan ends, and its ISF (found by name only: no index, no download) loads
-        // meanwhile. Used only if it is the final answer.
-        type SpecTable = (symbols::IsfLocation, symbols::SymbolTable);
-        let spec: Mutex<Option<((String, String, u32), std::thread::JoinHandle<Option<SpecTable>>)>> = Mutex::new(None);
+        // the kernel symbol table loading speculatively while the kernel search scans (see
+        // `IsfSpeculation`); used only if it is the final answer
+        let spec = crate::automagic::windows::IsfSpeculation::new();
         let am = match cached {
             Some(a) => a,
             None => {
@@ -311,23 +308,8 @@ impl Context {
                 let k = {
                     let _t = crate::util::trace::span("windows pdbscan");
                     let path = self.symbol_path();
-                    let on_candidate = |k: &KernelFound| {
-                        let mut g = spec.lock().unwrap_or_else(|e| e.into_inner());
-                        if g.is_some() {
-                            return;
-                        }
-                        let key = (k.pdb.pdb_name.clone(), k.pdb.guid.clone(), k.pdb.age);
-                        let (pdb, guid, age) = key.clone();
-                        let job = move || {
-                            let _t = crate::util::trace::span("kernel isf load (speculative)");
-                            let loc = symbols::store::find_windows_isf_local(path, &pdb, &guid, age)?;
-                            let t = symbols::store::load(&loc, "symbol_table_name", &symbols::BuildOptions::default()).ok()?;
-                            Some((loc, t))
-                        };
-                        if let Ok(h) = std::thread::Builder::new().name("rsvol-spec".into()).spawn(job) {
-                            *g = Some((key, h));
-                        }
-                    };
+                    let offline = self.opts.offline;
+                    let on_candidate = |k: &KernelFound| spec.start(path, k, offline);
                     find_kernel_with(&vl, *phys, &on_candidate)
                         .map_err(|e| self.unsatisfied(&e, SYMS))?
                         .ok_or_else(|| self.unsatisfied(&Error::msg("No suitable kernels found during pdbscan"), SYMS))?
@@ -368,16 +350,8 @@ impl Context {
             let _t = crate::util::trace::span("kernel isf lookup");
             symbols::store::find_windows_isf(self.symbol_path(), &am.pdb_name, &am.guid, am.age, self.opts.offline).map_err(|e| self.unsatisfied(&e, SYMS))?
         };
-        let speculative = match spec.into_inner().unwrap_or_else(|e| e.into_inner()) {
-            Some((key, h)) if key == (am.pdb_name.clone(), am.guid.clone(), am.age) => {
-                let _t = crate::util::trace::span("kernel isf load (joining the speculative load)");
-                h.join().ok().flatten().filter(|(sloc, _)| *sloc == loc)
-            }
-            // a wrong guess: that thread finishes (or dies with the process) on its own
-            _ => None,
-        };
-        let table = match speculative {
-            Some((_, t)) => symbols::adopt_location(&loc, "symbol_table_name", None, 0, t),
+        let table = match spec.take(&am.pdb_name, &am.guid, am.age, &loc) {
+            Some(t) => symbols::adopt_location(&loc, "symbol_table_name", None, 0, t),
             None => {
                 let _t = crate::util::trace::span("kernel isf load");
                 symbols::load_location(&loc, "symbol_table_name", None, 0).map_err(|e| self.unsatisfied(&e, SYMS))?

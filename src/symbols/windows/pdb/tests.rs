@@ -333,3 +333,46 @@ fn download_and_convert_ntkrnlmp() {
     assert_eq!(crate::codecs::xz::decompress(&std::fs::read(&p).unwrap()).unwrap(), json);
     assert!(download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, &[dir], true).is_err());
 }
+
+/// A converted table written later (the deferred `.json.xz`): the job survives its one-line
+/// encoding, re-converts to exactly the JSON the run used (same producer datetime), and leaves
+/// only the final file; the PDB info stream GUID is what the symbol server path names.
+#[test]
+fn deferred_isf_write_same_json() {
+    let dir = std::env::temp_dir().join(format!("rsvol-isfwrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pdb = dir.join("data_x.cache");
+    std::fs::write(&pdb, SYNTH).unwrap();
+    let datetime = "2026-09-26T18:00:00.123456";
+    let path = dir.join("windows/synth.pdb/AB-1.json.xz");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let tmp = path.with_extension("tmp1");
+    std::fs::write(&tmp, b"").unwrap();
+    let job = IsfWrite { pdb: pdb.clone(), pdb_name: "synth.pdb".into(), datetime: datetime.into(), tmp: tmp.clone(), path: path.clone() };
+    assert_eq!(IsfWrite::decode(&job.encode()), Some(job.clone()));
+    assert_eq!(IsfWrite::decode("zz:00"), None);
+    let want = pdb_to_isf_bytes(SYNTH, Some("synth.pdb"), datetime).unwrap();
+    let (json, stamp) = job.run().unwrap();
+    assert!(json == want);
+    assert!(crate::codecs::xz::decompress(&std::fs::read(&path).unwrap()).unwrap() == want);
+    assert_eq!(crate::util::paths::file_stamp(&path), Some(stamp));
+    assert!(!tmp.exists());
+    // the in-process fallback writes the same file from the JSON it holds
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&tmp, b"").unwrap();
+    assert!(job.run_with(&want));
+    assert!(crate::codecs::xz::decompress(&std::fs::read(&path).unwrap()).unwrap() == want);
+    // a PDB that cannot be converted: nothing is left
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&tmp, b"").unwrap();
+    let bad = IsfWrite { pdb: dir.join("missing"), ..job.clone() };
+    assert!(bad.run().is_none());
+    assert!(!tmp.exists() && !path.exists());
+    // the GUID of the ranged-download check: the one the converter writes
+    let g = pdb_file_guid(SYNTH).unwrap();
+    let text = String::from_utf8_lossy(&want).into_owned();
+    assert!(text.contains(&format!("\"GUID\": \"{g}\"")), "{g}");
+    assert_eq!(pdb_file_guid(b"not a pdb"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

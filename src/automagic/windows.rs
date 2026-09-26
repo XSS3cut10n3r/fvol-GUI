@@ -706,6 +706,98 @@ pub fn find_kernel_with(vlayer: &IntelLayer, phys: &dyn Layer, candidate: &(dyn 
     Ok(method_slow_scan(vlayer))
 }
 
+/// The kernel symbol table, loaded on another thread while the kernel search still scans:
+/// without a valid KDBG the whole image is scanned, and the module-list candidate (the result
+/// unless a later KDBG hit validates) is known long before the scan ends.
+///
+/// The speculation loads exactly the ISF the final lookup will pick (python's identifier-cache
+/// choice, else by name: `store::find_windows_isf_no_download`) and announces it before
+/// loading, so the final lookup joins it only when it picked the same file and never waits for
+/// the load of another one (with one GUID in two symbol directories, the copy python's
+/// database lists last is the one loaded, once). With no ISF on disk the kernel's PDB is
+/// downloaded meanwhile instead (not `--offline`), which the lookup's conversion then waits
+/// for rather than downloading it again.
+pub struct IsfSpeculation {
+    job: std::sync::Mutex<Option<SpecJob>>,
+}
+
+struct SpecJob {
+    /// (pdb name, GUID, age) of the candidate kernel
+    key: (String, String, u32),
+    /// the ISF the speculation loads (sent before it loads; `None`: none on disk)
+    chosen: std::sync::mpsc::Receiver<Option<crate::symbols::IsfLocation>>,
+    load: std::thread::JoinHandle<Option<crate::symbols::SymbolTable>>,
+}
+
+impl Default for IsfSpeculation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IsfSpeculation {
+    pub fn new() -> IsfSpeculation {
+        IsfSpeculation { job: std::sync::Mutex::new(None) }
+    }
+
+    /// Start the speculation for candidate `k` (the first candidate only), with the symbol
+    /// search path `path`.
+    pub fn start(&self, path: &'static crate::symbols::SymbolPath, k: &KernelFound, offline: bool) {
+        use crate::symbols::{self, BuildOptions};
+        let mut g = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_some() {
+            return;
+        }
+        let key = (k.pdb.pdb_name.clone(), k.pdb.guid.clone(), k.pdb.age);
+        let (pdb, guid, age) = key.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job = move || {
+            let _t = crate::util::trace::span("kernel isf load (speculative)");
+            let loc = symbols::store::find_windows_isf_no_download(path, &pdb, &guid, age);
+            let _ = tx.send(loc.clone());
+            match loc {
+                Some(loc) => symbols::store::load(&loc, "symbol_table_name", &BuildOptions::default()).ok(),
+                None => {
+                    if !offline {
+                        symbols::windows::pdb::convert_ahead(pdb.trim_matches('\0'), &guid, age, true);
+                    }
+                    None
+                }
+            }
+        };
+        if let Ok(h) = std::thread::Builder::new().name("rsvol-spec".into()).spawn(job) {
+            *g = Some(SpecJob { key, chosen: rx, load: h });
+        }
+    }
+
+    /// A speculation running `job` (it announces its ISF through the sender) for kernel `key`.
+    #[cfg(test)]
+    fn with_job(
+        key: (String, String, u32),
+        job: impl FnOnce(std::sync::mpsc::Sender<Option<crate::symbols::IsfLocation>>) -> Option<crate::symbols::SymbolTable> + Send + 'static,
+    ) -> IsfSpeculation {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let load = std::thread::spawn(move || job(tx));
+        IsfSpeculation { job: std::sync::Mutex::new(Some(SpecJob { key, chosen: rx, load })) }
+    }
+
+    /// The table the speculation loaded, when it was for kernel (`pdb_name`, `guid`, `age`)
+    /// and loaded `loc` (the final lookup's answer); `None` otherwise, without waiting for a
+    /// load of another file (that thread finishes, or dies with the process, on its own).
+    pub fn take(self, pdb_name: &str, guid: &str, age: u32, loc: &crate::symbols::IsfLocation) -> Option<crate::symbols::SymbolTable> {
+        let job = self.job.into_inner().unwrap_or_else(|e| e.into_inner())?;
+        if (job.key.0.as_str(), job.key.1.as_str(), job.key.2) != (pdb_name, guid, age) {
+            return None;
+        }
+        if job.chosen.recv().ok().flatten().as_ref() != Some(loc) {
+            crate::util::trace::note(|| "kernel isf: the speculative load is not the final choice".to_string());
+            return None;
+        }
+        let _t = crate::util::trace::span("kernel isf load (joining the speculative load)");
+        job.load.join().ok().flatten()
+    }
+}
+
 /// Everything the Windows automagic determines for an image (cacheable).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinAutomagic {
@@ -739,6 +831,48 @@ fn _unused(l: &dyn Layer) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The speculative kernel table is used only when it is the file the final lookup chose;
+    /// a speculation that chose another file is never waited for (it may still be loading).
+    #[test]
+    fn speculation_joins_only_the_final_choice() {
+        use crate::symbols::IsfLocation;
+        let key = || ("k.pdb".to_string(), "AB".to_string(), 1u32);
+        let (a, b) = (IsfLocation::File("/syms/a.json".into()), IsfLocation::File("/syms/b.json".into()));
+        let table = || crate::symbols::isf::load_table(crate::symbols::isf::tests::ISF.as_bytes(), "t", "file:///x", &Default::default()).ok();
+        // chose b (python's copy), final lookup says a: not joined, although b's load hangs
+        let (hold, wait) = std::sync::mpsc::channel::<()>();
+        let bb = b.clone();
+        let s = IsfSpeculation::with_job(key(), move |tx| {
+            let _ = tx.send(Some(bb));
+            let _ = wait.recv();
+            None
+        });
+        let t0 = std::time::Instant::now();
+        assert!(s.take("k.pdb", "AB", 1, &a).is_none());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+        drop(hold);
+        // the same file: joined, its table used
+        let aa = a.clone();
+        let s = IsfSpeculation::with_job(key(), move |tx| {
+            let _ = tx.send(Some(aa));
+            table()
+        });
+        assert!(s.take("k.pdb", "AB", 1, &a).is_some());
+        // another kernel, or no ISF on disk (the PDB was fetched instead): not used
+        let aa = a.clone();
+        let s = IsfSpeculation::with_job(key(), move |tx| {
+            let _ = tx.send(Some(aa));
+            table()
+        });
+        assert!(s.take("k.pdb", "AB", 2, &a).is_none());
+        let s = IsfSpeculation::with_job(key(), move |tx| {
+            let _ = tx.send(None);
+            None
+        });
+        assert!(s.take("k.pdb", "AB", 1, &a).is_none());
+        assert!(IsfSpeculation::new().take("k.pdb", "AB", 1, &a).is_none());
+    }
 
     fn page_with(entries: &[(usize, u64)]) -> Vec<u8> {
         let mut p = vec![0u8; 0x1000];

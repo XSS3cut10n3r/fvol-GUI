@@ -40,6 +40,8 @@ pub(crate) enum JsonBuf {
     Owned(Vec<u8>),
     Static(&'static [u8]),
     Mapped(crate::util::mmap::MapWindow),
+    /// JSON also held elsewhere (a converted PDB's, until its file is written)
+    Shared(Arc<Vec<u8>>),
 }
 
 impl std::ops::Deref for JsonBuf {
@@ -49,6 +51,7 @@ impl std::ops::Deref for JsonBuf {
             JsonBuf::Owned(v) => v,
             JsonBuf::Static(s) => s,
             JsonBuf::Mapped(m) => m.as_slice(),
+            JsonBuf::Shared(v) => v,
         }
     }
 }
