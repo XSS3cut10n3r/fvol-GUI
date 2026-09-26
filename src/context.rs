@@ -290,3 +290,54 @@ fn percent_decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::layers::LayerExt;
+    use crate::layers::scan::{BytesScanner, scan};
+
+    /// `RSVOL_BENCH_IMG=... cargo test --release translation_bench -- --ignored --nocapture`
+    /// (run through bench/scripts/limit.sh): page-walk / mapping / virtual-scan throughput.
+    #[test]
+    #[ignore]
+    fn translation_bench() {
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let t = std::time::Instant::now();
+        let runs = k.vlayer.mappings(0, (1 << 48) - 1);
+        let bytes: u64 = runs.iter().map(|m| m.len).sum();
+        let d = t.elapsed();
+        println!("kernel layer mapping(0, 2^48): {} runs, {} MiB mapped, {:.2} ms", runs.len(), bytes >> 20, d.as_secs_f64() * 1e3);
+        let t = std::time::Instant::now();
+        let mut pages = 0u64;
+        let mut buf = vec![0u8; 0x1000];
+        for m in &runs {
+            let mut a = m.offset;
+            while a < m.offset + m.len {
+                let n = 0x1000.min(m.offset + m.len - a) as usize;
+                k.vlayer.read_padded(a, &mut buf[..n]);
+                pages += 1;
+                a += n as u64;
+            }
+        }
+        let d = t.elapsed();
+        println!("read_padded of every mapped kernel page: {pages} pages, {:.2} ms ({:.0} ns/page)", d.as_secs_f64() * 1e3, d.as_nanos() as f64 / pages as f64);
+        let t = std::time::Instant::now();
+        let hits = scan(k.vlayer, &BytesScanner::new(b"RSDS"), None);
+        let d = t.elapsed();
+        println!("virtual scan of the kernel layer for RSDS: {} hits, {:.2} ms", hits.len(), d.as_secs_f64() * 1e3);
+        let procs: Vec<_> = crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)).into_iter().filter_map(|p| p.ok()).collect();
+        let t = std::time::Instant::now();
+        let mut ubytes = 0u64;
+        for p in &procs {
+            use crate::symbols::windows::WinExt;
+            if let Ok(l) = p.add_process_layer() {
+                ubytes += l.mappings(0, 0x7FFF_FFFF_FFFF).iter().map(|m| m.len).sum::<u64>();
+            }
+        }
+        let d = t.elapsed();
+        println!("user-space mapping of {} processes: {} MiB, {:.2} ms", procs.len(), ubytes >> 20, d.as_secs_f64() * 1e3);
+    }
+}
