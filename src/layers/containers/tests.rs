@@ -556,51 +556,119 @@ fn malformed_containers_never_panic() {
 
 /// Read throughput on the large containers of bench/refbench/containers.py (`make`), same
 /// random page addresses as the python run (`pybench`):
-///   RSVOL_LAYER_BENCH=DIR cargo test --release container_bench -- --ignored --nocapture
+///   RSVOL_LAYER_BENCH=DIR [RSVOL_BENCH_CPU=2] cargo test --release container_bench -- --ignored --nocapture
+/// Per layer: open time; random 8-byte `read` and `slice` (page-table-walk style accesses:
+/// the per-read overhead); random 4 KiB reads; the same 8-byte reads from all threads;
+/// sequential 1 MiB padded reads over every run; one full `mapping()` iteration.
 #[test]
 #[ignore]
 fn container_bench() {
     let Ok(dir) = std::env::var("RSVOL_LAYER_BENCH") else { return };
+    unsafe extern "C" {
+        fn sched_setaffinity(pid: i32, size: usize, mask: *const u64) -> i32;
+    }
+    let set_affinity = |mask: &[u64; 16]| {
+        // SAFETY: plain syscall wrapper with a valid mask buffer
+        unsafe { sched_setaffinity(0, std::mem::size_of_val(mask), mask.as_ptr()) };
+    };
+    let all_cpus = [u64::MAX; 16];
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
+    if let Some(cpu) = std::env::var("RSVOL_BENCH_CPU").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let mut mask = [0u64; 16];
+        mask[cpu % 1024 / 64] = 1 << (cpu % 64);
+        set_affinity(&mask);
+    }
     let dir = PathBuf::from(dir);
+    let reps = 5;
+    let best = |f: &mut dyn FnMut()| -> f64 {
+        let mut b = f64::MAX;
+        for _ in 0..reps {
+            let t = std::time::Instant::now();
+            f();
+            b = b.min(t.elapsed().as_secs_f64());
+        }
+        b
+    };
     for name in ["lime", "elf", "crash64_bitmap", "vmware", "avml", "qemu"] {
-        let main = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| {
-                p.file_stem().and_then(|s| s.to_str()) == Some(name)
-                    && !matches!(p.extension().and_then(|e| e.to_str()), Some("addrs" | "vmss"))
-            })
-            .unwrap();
+        let Some(main) = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).find(|p| {
+            p.file_stem().and_then(|s| s.to_str()) == Some(name) && !matches!(p.extension().and_then(|e| e.to_str()), Some("addrs" | "vmss"))
+        }) else {
+            continue;
+        };
         let file = open(&main);
         let t = std::time::Instant::now();
         let layer = stack_with(file, &StackOptions { location: Some(&main), stackers: None }).unwrap().layer;
         let t_open = t.elapsed().as_secs_f64();
-        let addrs: Vec<u64> = std::fs::read(dir.join(format!("{name}.addrs")))
+        let pages: Vec<u64> = std::fs::read(dir.join(format!("{name}.addrs")))
             .unwrap()
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
             .collect();
+        // 8-byte accesses at pseudo-random offsets inside the random pages
+        let small: Vec<u64> = pages.iter().enumerate().map(|(i, &p)| p + ((i as u64).wrapping_mul(0x9e37_79b9) & 0xff8)).collect();
+        let n = pages.len() as f64;
+        let t_r8 = best(&mut || {
+            let mut b = [0u8; 8];
+            let mut s = 0u64;
+            for &a in &small {
+                layer.read(a, &mut b).unwrap();
+                s = s.wrapping_add(u64::from_le_bytes(b));
+            }
+            std::hint::black_box(s);
+        });
+        let t_s8 = best(&mut || {
+            let mut s = 0u64;
+            for &a in &small {
+                if let Some(b) = layer.slice(a, 8) {
+                    s = s.wrapping_add(b[0] as u64);
+                }
+            }
+            std::hint::black_box(s);
+        });
         let mut buf = vec![0u8; 4096];
-        let mut best_rand = f64::MAX;
-        for _ in 0..3 {
-            let t = std::time::Instant::now();
-            for &a in &addrs {
+        let t_r4k = best(&mut || {
+            for &a in &pages {
                 layer.read(a, &mut buf).unwrap();
                 std::hint::black_box(&buf);
             }
-            best_rand = best_rand.min(t.elapsed().as_secs_f64());
-        }
+        });
+        let t_mt = {
+            let mut b = f64::MAX;
+            for _ in 0..reps {
+                let t = std::time::Instant::now();
+                std::thread::scope(|sc| {
+                    for k in 0..threads {
+                        let (layer, small) = (&layer, &small);
+                        sc.spawn(move || {
+                            set_affinity(&all_cpus);
+                            let mut v = [0u8; 8];
+                            let mut s = 0u64;
+                            // every thread reads all addresses (from a different start)
+                            let (x, y) = small.split_at(k * small.len() / threads);
+                            for &a in y.iter().chain(x) {
+                                layer.read(a, &mut v).unwrap();
+                                s = s.wrapping_add(u64::from_le_bytes(v));
+                            }
+                            std::hint::black_box(s);
+                        });
+                    }
+                });
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
         let mut runs = Vec::new();
-        layer.mapping(0, layer.max_address().saturating_add(1), &mut |m| {
-            runs.push((m.offset, m.len));
-            true
+        let t_map = best(&mut || {
+            runs.clear();
+            layer.mapping(0, layer.max_address().saturating_add(1), &mut |m| {
+                runs.push((m.offset, m.len));
+                true
+            });
         });
         let mut big = vec![0u8; 1 << 20];
-        let mut best_seq = f64::MAX;
         let mut total = 0u64;
-        for _ in 0..3 {
+        let t_seq = best(&mut || {
             total = 0;
-            let t = std::time::Instant::now();
             for &(o, l) in &runs {
                 let mut a = o;
                 while a < o + l {
@@ -611,15 +679,18 @@ fn container_bench() {
                     a += k as u64;
                 }
             }
-            best_seq = best_seq.min(t.elapsed().as_secs_f64());
-        }
-        let n = addrs.len() as f64;
+        });
         println!(
-            "{name:16} rsvol  open {:9.3} ms   random 4K {:10.0} reads/s ({:8.1} MB/s)   sequential {:8.1} MB/s ({})",
+            "{name:15} open {:7.3} ms | rand read8 {:6.1} ns  slice8 {:6.1} ns  read4K {:7.1} ns ({:6.0} MB/s) | {threads}T read8 {:5.2} ns/read | seq {:6.0} MB/s | mapping {:5} runs {:8.1} us  ({})",
             t_open * 1e3,
-            n / best_rand,
-            n * 4096.0 / best_rand / 1e6,
-            total as f64 / best_seq / 1e6,
+            t_r8 / n * 1e9,
+            t_s8 / n * 1e9,
+            t_r4k / n * 1e9,
+            n * 4096.0 / t_r4k / 1e6,
+            t_mt / (n * threads as f64) * 1e9,
+            total as f64 / t_seq / 1e6,
+            runs.len(),
+            t_map * 1e6,
             layer.name()
         );
     }
