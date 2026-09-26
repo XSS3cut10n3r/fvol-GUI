@@ -106,6 +106,15 @@ impl<'a> BitReader<'a> {
         BitReader { data, buf: 0, count: 0, ip }
     }
 
+    /// A reader positioned at bit `pos` of `data`.
+    fn at_bit(data: &'a [u8], pos: usize) -> Self {
+        let mut br = BitReader::new(data, pos / 8);
+        if pos % 8 != 0 {
+            br.bits((pos % 8) as u32);
+        }
+        br
+    }
+
     /// Tops the buffer up to at least 56 valid bits (zeros past the end of the input).
     #[inline(always)]
     fn refill(&mut self) {
@@ -400,11 +409,16 @@ impl Scratch {
     }
 
     /// Decodes one block (after its magic), appending its output to `out`; returns the
-    /// block CRC.
-    fn block(&mut self, br: &mut BitReader, max_block: usize, out: &mut Vec<u8>) -> std::result::Result<u32, Fail> {
+    /// block CRC and its BWT length.
+    fn decode_block(
+        &mut self,
+        br: &mut BitReader,
+        max_block: usize,
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(u32, usize), Fail> {
         let info = self.entropy(br, max_block)?;
         self.finish(&info, out)?;
-        Ok(info.crc)
+        Ok((info.crc, info.n))
     }
 
     /// Huffman + MTF/RUNA-RUNB decoding of one block into `ll8`.
@@ -1012,8 +1026,21 @@ fn unrle(src: &[u8], out: &mut Vec<u8>) -> Result<()> {
     }
 }
 
+/// Where the stream walker gets its blocks from.
+trait BlockSource {
+    /// Decodes the block whose header starts at `br` (just after the block magic), appending
+    /// its output to `out` and leaving `br` after the block; returns the block CRC.
+    fn block(&mut self, br: &mut BitReader, max_block: usize, out: &mut Vec<u8>) -> std::result::Result<u32, Fail>;
+}
+
+impl BlockSource for Scratch {
+    fn block(&mut self, br: &mut BitReader, max_block: usize, out: &mut Vec<u8>) -> std::result::Result<u32, Fail> {
+        self.decode_block(br, max_block, out).map(|(crc, _)| crc)
+    }
+}
+
 /// Decodes one stream starting at byte `off`; returns the byte offset after it.
-fn decode_stream(data: &[u8], off: usize, sc: &mut Scratch, out: &mut Vec<u8>) -> std::result::Result<usize, Fail> {
+fn decode_stream<S: BlockSource>(data: &[u8], off: usize, src: &mut S, out: &mut Vec<u8>) -> std::result::Result<usize, Fail> {
     // Header "BZh1".."BZh9"; a mismatch in the available bytes is corrupt, a short but
     // matching prefix is truncation (libbz2 checks byte by byte).
     let avail = &data[off.min(data.len())..];
@@ -1045,23 +1072,21 @@ fn decode_stream(data: &[u8], off: usize, sc: &mut Scratch, out: &mut Vec<u8>) -
         if magic != BLOCK_MAGIC {
             return Err(br.fail(corrupt("bad block magic")));
         }
-        let crc = sc.block(&mut br, max_block, out)?;
+        let crc = src.block(&mut br, max_block, out)?;
         combined = combined.rotate_left(1) ^ crc;
     }
 }
 
-/// Decompresses a bzip2 file (all concatenated streams). Like python's `bz2.decompress`,
-/// invalid data after the first complete stream is ignored.
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
+/// Decodes all streams of `data` (python `bz2.decompress` semantics).
+fn decode_all<S: BlockSource>(data: &[u8], src: &mut S) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     // Size hint only (a failed reservation just means growing later).
     let _ = out.try_reserve(data.len().saturating_mul(5).min(1 << 30));
-    let mut sc = Scratch::new()?;
     let mut off = 0usize;
     let mut streams = 0;
     while off < data.len() {
         let mark = out.len();
-        match decode_stream(data, off, &mut sc, &mut out) {
+        match decode_stream(data, off, src, &mut out) {
             Ok(next) => {
                 off = next;
                 streams += 1;
@@ -1084,6 +1109,368 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
         return Err(Error::Msg("bzip2: empty input".into()));
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// Parallel decoding
+//
+// Blocks are not byte aligned and there is no index, but every block starts with the 48-bit
+// magic 0x314159265359. The input is scanned (in parallel) for the magic at every bit
+// offset; worker threads then decode whole blocks (entropy decoding, inverse BWT, RLE1, CRC)
+// at those candidate positions, in order, at most WINDOW candidates / BUDGET output bytes
+// ahead of the consumer. The calling thread runs the ordinary sequential stream walker and,
+// for each block, takes the result computed for exactly that bit position (helping with
+// jobs while it waits). A speculative failure, or a block longer than its stream's level
+// allows (workers decode with the level-9 limit), is simply decoded again inline, so errors
+// and python semantics are exactly those of the sequential decoder. A magic that occurs by
+// chance inside compressed data (probability ~2^-48 per bit) only costs wasted work.
+// ---------------------------------------------------------------------------------------
+
+/// Inputs shorter than this are decoded on the calling thread only (a bzip2 block is at
+/// least ~40 bytes, and highly compressible blocks are a few hundred bytes).
+const PAR_MIN: usize = 1024;
+/// Upper bound on decoding threads.
+const MAX_THREADS: usize = 16;
+/// Upper bound on finished-but-unconsumed output held by the workers.
+const BUDGET: usize = 64 << 20;
+/// Output buffers larger than this are not recycled.
+const POOL_MAX_CAP: usize = 4 << 20;
+
+/// Bit positions just after each occurrence of the block magic (any bit offset), ascending.
+fn scan_magics(data: &[u8], threads: usize) -> Vec<usize> {
+    // TBL[b] has bit s set if byte 2 of a magic starting at bit offset s of byte 0 is b.
+    let mut tbl = [0u8; 256];
+    for sh in 0..8 {
+        tbl[((BLOCK_MAGIC >> (24 + sh)) & 0xFF) as usize] |= 1 << sh;
+    }
+    let scan = |from: usize, to: usize| -> Vec<usize> {
+        let mut v = Vec::new();
+        let end = to.min(data.len().saturating_sub(8));
+        for i in from..end {
+            let mut m = tbl[data[i + 2] as usize];
+            if m == 0 {
+                continue;
+            }
+            let w = u64::from_be_bytes(data[i..i + 8].try_into().unwrap());
+            while m != 0 {
+                let sh = m.trailing_zeros();
+                m &= m - 1;
+                if (w >> (16 - sh)) & 0xFFFF_FFFF_FFFF == BLOCK_MAGIC {
+                    v.push(i * 8 + sh as usize + 48);
+                }
+            }
+        }
+        v
+    };
+    let chunk = data.len().div_ceil(threads.max(1)).max(1 << 16);
+    if chunk >= data.len() {
+        return scan(0, data.len());
+    }
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..data.len().div_ceil(chunk))
+            .map(|t| {
+                let scan = &scan;
+                sc.spawn(move || scan(t * chunk, (t + 1) * chunk))
+            })
+            .collect();
+        let mut all = Vec::new();
+        for h in hs {
+            // The scan cannot panic; if it did, fewer candidates only mean more inline
+            // decoding.
+            if let Ok(v) = h.join() {
+                all.extend(v);
+            }
+        }
+        all
+    })
+}
+
+/// A block decoded ahead of time.
+struct Ahead {
+    /// Bit position after the block.
+    end_bit: usize,
+    crc: u32,
+    /// BWT length (checked against the stream's level).
+    n: usize,
+    out: Vec<u8>,
+}
+
+/// State shared by the workers and the walker.
+struct Shared {
+    /// Next candidate to hand out.
+    next_job: usize,
+    /// Candidates below this are no longer needed by the walker.
+    need: usize,
+    /// Per candidate: None = pending, Some(None) = failed, Some(Some(..)) = decoded.
+    results: Vec<Option<Option<Ahead>>>,
+    /// Output bytes held in `results`.
+    held: usize,
+    pool: Vec<Vec<u8>>,
+    stop: bool,
+}
+
+struct Par<'a> {
+    data: &'a [u8],
+    cands: &'a [usize],
+    window: usize,
+    st: &'a std::sync::Mutex<Shared>,
+    cv: &'a std::sync::Condvar,
+}
+
+impl Par<'_> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
+        self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn wait<'g>(&self, g: std::sync::MutexGuard<'g, Shared>) -> std::sync::MutexGuard<'g, Shared> {
+        self.cv.wait(g).unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hands out the next job allowed by the window and the byte budget.
+    fn take_job(&self, g: &mut Shared) -> Option<(usize, Vec<u8>)> {
+        g.next_job = g.next_job.max(g.need);
+        let i = g.next_job;
+        if i >= self.cands.len() || i >= g.need + self.window || (i > g.need && g.held >= BUDGET) {
+            return None;
+        }
+        g.next_job += 1;
+        Some((i, g.pool.pop().unwrap_or_default()))
+    }
+
+    fn recycle(g: &mut Shared, mut buf: Vec<u8>) {
+        if buf.capacity() <= POOL_MAX_CAP && g.pool.len() < 64 {
+            buf.clear();
+            g.pool.push(buf);
+        }
+    }
+
+    /// Decodes candidate `i` (never panics into the caller: a panic counts as a failure,
+    /// and the walker then decodes the block inline).
+    fn run_job(&self, i: usize, sc: &mut Option<Scratch>, mut buf: Vec<u8>) -> Option<Ahead> {
+        if sc.is_none() {
+            *sc = Scratch::new().ok();
+        }
+        let scr = sc.as_mut()?;
+        let pos = self.cands[i];
+        let data = self.data;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            buf.clear();
+            let mut br = BitReader::at_bit(data, pos);
+            match scr.decode_block(&mut br, MAX_BLOCK, &mut buf) {
+                Ok((crc, n)) => Some(Ahead { end_bit: br.position_bits(), crc, n, out: buf }),
+                Err(_) => None,
+            }
+        }));
+        match r {
+            Ok(a) => a,
+            Err(_) => {
+                *sc = None;
+                None
+            }
+        }
+    }
+
+    fn store(&self, g: &mut Shared, i: usize, r: Option<Ahead>) {
+        if i < g.need {
+            if let Some(a) = r {
+                Self::recycle(g, a.out);
+            }
+            return;
+        }
+        if let Some(a) = &r {
+            g.held += a.out.len();
+        }
+        g.results[i] = Some(r);
+    }
+
+    /// Drops the results below `need` (the walker has moved past them).
+    fn advance(&self, g: &mut Shared, need: usize) {
+        while g.need < need {
+            let i = g.need;
+            if let Some(Some(a)) = g.results[i].take() {
+                g.held -= a.out.len();
+                Self::recycle(g, a.out);
+            }
+            g.need += 1;
+        }
+    }
+
+    fn worker(&self) {
+        let mut sc: Option<Scratch> = None;
+        let mut g = self.lock();
+        loop {
+            if g.stop {
+                return;
+            }
+            match self.take_job(&mut g) {
+                Some((i, buf)) => {
+                    drop(g);
+                    let r = self.run_job(i, &mut sc, buf);
+                    g = self.lock();
+                    self.store(&mut g, i, r);
+                    self.cv.notify_all();
+                }
+                None => {
+                    if g.next_job >= self.cands.len() {
+                        return;
+                    }
+                    g = self.wait(g);
+                }
+            }
+        }
+    }
+}
+
+/// The walker's block source: precomputed results, inline decoding as the fallback.
+struct ParWalker<'a> {
+    par: Par<'a>,
+    sc: Option<Scratch>,
+}
+
+impl BlockSource for ParWalker<'_> {
+    fn block(&mut self, br: &mut BitReader, max_block: usize, out: &mut Vec<u8>) -> std::result::Result<u32, Fail> {
+        let pos = br.position_bits();
+        let idx = self.par.cands.partition_point(|&c| c < pos);
+        let mut g = self.par.lock();
+        self.par.advance(&mut g, idx);
+        if self.par.cands.get(idx) == Some(&pos) {
+            let r = loop {
+                if let Some(r) = g.results[idx].take() {
+                    break r;
+                }
+                match self.par.take_job(&mut g) {
+                    Some((i, buf)) => {
+                        drop(g);
+                        let r = self.par.run_job(i, &mut self.sc, buf);
+                        g = self.par.lock();
+                        self.par.store(&mut g, i, r);
+                        self.par.cv.notify_all();
+                    }
+                    None => g = self.par.wait(g),
+                }
+            };
+            if let Some(a) = &r {
+                g.held -= a.out.len();
+            }
+            self.par.advance(&mut g, idx + 1);
+            drop(g);
+            self.par.cv.notify_all();
+            if let Some(a) = r {
+                let ok = a.n <= max_block;
+                if ok {
+                    reserve(out, a.out.len())?;
+                    out.extend_from_slice(&a.out);
+                    *br = BitReader::at_bit(br.data, a.end_bit);
+                }
+                let crc = a.crc;
+                Par::recycle(&mut self.par.lock(), a.out);
+                if ok {
+                    return Ok(crc);
+                }
+            }
+        } else {
+            drop(g);
+        }
+        // Not a candidate, failed, or too long for this stream's level: decode inline.
+        if self.sc.is_none() {
+            self.sc = Some(Scratch::new()?);
+        }
+        let sc = self.sc.as_mut().ok_or_else(alloc_error)?;
+        sc.block(br, max_block, out)
+    }
+}
+
+/// Decodes with up to `threads` threads (the calling thread included).
+fn decompress_par(data: &[u8], cands: &[usize], threads: usize) -> Result<Vec<u8>> {
+    let st = std::sync::Mutex::new(Shared {
+        next_job: 0,
+        need: 0,
+        results: (0..cands.len()).map(|_| None).collect(),
+        held: 0,
+        pool: Vec::new(),
+        stop: false,
+    });
+    let cv = std::sync::Condvar::new();
+    let window = 2 * threads + 2;
+    let mk = || Par { data, cands, window, st: &st, cv: &cv };
+    std::thread::scope(|scope| {
+        for _ in 1..threads {
+            let p = mk();
+            scope.spawn(move || p.worker());
+        }
+        let mut walker = ParWalker { par: mk(), sc: None };
+        let r = decode_all(data, &mut walker);
+        let mut g = walker.par.lock();
+        g.stop = true;
+        drop(g);
+        cv.notify_all();
+        r
+    })
+}
+
+/// Number of threads for decoding `data` (1 when pinned to one CPU).
+///
+/// The inverse BWT makes random accesses over 4 bytes per block symbol; once the blocks being
+/// decoded concurrently no longer fit in the last-level cache the walk turns DRAM-latency
+/// bound and every thread slows down several times (level-9 text: 6 threads 40 ms, 16
+/// threads 58 ms). So the thread count is capped at L3 size / ~4.5 bytes per block symbol,
+/// using the first stream's level.
+fn default_threads(data: &[u8]) -> usize {
+    if data.len() < PAR_MIN {
+        return 1;
+    }
+    let avail = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(MAX_THREADS);
+    if avail <= 1 {
+        return 1;
+    }
+    let level = match data.get(..4) {
+        Some([b'B', b'Z', b'h', l @ b'1'..=b'9']) => (l - b'0') as usize,
+        _ => 9,
+    };
+    let per_thread = level * 100_000 * 9 / 2;
+    avail.min((l3_cache_bytes() / per_thread).max(2))
+}
+
+/// Last-level cache size (Linux sysfs; 32 MiB if unknown).
+fn l3_cache_bytes() -> usize {
+    static L3: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *L3.get_or_init(|| {
+        let mut best = 0usize;
+        for i in 0..8 {
+            let dir = format!("/sys/devices/system/cpu/cpu0/cache/index{i}");
+            let Ok(size) = std::fs::read_to_string(format!("{dir}/size")) else { break };
+            let size = size.trim();
+            let (num, mul) = match size.strip_suffix('K') {
+                Some(k) => (k, 1 << 10),
+                None => match size.strip_suffix('M') {
+                    Some(m) => (m, 1 << 20),
+                    None => (size, 1),
+                },
+            };
+            if let Ok(v) = num.parse::<usize>() {
+                best = best.max(v.saturating_mul(mul));
+            }
+        }
+        if best >= 1 << 20 { best } else { 32 << 20 }
+    })
+}
+
+/// Decompresses a bzip2 file (all concatenated streams). Like python's `bz2.decompress`,
+/// invalid data after the first complete stream is ignored. Multi-block inputs are decoded
+/// on up to `available_parallelism()` threads.
+pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
+    decompress_threads(data, default_threads(data))
+}
+
+/// As [`decompress`] with an explicit thread count (1 = single-threaded).
+pub fn decompress_threads(data: &[u8], threads: usize) -> Result<Vec<u8>> {
+    if threads > 1 {
+        let cands = scan_magics(data, threads);
+        if cands.len() >= 2 {
+            return decompress_par(data, &cands, threads.min(cands.len()));
+        }
+    }
+    decode_all(data, &mut Scratch::new()?)
 }
 
 #[cfg(test)]
@@ -1257,6 +1644,34 @@ mod tests {
                 }
             }
             println!("walk n={n}: {:.2} TSC ticks/step", best as f64 / n as f64);
+        }
+    }
+
+    /// Thread scaling on CODECS_BENCH_FILE: best wall time per thread count.
+    #[test]
+    #[ignore]
+    fn codecs_bzip2_threads() {
+        let Ok(file) = std::env::var("CODECS_BENCH_FILE") else { return };
+        let data = std::fs::read(&file).unwrap();
+        let reference = decompress_threads(&data, 1).unwrap();
+        let counts: Vec<usize> = std::env::var("CODECS_THREADS")
+            .unwrap_or_else(|_| "1,2,4,6,8,10,12,16,20".into())
+            .split(',')
+            .filter_map(|x| x.parse().ok())
+            .collect();
+        for t in counts {
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t0 = std::time::Instant::now();
+                let out = decompress_threads(&data, t).unwrap();
+                best = best.min(t0.elapsed().as_secs_f64());
+                assert!(out == reference);
+            }
+            println!(
+                "threads {t:2}: {:8.2} ms {:8.1} MB/s",
+                best * 1e3,
+                reference.len() as f64 / best / 1e6
+            );
         }
     }
 
