@@ -54,7 +54,9 @@ pub mod threads;
 pub mod timers;
 pub mod unloadedmodules;
 pub mod vadinfo;
+pub mod vadregexscan;
 pub mod vadwalk;
+pub mod vadyarascan;
 pub mod virtmap;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
@@ -107,7 +109,9 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&timers::Timers);
     v.push(&unloadedmodules::UnloadedModules);
     v.push(&vadinfo::VadInfo);
+    v.push(&vadregexscan::VadRegExScan);
     v.push(&vadwalk::VadWalk);
+    v.push(&vadyarascan::VadYaraScan);
     v.push(&virtmap::VirtMap);
     malware::register(v);
     registry::register(v);
