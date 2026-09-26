@@ -2,4 +2,12 @@
 
 use crate::plugins::Plugin;
 
-pub fn register(_v: &mut Vec<&'static dyn Plugin>) {}
+pub mod info;
+pub mod modules;
+pub mod pslist;
+
+pub fn register(v: &mut Vec<&'static dyn Plugin>) {
+    v.push(&info::Info);
+    v.push(&modules::Modules);
+    v.push(&pslist::PsList);
+}
