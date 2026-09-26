@@ -112,3 +112,55 @@ fn yara_rules_difftest_driver() {
     }
     let _ = std::fs::write(out, res);
 }
+
+/// Compile / evaluation timings on a synthetic rule set
+/// (`cargo test --profile fast yara_rules_perf -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn yara_rules_perf() {
+    use std::time::Instant;
+    let nrules = 2000;
+    let mut src = String::new();
+    for i in 0..nrules {
+        src.push_str(&format!(
+            "rule r{i} : tag{} {{ meta: author = \"x\" n = {i} strings: $a = \"abc{i}\" $b = \"def{i}\" nocase \
+             $c = \"ghi{i}\" wide $d = \"jkl{i}\" condition: ($a and #b > 2) or (2 of ($c, $d) and @c[1] < 100) \
+             or for any i in (1..#a) : (@a[i] + 4 == @b[i]) or uint16(0) == 0x5a4d and filesize < 10MB }}\n",
+            i % 7
+        ));
+    }
+    let t = Instant::now();
+    let r = Rules::compile(&src).unwrap_or_else(|e| panic!("{e}"));
+    let compile = t.elapsed();
+    let nstr = r.string_defs().len();
+    // Every 10th rule's strings match a few times.
+    let data = vec![0u8; 4096];
+    let mut ms: Vec<Vec<Match>> = vec![Vec::new(); nstr];
+    for (i, v) in ms.iter_mut().enumerate() {
+        if (i / 4) % 10 == 0 {
+            *v = (0..5).map(|k| Match { offset: k * 16 + (i % 4) * 4, len: 3, xor_key: 0 }).collect();
+        }
+    }
+    let iters = 200;
+    let t = Instant::now();
+    let mut n = 0;
+    for _ in 0..iters {
+        n += r.evaluate_rules(&data, &ms).iter().filter(|&&b| b).count();
+    }
+    let eval = t.elapsed();
+    let t = Instant::now();
+    for _ in 0..iters {
+        n += r.evaluate(&data, &ms).len();
+    }
+    let full = t.elapsed();
+    println!(
+        "rules={nrules} strings={nstr} compile={:.2?} ({:.1} us/rule) eval={:.1} us/scan ({:.0} ns/rule) \
+         eval+results={:.1} us/scan matched={}",
+        compile,
+        compile.as_secs_f64() * 1e6 / nrules as f64,
+        eval.as_secs_f64() * 1e6 / iters as f64,
+        eval.as_secs_f64() * 1e9 / (iters * nrules) as f64,
+        full.as_secs_f64() * 1e6 / iters as f64,
+        n / (2 * iters)
+    );
+}
