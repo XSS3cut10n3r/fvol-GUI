@@ -4,6 +4,7 @@
 #
 #   bench/refbench/run.sh [CORPUS_DIR] [RUNS] [NAME_FILTER]
 #
+# CORPUS_DIR is made by bench/refbench/gen_corpus.sh (keep it on disk, not tmpfs /tmp).
 # Both sides run pinned to one CPU ($CPU, default 8) and are interleaved ($ROUNDS rounds,
 # best taken) so background load affects them alike. Besides wall-clock MB/s, both harnesses
 # read user-mode CPU cycles with perf_event_open; the cycle ratio is insensitive to frequency
@@ -18,9 +19,11 @@ RUNS=${2:-10}
 FILTER=${3:-}
 CPU=${CPU:-8}
 ROUNDS=${ROUNDS:-3}
+# Memory-capped scopes (see DESIGN.md "Resource safety").
+LIMIT=${LIMIT:-/home/user/rs-vol/bench/scripts/limit.sh}
 
 gcc -O3 -march=native -o "$HERE/refbench" "$HERE/refbench.c" -llzma -lz -lbz2
-BIN=$(cd "$ROOT" && cargo test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
+BIN=$(cd "$ROOT" && "$LIMIT" -m 6G cargo test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
 BIN="$ROOT/$BIN"
 
 printf '%-24s %-7s %8s %9s %9s %7s %9s %9s %7s\n' file codec out_MB C_MB/s rust_MB/s speedup C_Mcyc rust_Mcyc cyc_x
@@ -39,8 +42,8 @@ for f in "$CORPUS"/*; do
     esac
     base=${f%.*}
     case "${base##*.}" in l[0-9]*|mt|x86|delta) base=${base%.*} ;; esac
-    pin=(taskset -c "$CPU")
-    [[ $codec == xz-mt ]] && pin=()
+    pin=("$LIMIT" -m 2G taskset -c "$CPU")
+    [[ $codec == xz-mt ]] && pin=("$LIMIT" -m 2G)
     cms=1e18; rms=1e18; ccy=1e18; rcy=1e18; out=0
     for ((r = 0; r < ROUNDS; r++)); do
         if [[ $codec != lznt1 ]]; then
