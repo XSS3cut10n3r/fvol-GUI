@@ -176,15 +176,16 @@ pub fn build_module_collection(k: &WinKernel) -> Result<ModuleCollection> {
     Ok(ModuleCollection::new(k.table, mods))
 }
 
-/// The resolved service table: `(index, function address)` per entry; a trailing `Err` is
-/// python raising while reading that element.
-fn service_table(k: &WinKernel) -> Result<Vec<Result<(u64, u64)>>> {
+/// The native service table (python `SSDT._generator`'s `KiServiceTable` walk): `f(index,
+/// function address)` for every entry up to `KiServiceLimit`, in order (`Ok(false)` stops).
+/// 64-bit entries are signed offsets (`>> 4`) from the table, 32-bit entries are pointers. An
+/// unreadable entry is python raising: its `Err` is returned after the entries before it.
+pub fn service_table_each(k: &WinKernel, mut f: impl FnMut(u64, u64) -> Result<bool>) -> Result<()> {
     let table_addr = k.get_symbol("KiServiceTable")?.address;
     let limit_addr = k.get_symbol("KiServiceLimit")?.address;
     let limit = k.object("int", limit_addr)?.int()?;
     let is64 = k.table.is_64bit();
     let count = limit.max(0) as u64;
-    // 64-bit: signed 32-bit offsets from the table; 32-bit: absolute pointers
     let arr = k.object("int", table_addr)?.cast_array_of(count, if is64 { "long" } else { "unsigned long" })?;
     let resolve = |raw: u32| -> u64 {
         if is64 {
@@ -194,24 +195,31 @@ fn service_table(k: &WinKernel) -> Result<Vec<Result<(u64, u64)>>> {
             raw as u64
         }
     };
-    let mut out = Vec::with_capacity(count as usize);
-    let mut buf = vec![0u8; count as usize * 4];
-    if k.vlayer.read(arr.addr, &mut buf).is_ok() {
-        for (i, c) in buf.chunks_exact(4).enumerate() {
-            out.push(Ok((i as u64, resolve(u32::from_le_bytes(c.try_into().unwrap())))));
-        }
-        return Ok(out);
-    }
-    for i in 0..count {
-        match arr.at(i).and_then(|e| e.int()) {
-            Ok(v) => out.push(Ok((i, resolve(v as u32)))),
-            Err(e) => {
-                out.push(Err(e));
-                break;
+    // read in blocks; a block with a hole falls back to per-entry reads (python's exact
+    // failure point)
+    const BLOCK: u64 = 1024;
+    let mut buf = vec![0u8; BLOCK as usize * 4];
+    let mut i = 0;
+    while i < count {
+        let n = BLOCK.min(count - i);
+        let b = &mut buf[..n as usize * 4];
+        if k.vlayer.read(arr.addr.wrapping_add(i * 4), b).is_ok() {
+            for (j, c) in b.chunks_exact(4).enumerate() {
+                if !f(i + j as u64, resolve(u32::from_le_bytes(c.try_into().unwrap())))? {
+                    return Ok(());
+                }
+            }
+        } else {
+            for j in i..i + n {
+                let v = arr.at(j)?.int()?;
+                if !f(j, resolve(v as u32))? {
+                    return Ok(());
+                }
             }
         }
+        i += n;
     }
-    Ok(out)
+    Ok(())
 }
 
 impl Plugin for Ssdt {
@@ -230,8 +238,7 @@ impl Plugin for Ssdt {
         ])?;
         let k = ctx.windows_kernel()?;
         let collection = build_module_collection(k)?;
-        for e in service_table(k)? {
-            let (idx, function) = e?;
+        service_table_each(k, |idx, function| {
             for (module_name, syms) in collection.module_symbols(function) {
                 if syms.is_empty() {
                     out.row(0, vec![Value::Int(idx as i128), Value::Int(function as i128), Value::str(module_name), Value::NotAvailable])?;
@@ -240,8 +247,8 @@ impl Plugin for Ssdt {
                     out.row(0, vec![Value::Int(idx as i128), Value::Int(function as i128), Value::str(module_name), Value::str(s)])?;
                 }
             }
-        }
-        Ok(())
+            Ok(true)
+        })
     }
 }
 
