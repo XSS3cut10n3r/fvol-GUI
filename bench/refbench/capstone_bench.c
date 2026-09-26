@@ -12,7 +12,8 @@
  *           a reused buffer (format_capstone equivalent)
  *   detail  cs_disasm_iter with CS_OPT_DETAIL on (structured operands with access flags,
  *           implicit registers); compare with the Rust "detail" (native structured operands)
- *           and "cdetail" (the same capstone detail view: detail_operands + implicit_regs)
+ *   cdetail detail + cs_regs_access(); the Rust "cdetail" (decode + detail_operands +
+ *           implicit_regs + regs_access) computes the same view and has the same check
  *   len     cheapest capstone path: detail off, only insn->size used
  *
  * Build/run: bench/refbench/capstone_bench.sh  (gcc -O3 -march=native ... -lcapstone)
@@ -78,8 +79,20 @@ static inline size_t put_hex(char *p, uint64_t v) {
     return 2 + 16 - i;
 }
 
-enum { W_TEXT, W_LINE, W_DETAIL, W_LEN };
-static const char *WNAME[] = {"text", "line", "detail", "len"};
+enum { W_TEXT, W_LINE, W_DETAIL, W_CDETAIL, W_LEN, W_N };
+static const char *WNAME[] = {"text", "line", "detail", "cdetail", "len"};
+
+/* exact token match in a comma separated list */
+static int has_work(const char *only, const char *name) {
+    size_t n = strlen(name);
+    for (const char *p = only; p && *p;) {
+        const char *e = strchr(p, ',');
+        size_t k = e ? (size_t)(e - p) : strlen(p);
+        if (k == n && strncmp(p, name, n) == 0) return 1;
+        p = e ? e + 1 : NULL;
+    }
+    return 0;
+}
 
 typedef struct {
     uint64_t insns, bad, bytes, check;
@@ -116,10 +129,19 @@ static result_t run(csh h, int w, const uint8_t *data, const chunk_t *ch, size_t
                     break;
                 }
                 case W_DETAIL:
-                    /* operands + implicit registers: equals the Rust "cdetail" check */
+                    /* operands + implicit registers */
                     r.check += insn->detail->x86.op_count + insn->detail->regs_read_count +
                                insn->detail->regs_write_count;
                     break;
+                case W_CDETAIL: {
+                    cs_regs rr, ww;
+                    uint8_t nr = 0, nw = 0;
+                    cs_regs_access(h, insn, rr, &nr, ww, &nw);
+                    /* operands + implicit registers + regs_access: equals the Rust check */
+                    r.check += insn->detail->x86.op_count + insn->detail->regs_read_count +
+                               insn->detail->regs_write_count + nr + nw;
+                    break;
+                }
                 default:
                     r.check += insn->size;
                     break;
@@ -155,9 +177,9 @@ int main(int argc, char **argv) {
         if (!ch) { fprintf(stderr, "cannot read %s\n", p2); return 1; }
         csh h;
         if (cs_open(CS_ARCH_X86, bits == 64 ? CS_MODE_64 : CS_MODE_32, &h) != CS_ERR_OK) return 1;
-        for (int w = 0; w < 4; w++) {
-            if (only && !strstr(only, WNAME[w])) continue;
-            cs_option(h, CS_OPT_DETAIL, w == W_DETAIL ? CS_OPT_ON : CS_OPT_OFF);
+        for (int w = 0; w < W_N; w++) {
+            if (only && !has_work(only, WNAME[w])) continue;
+            cs_option(h, CS_OPT_DETAIL, (w == W_DETAIL || w == W_CDETAIL) ? CS_OPT_ON : CS_OPT_OFF);
             double best = 1e30;
             result_t r = {0};
             for (int p = 0; p < passes; p++) {

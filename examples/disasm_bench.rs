@@ -6,9 +6,9 @@
 //!
 //! Workloads: text (decode + write_mnemonic + write_op_str into reused Strings), line (the
 //! format_capstone renderer line into a reused buffer), detail (decode with structured operands),
-//! cdetail (decode + capstone's detail view: `detail_operands` + `implicit_regs`, the work
-//! capstone's CS_OPT_DETAIL does; its check equals capstone's detail check), len (length-only
-//! `insn_len`). Each corpus section is swept linearly, skipping one byte after an
+//! cdetail (decode + capstone's detail view: `detail_operands` + `implicit_regs` +
+//! `regs_access`, i.e. what capstone's CS_OPT_DETAIL + cs_regs_access compute; same check as
+//! capstone's cdetail), len (length-only `insn_len`). Each corpus section is swept linearly, skipping one byte after an
 //! undecodable instruction. The `check` column must equal capstone's for text / line / len.
 
 #[allow(dead_code)]
@@ -145,7 +145,8 @@ fn run_cdetail(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
             if x86::decode_into(&buf[pos..], addr, mode, &mut insn) {
                 let ops = insn.detail_operands();
                 let (rd, wr) = insn.implicit_regs();
-                r.check += (ops.len() + rd.len() + wr.len()) as u64;
+                let (ar, aw) = insn.regs_access();
+                r.check += (ops.len() + rd.len() + wr.len() + ar.len() + aw.len()) as u64;
                 r.insns += 1;
                 pos += insn.size as usize;
             } else {

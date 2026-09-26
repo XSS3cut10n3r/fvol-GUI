@@ -5,7 +5,7 @@
 # Usage: bench/refbench/capstone_bench.sh [--rust] [CORPUS_DIR] [PASSES] [WORKLOADS]
 #   CORPUS_DIR  default /home/user/rs-vol/testdata/scratch/disasm/ref/bin (bench/scripts/disasm_bench_corpus.py output)
 #   PASSES      best of N (default 5)
-#   WORKLOADS   comma list of text,line,detail,cdetail,len (default all; cdetail is Rust only)
+#   WORKLOADS   comma list of text,line,detail,cdetail,len (default all)
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
