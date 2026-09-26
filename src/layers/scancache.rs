@@ -16,6 +16,12 @@
 //!     literals, so ANY query over known literals is answered, not only the one that was run;
 //!   * `Page(v)`: python `vmscan.PageStartScanner` hits of the 4-byte value `v` ([`page_start_hits`]);
 //!   * `Opaque(key)`: a scanner's own `prescan` output, keyed by the scanner ([`CacheQuery::Opaque`]).
+//!     A greedy query over more than [`MAX_LITERAL_ATOMS`] literals (needles derived from data,
+//!     e.g. linux.bash's pointers) is cached whole this way, keyed by the full ordered query.
+//!
+//! Not cached: scans of fewer than [`MIN_CACHED_SPAN`] section bytes (they cost ~1 ms), scans
+//! that stop early (nothing is stored), scanners without `cache_query` (user yara/regex rules,
+//! automagic scans, which the automagic cache covers), and `scan_each_progressive`.
 //!
 //! The scan configuration (key material, stored in full in every file and compared on load):
 //! [`CACHE_VERSION`], the layer's identity -- its class/name, bounds, translation parameters
@@ -28,7 +34,9 @@
 //! pool tag on translation layers; MFT / MBR signatures and vmscan's VMCS page starts on
 //! physical layers, plus the pool tags when the scan itself is a pool scan). The extra literals
 //! ride the same Teddy prefilter pass over cache-resident data (measured: the sweep stays memory
-//! bound), so the next DIFFERENT scanner of the family is answered from the cache too.
+//! bound), so the next DIFFERENT scanner of the family is answered from the cache too. Within one
+//! process, a scan that a sweep running on another thread will record waits for it and replays
+//! (timeliner runs its plugins concurrently).
 //!
 //! Storage: `~/.cache/rsvol/scan/<image key>/<atom key>.hits` (image key = image file identity
 //! and this executable's identity: a rebuilt binary never trusts an older binary's scans), written
@@ -62,10 +70,10 @@ const MAX_ATOM_BYTES: usize = 64 << 20;
 const MAX_RECORDS: usize = 16 << 20;
 /// Scans of fewer section bytes are not cached: they read at most this much (~1 ms), a cache
 /// file costs about as much (e.g. linux.bash's heap scans).
-const MIN_CACHED_SPAN: u128 = 16 << 20;
+pub const MIN_CACHED_SPAN: u128 = 16 << 20;
 /// Greedy queries over more distinct literals (e.g. linux.bash's pointer needles, one per heap
 /// hit) are cached whole (one atom keyed by the full query) instead of per literal.
-const MAX_LITERAL_ATOMS: usize = 64;
+pub const MAX_LITERAL_ATOMS: usize = 64;
 
 /// What a scanner's `prescan` computes (see [`Scanner::cache_query`]). The description must be
 /// exact: the cache answers a scan with matches derived from it, and the scanner's `finish`

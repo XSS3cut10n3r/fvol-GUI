@@ -383,8 +383,10 @@ Describe the prescan exactly: `CacheQuery::Greedy { patterns, limit, cap }` (pyt
 (the prescan output as is; `key` = name + version + every parameter). Literal queries are
 answered from per-literal atoms, and a full-layer miss also records well-known literals (pool
 tags, MFT / MBR signatures, vmscan page starts) in the same sweep, so the next scanner of that
-family is warm too. Never implement it for scanners of user-supplied patterns (yara/regex).
-`RSVOL_NO_SCAN_CACHE=1` disables the cache, `--clear-cache` wipes it.
+family is warm too. Scans of < 16 MiB of sections are never cached (cheap anyway); greedy
+queries over > 64 literals are cached whole. Never implement it for scanners of user-supplied
+patterns (yara/regex). `RSVOL_NO_SCAN_CACHE=1` disables the cache, `--clear-cache` wipes it.
+Scanners with their own executor use the explicit API (`scancache::page_start_hits`, vmscan).
 
 ### Pool scanning (`crate::plugins::windows::poolscanner`, `crate::symbols::windows::pool`)
 
