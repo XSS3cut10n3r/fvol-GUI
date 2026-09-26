@@ -574,6 +574,69 @@ mod tests {
         assert_eq!(short, [0xE8, 1, 2, 3]);
     }
 
+    /// Long mutation fuzz over every xz/lzma fixture (CODECS_FUZZ_ITERS, default 200k):
+    /// `cargo test codecs_xz_fuzz_long -- --ignored`, also run under valgrind memcheck.
+    #[test]
+    #[ignore]
+    fn codecs_xz_fuzz_long() {
+        let iters: usize = std::env::var("CODECS_FUZZ_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(200_000);
+        let seeds: [&[u8]; 10] = [
+            include_bytes!("testdata/text.xz"),
+            include_bytes!("testdata/text.mt.xz"),
+            include_bytes!("testdata/text.props.xz"),
+            include_bytes!("testdata/noise.xz"),
+            include_bytes!("testdata/x86.bin.xz"),
+            include_bytes!("testdata/samples.bin.xz"),
+            include_bytes!("testdata/multi.xz"),
+            include_bytes!("testdata/text.lzma"),
+            include_bytes!("testdata/text.lzma2"),
+            include_bytes!("testdata/text.lzma1"),
+        ];
+        let mut s = 0x0123_4567_89AB_CDEFu64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for it in 0..iters {
+            let seed = seeds[it % seeds.len()];
+            let mut v = seed.to_vec();
+            let r = rnd();
+            match r % 4 {
+                0 => {
+                    // a few random bytes
+                    for _ in 0..(r >> 8) % 4 + 1 {
+                        let i = rnd() as usize % v.len();
+                        v[i] = rnd() as u8;
+                    }
+                }
+                1 => {
+                    // bit flip in the compressed payload
+                    let i = rnd() as usize % v.len();
+                    v[i] ^= 1 << (rnd() % 8);
+                }
+                2 => {
+                    // truncate
+                    v.truncate(rnd() as usize % v.len());
+                }
+                _ => {
+                    // splice a chunk of another fixture in
+                    let other = seeds[rnd() as usize % seeds.len()];
+                    let a = rnd() as usize % v.len();
+                    let b = rnd() as usize % other.len();
+                    let n = (rnd() as usize % 64).min(v.len() - a).min(other.len() - b);
+                    v[a..a + n].copy_from_slice(&other[b..b + n]);
+                }
+            }
+            let _ = decompress(&v);
+            let _ = lzma::decompress(&v);
+            let _ = lzma::decompress_lzma2(&v);
+            let _ = lzma::decompress_lzma1_raw(&v, 93, None);
+            let _ = lzma::decompress_lzma1_raw(&v, (rnd() % 225) as u8, Some(rnd() % 20000));
+        }
+    }
+
     /// The real volatility ISF (single 6.7 MB block) when it is present on this machine.
     #[test]
     fn codecs_xz_real_isf() {
