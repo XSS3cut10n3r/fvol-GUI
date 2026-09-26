@@ -418,3 +418,59 @@ mod tests {
         assert_eq!(super::convert_fourcc_code(0), "");
     }
 }
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::context::{Context, GlobalOptions};
+    use crate::objects::util::array_to_string;
+    use crate::renderers::Value;
+
+    fn v(x: Value) -> String {
+        match x {
+            Value::DateTime(d) => crate::util::time::fmt_quick(&d),
+            Value::Str(s) => s,
+            Value::SStr(s) => s.into(),
+            Value::Int(i) => i.to_string(),
+            _ => "-".into(),
+        }
+    }
+
+    /// Prints `linux.lsof.Lsof`-like rows to check `files_descriptors_for_process` /
+    /// `path_for_file` / the inode helpers against python's reference:
+    /// `RSVOL_BENCH_IMAGE=<image> cargo test --profile fast lsof_like -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lsof_like() {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
+        let ctx = Context::new(opts).unwrap();
+        let k = ctx.linux_kernel().unwrap();
+        crate::plugins::linux::pslist::list_tasks(k, &|_| Ok(false), true, &mut |task| {
+            let comm = array_to_string(&task.m("comm")?, None)?;
+            for e in files_descriptors_for_process(&task, false) {
+                let (fd, filp, path) = e?;
+                let pre = format!("LS\t{}\t{}\t{comm}\t{fd}\t{path}", task.m("tgid")?.int()?, task.m("pid")?.int()?);
+                match filp.get_inode()? {
+                    Some(i) => {
+                        let sb = i.m("i_sb")?;
+                        let dev = if ptr_ok(&sb)? { format!("{}:{}", sb.major()?, sb.minor()?) } else { "-".into() };
+                        println!(
+                            "{pre}\t{dev}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            i.m("i_ino")?.int()?,
+                            i.get_inode_type()?.unwrap_or("-"),
+                            i.get_file_mode()?,
+                            v(i.get_change_time()?),
+                            v(i.get_modification_time()?),
+                            v(i.get_access_time()?),
+                            i.m("i_size")?.int()?
+                        );
+                    }
+                    None => println!("{pre}\t-\t-\t-\t-\t-\t-\t-\t-"),
+                }
+            }
+            Ok(true)
+        })
+        .unwrap();
+    }
+}

@@ -212,7 +212,7 @@ const S_IFIFO: i128 = 0o010000;
 const S_IFLNK: i128 = 0o120000;
 const S_IFSOCK: i128 = 0o140000;
 
-/// python `stat.filemode(mode)`.
+/// python `stat.filemode(mode)` (the C `_stat` implementation: unknown file types are `?`).
 pub fn filemode(mode: i128) -> String {
     let mut s = String::with_capacity(10);
     s.push(match mode & S_IFMT {
@@ -223,7 +223,8 @@ pub fn filemode(mode: i128) -> String {
         S_IFDIR => 'd',
         S_IFCHR => 'c',
         S_IFIFO => 'p',
-        _ => '-',
+        // CPython _stat.filemode: unknown file type
+        _ => '?',
     });
     // (mask, char) groups as in python's _filemode_table; the first matching entry wins
     let groups: [&[(i128, char)]; 9] = [
@@ -954,7 +955,8 @@ mod tests {
         assert_eq!(filemode(0o041777), "drwxrwxrwt");
         assert_eq!(filemode(0o120777), "lrwxrwxrwx");
         assert_eq!(filemode(0o102644), "-rw-r-Sr--");
-        assert_eq!(filemode(0), "----------");
+        assert_eq!(filemode(0), "?---------");
+        assert_eq!(filemode(0o600), "?rw-------");
     }
 }
 
