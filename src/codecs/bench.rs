@@ -37,9 +37,9 @@ fn decode(codec: &str, data: &[u8]) -> Option<crate::error::Result<Vec<u8>>> {
     Some(match codec {
         "xz" => super::xz::decompress(data),
         "lzma" => super::lzma::decompress(data),
-        // "gzip" => super::gzip::decompress(data),
-        // "zlib" => super::zlib::decompress(data),
-        // "deflate" => super::inflate::decompress(data),
+        "gzip" => super::gzip::decompress(data),
+        "zlib" => super::zlib::decompress(data),
+        "deflate" => super::inflate::decompress(data),
         // "bz2" => super::bzip2::decompress(data),
         // "lznt1" => super::lznt1::decompress(data),
         _ => return None,
@@ -207,7 +207,6 @@ mod perf {
     unsafe extern "C" {
         fn syscall(num: c_long, ...) -> c_long;
         fn ioctl(fd: c_int, req: c_ulong, ...) -> c_int;
-        fn read(fd: c_int, buf: *mut u8, n: usize) -> isize;
         fn close(fd: c_int) -> c_int;
     }
     const SYS_PERF_EVENT_OPEN: c_long = 298;
@@ -257,7 +256,13 @@ mod perf {
                 // SAFETY: valid perf fds; reading one u64 counter value.
                 unsafe {
                     ioctl(fd, IOC_DISABLE, 0 as c_ulong);
-                    read(fd, &mut v[i] as *mut u64 as *mut u8, 8);
+                    use std::io::Read;
+                    use std::os::fd::FromRawFd;
+                    let mut f = std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(fd));
+                    let mut b = [0u8; 8];
+                    if f.read_exact(&mut b).is_ok() {
+                        v[i] = u64::from_ne_bytes(b);
+                    }
                 }
             }
             v
