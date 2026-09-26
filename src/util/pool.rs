@@ -67,6 +67,17 @@ fn pool() -> &'static Pool {
     })
 }
 
+/// Start the workers on a helper thread (returns at once): call when parallel work is coming
+/// but the caller has something serial to do first (e.g. an xz decode before an ISF build).
+pub fn warm() {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !STARTED.swap(true, Ordering::Relaxed) {
+        let _ = std::thread::Builder::new().name("rsvol-pool-init".into()).spawn(|| {
+            pool();
+        });
+    }
+}
+
 /// Execute tasks of `job` until none are left.
 fn drain(job: &Job) {
     // SAFETY: `f` outlives the job (the caller of for_each waits for every worker)

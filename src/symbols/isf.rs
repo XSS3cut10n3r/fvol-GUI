@@ -314,7 +314,7 @@ const PAR_PARSE_MIN: usize = 1 << 20;
 /// Parse ISF JSON: stage 1 structural index, then the members of the big top-level objects
 /// (`user_types`, `symbols`, `enums`) in parallel ranges (see [`parse_parallel`]).
 fn parse<'a>(buf: &'a [u8]) -> Result<Parsed<'a>> {
-    let par = buf.len() >= PAR_PARSE_MIN && crate::util::par::threads() > 1;
+    let par = buf.len() >= PAR_PARSE_MIN && parallel_allowed();
     let idx = {
         let _t = crate::util::trace::span("isf parse: stage 1");
         Index::build_with(buf, par)?
@@ -840,6 +840,24 @@ impl<'p, 'a> Resolver<'p, 'a> {
     }
 }
 
+thread_local! {
+    /// Set while [`build_blob_serial`] runs: every phase stays on the calling thread.
+    static SERIAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn parallel_allowed() -> bool {
+    crate::util::par::threads() > 1 && !SERIAL.with(|s| s.get())
+}
+
+/// [`build_blob`] on the calling thread only (for callers already running one job per core,
+/// e.g. speculative builds inside the identifier index).
+pub fn build_blob_serial(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
+    let prev = SERIAL.with(|s| s.replace(true));
+    let r = build_blob(json, opts);
+    SERIAL.with(|s| s.set(prev));
+    r
+}
+
 /// Parse ISF JSON and build a table blob.
 pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
     // the fused parallel builder handles every well-formed ISF without repeated names; the
@@ -1350,7 +1368,7 @@ fn serialize_fast(o: &Out<'_>) -> Vec<u8> {
     let nu = o.users.len();
     let total_members: usize = o.users.iter().map(|u| u.members.len()).sum();
     let threads = crate::util::par::threads();
-    let par = threads > 1 && total_members + o.syms.len() + o.nodes.len() > 30_000;
+    let par = parallel_allowed() && total_members + o.syms.len() + o.nodes.len() > 30_000;
     // user ranges (by member count) for the parallel passes
     let uranges: Vec<std::ops::Range<usize>> = {
         let per = (total_members / (threads * 4)).max(2048);
@@ -2123,7 +2141,7 @@ mod fast {
 
     fn build_opt(json: &[u8], opts: &BuildOptions) -> Option<Vec<u8>> {
         let threads = crate::util::par::threads();
-        let par = json.len() >= PAR_PARSE_MIN && threads > 1;
+        let par = json.len() >= PAR_PARSE_MIN && parallel_allowed();
         let idx = {
             let _t = crate::util::trace::span("isf: stage 1");
             Index::build_with(json, par).ok()?

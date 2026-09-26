@@ -646,6 +646,8 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
             }
         }
     }
+    // the build is parallel: start the pool's workers while this thread decompresses
+    crate::util::pool::warm();
     let json = match take_kept(loc, &url) {
         Some(j) => std::borrow::Cow::Owned(j),
         None => {
@@ -653,16 +655,23 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
             loc.read()?
         }
     };
+    let blob = build_remember(&url, cf, json, opts, true)?;
+    SymbolTable::from_blob(Blob::Shared(blob), name, &url)
+}
+
+/// Build the blob of an ISF's JSON, remember it in-process ([`BUILT`]) and write its cache
+/// file in the background (overlapping the plugin run; joined before exit), where the JSON is
+/// freed too.
+fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: std::borrow::Cow<'static, [u8]>, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
     let blob = {
         let _t = crate::util::trace::span("isf parse+build");
-        build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?
+        let b = if parallel { build_blob(&json, opts) } else { super::isf::build_blob_serial(&json, opts) };
+        b.map_err(|e| Error::msg(format!("{url}: {e}")))?
     };
     let blob = std::sync::Arc::new(blob);
     if let Some((_, key)) = &cf {
         BUILT.lock().unwrap_or_else(|e| e.into_inner()).push((key.clone(), blob.clone()));
     }
-    // the cache file is written in the background (overlapping the plugin run; joined
-    // before exit), and the decompressed JSON is freed there too
     let writer = blob.clone();
     crate::util::bg::spawn(move || {
         drop(json);
@@ -672,7 +681,35 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
             let _ = paths::write_atomic_parts(&cf, &cache_file_parts(&writer, &key, &len));
         }
     });
-    SymbolTable::from_blob(Blob::Shared(blob), name, &url)
+    Ok(blob)
+}
+
+/// Speculative table builds done by the identifier index (see [`keep_decoded_for`]).
+static SPEC_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// At most this many: a big symbol pack must not turn the index into a build farm.
+const MAX_SPEC_BUILDS: usize = 3;
+
+/// Inside the identifier index: `json` (all of `loc`) was identified as the OS whose kernel
+/// ISF is loaded next. Build its table now, on this worker (the other workers keep
+/// decompressing), for the first few such files; else keep the JSON (decompressed ones only)
+/// so the load skips the decompression.
+fn speculate(loc: &IsfLocation, json: Vec<u8>, decoded: bool) {
+    use std::sync::atomic::Ordering;
+    // plain JSON files load without decompression anyway: only compressed ones are worth it
+    if !decoded {
+        return;
+    }
+    if SPEC_BUILDS.fetch_add(1, Ordering::Relaxed) < MAX_SPEC_BUILDS {
+        let url = loc.url();
+        let cf = cache_file(loc, &url, &BuildOptions::default());
+        let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
+        if !known {
+            let _t = crate::util::trace::span("isf speculative build (identifier index)");
+            let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+        }
+        return;
+    }
+    keep_decoded(loc, json);
 }
 
 /// Load an ISF by python sub_path/filename (e.g. `("windows", "pe")`), first match wins
@@ -871,15 +908,15 @@ pub(crate) fn with_json<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(
     with_json_len(loc, buf, |j, _| f(j))
 }
 
-/// [`with_json`]; `f` also gets `Some(n)` when the JSON was decompressed into `buf[..n]`.
-fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8], Option<usize>) -> R) -> Result<R> {
+/// [`with_json`]; `f` also gets `Some((n, decompressed))` when the JSON is `buf[..n]`.
+fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8], Option<(usize, bool)>) -> R) -> Result<R> {
     let owned;
-    let (json, decoded): (&[u8], Option<usize>) = match loc {
+    let (json, decoded): (&[u8], Option<(usize, bool)>) = match loc {
         IsfLocation::Embedded { data, .. } => (data, None),
         IsfLocation::File(p) if p.to_string_lossy().ends_with(".xz") => {
             let raw = std::fs::read(p)?;
             let n = crate::codecs::xz::decompress_reuse(&raw, buf, false)?;
-            (&buf[..n], Some(n))
+            (&buf[..n], Some((n, true)))
         }
         IsfLocation::File(p) if p.to_string_lossy().ends_with(".json") => {
             use std::io::Read;
@@ -890,7 +927,7 @@ fn with_json_len<R>(loc: &IsfLocation, buf: &mut Vec<u8>, f: impl FnOnce(&[u8], 
                 buf.resize(len, 0);
             }
             file.read_exact(&mut buf[..len])?;
-            (&buf[..len], None)
+            (&buf[..len], Some((len, false)))
         }
         _ => {
             owned = loc.read()?;
@@ -973,13 +1010,13 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
             })
             .ok()
             .flatten();
-            // keep the decoded JSON of the OS the caller is about to load a kernel ISF for
-            if let (Some(n), Some(os), Some((ios, _))) = (decoded, keep_os, &ident)
+            // the OS the caller is about to load a kernel ISF for: build it now or keep the JSON
+            if let (Some((n, was_decoded)), Some(os), Some((ios, _))) = (decoded, keep_os, &ident)
                 && os == ios
             {
                 let mut v = std::mem::take(&mut buf);
                 v.truncate(n);
-                keep_decoded(loc, v);
+                speculate(loc, v, was_decoded);
             }
             out.push((k, make(k, ident)));
         }

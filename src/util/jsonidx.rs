@@ -156,10 +156,32 @@ fn prefix_xor_portable(mut x: u64) -> u64 {
     x
 }
 
+/// Where stage 1 puts a block's index bits.
+trait Sink {
+    fn put(&mut self, bits: u64, base: u32);
+}
+
+impl Sink for Vec<u32> {
+    #[inline(always)]
+    fn put(&mut self, bits: u64, base: u32) {
+        flatten(self, bits, base)
+    }
+}
+
+/// Counting pass of the parallel stage 1: only how many entries a chunk has.
+struct Count(usize);
+
+impl Sink for Count {
+    #[inline(always)]
+    fn put(&mut self, bits: u64, _base: u32) {
+        self.0 += bits.count_ones() as usize;
+    }
+}
+
 /// The bit logic shared by the SIMD and portable paths: escapes, string mask, index bits,
 /// depth; appends the index entries of this block.
 #[inline(always)]
-fn block(m: &Masks, in_str_xor: u64, base: u32, st: &mut State, out: &mut Vec<u32>, esc: &mut Vec<u32>) {
+fn block<K: Sink>(m: &Masks, in_str_xor: u64, base: u32, st: &mut State, out: &mut K, esc: &mut Vec<u32>) {
     // backslash runs: odd-length runs escape the next character (simdjson find_escaped)
     let escaped = if m.bs == 0 && st.prev_escaped == 0 {
         0
@@ -193,7 +215,7 @@ fn block(m: &Masks, in_str_xor: u64, base: u32, st: &mut State, out: &mut Vec<u3
     let starts = scalar & !((scalar << 1) | st.prev_scalar);
     st.prev_scalar = scalar >> 63;
     st.depth += (m.open & outside).count_ones() as i64 - (m.close & outside).count_ones() as i64;
-    flatten(out, (m.op & outside) | quote | starts, base);
+    out.put((m.op & outside) | quote | starts, base);
 }
 
 /// Append the positions of the set bits of `bits` (+ `base`). Unconditionally writes 8 (then
@@ -234,7 +256,7 @@ fn flatten(out: &mut Vec<u32>, bits: u64, base: u32) {
 
 /// Index `buf[start..end]` (absolute positions), assuming `start` is outside any string and
 /// not escaped. Returns the state after `end`.
-fn index_range(buf: &[u8], start: usize, end: usize, out: &mut Vec<u32>, esc: &mut Vec<u32>) -> State {
+fn index_range<K: Sink>(buf: &[u8], start: usize, end: usize, out: &mut K, esc: &mut Vec<u32>) -> State {
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("pclmulqdq") {
@@ -245,7 +267,7 @@ fn index_range(buf: &[u8], start: usize, end: usize, out: &mut Vec<u32>, esc: &m
     index_range_portable(buf, start, end, out, esc)
 }
 
-fn index_range_portable(buf: &[u8], start: usize, end: usize, out: &mut Vec<u32>, esc: &mut Vec<u32>) -> State {
+fn index_range_portable<K: Sink>(buf: &[u8], start: usize, end: usize, out: &mut K, esc: &mut Vec<u32>) -> State {
     let mut st = State::default();
     let mut i = start;
     let mut blk = [b' '; 64];
@@ -281,7 +303,7 @@ mod x86 {
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx2,pclmulqdq,popcnt,bmi1")]
-    pub(super) unsafe fn index_range_avx2(buf: &[u8], start: usize, end: usize, out: &mut Vec<u32>, esc: &mut Vec<u32>) -> State {
+    pub(super) unsafe fn index_range_avx2<K: Sink>(buf: &[u8], start: usize, end: usize, out: &mut K, esc: &mut Vec<u32>) -> State {
         // nibble classifier (see the module docs of simdjson): class bits
         //   b0 ','  b1 ':'  b2 '[' '{'  b3 ']' '}'  b4 ' '  b5 '\t' '\n' '\r'
         let lo_tab = _mm256_setr_epi8(
@@ -375,23 +397,36 @@ impl Index {
         }
         bounds.push(buf.len());
         let n = bounds.len() - 1;
-        let run = |c: usize| -> (Vec<u32>, Vec<u32>, State, bool) {
-            let (s, e) = (bounds[c], bounds[c + 1]);
-            let mut out = Vec::with_capacity((e - s) / 6 + 64);
+        if n == 1 {
+            let mut pos = Vec::with_capacity(buf.len() / 6 + 64);
             let mut esc = Vec::new();
-            let st = index_range(buf, s, e, &mut out, &mut esc);
-            let utf8 = std::str::from_utf8(&buf[s..e]).is_ok();
-            (out, esc, st, utf8)
+            let st = index_range(buf, 0, buf.len(), &mut pos, &mut esc);
+            if st.bad {
+                return Err(Error::msg("JSON parse error: invalid control character in string"));
+            }
+            if st.prev_in_string != 0 {
+                return Err(Error::msg("JSON parse error: unterminated string"));
+            }
+            let chunks = vec![Chunk { start: 0, end: buf.len() as u32, first: 0, len: pos.len() as u32, depth: 0 }];
+            return Ok(Index { pos, esc, chunks, utf8: std::str::from_utf8(buf).is_ok() });
+        }
+        // two passes over the chunks: count each chunk's entries (and its end state), then
+        // index each chunk straight into its slot of the final array (no per-chunk vectors to
+        // allocate, fault in and concatenate)
+        let counted: Vec<(usize, State, bool)> = {
+            let _t = crate::util::trace::span("stage1: count pass");
+            crate::util::pool::map(n, |c| {
+                let (s, e) = (bounds[c], bounds[c + 1]);
+                let mut cnt = Count(0);
+                let st = index_range(buf, s, e, &mut cnt, &mut Vec::new());
+                (cnt.0, st, std::str::from_utf8(&buf[s..e]).is_ok())
+            })
         };
-        let _t0 = crate::util::trace::span("stage1: chunks");
-        let parts: Vec<(Vec<u32>, Vec<u32>, State, bool)> = if n == 1 { vec![run(0)] } else { crate::util::pool::map(n, run) };
-        drop(_t0);
-        let _t1 = crate::util::trace::span("stage1: concat");
         let mut chunks = Vec::with_capacity(n);
         let mut depth: i64 = 0;
         let mut total = 0usize;
         let mut utf8 = true;
-        for (c, (out, _, st, u)) in parts.iter().enumerate() {
+        for (c, (cnt, st, u)) in counted.iter().enumerate() {
             if st.bad {
                 return Err(Error::msg("JSON parse error: invalid control character in string"));
             }
@@ -399,33 +434,43 @@ impl Index {
                 return Err(Error::msg("JSON parse error: unterminated string"));
             }
             utf8 &= u;
-            chunks.push(Chunk { start: bounds[c] as u32, end: bounds[c + 1] as u32, first: total as u32, len: out.len() as u32, depth: depth.clamp(i32::MIN as i64, i32::MAX as i64) as i32 });
+            chunks.push(Chunk { start: bounds[c] as u32, end: bounds[c + 1] as u32, first: total as u32, len: *cnt as u32, depth: depth.clamp(i32::MIN as i64, i32::MAX as i64) as i32 });
             depth += st.depth;
-            total += out.len();
+            total += cnt;
         }
-        let mut parts = parts;
-        let (pos, esc) = if n == 1 {
-            let (out, esc, _, _) = parts.pop().unwrap();
-            (out, esc)
-        } else {
-            let mut pos: Vec<u32> = Vec::with_capacity(total + 8);
-            struct Dst(*mut u32);
-            // SAFETY: each chunk writes its own disjoint range [first, first + len)
-            unsafe impl Sync for Dst {}
-            let dst = Dst(pos.as_mut_ptr());
-            let (parts_ref, chunks_ref, dst_ref) = (&parts, &chunks, &dst);
-            crate::util::pool::for_each(n, &move |c| unsafe {
-                let src = &parts_ref[c].0;
-                std::ptr::copy_nonoverlapping(src.as_ptr(), dst_ref.0.add(chunks_ref[c].first as usize), src.len());
-            });
-            // SAFETY: all `total` entries were written above
-            unsafe { pos.set_len(total) };
-            let esc = parts.iter().flat_map(|p| p.1.iter().copied()).collect();
-            drop(_t1);
-            let _t2 = crate::util::trace::span("stage1: drop parts");
-            drop(parts);
-            (pos, esc)
-        };
+        let _t = crate::util::trace::span("stage1: index pass");
+        let mut pos: Vec<u32> = Vec::with_capacity(total + 8);
+        struct Dst(*mut u32);
+        // SAFETY: each chunk writes exactly its own range [first, first + len) (checked)
+        unsafe impl Sync for Dst {}
+        let dst = Dst(pos.as_mut_ptr());
+        let dst = &dst;
+        let chunks_ref = &chunks;
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let escs: Vec<Option<Vec<u32>>> = crate::util::pool::map(n, |c| {
+            let (s, e) = (bounds[c], bounds[c + 1]);
+            let ch = chunks_ref[c];
+            SCRATCH.with(|sc| {
+                let mut sc = sc.borrow_mut();
+                sc.clear();
+                let mut esc = Vec::new();
+                index_range(buf, s, e, &mut *sc, &mut esc);
+                if sc.len() != ch.len as usize {
+                    return None; // cannot happen: the same pass as the count
+                }
+                // SAFETY: disjoint destination ranges, total capacity reserved above
+                unsafe { std::ptr::copy_nonoverlapping(sc.as_ptr(), dst.0.add(ch.first as usize), sc.len()) };
+                Some(esc)
+            })
+        });
+        if escs.iter().any(|e| e.is_none()) {
+            return Err(Error::msg("JSON structural index: inconsistent passes"));
+        }
+        // SAFETY: every chunk wrote its full range, which tile [0, total)
+        unsafe { pos.set_len(total) };
+        let esc: Vec<u32> = escs.into_iter().flatten().flatten().collect();
         Ok(Index { pos, esc, chunks, utf8 })
     }
 
