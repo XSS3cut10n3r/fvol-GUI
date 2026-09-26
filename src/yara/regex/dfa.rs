@@ -268,6 +268,9 @@ pub struct PreStats {
     calls: u64,
     skipped: u64,
     off: bool,
+    /// Where the prefiltered forward scan last (re)started with no thread alive: the
+    /// match it finds starts there or later (bounds the reverse scan).
+    restart: usize,
 }
 
 impl Cache {
@@ -440,29 +443,34 @@ impl Searcher {
                 return self.find_inner(finder, pre, pc, &mut c.plain, &mut c.rev, hay, start, must_advance);
             }
         }
-        let e = self.fwd_unanchored(c, hay, start, must_advance)?;
+        let (e, lb) = self.fwd_unanchored(c, hay, start, must_advance)?;
         if let Some(w) = self.fixed_width {
             if e >= start + w {
                 return Some((e - w, e));
             }
         }
-        let s = rev_search(&self.cls, &self.rev, &mut c.rev, hay, e, start)?;
+        // The match starts at or after `lb` (>= start): no need to scan further back (the
+        // reverse DFA would otherwise run on through bytes that could precede a match,
+        // e.g. the rest of a class run before a URL).
+        let s = rev_search(&self.cls, &self.rev, &mut c.rev, hay, e, lb)?;
         Some((s, e))
     }
 
-    /// Unanchored forward search with the adaptive prefilter.
-    fn fwd_unanchored(&self, c: &mut Cache, hay: &[u8], start: usize, must_advance: bool) -> Option<usize> {
+    /// Unanchored forward search with the adaptive prefilter: (match end, lower bound of
+    /// the match start).
+    fn fwd_unanchored(&self, c: &mut Cache, hay: &[u8], start: usize, must_advance: bool) -> Option<(usize, usize)> {
         match &self.prefilter {
             Some(pf) if !c.stats.off => {
+                c.stats.restart = start;
                 let (e, pos, switched) =
                     fwd_search(&self.cls, &self.fwd, &mut c.fwd, Some((pf, &mut c.stats)), hay, start, false, must_advance);
                 if switched {
-                    fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, pos, false, false).0
+                    Some((fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, pos, false, false).0?, pos))
                 } else {
-                    e
+                    Some((e?, c.stats.restart.max(start)))
                 }
             }
-            _ => fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, start, false, must_advance).0,
+            _ => Some((fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, start, false, must_advance).0?, start)),
         }
     }
 
@@ -693,13 +701,14 @@ fn fwd_search(
     let behind = if p == 0 { CTX_NONE } else { cls.byte_ctx(hay[p - 1]) };
     let mut sid = start_state(cls, d, c, behind, anchored, must_advance);
     let mut last: Option<usize> = None;
-    if let (Some((pf, _)), false) = (pre.as_ref(), anchored) {
+    if let (Some((pf, st)), false) = (pre.as_mut(), anchored) {
         match pf.find(hay, p) {
             None => return (None, n, false),
             Some(q) => {
                 if q > p {
                     p = q;
                     sid = start_state(cls, d, c, cls.byte_ctx(hay[q - 1]), false, false);
+                    st.restart = q;
                 }
             }
         }
@@ -791,6 +800,9 @@ fn fwd_search(
                             st.off = true;
                             return (None, q, true);
                         }
+                        // No thread alive (and no match yet: restarts stop after one):
+                        // every match from here starts at q or later.
+                        st.restart = q;
                         if q > p {
                             p = q;
                             sid = start_state(cls, d, c, cls.byte_ctx(hay[q - 1]), false, false) & ID_MASK;
