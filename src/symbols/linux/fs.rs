@@ -957,3 +957,81 @@ mod tests {
         assert_eq!(filemode(0), "----------");
     }
 }
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::context::{Context, GlobalOptions};
+    use crate::symbols::linux::utilities::get_path_mnt;
+
+    /// Prints `linux.mountinfo.MountInfo`-like rows (default options) to check the mount /
+    /// dentry helpers against python's reference:
+    /// `RSVOL_BENCH_IMAGE=<image> cargo test --profile fast mountinfo_like -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn mountinfo_like() {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
+        let ctx = Context::new(opts).unwrap();
+        let k = ctx.linux_kernel().unwrap();
+        let mut seen = FxHashSet::default();
+        crate::plugins::linux::pslist::list_tasks(k, &|_| Ok(false), false, &mut |task| {
+            let fs = task.m("fs")?;
+            let ns = task.m("nsproxy")?;
+            if !(ptr_ok(&fs)? && ptr_ok(&ns)? && ptr_ok(&ns.m("mnt_ns")?)?) {
+                return Ok(true);
+            }
+            let mnt_ns = ns.m("mnt_ns")?;
+            let ns_id = mnt_ns.get_mnt_ns_inode()?;
+            for m in mnt_ns.get_mount_points() {
+                let m = m?.unwrap();
+                let mnt_id = m.m("mnt_id")?.int()?;
+                if !seen.insert(mnt_id) {
+                    continue;
+                }
+                let mnt_root = m.get_mnt_root()?;
+                if mnt_root.u64()? == 0 {
+                    continue;
+                }
+                let path_root = get_path_mnt(&task, &m)?;
+                if path_root.is_empty() {
+                    continue;
+                }
+                let root_path = mnt_root.dentry_path()?;
+                let parent_id = m.m("mnt_parent")?.m("mnt_id")?.int()?;
+                let sb = m.get_mnt_sb()?;
+                if !ptr_ok(&sb)? {
+                    continue;
+                }
+                let st_dev = format!("{}:{}", sb.major()?, sb.minor()?);
+                let mut mnt_opts = vec![m.get_flags_access()?];
+                mnt_opts.extend(m.get_flags_opts()?);
+                let mut fields: Vec<String> = Vec::new();
+                if m.is_shared()? != 0 {
+                    fields.push(format!("shared:{}", m.m("mnt_group_id")?.int()?));
+                }
+                if m.is_slave()? {
+                    let master = m.m("mnt_master")?.m("mnt_group_id")?.int()?;
+                    fields.push(format!("master:{master}"));
+                    let dom = m.get_dominating_id(&fs.m("root")?)?;
+                    if dom != 0 && dom != master {
+                        fields.push(format!("propagate_from:{dom}"));
+                    }
+                }
+                if m.is_unbindable()? != 0 {
+                    fields.push("unbindable".into());
+                }
+                let ty = sb.sb_get_type()?.unwrap_or_else(|| "-".into());
+                let mut devname = m.get_devname()?;
+                if devname.is_empty() {
+                    devname = "none".into();
+                }
+                let mut sb_opts = vec![sb.get_flags_access()?];
+                sb_opts.extend(sb.get_flags_opts()?);
+                println!("MI\t{ns_id}\t{mnt_id}\t{parent_id}\t{st_dev}\t{root_path}\t{path_root}\t{}\t{}\t{ty}\t{devname}\t{}", mnt_opts.join(","), fields.join(" "), sb_opts.join(","));
+            }
+            Ok(true)
+        })
+        .unwrap();
+    }
+}
