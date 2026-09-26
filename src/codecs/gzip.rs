@@ -87,6 +87,331 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------------------
+// Streaming (whole memory images)
+//
+// A single member is one DEFLATE stream: inherently serial, so it is decoded on the calling
+// thread with only the 32 KiB window kept, its output going to the sink in STREAM_CHUNK
+// pieces. Members are independent, though: a file of several members (bgzip / BGZF,
+// concatenated files, pgzip, ...) is decoded in parallel. There is no index, so every
+// position that looks like a member header (magic, method 8, reserved flags clear) is a
+// candidate; worker threads decode whole members at candidates, in order, at most WINDOW
+// candidates / BUDGET bytes ahead of the output. The calling thread walks the members
+// sequentially and, at each member start, takes the result decoded for exactly that
+// position (helping with jobs while it waits); a failed or oversized speculation, or a
+// member that starts at no candidate, is decoded inline, so errors and semantics are those
+// of the sequential decoder. A false candidate inside compressed data only costs the (short)
+// time until its decoding fails.
+// ---------------------------------------------------------------------------------------
+
+/// Output chunk of the streaming decoder.
+const STREAM_CHUNK: usize = 8 << 20;
+/// Members larger than this are not decoded speculatively (the walker streams them).
+const MEMBER_MAX: usize = 8 << 20;
+/// Upper bound on decoded-but-unconsumed member output held by the workers.
+const BUDGET: usize = 128 << 20;
+/// Inputs shorter than this are decoded on the calling thread only.
+const PAR_MIN: usize = 1 << 20;
+/// Upper bound on decoding threads.
+const MAX_THREADS: usize = 16;
+
+/// The end of a member whose DEFLATE data ends at `data_end` (after its trailer and any
+/// zero padding).
+fn member_end(data: &[u8], data_end: usize) -> usize {
+    let mut off = data_end + 8;
+    while off < data.len() && data[off] == 0 {
+        off += 1;
+    }
+    off
+}
+
+/// Checks the trailer after DEFLATE data ending at `data_end` against the member's CRC and
+/// length (mod 2^32).
+fn check_trailer(data: &[u8], data_end: usize, crc: u32, len: u64) -> Result<()> {
+    let t = data.get(data_end..data_end + 8).ok_or_else(|| err("truncated trailer"))?;
+    if crc != u32::from_le_bytes([t[0], t[1], t[2], t[3]]) {
+        return Err(err("CRC check failed"));
+    }
+    if len as u32 != u32::from_le_bytes([t[4], t[5], t[6], t[7]]) {
+        return Err(err("incorrect length of data produced"));
+    }
+    Ok(())
+}
+
+/// Streams the member at `off` into `sink` through `buf` (see `inflate_stream`); returns the
+/// offset of the next member.
+fn member_stream(data: &[u8], off: usize, buf: &mut Vec<u8>, sink: &mut dyn super::sink::Sink) -> Result<usize> {
+    let start = parse_header(data, off)?;
+    let before = sink.position() + buf.len() as u64;
+    let mut check = Check::crc32();
+    let used = super::inflate::inflate_stream(&data[start..], &mut check, sink, STREAM_CHUNK, buf)?;
+    check_trailer(data, start + used, check.value, sink.position() + buf.len() as u64 - before)?;
+    Ok(member_end(data, start + used))
+}
+
+/// Decodes the member at `off` into `out` (at most [`MEMBER_MAX`] bytes); returns the offset
+/// of the next member.
+fn member_buf(data: &[u8], off: usize, out: &mut Vec<u8>) -> Result<usize> {
+    let start = parse_header(data, off)?;
+    let mut check = Check::crc32();
+    let used = super::inflate::inflate_into_check_max(&data[start..], out, &mut check, MEMBER_MAX)?;
+    check_trailer(data, start + used, check.value, out.len() as u64)?;
+    Ok(member_end(data, start + used))
+}
+
+/// [`decompress`] into `sink` with bounded memory. Returns the decompressed size.
+pub fn decompress_to(data: &[u8], sink: &mut dyn super::sink::Sink) -> Result<u64> {
+    let base = sink.position();
+    let threads = if data.len() >= PAR_MIN {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(MAX_THREADS)
+    } else {
+        1
+    };
+    let cands = if threads > 1 { member_candidates(data, threads) } else { Vec::new() };
+    let mut buf = Vec::new();
+    buf.try_reserve(STREAM_CHUNK + (1 << 20)).map_err(|_| err("out of memory"))?;
+    if cands.is_empty() {
+        let mut off = 0usize;
+        while off < data.len() {
+            off = member_stream(data, off, &mut buf, sink)?;
+        }
+    } else {
+        decompress_par(data, &cands, threads, &mut buf, sink)?;
+    }
+    sink.flush(&mut buf, 0, 0)?;
+    Ok(sink.position() - base)
+}
+
+/// Offsets (> 0, ascending) that could start a member: magic, method 8, reserved flag bits
+/// clear, and a header that parses.
+fn member_candidates(data: &[u8], threads: usize) -> Vec<usize> {
+    let scan = |from: usize, to: usize| -> Vec<usize> {
+        let mut v = Vec::new();
+        let end = to.min(data.len().saturating_sub(10));
+        let mut i = from.max(1);
+        while i < end {
+            // find the next 0x1f quickly
+            match data[i..end].iter().position(|&b| b == 0x1F) {
+                Some(p) => i += p,
+                None => break,
+            }
+            if data[i + 1] == 0x8B && data[i + 2] == 8 && data[i + 3] & 0xE0 == 0 && parse_header(data, i).is_ok() {
+                v.push(i);
+            }
+            i += 1;
+        }
+        v
+    };
+    let chunk = data.len().div_ceil(threads).max(1 << 20);
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..data.len().div_ceil(chunk))
+            .map(|t| {
+                let scan = &scan;
+                sc.spawn(move || scan(t * chunk, (t + 1) * chunk))
+            })
+            .collect();
+        let mut all = Vec::new();
+        for h in hs {
+            // a failed scan only means fewer candidates (more inline decoding)
+            if let Ok(v) = h.join() {
+                all.extend(v);
+            }
+        }
+        all
+    })
+}
+
+/// A member decoded ahead of time.
+struct Ahead {
+    /// offset of the next member
+    next: usize,
+    out: Vec<u8>,
+}
+
+struct Shared {
+    /// next candidate to hand out
+    next_job: usize,
+    /// candidates below this are no longer needed by the walker
+    need: usize,
+    /// per candidate: None = pending, Some(None) = failed, Some(Some(..)) = decoded
+    results: Vec<Option<Option<Ahead>>>,
+    /// output bytes held in `results`
+    held: usize,
+    pool: Vec<Vec<u8>>,
+    stop: bool,
+}
+
+struct Par<'a> {
+    data: &'a [u8],
+    cands: &'a [usize],
+    window: usize,
+    st: &'a std::sync::Mutex<Shared>,
+    cv: &'a std::sync::Condvar,
+}
+
+impl Par<'_> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
+        self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn wait<'g>(&self, g: std::sync::MutexGuard<'g, Shared>) -> std::sync::MutexGuard<'g, Shared> {
+        self.cv.wait(g).unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn take_job(&self, g: &mut Shared) -> Option<(usize, Vec<u8>)> {
+        g.next_job = g.next_job.max(g.need);
+        let i = g.next_job;
+        if i >= self.cands.len() || i >= g.need + self.window || (i > g.need && g.held >= BUDGET) {
+            return None;
+        }
+        g.next_job += 1;
+        Some((i, g.pool.pop().unwrap_or_default()))
+    }
+
+    fn recycle(g: &mut Shared, mut buf: Vec<u8>) {
+        if buf.capacity() <= 2 * MEMBER_MAX && g.pool.len() < 64 {
+            buf.clear();
+            g.pool.push(buf);
+        }
+    }
+
+    /// Decodes candidate `i` (a panic counts as a failure: the walker then decodes inline).
+    fn run_job(&self, i: usize, mut buf: Vec<u8>) -> Option<Ahead> {
+        let (data, off) = (self.data, self.cands[i]);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            buf.clear();
+            member_buf(data, off, &mut buf).ok().map(|next| Ahead { next, out: buf })
+        }))
+        .ok()
+        .flatten()
+    }
+
+    fn store(&self, g: &mut Shared, i: usize, r: Option<Ahead>) {
+        if i < g.need {
+            if let Some(a) = r {
+                Self::recycle(g, a.out);
+            }
+            return;
+        }
+        if let Some(a) = &r {
+            g.held += a.out.len();
+        }
+        g.results[i] = Some(r);
+    }
+
+    /// Drops the results below `need` (the walker has moved past them).
+    fn advance(&self, g: &mut Shared, need: usize) {
+        while g.need < need {
+            let i = g.need;
+            if let Some(Some(a)) = g.results[i].take() {
+                g.held -= a.out.len();
+                Self::recycle(g, a.out);
+            }
+            g.need += 1;
+        }
+    }
+
+    fn worker(&self) {
+        let mut g = self.lock();
+        loop {
+            if g.stop {
+                return;
+            }
+            match self.take_job(&mut g) {
+                Some((i, buf)) => {
+                    drop(g);
+                    let r = self.run_job(i, buf);
+                    g = self.lock();
+                    self.store(&mut g, i, r);
+                    self.cv.notify_all();
+                }
+                None => {
+                    if g.next_job >= self.cands.len() {
+                        return;
+                    }
+                    g = self.wait(g);
+                }
+            }
+        }
+    }
+
+    /// The result for candidate `idx` (the walker is at its offset), running jobs while it
+    /// waits. None: decode inline.
+    fn result(&self, idx: usize) -> Option<Ahead> {
+        let mut g = self.lock();
+        self.advance(&mut g, idx);
+        let r = loop {
+            if let Some(r) = g.results[idx].take() {
+                break r;
+            }
+            match self.take_job(&mut g) {
+                Some((i, buf)) => {
+                    drop(g);
+                    let r = self.run_job(i, buf);
+                    g = self.lock();
+                    self.store(&mut g, i, r);
+                    self.cv.notify_all();
+                }
+                None => g = self.wait(g),
+            }
+        };
+        if let Some(a) = &r {
+            g.held -= a.out.len();
+        }
+        self.advance(&mut g, idx + 1);
+        drop(g);
+        self.cv.notify_all();
+        r
+    }
+}
+
+/// The walker of the parallel decoder (see the section comment).
+fn decompress_par(data: &[u8], cands: &[usize], threads: usize, buf: &mut Vec<u8>, sink: &mut dyn super::sink::Sink) -> Result<()> {
+    let st = std::sync::Mutex::new(Shared {
+        next_job: 0,
+        need: 0,
+        results: (0..cands.len()).map(|_| None).collect(),
+        held: 0,
+        pool: Vec::new(),
+        stop: false,
+    });
+    let cv = std::sync::Condvar::new();
+    let window = (4 * threads).max(64);
+    let mk = || Par { data, cands, window, st: &st, cv: &cv };
+    std::thread::scope(|scope| {
+        for _ in 1..threads {
+            let p = mk();
+            if std::thread::Builder::new().spawn_scoped(scope, move || p.worker()).is_err() {
+                break;
+            }
+        }
+        let par = mk();
+        let r = (|| -> Result<()> {
+            let mut off = 0usize;
+            while off < data.len() {
+                let idx = cands.partition_point(|&c| c < off);
+                if cands.get(idx) == Some(&off)
+                    && let Some(a) = par.result(idx)
+                {
+                    buf.try_reserve(a.out.len()).map_err(|_| err("out of memory"))?;
+                    buf.extend_from_slice(&a.out);
+                    Par::recycle(&mut par.lock(), a.out);
+                    off = a.next;
+                    if buf.len() >= STREAM_CHUNK {
+                        sink.flush(buf, 0, 0)?;
+                    }
+                    continue;
+                }
+                off = member_stream(data, off, buf, sink)?;
+            }
+            Ok(())
+        })();
+        par.lock().stop = true;
+        cv.notify_all();
+        r
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::crc::crc32;
@@ -353,6 +678,110 @@ mod tests {
         bad[k] ^= 1; // ISIZE
         v.extend_from_slice(&bad);
         assert!(decompress(&v).is_err());
+    }
+
+    /// The streaming decoder produces what `decompress` does, or fails where it fails.
+    #[test]
+    fn codecs_gzip_stream_matches() {
+        let mut two = GZ.to_vec();
+        two.extend_from_slice(&[0, 0, 0]);
+        two.extend_from_slice(GZ);
+        let mut many = member(FNAME | FHCRC, false, b"first ").to_vec();
+        many.extend_from_slice(&member(0, false, b""));
+        many.extend_from_slice(GZIP_LEVELS[0]);
+        let mut tail = GZ.to_vec();
+        tail.push(b'x');
+        let mut badcrc = GZ.to_vec();
+        badcrc[GZ.len() - 8] ^= 1;
+        let mut cases: Vec<Vec<u8>> = vec![GZ.to_vec(), two, many, tail, badcrc, Vec::new(), b"\x1f".to_vec()];
+        cases.extend(GZIP_LEVELS.iter().map(|g| g.to_vec()));
+        for (i, c) in cases.iter().enumerate() {
+            let mut sink = Vec::new();
+            match (decompress(c), decompress_to(c, &mut sink)) {
+                (Ok(a), Ok(n)) => assert!(a == sink && n == a.len() as u64, "case {i}"),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!("case {i}: {a:?} vs {b:?}"),
+            }
+        }
+    }
+
+    /// Streaming with tiny chunks: matches reach back across every flush (the 32 KiB window
+    /// is kept), the CRC covers all of it.
+    #[test]
+    fn codecs_gzip_stream_window() {
+        let mut s = 0x1234_5678_9ABC_DEF1u64;
+        let mut data = Vec::with_capacity(3 << 20);
+        while data.len() < 3 << 20 {
+            let r = xorshift(&mut s);
+            if r % 3 == 0 || data.len() < 40_000 {
+                data.extend_from_slice(&r.to_le_bytes()[..(r >> 60) as usize % 8 + 1]);
+            } else {
+                let dist = 1 + (r >> 8) as usize % 32_768;
+                let len = 3 + (r >> 32) as usize % 300;
+                for _ in 0..len {
+                    data.push(data[data.len() - dist]);
+                }
+            }
+        }
+        let gz = crate::codecs::gzip_enc::gzip_compress(&data, &crate::codecs::gzip_enc::GzipOptions::python(6, 0));
+        let start = parse_header(&gz, 0).unwrap();
+        for chunk in [1, 5000, 70_000, 100 << 20] {
+            let mut sink = Vec::new();
+            let mut check = Check::crc32();
+            // pending output of an earlier member is emitted first, never used as history
+            let mut buf = b"earlier".to_vec();
+            let used = super::super::inflate::inflate_stream(&gz[start..], &mut check, &mut sink, chunk, &mut buf).unwrap();
+            assert_eq!(start + used + 8, gz.len());
+            sink.extend_from_slice(&buf);
+            assert!(sink[..7] == *b"earlier" && sink[7..] == data, "chunk {chunk}");
+            assert_eq!(check.value, crc32(&data));
+        }
+        let mut sink = Vec::new();
+        assert_eq!(decompress_to(&gz, &mut sink).unwrap(), data.len() as u64);
+        assert!(sink == data);
+    }
+
+    /// Many members (BGZF-like, concatenated, with zero padding, empty ones, and members
+    /// containing a fake member header) decode in parallel exactly like sequentially; a bad
+    /// member anywhere fails the whole call; big members are streamed by the walker.
+    #[test]
+    fn codecs_gzip_parallel_members() {
+        let mut s = 0xFEED_F00D_u64;
+        let opts = |level| crate::codecs::gzip_enc::GzipOptions::python(level, 0);
+        let mut gz = Vec::new();
+        let mut want = Vec::new();
+        for k in 0..60usize {
+            let n = match k % 7 {
+                0 => 0,
+                1 if k == 8 => 9 << 20, // bigger than MEMBER_MAX: streamed inline
+                _ => (xorshift(&mut s) as usize) % 200_000,
+            };
+            let mut part: Vec<u8> = (0..n).map(|i| (xorshift(&mut s) % 5) as u8 + (i % 7) as u8).collect();
+            if k % 5 == 3 {
+                // a member header inside the data (stored, so it shows in the compressed bytes)
+                part.extend_from_slice(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3]);
+            }
+            gz.extend_from_slice(&crate::codecs::gzip_enc::gzip_compress(&part, &opts(if k % 5 == 3 { 0 } else { 1 })));
+            if k % 4 == 2 {
+                gz.extend_from_slice(&[0, 0]);
+            }
+            want.extend_from_slice(&part);
+        }
+        assert!(gz.len() >= PAR_MIN && member_candidates(&gz, 4).len() >= 50);
+        let mut sink = Vec::new();
+        assert_eq!(decompress_to(&gz, &mut sink).unwrap(), want.len() as u64);
+        assert!(sink == want);
+        assert!(decompress(&gz).unwrap() == want);
+        // corrupt the CRC of a member in the middle: both fail
+        let cands = member_candidates(&gz, 4);
+        let mid = cands[cands.len() / 2];
+        let mut bad = gz.clone();
+        bad[mid - 5] ^= 1; // ISIZE of the member before it, or padding: either way an error
+        let mut sink = Vec::new();
+        assert_eq!(decompress_to(&bad, &mut sink).is_err(), decompress(&bad).is_err());
+        let mut bad = gz.clone();
+        bad.extend_from_slice(b"trailing");
+        assert!(decompress_to(&bad, &mut Vec::new()).is_err());
     }
 
     #[test]

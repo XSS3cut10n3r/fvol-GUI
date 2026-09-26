@@ -1069,8 +1069,18 @@ impl BlockSource for Scratch {
     }
 }
 
-/// Decodes one stream starting at byte `off`; returns the byte offset after it.
-fn decode_stream<S: BlockSource>(data: &[u8], off: usize, src: &mut S, out: &mut Vec<u8>) -> std::result::Result<usize, Fail> {
+/// Output a streaming decode buffers before emitting it.
+const STREAM_CHUNK: usize = 8 << 20;
+
+/// Decodes one stream starting at byte `off`; returns the byte offset after it. With a
+/// `sink`, `out` is emitted into it whenever it holds [`STREAM_CHUNK`] bytes.
+fn decode_stream<S: BlockSource>(
+    data: &[u8],
+    off: usize,
+    src: &mut S,
+    out: &mut Vec<u8>,
+    mut sink: Option<&mut (dyn super::sink::Sink + '_)>,
+) -> std::result::Result<usize, Fail> {
     // Header "BZh1".."BZh9"; a mismatch in the available bytes is corrupt, a short but
     // matching prefix is truncation (libbz2 checks byte by byte).
     let avail = &data[off.min(data.len())..];
@@ -1104,6 +1114,11 @@ fn decode_stream<S: BlockSource>(data: &[u8], off: usize, src: &mut S, out: &mut
         }
         let crc = src.block(&mut br, max_block, out)?;
         combined = combined.rotate_left(1) ^ crc;
+        if let Some(s) = sink.as_deref_mut()
+            && out.len() >= STREAM_CHUNK
+        {
+            s.flush(out, 0, 0)?;
+        }
     }
 }
 
@@ -1112,18 +1127,39 @@ fn decode_all<S: BlockSource>(data: &[u8], src: &mut S) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     // Size hint only (a failed reservation just means growing later).
     let _ = out.try_reserve(data.len().saturating_mul(5).min(1 << 30));
+    decode_all_to(data, src, &mut out, None)?;
+    Ok(out)
+}
+
+/// [`decode_all`] appending to `out`; with a `sink`, the output is emitted into it as it is
+/// produced (and at the end), `out` being only the buffer.
+fn decode_all_to<S: BlockSource>(
+    data: &[u8],
+    src: &mut S,
+    out: &mut Vec<u8>,
+    mut sink: Option<&mut (dyn super::sink::Sink + '_)>,
+) -> Result<()> {
+    let emitted = |s: &Option<&mut (dyn super::sink::Sink + '_)>| s.as_ref().map_or(0, |s| s.position());
     let mut off = 0usize;
     let mut streams = 0;
     while off < data.len() {
-        let mark = out.len();
-        match decode_stream(data, off, src, &mut out) {
+        // where this stream's output starts, counting what was emitted already
+        let mark = emitted(&sink) + out.len() as u64;
+        match decode_stream(data, off, src, out, sink.as_deref_mut()) {
             Ok(next) => {
                 off = next;
                 streams += 1;
             }
             Err(Fail::Corrupt(e)) => {
                 if streams > 0 {
-                    out.truncate(mark);
+                    // invalid data after a complete stream is ignored: drop its output
+                    let done = emitted(&sink);
+                    if mark >= done {
+                        out.truncate((mark - done) as usize);
+                    } else if let Some(s) = sink.as_deref_mut() {
+                        s.truncate(mark)?;
+                        out.clear();
+                    }
                     break;
                 }
                 return Err(e);
@@ -1135,8 +1171,11 @@ fn decode_all<S: BlockSource>(data: &[u8], src: &mut S) -> Result<Vec<u8>> {
             }
         }
     }
+    if let Some(s) = sink {
+        s.flush(out, 0, 0)?;
+    }
     // No streams at all only happens for empty input, which python decodes to b"".
-    Ok(out)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1410,6 +1449,21 @@ impl BlockSource for ParWalker<'_> {
 
 /// Decodes with up to `threads` threads (the calling thread included).
 fn decompress_par(data: &[u8], cands: &[usize], threads: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    // Size hint only (a failed reservation just means growing later).
+    let _ = out.try_reserve(data.len().saturating_mul(5).min(1 << 30));
+    decompress_par_to(data, cands, threads, &mut out, None)?;
+    Ok(out)
+}
+
+/// [`decompress_par`] into `out`, emitting into `sink` as it goes (see [`decode_all_to`]).
+fn decompress_par_to(
+    data: &[u8],
+    cands: &[usize],
+    threads: usize,
+    out: &mut Vec<u8>,
+    sink: Option<&mut (dyn super::sink::Sink + '_)>,
+) -> Result<()> {
     let st = std::sync::Mutex::new(Shared {
         next_job: 0,
         need: 0,
@@ -1427,7 +1481,7 @@ fn decompress_par(data: &[u8], cands: &[usize], threads: usize) -> Result<Vec<u8
             scope.spawn(move || p.worker());
         }
         let mut walker = ParWalker { par: mk(), sc: None };
-        let r = decode_all(data, &mut walker);
+        let r = decode_all_to(data, &mut walker, out, sink);
         let mut g = walker.par.lock();
         g.stop = true;
         drop(g);
@@ -1500,6 +1554,26 @@ pub fn decompress_threads(data: &[u8], threads: usize) -> Result<Vec<u8>> {
     }
     decode_all(data, &mut Scratch::new()?)
 }
+
+/// [`decompress`] into `sink` with bounded memory (blocks are decoded in parallel as in
+/// [`decompress`], a bounded distance ahead of the output). Returns the decompressed size.
+pub fn decompress_to(data: &[u8], sink: &mut dyn super::sink::Sink) -> Result<u64> {
+    let base = sink.position();
+    let mut out = Vec::new();
+    out.try_reserve(STREAM_CHUNK + BLOCK_OUT_HINT).map_err(|_| alloc_error())?;
+    let threads = default_threads(data);
+    let cands = if threads > 1 { scan_magics(data, threads) } else { Vec::new() };
+    if cands.len() >= 2 {
+        decompress_par_to(data, &cands, threads.min(cands.len()), &mut out, Some(sink))?;
+    } else {
+        decode_all_to(data, &mut Scratch::new()?, &mut out, Some(sink))?;
+    }
+    Ok(sink.position() - base)
+}
+
+/// Reserved on top of the streaming chunk so that most blocks (900 kB at most before RLE1
+/// decoding) append without reallocating.
+const BLOCK_OUT_HINT: usize = 4 << 20;
 
 #[cfg(test)]
 mod tests {
@@ -1769,6 +1843,44 @@ mod tests {
         assert_eq!(decompress_threads(bz, 1).unwrap(), want, "single-threaded");
         assert_eq!(decompress_threads(bz, 4).unwrap(), want, "4 threads");
         assert_eq!(decompress(bz).unwrap(), want, "default threads");
+        let mut sink = Vec::new();
+        assert_eq!(decompress_to(bz, &mut sink).unwrap(), want.len() as u64);
+        assert_eq!(sink, want, "streaming");
+    }
+
+    /// Streaming: output is emitted every STREAM_CHUNK bytes; a corrupt stream after a good
+    /// one is dropped even when part of it was emitted already (python ignores it).
+    #[test]
+    fn codecs_bzip2_stream_truncates_ignored_stream() {
+        let mut s = 0x5EED_u64;
+        let mut big = Vec::with_capacity(STREAM_CHUNK + (2 << 20));
+        while big.len() < STREAM_CHUNK + (2 << 20) {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            big.extend_from_slice(&[(s % 7) as u8; 64][..(s >> 58) as usize + 1]);
+        }
+        let bzbig = crate::codecs::bzip2_enc::bzip2_compress(&big, 1);
+        let mut sink = Vec::new();
+        assert_eq!(decompress_to(&bzbig, &mut sink).unwrap(), big.len() as u64);
+        assert!(sink == big);
+        // HELLO, then the big stream with its last block corrupted
+        let mut v = BZ.to_vec();
+        let mut bad = bzbig.clone();
+        let k = bad.len() - 20;
+        bad[k] ^= 0x55;
+        v.extend_from_slice(&bad);
+        assert_eq!(decompress(&v).unwrap(), HELLO);
+        let mut sink = Vec::new();
+        assert_eq!(decompress_to(&v, &mut sink).unwrap(), HELLO.len() as u64);
+        assert_eq!(sink, HELLO);
+        // the same into a file
+        let p = std::env::temp_dir().join(format!("rsvol-bz2-stream-{}", std::process::id()));
+        let mut fs = crate::codecs::sink::FileSink::new(std::fs::File::create(&p).unwrap()).unwrap();
+        assert_eq!(decompress_to(&v, &mut fs).unwrap(), HELLO.len() as u64);
+        fs.finish().unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), HELLO);
+        let _ = std::fs::remove_file(&p);
     }
 
     // ---------------------------------------------------------------------------------

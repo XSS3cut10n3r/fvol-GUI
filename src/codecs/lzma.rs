@@ -795,9 +795,110 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     Ok(decode_lzma1(&data[13..], props, size)?.0)
 }
 
+/// [`decompress`] into `sink` with bounded memory: the output buffer slides, keeping only the
+/// dictionary (the size the header declares) as history. Returns the decompressed size.
+pub fn decompress_alone_to(data: &[u8], sink: &mut dyn super::sink::Sink) -> Result<u64> {
+    decompress_alone_chunked(data, sink, 8 << 20)
+}
+
+fn decompress_alone_chunked(data: &[u8], sink: &mut dyn super::sink::Sink, chunk: usize) -> Result<u64> {
+    // the window slides by whole pages, so positions keep their low bits (pos_state, lp)
+    const PAGE: usize = 1 << 12;
+    if data.len() < 13 {
+        return Err(corrupt("truncated .lzma header"));
+    }
+    let props = Props::from_byte(data[0])?;
+    let dict = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+    let size = u64::from_le_bytes(data[5..13].try_into().unwrap());
+    let size = if size == u64::MAX { None } else { Some(size) };
+    let input = &data[13..];
+    let mut rc = RangeDecoder::new(input, 0)?;
+    let mut dec = LzmaDecoder::new(props);
+    let keep_min = dict.max(PAGE).next_multiple_of(PAGE);
+    let cap = keep_min + chunk.next_multiple_of(PAGE);
+    let mut buf = super::try_zeroed(cap)?;
+    let first = sink.position();
+    // buf[0] is output byte `base`; buf[..emitted] went to the sink already
+    let (mut pos, mut emitted, mut base) = (0usize, 0usize, 0u64);
+    let mut emit = |buf: &mut Vec<u8>, pos: usize, emitted: usize, keep: usize| -> Result<()> {
+        buf.truncate(pos);
+        sink.flush(buf, emitted, keep)?;
+        buf.resize(cap, 0);
+        Ok(())
+    };
+    loop {
+        let limit = match size {
+            Some(s) => (s - base).min(cap as u64) as usize,
+            None => cap,
+        };
+        let stop = dec.decode(&mut rc, input, &mut buf, &mut pos, limit)?;
+        if rc.ip > input.len() {
+            return Err(corrupt("truncated input"));
+        }
+        match stop {
+            Stop::EndMarker => {
+                if size.is_some_and(|s| base + pos as u64 != s) {
+                    return Err(corrupt("end marker before declared size"));
+                }
+                rc.finish(input);
+                break;
+            }
+            Stop::InputExhausted => return Err(corrupt("truncated input")),
+            Stop::Limit => {
+                if size == Some(base + pos as u64) {
+                    break;
+                }
+                // slide: emit everything, keep the dictionary
+                let shift = (pos - keep_min) / PAGE * PAGE;
+                emit(&mut buf, pos, emitted, pos - shift)?;
+                pos -= shift;
+                base += shift as u64;
+                emitted = pos;
+            }
+        }
+    }
+    if rc.ip > input.len() {
+        return Err(corrupt("truncated input"));
+    }
+    emit(&mut buf, pos, emitted, 0)?;
+    Ok(sink.position() - first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sliding-window decoder matches the flat one (known and unknown sizes, windows
+    /// smaller than the output), and fails where it fails.
+    #[test]
+    fn codecs_lzma_alone_streaming() {
+        let text: &[u8] = include_bytes!("testdata/text.json");
+        let text4 = text.repeat(4);
+        let cases: [(&[u8], &[u8]); 4] = [
+            (HELLO_LZMA, b"hello hello hello hello\n"),
+            (include_bytes!("testdata/text.lzma"), text),
+            (include_bytes!("testdata/text.sized.lzma"), text),
+            // a 4 KiB dictionary: with small chunks the window slides ~10 times
+            (include_bytes!("testdata/text4.d4k.lzma"), &text4),
+        ];
+        for (lz, want) in cases {
+            assert_eq!(decompress(lz).unwrap(), want);
+            for chunk in [1, 4096, 8 << 20] {
+                let mut sink = Vec::new();
+                assert_eq!(decompress_alone_chunked(lz, &mut sink, chunk).unwrap(), want.len() as u64);
+                assert_eq!(sink, want);
+            }
+            // truncation: an error exactly when the flat decoder reports one
+            for n in 0..lz.len() {
+                let mut sink = Vec::new();
+                match (decompress(&lz[..n]), decompress_alone_chunked(&lz[..n], &mut sink, 4096)) {
+                    (Ok(a), Ok(_)) => assert_eq!(a, sink, "n {n}"),
+                    (Err(_), Err(_)) => {}
+                    (a, b) => panic!("n {n}: {:?} vs {:?}", a.map(|v| v.len()), b),
+                }
+            }
+        }
+    }
 
     // `printf 'hello hello hello hello\n' | xz --format=lzma -c | xxd -i`
     const HELLO_LZMA: &[u8] = &[
