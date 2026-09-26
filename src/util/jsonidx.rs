@@ -1532,6 +1532,21 @@ mod tests {
         }
     }
 
+    /// CRC-64 share of an xz decode.
+    #[test]
+    #[ignore]
+    fn crc64_speed() {
+        let raw = std::fs::read(std::env::var("RSVOL_BENCH_XZ").unwrap()).unwrap();
+        let out = crate::codecs::xz::decompress(&raw).unwrap();
+        let mut best = f64::MAX;
+        for _ in 0..20 {
+            let t = std::time::Instant::now();
+            std::hint::black_box(crate::codecs::crc::crc64(&out));
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        println!("crc64 of {:.1} MB: {:.3} ms ({:.1} GB/s)", out.len() as f64 / 1e6, best * 1e3, out.len() as f64 / best / 1e9);
+    }
+
     /// Cost of one `par_for` round (thread spawn + join) on this machine.
     #[test]
     #[ignore]
