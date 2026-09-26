@@ -466,7 +466,8 @@ impl IdentifierIndex {
                 _ => true,
             })
             .collect();
-        let fresh: Vec<Option<IdentEntry>> = crate::util::par::par_map(todo.len(), |k| {
+        // bounded: each item may decompress a 50-100 MB ISF
+        let fresh: Vec<Option<IdentEntry>> = crate::util::par::par_map_bounded(todo.len(), 4, |k| {
             let i = todo[k];
             let loc = &locs[i];
             let stamp = stamps[i]?;
@@ -564,6 +565,17 @@ fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
     let _ = paths::write_atomic(path, &b);
 }
 
+/// The process-wide identifier index (python `symbol_cache.load_cache_manager()` after the
+/// SymbolCacheMagic update), built/refreshed on first use for `path`.
+/// `identifier_index(p).dictionary("linux")` = python `get_identifier_dictionary("linux")`.
+pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
+    static INDEX: OnceLock<IdentifierIndex> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let _t = crate::util::trace::span("identifier index update");
+        IdentifierIndex::update(path)
+    })
+}
+
 /// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
 /// by name `windows/<pdb>/<GUID>-<AGE>.json*`, then by identifier, then download + convert).
 pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
@@ -583,8 +595,7 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
     if let Some(l) = path.find("windows", &filter).into_iter().next() {
         return Ok(l);
     }
-    static INDEX: OnceLock<IdentifierIndex> = OnceLock::new();
-    let idx = INDEX.get_or_init(|| IdentifierIndex::update(path));
+    let idx = identifier_index(path);
     let ident = format!("{}|{}|{}", pdb_name, guid.to_uppercase(), age);
     if let Some(l) = idx.find(ident.as_bytes(), "windows") {
         return Ok(l);

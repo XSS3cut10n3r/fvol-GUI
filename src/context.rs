@@ -90,6 +90,8 @@ pub struct Context {
     pub opts: GlobalOptions,
     physical: Lazy<(Arc<dyn Layer>, LayerRef)>,
     win: Lazy<WinKernel>,
+    linux: Lazy<crate::automagic::linux::LinuxKernel>,
+    mac: Lazy<crate::automagic::mac::MacKernel>,
     output_lock: Mutex<()>,
 }
 
@@ -101,7 +103,14 @@ impl Context {
     /// Cheap: records options and sets the symbol search path. Nothing is opened or scanned.
     pub fn new(opts: GlobalOptions) -> Result<Context> {
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
-        Ok(Context { opts, physical: OnceLock::new(), win: OnceLock::new(), output_lock: Mutex::new(()) })
+        Ok(Context {
+            opts,
+            physical: OnceLock::new(),
+            win: OnceLock::new(),
+            linux: OnceLock::new(),
+            mac: OnceLock::new(),
+            output_lock: Mutex::new(()),
+        })
     }
 
     /// The symbol search path.
@@ -128,7 +137,8 @@ impl Context {
         Ok(self.physical_arc()?.1)
     }
 
-    fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
+    /// `memory_layer` as the owning `Arc` (to build translation layers on) and as `&dyn Layer`.
+    pub fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
         keep_err(self.physical.get_or_init(|| {
             let path = self.image_path().map_err(|e| e.to_string())?;
             let l = crate::automagic::stack_physical(&path).map_err(|e| e.to_string())?;
@@ -140,6 +150,16 @@ impl Context {
     /// The Windows kernel (runs the Windows automagic on first use; cached per image).
     pub fn windows_kernel(&self) -> Result<&WinKernel> {
         keep_err(self.win.get_or_init(|| self.init_windows().map_err(|e| e.to_string())))
+    }
+
+    /// The Linux kernel (runs the Linux automagic on first use; see `automagic::linux`).
+    pub fn linux_kernel(&self) -> Result<&crate::automagic::linux::LinuxKernel> {
+        keep_err(self.linux.get_or_init(|| crate::automagic::linux::init(self).map_err(|e| e.to_string())))
+    }
+
+    /// The macOS kernel (runs the Mac automagic on first use; see `automagic::mac`).
+    pub fn mac_kernel(&self) -> Result<&crate::automagic::mac::MacKernel> {
+        keep_err(self.mac.get_or_init(|| crate::automagic::mac::init(self).map_err(|e| e.to_string())))
     }
 
     fn init_windows(&self) -> Result<WinKernel> {

@@ -55,7 +55,17 @@ where
     R: Send,
     F: Fn(usize) -> R + Sync,
 {
-    let t = threads().min(n);
+    par_map_bounded(n, threads(), f)
+}
+
+/// [`par_map`] with at most `max_threads` workers (for memory-heavy items, e.g. decompressing
+/// many large ISFs at once).
+pub fn par_map_bounded<R, F>(n: usize, max_threads: usize, f: F) -> Vec<R>
+where
+    R: Send,
+    F: Fn(usize) -> R + Sync,
+{
+    let t = threads().min(max_threads.max(1)).min(n);
     if t <= 1 {
         return (0..n).map(f).collect();
     }
