@@ -313,7 +313,7 @@ fn decode_block(data: &[u8], blk: &Block, out: &mut [u8]) -> Result<()> {
 /// Decompresses a complete `.xz` file (all streams).
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     let (blocks, total) = scan(data)?;
-    let mut out = vec![0u8; total];
+    let mut out = super::try_zeroed(total)?;
     let threads = if blocks.len() > 1 && total >= PARALLEL_MIN_BYTES {
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(blocks.len())
     } else {
@@ -338,24 +338,31 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     jobs.sort_by_key(|j| std::cmp::Reverse(j.1.len()));
     let queue = std::sync::Mutex::new(jobs);
     let first_err: std::sync::Mutex<Option<Error>> = std::sync::Mutex::new(None);
-    std::thread::scope(|s| {
-        for _ in 0..threads {
-            s.spawn(|| {
-                loop {
-                    let job = queue.lock().ok().and_then(|mut q| q.pop());
-                    let Some((blk, buf)) = job else { break };
-                    if let Err(e) = decode_block(data, blk, buf) {
-                        if let Ok(mut fe) = first_err.lock() {
-                            fe.get_or_insert(e);
-                        }
-                        if let Ok(mut q) = queue.lock() {
-                            q.clear();
-                        }
-                        break;
-                    }
+    let (q, fe_ref) = (&queue, &first_err);
+    let work = move || {
+        loop {
+            let job = q.lock().ok().and_then(|mut q| q.pop());
+            let Some((blk, buf)) = job else { break };
+            if let Err(e) = decode_block(data, blk, buf) {
+                if let Ok(mut fe) = fe_ref.lock() {
+                    fe.get_or_insert(e);
                 }
-            });
+                if let Ok(mut q) = q.lock() {
+                    q.clear();
+                }
+                break;
+            }
         }
+    };
+    std::thread::scope(|s| {
+        // Helpers plus the calling thread; if the OS refuses a thread, the others (at least
+        // this one) simply take more blocks.
+        for _ in 1..threads {
+            if std::thread::Builder::new().spawn_scoped(s, work).is_err() {
+                break;
+            }
+        }
+        work();
     });
     if let Some(e) = first_err.into_inner().ok().flatten() {
         return Err(e);

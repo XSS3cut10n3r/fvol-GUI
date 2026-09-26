@@ -283,7 +283,9 @@ impl LzmaDecoder {
 
         macro_rules! normalize {
             () => {
+                stat!(12, 1);
                 if range < TOP {
+                    stat!(13, 1);
                     range <<= 8;
                     // SAFETY: ip <= ip_limit + INPUT_MARGIN (see decode_inner).
                     let b = unsafe { *inp.add(ip) };
@@ -719,7 +721,7 @@ pub(crate) fn lzma2_decode_into(input: &[u8], out: &mut [u8]) -> Result<usize> {
 pub fn decompress_lzma2(data: &[u8]) -> Result<Vec<u8>> {
     let (_, size) = lzma2_scan(data)?;
     let size = usize::try_from(size).map_err(|_| corrupt("lzma2 size"))?;
-    let mut out = vec![0u8; size];
+    let mut out = super::try_zeroed(size)?;
     lzma2_decode_into(data, &mut out)?;
     Ok(out)
 }
@@ -739,7 +741,7 @@ pub(crate) fn decode_lzma1(input: &[u8], props: Props, size: Option<u64>) -> Res
         Some(s) => usize::try_from(s).map_err(|_| corrupt("uncompressed size"))?,
         None => usize::MAX,
     };
-    let mut out = vec![0u8; target.min(guess.max(1 << 16))];
+    let mut out = super::try_zeroed(target.min(guess.max(1 << 16)))?;
     let mut pos = 0usize;
     loop {
         let limit = out.len().min(target);
@@ -759,6 +761,7 @@ pub(crate) fn decode_lzma1(input: &[u8], props: Props, size: Option<u64>) -> Res
                 }
                 // Grow the output buffer.
                 let new_len = out.len().saturating_mul(2).min(target).max(out.len() + 1);
+                out.try_reserve_exact(new_len - out.len()).map_err(|_| corrupt("output too large"))?;
                 out.resize(new_len, 0);
             }
         }
@@ -804,6 +807,22 @@ mod tests {
     #[test]
     fn codecs_lzma_alone_small() {
         assert_eq!(decompress(HELLO_LZMA).unwrap(), b"hello hello hello hello\n");
+    }
+
+    #[test]
+    fn codecs_lzma_huge_claimed_sizes_are_errors() {
+        assert!(crate::codecs::try_zeroed(usize::MAX).is_err());
+        // .lzma header claiming 2^60 bytes with a short body.
+        let mut h = HELLO_LZMA.to_vec();
+        h[5..13].copy_from_slice(&(1u64 << 60).to_le_bytes());
+        assert!(decompress(&h).is_err());
+        // LZMA2 chunks each claiming 2 MiB of output from a 1-byte body.
+        let mut v = Vec::new();
+        for _ in 0..100 {
+            v.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x5d, 0x00]);
+        }
+        v.push(0);
+        assert!(decompress_lzma2(&v).is_err());
     }
 
     #[test]

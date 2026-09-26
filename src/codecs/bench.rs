@@ -399,6 +399,7 @@ fn codecs_lzma_stats() {
         out.len(), syms, s[0], s[1], s[2], s[10], s[3], s[4], s[8],
         s[8] as f64 / (s[2] + s[3]) as f64, s[9], s[11], out.len() as f64 / syms as f64
     );
+    println!("decisions (normalize checks) {} normalizations {}", s[12], s[13]);
 }
 
 /// Where does the time go when decoding big.json.xz?
