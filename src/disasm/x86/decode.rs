@@ -1237,8 +1237,8 @@ fn operands<const FULL: bool>(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64
     out.ofmt = [0; MAX_OPS];
     out.evex = 0;
     out.sae = 0;
-    // The first two operands are expanded inline (straight-line, no loop: in a loop LLVM
-    // hoists the many per-source invariants into a costly prologue); the rest go out of line.
+    // The first two operands are expanded straight-line (in a loop over all operands LLVM
+    // hoists the many per-source invariants into a costly prologue); 3+ operands loop.
     let nops = (e.nops as usize).min(MAX_OPS);
     if nops > 0 {
         if !operand_inl::<FULL>(st, e, 0, &mem, out, m64, op) {
@@ -1249,19 +1249,13 @@ fn operands<const FULL: bool>(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64
                 return false;
             }
             for k in 2..nops {
-                if !operand(st, e, k, &mem, out, m64, op) {
+                if !operand_inl::<FULL>(st, e, k, &mem, out, m64, op) {
                     return false;
                 }
             }
         }
     }
     true
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn operand(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
-    operand_inl::<true>(st, e, k, mem, out, m64, op)
 }
 
 /// Decode explicit operand `k` (spec `e.ops[k]`).

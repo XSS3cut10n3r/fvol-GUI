@@ -207,14 +207,28 @@ impl Drop for W<'_> {
 fn hex8_full(v: u32) -> ([u8; 8], usize) {
     const ONES: u64 = 0x0101_0101_0101_0101;
     let k = ((32 - (v | 1).leading_zeros() + 3) >> 2) as usize; // 1..=8
-    let mut x = v as u64;
-    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
-    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
-    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    let x = spread_nibbles(v);
     // byte i = nibble i; '0'..'9' then 'a'..'f' (+0x27 when the nibble is > 9)
     let gt9 = ((x + ONES * 6) >> 4) & ONES;
     let a = x + ONES * 0x30 + gt9 * 0x27;
     (a.swap_bytes().to_le_bytes(), k)
+}
+
+/// Nibble i of `v` -> byte i of the result.
+#[inline(always)]
+fn spread_nibbles(v: u32) -> u64 {
+    #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+    {
+        // SAFETY: the bmi2 target feature is enabled for this build (cfg above).
+        unsafe { std::arch::x86_64::_pdep_u64(v as u64, 0x0F0F_0F0F_0F0F_0F0F) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
+    {
+        let mut x = v as u64;
+        x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
+        x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
+        (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F
+    }
 }
 
 /// Significant hex digits of `v` (no leading zeros), left-aligned in 8 bytes; + digit count.
@@ -333,7 +347,13 @@ pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
 fn op_str(w: &mut W, insn: &Insn) {
     let f = &insn.ofmt;
     if (f[0] | f[1] | f[2] | f[3] | f[4]) & (OF_RC | OF_KMASK) != 0 || insn.evex & 0x80 != 0 {
-        return op_str_decorated(w, insn);
+        // (out of line with its own writer, so this one never escapes to memory)
+        // SAFETY: bytes [len, n) were initialized by previous stores.
+        unsafe { w.v.set_len(w.n) };
+        op_str_decorated(&mut *w.v, insn);
+        w.n = w.v.len();
+        w.p = w.v.as_mut_ptr();
+        return;
     }
     // common case (no EVEX rounding / mask decorations): separators + plain operands
     for k in 0..(insn.op_count as usize).min(insn.operands.len()) {
@@ -368,7 +388,8 @@ fn operand(w: &mut W, insn: &Insn, k: usize, f: u8) {
 
 /// General operand string: EVEX rounding / sae slot, standalone {kN}, first-operand {kN}{z}.
 #[inline(never)]
-fn op_str_decorated(w: &mut W, insn: &Insn) {
+fn op_str_decorated(v: &mut Vec<u8>, insn: &Insn) {
+    let w = &mut W::new(v);
     let mut first = true;
     for k in 0..(insn.op_count as usize).min(insn.operands.len()) {
         w.room(ROOM);
