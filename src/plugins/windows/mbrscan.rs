@@ -247,3 +247,48 @@ impl Plugin for MBRScan {
         res
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A translation layer mapping `[10, 15)` and `[20, 25)`.
+    struct Holes;
+    impl Layer for Holes {
+        fn name(&self) -> &str {
+            "holes"
+        }
+        fn max_address(&self) -> u64 {
+            100
+        }
+        fn read(&self, addr: u64, _buf: &mut [u8]) -> Result<()> {
+            Err(Error::invalid(addr))
+        }
+        fn is_valid(&self, _addr: u64, _len: u64) -> bool {
+            false
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
+            for (o, l) in [(10u64, 5u64), (20, 5)] {
+                let s = o.max(addr);
+                let e = (o + l).min(addr + len);
+                if s < e && !f(Mapping { offset: s, len: e - s, mapped: s }) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// python `LayerDataRenderer.render_bytes` hole map, worked by hand for [8, 28): bytes
+    /// before a run are holes, the byte right after a run passes (off-by-one), the walk moves
+    /// to the next run one byte late, and bytes past the last run are holes.
+    #[test]
+    fn layer_data_hole_map() {
+        assert_eq!(layer_data_errors(&Holes, 8, 20).unwrap(), vec![0, 1, 9, 10, 11, 18, 19]);
+        assert!(layer_data_errors(&Holes, 40, 4).is_err());
+    }
+
+    #[test]
+    fn md5() {
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+    }
+}

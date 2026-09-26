@@ -172,16 +172,16 @@ fn caught(r: Result<()>) -> Result<()> {
 }
 
 /// A `(start, len)` range of a batch arena.
-type Span = (u32, u32);
+type Span = (usize, usize);
 
 #[inline]
 fn span_of(start: usize, end: usize) -> Span {
-    (start as u32, (end - start) as u32)
+    (start, end - start)
 }
 
 #[inline]
 fn text(arena: &str, s: Span) -> &str {
-    &arena[s.0 as usize..(s.0 + s.1) as usize]
+    &arena[s.0..s.0 + s.1]
 }
 
 // ------------------------------------------------------------------------------------------
@@ -367,7 +367,7 @@ impl DataBatch {
         if let Some((_, d)) = c {
             self.bytes.extend_from_slice(&d);
         }
-        (start as u32, (self.bytes.len() - start) as u32)
+        span_of(start, self.bytes.len())
     }
     fn fail(&mut self, r: Result<()>) -> bool {
         match r {
@@ -427,7 +427,7 @@ fn content_value(b: &DataBatch, s: Span) -> Value {
     if s.1 == 0 {
         return Value::NotAvailable;
     }
-    Value::LayerBytes { data: b.bytes[s.0 as usize..(s.0 + s.1) as usize].to_vec(), errors: Vec::new() }
+    Value::LayerBytes { data: b.bytes[s.0..s.0 + s.1].to_vec(), errors: Vec::new() }
 }
 
 /// `x or NotAvailableValue()` for a string.
@@ -606,6 +606,41 @@ mod tests {
         };
         assert_eq!(hits(b"BAADBAADFILE0FILE*FILE1FILEBAAD"), vec![0, 4, 8, 13, 27]);
         assert_eq!(hits(b"FILFILE0xBAABAAD"), vec![3, 12]);
+    }
+
+    /// `timeline()` through a model of python's `timeliner.Timeliner` with only MFTScan
+    /// selected (`--plugin-filter windows.mftscan.MFTScan`): one row per distinct description in
+    /// first-seen order, every row showing the times dict of the LAST event (python's loop
+    /// variable leaks). Needs the image and `MFT_TIMELINER_REF` (python's output), so ignored.
+    #[test]
+    #[ignore]
+    fn timeliner_model() {
+        use crate::context::GlobalOptions;
+        let (Ok(img), Ok(reference)) = (std::env::var("MFT_TIMELINER_IMG"), std::env::var("MFT_TIMELINER_REF")) else { return };
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let ev = MFTScan.timeline(&ctx, &Config::default()).unwrap().unwrap();
+        let mut order: Vec<&str> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for e in &ev {
+            if seen.insert(e.description.as_str()) {
+                order.push(&e.description);
+            }
+        }
+        let last = ev.last().unwrap().description.as_str();
+        let get = |k: TimeKind| ev.iter().rev().filter(|e| e.description == last).find(|e| e.kind == k).map(|e| e.time.clone()).unwrap_or(Value::NotApplicable);
+        let cell = |v: &Value| {
+            let mut o = Vec::new();
+            crate::renderers::text::render_cell(&mut o, ColType::DateTime, v, false);
+            String::from_utf8(o).unwrap()
+        };
+        let times = [TimeKind::Created, TimeKind::Modified, TimeKind::Accessed, TimeKind::Changed].map(|k| cell(&get(k))).join("\t");
+        let mut want = String::from("Volatility 3 Framework 2.28.2\n\nPlugin\tDescription\tCreated Date\tModified Date\tAccessed Date\tChanged Date\n");
+        for d in order {
+            want.push_str(&format!("\nMFTScan\t{d}\t{times}"));
+        }
+        want.push('\n');
+        let got = std::fs::read_to_string(reference).unwrap();
+        assert!(got == want, "timeliner model differs");
     }
 
     #[test]
