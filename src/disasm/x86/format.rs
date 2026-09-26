@@ -7,7 +7,7 @@
 
 use super::decode::{EVEX_FMT_DECO, OF_FARSEP, OF_KMASK, OF_MOFFS, OF_RC, OF_SIGNED};
 use super::regs::NAMES;
-use super::{Insn, Mem, Mode, Operand};
+use super::{Insn, Mem, Mode, Operand, MAX_OPS};
 
 pub(crate) static PREFIX_STR: [&str; 13] = [
     "",
@@ -77,7 +77,8 @@ struct W<'a> {
 }
 
 /// Upper bound of bytes stored (including fixed-size overshoot) by one operand, the mnemonic,
-/// or one address; `room(ROOM)` is called before each of those.
+/// or one address; `room(ROOM)` is called before each of those (`ROOM * MAX_OPS` before a
+/// whole plain operand list).
 const ROOM: usize = 256;
 
 impl<'a> W<'a> {
@@ -354,9 +355,10 @@ fn op_str(w: &mut W, insn: &Insn) {
         w.p = w.v.as_mut_ptr();
         return;
     }
-    // common case (no EVEX rounding / mask decorations): separators + plain operands
+    // common case (no EVEX rounding / mask decorations): separators + plain operands;
+    // one reservation covers all of them (ROOM per operand)
+    w.room(ROOM * MAX_OPS);
     for k in 0..(insn.op_count as usize).min(insn.operands.len()) {
-        w.room(ROOM);
         let f = insn.ofmt[k];
         if k != 0 {
             if f & OF_FARSEP != 0 {
