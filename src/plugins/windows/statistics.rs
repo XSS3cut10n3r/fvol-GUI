@@ -25,7 +25,7 @@ use crate::context::Context;
 use crate::error::Result;
 use crate::layers::Layer;
 use crate::layers::intel::{IntelLayer, Target};
-use crate::plugins::{Config, Plugin};
+use crate::plugins::{Config, Plugin, UnsatKind, unsatisfied_described};
 use crate::renderers::{ColType, Column, RowSink, Value};
 
 pub struct Statistics;
@@ -148,7 +148,15 @@ impl Plugin for Statistics {
             Column::new("Invalid Pages (large)", ColType::Int),
             Column::new("Other Invalid Pages (all)", ColType::Int),
         ])?;
-        let il: &IntelLayer = ctx.windows_kernel()?.layer;
+        // python's requirement is a translation layer "primary" (python's automagic only
+        // satisfies it with the Windows stacker; Linux / Mac images are unsatisfied)
+        let il: &IntelLayer = match ctx.windows_kernel() {
+            Ok(k) => k.layer,
+            Err(e) if matches!(e, crate::error::Error::Unsatisfied(_)) => {
+                return Err(unsatisfied_described(&[("primary", UnsatKind::Layer, "Memory layer for the kernel")]));
+            }
+            Err(e) => return Err(e),
+        };
         let c = statistics(il);
         out.row(0, c.iter().map(|v| Value::Int(*v)).collect())
     }

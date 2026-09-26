@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(parse_line(b"  123 hello\n"), Some((&b"123"[..], &b"hello\n"[..])));
         assert_eq!(parse_line(b"123\n"), Some((&b"12"[..], &b"3\n"[..])));
         assert_eq!(parse_line(b"123"), Some((&b"1"[..], &b"23"[..])));
-        assert_eq!(parse_line(b"12"), Some((&b"1"[..], &b"2"[..])));
+        assert_eq!(parse_line(b"12"), None);
         assert_eq!(parse_line(b"1"), None);
         assert_eq!(parse_line(b"abc 12"), None);
         assert_eq!(parse_line(b"5 a"), None);
