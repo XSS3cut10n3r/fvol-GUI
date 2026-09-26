@@ -2,7 +2,7 @@
 //! python `re` and yara-python (see bench/scripts/gen_yara_smoke.py).
 
 use super::regex::Regex;
-use super::smoke_cases::{RE_CASES, YRE_CASES};
+use super::smoke_cases::{RE_CASES, STR_CASES, YRE_CASES};
 
 #[test]
 fn yara_smoke_python_re() {
@@ -21,6 +21,21 @@ fn yara_smoke_python_re() {
             if g2 != want {
                 bad.push(format!("#{i} (backtracker) {:?}: want {want} got {g2}", String::from_utf8_lossy(pat)));
             }
+        }
+    }
+    assert!(bad.is_empty(), "{} mismatches:\n{}", bad.len(), bad.join("\n"));
+}
+
+#[test]
+fn yara_smoke_python_str_re() {
+    let mut bad = Vec::new();
+    for (i, &(pat, flags, hay, want)) in STR_CASES.iter().enumerate() {
+        let got = match Regex::new_str(pat, flags) {
+            Err(_) => "ERR".to_string(),
+            Ok(re) => re.find_iter(hay.as_bytes()).map(|(s, e)| format!("{s}-{e}")).collect::<Vec<_>>().join(","),
+        };
+        if got != want {
+            bad.push(format!("#{i} {pat:?} flags={flags} hay={hay:?}: want {want} got {got}"));
         }
     }
     assert!(bad.is_empty(), "{} mismatches:\n{}", bad.len(), bad.join("\n"));

@@ -26,7 +26,19 @@ def rs_bytes(b):
 
 
 def rs_str(t):
-    return '"' + t.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    out = []
+    for ch in t:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ord(ch) < 32 or ord(ch) == 127:
+            out.append("\\u{%x}" % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def main():
@@ -45,6 +57,18 @@ def main():
         if e is None:
             continue
         out.append("    (%s, %d, %s, %s)," % (rs_bytes(p), f, rs_bytes(h), rs_str(e)))
+        n += 1
+    out.append("];")
+    out.append("")
+    out.append("// python str patterns: (pattern, flags, haystack, expected byte spans or \"ERR\")")
+    out.append("pub static STR_CASES: &[(&str, u32, &str, &str)] = &[")
+    n = 0
+    while n < 200:
+        p, f, h = regex_diff.gen_str_case(r)
+        e = regex_diff.guarded(regex_diff.py_str_iter, p, f, h)
+        if e is None:
+            continue
+        out.append("    (%s, %d, %s, %s)," % (rs_str(p), f, rs_str(h), rs_str(e)))
         n += 1
     out.append("];")
     out.append("")
