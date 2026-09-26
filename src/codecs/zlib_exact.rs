@@ -690,6 +690,9 @@ pub struct Deflater {
     /// Per window index: previous position with the same 6-byte hash (low 16 bits) and the
     /// 3-byte bucket insertion count of this position (high 16 bits).
     link6: Vec<u32>,
+    /// Position whose 6-byte hash `pre_h6` was computed ahead (see prefetch_buckets).
+    pre_p: usize,
+    pre_h6: usize,
     ins_h: u32,
     hash_mask: u32,
     hash_shift: u32,
@@ -787,6 +790,8 @@ impl Deflater {
             f6,
             head6: if f6 { vec![0; 1 << HASH6_BITS] } else { Vec::new() },
             link6: if f6 { vec![0; w_size] } else { Vec::new() },
+            pre_p: usize::MAX,
+            pre_h6: 0,
             ins_h: 0,
             hash_mask: hash_size as u32 - 1,
             hash_shift: (hash_bits + MIN_MATCH as u32 - 1) / MIN_MATCH as u32,
@@ -1071,7 +1076,7 @@ impl Deflater {
             if F6 {
                 let cnt = e.wrapping_add(0x1_0000) & 0xffff_0000;
                 *self.head.get_unchecked_mut(h) = cnt | str as u32;
-                let h6 = hash6(rd64u(self.window.as_ptr().add(str)));
+                let h6 = if str == self.pre_p { self.pre_h6 } else { hash6(rd64u(self.window.as_ptr().add(str))) };
                 let p6 = *self.head6.get_unchecked(h6);
                 *self.head6.get_unchecked_mut(h6) = str as u16;
                 *self.link6.get_unchecked_mut(str & wmask) = cnt | p6 as u32;
@@ -1079,6 +1084,30 @@ impl Deflater {
                 *self.head.get_unchecked_mut(h) = str as u32;
             }
             hh as usize
+        }
+    }
+
+    /// Prefetches the hash buckets of position `p` = strstart + 1 (just after an insert at
+    /// strstart: the rolling hash continues from ins_h exactly like the next INSERT_STRING).
+    /// In F6 mode the 6-byte hash is kept for that insert when p's 8 bytes are final data.
+    #[inline(always)]
+    fn prefetch_buckets<const F6: bool>(&mut self, p: usize) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: p + 8 <= window.len() (p <= window_size - MIN_LOOKAHEAD + 1 in the callers'
+        // loops, 16 bytes of padding); bucket indices are masked; prefetch never faults.
+        unsafe {
+            use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+            let win = self.window.as_ptr();
+            let h = self.update_hash(self.ins_h, *win.add(p + (MIN_MATCH - 1)));
+            _mm_prefetch::<_MM_HINT_T0>(self.head.as_ptr().add(h as usize) as *const i8);
+            if F6 {
+                let h6 = hash6(rd64u(win.add(p)));
+                _mm_prefetch::<_MM_HINT_T0>(self.head6.as_ptr().add(h6) as *const i8);
+                // bytes p..p + 8 already hold input (not past the data end) and cannot change
+                // before a slide, which moves strstart away from p
+                self.pre_p = if self.lookahead >= 9 { p } else { usize::MAX };
+                self.pre_h6 = h6;
+            }
         }
     }
 
@@ -1459,6 +1488,9 @@ impl Deflater {
             let c = l >> 16;
             let mut cur = (l & 0xffff) as usize;
             let key = rd64u(sp) & MASK48;
+            // zlib's quick reject: a node can only beat best_len if it also matches the two
+            // bytes ending at best_len.
+            let mut scan_end = rd16u(sp.add(best_len - 1));
             while cur > limit || cur == hash_head {
                 let e = *link6.add(cur & wmask);
                 let mp = win.add(cur);
@@ -1466,12 +1498,15 @@ impl Deflater {
                     if c.wrapping_sub(e >> 16) & 0xffff > chain_length {
                         break;
                     }
-                    let len = match_len_ptr(sp, mp);
-                    if len > best_len {
-                        match_start = cur;
-                        best_len = len;
-                        if len >= nice_match {
-                            break;
+                    if rd16u(mp.add(best_len - 1)) == scan_end {
+                        let len = match_len_ptr(sp, mp);
+                        if len > best_len {
+                            match_start = cur;
+                            best_len = len;
+                            if len >= nice_match {
+                                break;
+                            }
+                            scan_end = rd16u(sp.add(best_len - 1));
                         }
                     }
                 }
@@ -1715,6 +1750,10 @@ impl Deflater {
             let mut hash_head = NIL;
             if self.lookahead >= MIN_MATCH {
                 hash_head = self.insert_string::<F6>(self.strstart);
+                // The next position's buckets are known now: fetch them while this one is
+                // searched (on literal-heavy data the bucket loads are L2 misses feeding
+                // unpredictable branches).
+                self.prefetch_buckets::<F6>(self.strstart + 1);
             }
             self.prev_length = self.match_length;
             self.prev_match = self.match_start;
@@ -2114,16 +2153,38 @@ unsafe fn rd64u(p: *const u8) -> u64 {
 /// `a` and `b` must have 259 readable bytes.
 #[inline(always)]
 unsafe fn match_len_ptr(a: *const u8, b: *const u8) -> usize {
-    let mut len = 3;
-    while len < 259 {
-        // SAFETY: len + 8 <= 259.
-        let x = unsafe { rd64u(a.add(len)) ^ rd64u(b.add(len)) };
-        if x != 0 {
-            return len + (x.trailing_zeros() / 8) as usize;
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        use std::arch::x86_64::{__m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8};
+        // 3..259 is exactly eight 32-byte steps.
+        let mut len = 3;
+        while len < 259 {
+            // SAFETY: len + 32 <= 259 readable bytes; AVX2 is enabled at compile time.
+            let m = unsafe {
+                let x = _mm256_loadu_si256(a.add(len) as *const __m256i);
+                let y = _mm256_loadu_si256(b.add(len) as *const __m256i);
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, y)) as u32
+            };
+            if m != u32::MAX {
+                return len + (!m).trailing_zeros() as usize;
+            }
+            len += 32;
         }
-        len += 8;
+        MAX_MATCH
     }
-    MAX_MATCH
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        let mut len = 3;
+        while len < 259 {
+            // SAFETY: len + 8 <= 259.
+            let x = unsafe { rd64u(a.add(len)) ^ rd64u(b.add(len)) };
+            if x != 0 {
+                return len + (x.trailing_zeros() / 8) as usize;
+            }
+            len += 8;
+        }
+        MAX_MATCH
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
