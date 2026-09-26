@@ -18,14 +18,37 @@
 //!   * [`elf`]: python's `elf` extension (header / program headers) and `Elfs.elf_dump`.
 //!   * [`vmcoreinfo`]: python's `VMCoreInfo` (search + parse; for `linux.vmcoreinfo`).
 //!   * [`timespec`]: python's `Timespec64Concrete` with python's exact float semantics.
+//!   * [`fs`]: [`FsExt`] - `fs_struct`, `files_struct`, `qstr`, `dentry`, `inode`,
+//!     `super_block`, `mount`, `vfsmount`, `mnt_namespace`, `address_space`, `page`.
+//!   * [`caps`]: [`CapsExt`] - `kernel_cap_struct` / `kernel_cap_t` capability sets.
+//!   * [`idstorage`]: `IDStorage` (XArray / radix tree), `PageCache`, `IDR`, `rb_root`,
+//!     `scatterlist`.
+//!   * [`utilities`]: python `LinuxUtilities` - `path_for_file` (d_path), `do_get_path`,
+//!     `get_path_mnt`, `files_descriptors_for_process`, `walk_internal_list`,
+//!     `vm_area_struct.get_name`.
+//!
+//! `use crate::symbols::linux::prelude::*;` brings every extension trait into scope.
 
+pub mod caps;
 pub mod elf;
 pub mod ext;
+pub mod fs;
+pub mod idstorage;
 pub mod search;
 pub mod timespec;
+pub mod utilities;
 pub mod vmcoreinfo;
 
+pub use caps::CapsExt;
 pub use ext::{HListIter, LinuxExt, ListIter};
+pub use fs::FsExt;
+
+/// Every Linux extension trait (`use crate::symbols::linux::prelude::*`).
+pub mod prelude {
+    pub use super::caps::CapsExt;
+    pub use super::ext::LinuxExt;
+    pub use super::fs::FsExt;
+}
 
 use crate::error::{Error, Result};
 use crate::objects::{Module, Obj};

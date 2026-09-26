@@ -500,6 +500,26 @@ impl IntelLayer {
         }
     }
 
+    /// python `Intel.is_dirty(offset)`: the dirty bit (bit 6) of the final paging entry of the
+    /// page containing `addr` (the entry itself need not be present, like python).
+    /// `Err(InvalidAddress)` where python's `_translate_entry` raises.
+    pub fn is_dirty(&self, addr: u64) -> Result<bool> {
+        let page = addr & !0xfff;
+        match self.translate_entry(page) {
+            Ok((entry, _)) => Ok(entry & (1 << 6) != 0),
+            Err(f) => Err(fault_error(page, f)),
+        }
+    }
+
+    /// python `_translate(offset)[1]`: the size of the (possibly large) page mapping `addr`.
+    /// `Err(InvalidAddress)` where python raises (PagedInvalidAddressException).
+    pub fn page_size_at(&self, addr: u64) -> Result<u64> {
+        match self.translate_raw(addr) {
+            Ok((_, bits, _)) => Ok(1u64.checked_shl(bits).unwrap_or(0)),
+            Err(f) => Err(fault_error(addr, f)),
+        }
+    }
+
     #[cold]
     fn translate_swap(&self, f: Fault) -> std::result::Result<(u64, u32, Target), Fault> {
         let entry = f.entry;
