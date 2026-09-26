@@ -15,8 +15,13 @@
 #
 # usage: bench/scripts/refbench.sh [--fast|--release] [--reps N] [--yara-reps N] [--py-reps N]
 #            [--off OFF] [--len LEN] [--py-len LEN] [--img IMG] [--no-python]
-#            [--regex-only|--yara-only] [--only CASE[,CASE]] [--out DIR]
+#            [--regex-only|--yara-only] [--only CASE[,CASE]] [--out DIR] [--rounds N] [--cpu CPUS]
 #   --fast       rust built with --profile fast (iterating); default --release (final numbers)
+#   --rounds N   run every engine N times, interleaved (pcre2, re2, rust, libyara, rust, ...), and keep
+#                each engine's best throughput / compile time: on a shared, busy machine memory
+#                bandwidth contention only ever slows a run down, so the best of interleaved rounds
+#                is the fair comparison (python runs in the first round only)
+#   --cpu CPUS   pin every engine to these CPUs (taskset -c), e.g. a P-core on hybrid Intel parts
 #   --py-len     smaller window for python re (MB/s is comparable; its count is then not
 #                cross-checked against the other engines)
 set -u
@@ -27,7 +32,7 @@ LIMIT=${LIMIT:-/home/user/rs-vol/bench/scripts/limit.sh}
 PY=${PY:-/home/user/rs-vol/bench/venv/bin/python}
 IMG=/home/user/cbc2/task2/memory-dirty.raw
 OFF=1G; LEN=1G; PYLEN=; REPS=5; YREPS=3; PYREPS=3
-PROFILE=release; DO_REGEX=1; DO_YARA=1; DO_PY=1; ONLY=
+PROFILE=release; DO_REGEX=1; DO_YARA=1; DO_PY=1; ONLY=; ROUNDS=1; CPU=
 OUT=$ROOT/target/refbench
 while [ $# -gt 0 ]; do
   case $1 in
@@ -45,6 +50,8 @@ while [ $# -gt 0 ]; do
     --yara-only) DO_REGEX=0;;
     --only) ONLY=$2; shift;;
     --out) OUT=$2; shift;;
+    --rounds) ROUNDS=$2; shift;;
+    --cpu) CPU=$2; shift;;
     -h|--help) sed -n '2,25p' "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
@@ -70,6 +77,7 @@ echo "== building rust drivers (cargo test --profile $PROFILE, through limit.sh)
 run() { # engine-label cmd... : run through limit.sh, keep BENCH lines
   echo "== $1" >&2
   shift
+  if [ -n "$CPU" ]; then set -- taskset -c "$CPU" "$@"; fi
   "$LIMIT" -m 4G "$@" 2>"$OUT/stderr.last" | grep --line-buffered -E '^(BENCH|PRIM)' | tee -a "$RES" >&2
 }
 rust() { # driver-name extra-env...
@@ -78,11 +86,13 @@ rust() { # driver-name extra-env...
     RSVOL_BENCH_ONLY="$ONLY" "$@" cargo test --profile "$PROFILE" --bin vol -q "$drv" -- --ignored --nocapture --test-threads=1)
 }
 
+for ROUND in $(seq 1 "$ROUNDS"); do
+[ "$ROUNDS" -gt 1 ] && echo "== round $ROUND/$ROUNDS" >&2
 if [ $DO_REGEX = 1 ]; then
   run "PCRE2-JIT" "$OUT/regex_pcre2" "$IMG" "$OFF" "$LEN" "$REPS" "$CASES" "$ONLY"
   run "RE2" "$OUT/regex_re2" "$IMG" "$OFF" "$LEN" "$REPS" "$CASES" "$ONLY"
   rust yara_regex_bench_driver RSVOL_BENCH_REPS="$REPS" RSVOL_BENCH_REGEX_CASES="$CASES"
-  if [ $DO_PY = 1 ]; then
+  if [ $DO_PY = 1 ] && [ "$ROUND" = 1 ]; then
     run "python re (window $PYLEN, best of $PYREPS)" "$PY" "$ROOT/bench/scripts/regex_bench.py" --img "$IMG" \
       --off "$OFF" --len "$PYLEN" --reps "$PYREPS" --cases "$CASES" --only "$ONLY"
   fi
@@ -100,6 +110,8 @@ if [ $DO_YARA = 1 ]; then
   fi
 fi
 
+done
+
 # ---- report -------------------------------------------------------------------------
 echo
 echo "### rsvol regex / YARA throughput vs reference libraries"
@@ -107,13 +119,17 @@ echo
 echo "machine: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) threads, kernel $(uname -r); gcc $(gcc -dumpfullversion);" \
   "pcre2 $(pkg-config --modversion libpcre2-8), re2 $(pkg-config --modversion re2), libyara $(pkg-config --modversion yara)," \
   "$("$PY" -c 'import sys; print("python", sys.version.split()[0])'), $(rustc --version | cut -d' ' -f1-2), rust profile $PROFILE"
-echo "window: $IMG [$OFF, +$LEN) mmapped, warm page cache, single thread, best of $REPS (regex) / $YREPS (yara) / $PYREPS (python, window $PYLEN)"
+echo "window: $IMG [$OFF, +$LEN) mmapped, warm page cache, single thread, best of $REPS (regex) / $YREPS (yara) / $PYREPS (python, window $PYLEN)" \
+  "x $ROUNDS interleaved round(s)${CPU:+, pinned to CPU $CPU}"
 echo
 awk -F'\t' -v pylen="$PYLEN" -v len="$LEN" '
   $1 == "BENCH" {
     e = $2; c = $3
     if (!(c in seen)) { seen[c] = 1; order[++n] = c }
-    cus[c, e] = $4; mbps[c, e] = $6; cnt[c, e] = $7; note[c, e] = $8
+    # several rounds: keep the best throughput and the best compile time per engine
+    if (!((c, e) in mbps) || mbps[c, e] == "-" || ($6 != "-" && $6 + 0 > mbps[c, e] + 0)) mbps[c, e] = $6
+    if (!((c, e) in cus) || cus[c, e] == "-" || ($4 != "-" && $4 + 0 < cus[c, e] + 0)) cus[c, e] = $4
+    cnt[c, e] = $7; note[c, e] = $8
   }
   function cell(c, e) {
     if (!((c, e) in mbps)) return "-"
@@ -161,8 +177,8 @@ if grep -q '^PRIM' "$RES"; then
   echo
   echo "| case | glibc memmem | rsvol Memmem | rsvol regex |"
   echo "|---|---:|---:|---:|"
-  awk -F'\t' '$1 == "PRIM" { p[$3, $2] = $5; if (!($3 in s)) { s[$3] = 1; o[++n] = $3 } }
-    $1 == "BENCH" && $2 == "rsvol" { r[$3] = $6 }
+  awk -F'\t' '$1 == "PRIM" { if ($5 + 0 > p[$3, $2] + 0) p[$3, $2] = $5; if (!($3 in s)) { s[$3] = 1; o[++n] = $3 } }
+    $1 == "BENCH" && $2 == "rsvol" { if ($6 + 0 > r[$3] + 0) r[$3] = $6 }
     END { for (i = 1; i <= n; i++) { c = o[i]; printf "| %s | %.0f | %.0f | %.0f |\n", c, p[c, "glibc-memmem"], p[c, "rsvol-memmem"], r[c] } }' "$RES"
 fi
 echo

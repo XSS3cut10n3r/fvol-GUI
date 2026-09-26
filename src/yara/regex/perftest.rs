@@ -62,3 +62,62 @@ fn yara_regex_perf() {
         );
     }
 }
+
+/// Interleaved A/B timing of several patterns (developer probe, ignored test):
+///   RSVOL_AB_PATS='p1<TAB>p2...' RSVOL_AB_ROUNDS=15 RSVOL_AB_LEN=1073741824 \
+///   cargo test --profile release yara_regex_ab -- --ignored --nocapture
+/// A pattern prefixed with `mm:` times `memchr::Memmem::find_iter` of the raw bytes instead.
+/// Prints best / median / lower-quartile MB/s per pattern (window: 1 GiB at 1 GiB, like
+/// refbench). Interleaving makes the comparison robust on a busy machine.
+#[test]
+#[ignore]
+fn yara_regex_ab() {
+    let Ok(pats) = std::env::var("RSVOL_AB_PATS") else { return };
+    let path = std::env::var("RSVOL_IMAGE").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let Ok(f) = std::fs::File::open(&path) else { return };
+    let Ok(m) = Mmap::map(&f) else { return };
+    let len: usize = std::env::var("RSVOL_AB_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(1 << 30);
+    let rounds: usize = std::env::var("RSVOL_AB_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+    let off = (1usize << 30).min(m.len().saturating_sub(len));
+    let hay = &m.as_slice()[off..off + len.min(m.len() - off)];
+    let mut x = 0u64;
+    for i in (0..hay.len()).step_by(4096) {
+        x = x.wrapping_add(hay[i] as u64);
+    }
+    std::hint::black_box(x);
+    enum V {
+        Re(Regex),
+        Mm(crate::yara::memchr::Memmem),
+    }
+    let vs: Vec<(String, V)> = pats
+        .split('\t')
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.strip_prefix("mm:") {
+            Some(l) => (p.to_string(), V::Mm(crate::yara::memchr::Memmem::new(l.as_bytes()))),
+            None => (p.to_string(), V::Re(Regex::new(p.as_bytes(), 0).expect("pattern"))),
+        })
+        .collect();
+    let mut t: Vec<Vec<f64>> = vec![Vec::new(); vs.len()];
+    let mut n = vec![0usize; vs.len()];
+    for _ in 0..rounds.max(1) {
+        for (i, (_, v)) in vs.iter().enumerate() {
+            let t0 = Instant::now();
+            n[i] = match v {
+                V::Re(r) => r.find_iter(std::hint::black_box(hay)).count(),
+                V::Mm(mm) => mm.find_iter(std::hint::black_box(hay)).count(),
+            };
+            t[i].push(hay.len() as f64 / 1e6 / t0.elapsed().as_secs_f64());
+        }
+    }
+    for (i, (p, _)) in vs.iter().enumerate() {
+        let mut v = t[i].clone();
+        v.sort_by(|a, b| a.total_cmp(b));
+        eprintln!(
+            "{:>8.0} best {:>8.0} median {:>8.0} q25  {:>7} matches  {p}",
+            v[v.len() - 1],
+            v[v.len() / 2],
+            v[v.len() / 4],
+            n[i]
+        );
+    }
+}
