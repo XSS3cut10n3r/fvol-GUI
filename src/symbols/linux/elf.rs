@@ -79,12 +79,6 @@ impl Elf {
     }
 }
 
-/// python `FileHandlerInterface.sanitize_filename`.
-pub fn sanitize_filename(name: &str) -> String {
-    const ALLOWED: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.- ()[]{}!$%^#~,";
-    name.chars().map(|c| if ALLOWED.contains(c) { c } else { '_' }).collect()
-}
-
 /// python `Elfs.elf_dump(context, layer_name, elf_table_name, vma, task, open)`: write the ELF
 /// mapped at `vma.vm_start` of `proc_layer` to `pid.<pid>.<comm>.<vm_start>.dmp`. Returns the
 /// file's preferred name (what python prints from `preferred_filename` before closing),
@@ -124,7 +118,8 @@ pub fn elf_dump(ctx: &Context, proc_layer: LayerRef, elf_table: TableRef, vma: &
     sections.sort_by_key(|s| s.0);
     let pid = task.m("pid")?.int()?;
     let comm = array_to_string(&task.m("comm")?, None)?;
-    let name = sanitize_filename(&format!("pid.{pid}.{comm}.{vm_start:#x}.dmp"));
+    // not sanitized (python passes it straight to open(); a '/' in comm raises ValueError)
+    let name = format!("pid.{pid}.{comm}.{vm_start:#x}.dmp");
     let (mut f, _final) = ctx.create_output_file(&name)?;
     // stream the padded reads (python concatenates them in memory first)
     let mut buf = vec![0u8; 1 << 20];
