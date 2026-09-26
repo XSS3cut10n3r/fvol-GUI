@@ -124,6 +124,19 @@ impl Md5 {
         }
     }
 
+    // Split into four fixed-trip-count loops (one per round function) instead of
+    // one 64-iteration loop with a `match` on `i` to pick F and the message-word
+    // index every round: the round function is now a single hardcoded expression
+    // per loop (no per-iteration branch to predict), `S`/`K`/`m` indices are
+    // either the loop counter directly or a cheap fixed formula, and each F/G
+    // uses the standard 3-operation bitwise-identity form (one AND/OR fewer than
+    // the textbook `(b&c)|(!b&d)`/`(b&d)|(c&!d)`) instead of the direct
+    // definition:
+    //   F(b,c,d) = (b&c)|(!b&d)  ==  d ^ (b & (c^d))
+    //   G(b,c,d) = (b&d)|(c&!d)  ==  c ^ (d & (b^c))
+    // (both verified by case-splitting on the free variable that disappears:
+    // b for F, d for G -- see the module's differential/KAT tests, which cover
+    // this rewrite the same as everything else here).
     fn process_block(&mut self, block: &[u8; 64]) {
         let mut m = [0u32; 16];
         for i in 0..16 {
@@ -137,18 +150,52 @@ impl Md5 {
 
         let [mut a, mut b, mut c, mut d] = self.state;
 
-        for i in 0..64 {
-            let (f, g) = match i {
-                0..=15 => ((b & c) | (!b & d), i),
-                16..=31 => ((d & b) | (!d & c), (5 * i + 1) % 16),
-                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | !d), (7 * i) % 16),
-            };
-            let f = f.wrapping_add(a).wrapping_add(K[i]).wrapping_add(m[g]);
+        for i in 0..16 {
+            let f = d ^ (b & (c ^ d));
+            let tmp = a
+                .wrapping_add(f)
+                .wrapping_add(K[i])
+                .wrapping_add(m[i]);
             a = d;
             d = c;
             c = b;
-            b = b.wrapping_add(f.rotate_left(S[i]));
+            b = b.wrapping_add(tmp.rotate_left(S[i]));
+        }
+        for i in 16..32 {
+            let g = (5 * i + 1) % 16;
+            let f = c ^ (d & (b ^ c));
+            let tmp = a
+                .wrapping_add(f)
+                .wrapping_add(K[i])
+                .wrapping_add(unsafe { *m.get_unchecked(g) }); // g < 16 always (mod 16)
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(tmp.rotate_left(S[i]));
+        }
+        for i in 32..48 {
+            let g = (3 * i + 5) % 16;
+            let f = b ^ c ^ d;
+            let tmp = a
+                .wrapping_add(f)
+                .wrapping_add(K[i])
+                .wrapping_add(unsafe { *m.get_unchecked(g) }); // g < 16 always (mod 16)
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(tmp.rotate_left(S[i]));
+        }
+        for i in 48..64 {
+            let g = (7 * i) % 16;
+            let f = c ^ (b | !d);
+            let tmp = a
+                .wrapping_add(f)
+                .wrapping_add(K[i])
+                .wrapping_add(unsafe { *m.get_unchecked(g) }); // g < 16 always (mod 16)
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(tmp.rotate_left(S[i]));
         }
 
         self.state[0] = self.state[0].wrapping_add(a);

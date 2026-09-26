@@ -12,11 +12,46 @@
 //!
 //! Both call sites use `DES.new(key, DES.MODE_ECB)` from pycryptodome, i.e.
 //! independent per-block decryption with no chaining and no padding.
+//!
+//! ## Table-driven implementation
+//!
+//! DES's bit-level permutations (IP, FP, the 32->48-bit expansion E, the P
+//! permutation after the S-boxes, and the key schedule's PC1/PC2) are each a
+//! fixed selection of "output bit i comes from input bit table\[i\]". Naively
+//! applying one bit at a time (a loop over the table) costs one iteration per
+//! output bit -- 64 for IP/FP, 48 for E and PC2, 56 for PC1 -- adding up to well
+//! over a thousand loop iterations per block (E and P alone run inside all 16
+//! Feistel rounds) plus ~800 more per key schedule.
+//!
+//! Because every one of these permutations only *selects* bits (never combines
+//! two input bits into one output bit), the contribution of each input *byte* to
+//! the output can be precomputed independently and then OR-ed together: for each
+//! of the `in_bits/8` input byte positions, build a 256-entry table of "the
+//! (zero-elsewhere) output value this byte alone would produce for every
+//! possible byte value". Applying the permutation then costs `in_bits/8` table
+//! lookups and ORs instead of `table.len()` loop iterations -- e.g. 4 lookups
+//! instead of 48 for E, or 8 instead of 64 for IP/FP. [`build_perm_tables`]
+//! builds these once (lazily, via `OnceLock`) using [`permute_slow`] -- the
+//! original bit-loop -- as the ground truth, so there is no risk of the fast and
+//! slow paths disagreeing on *what* permutation is being computed, only on *how*
+//! it's computed; `tests::fast_matches_slow_permutation` cross-checks them
+//! directly, and every existing FIPS/differential/known-answer test exercises
+//! the fast path in normal use (it's the only path -- there is no separate
+//! "slow mode" left in `Des` itself).
+//!
+//! The S-box lookup + P-permutation step is folded into eight 64-entry
+//! "SP-boxes" the same way: since the P permutation's input byte (well, nibble)
+//! ranges for each of the 8 S-boxes' 4-bit outputs are disjoint, P(S-box
+//! output) can be precomputed per S-box and XOR-combined, skipping the explicit
+//! concatenate-then-permute step entirely (see [`build_sp_tables`]).
 
 use crate::error::{Error, Result};
+use std::sync::OnceLock;
 
 // --- Standard FIPS 46-3 permutation / selection tables (1-indexed bit positions,
-// counting from the most-significant bit of the relevant value). ---
+// counting from the most-significant bit of the relevant value). Used only to
+// build the fast lookup tables below (see module doc comment) -- never on the
+// per-block hot path. ---
 
 const IP: [u8; 64] = [
     58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6,
@@ -89,10 +124,9 @@ const SBOX: [[u8; 64]; 8] = [
     ],
 ];
 
-/// Gathers bits from `input` (which holds `in_bits` significant bits, right
-/// aligned) according to a 1-indexed-from-the-MSB permutation/selection table,
-/// producing a value with `table.len()` significant bits, right aligned.
-fn permute(input: u64, table: &[u8], in_bits: u32) -> u64 {
+/// The original bit-at-a-time permutation. Only used to *build* the fast tables
+/// below (and in the cross-check test) -- never called per-block.
+fn permute_slow(input: u64, table: &[u8], in_bits: u32) -> u64 {
     let mut out: u64 = 0;
     for &pos in table {
         let bit = (input >> (in_bits - pos as u32)) & 1;
@@ -101,11 +135,89 @@ fn permute(input: u64, table: &[u8], in_bits: u32) -> u64 {
     out
 }
 
+/// Builds the per-input-byte contribution tables described in the module doc
+/// comment, as a fixed-size `[[u64;256]; N]` (N = `in_bits/8`) rather than a
+/// heap-allocated `Vec` -- these are read on every single block/round, so
+/// avoiding the extra pointer indirection (and letting `apply_perm` fully
+/// unroll its loop over a compile-time-known `N`) measurably matters here, in
+/// a way it doesn't for AES's once-per-call S-box. `in_bits` must be a multiple
+/// of 8 (true for every permutation DES actually uses: IP/FP/PC1 take 64 bits,
+/// E and P take 32, PC2 takes 56) and must equal `N*8`.
+fn build_perm_tables<const N: usize>(table: &'static [u8], in_bits: usize) -> [[u64; 256]; N] {
+    debug_assert_eq!(in_bits, N * 8);
+    let mut tables = [[0u64; 256]; N];
+    for (byte_idx, tbl) in tables.iter_mut().enumerate() {
+        let shift = in_bits - 8 * (byte_idx + 1);
+        for (val, slot) in tbl.iter_mut().enumerate() {
+            let input = (val as u64) << shift;
+            *slot = permute_slow(input, table, in_bits as u32);
+        }
+    }
+    tables
+}
+
+/// Applies a table built by [`build_perm_tables`]: `N` lookups + ORs, unrolled
+/// since `N` is a compile-time constant at every call site.
+#[inline(always)]
+fn apply_perm<const N: usize>(tables: &[[u64; 256]; N], input: u64, in_bits: usize) -> u64 {
+    let mut out = 0u64;
+    for (byte_idx, tbl) in tables.iter().enumerate() {
+        let shift = in_bits - 8 * (byte_idx + 1);
+        out |= tbl[((input >> shift) & 0xFF) as usize];
+    }
+    out
+}
+
+/// The 8 S-boxes' outputs, pre-permuted through P and placed in their final bit
+/// position, so `feistel` can XOR-combine 8 table lookups instead of
+/// concatenating 8 nibbles and then running a separate 32-bit permutation (P's
+/// input bit ranges for each S-box's 4-bit output are disjoint, so precomputing
+/// P applied to "just this S-box's nibble, every other bit 0" and XOR-ing all 8
+/// together is exactly equivalent to concatenating then permuting once).
+fn build_sp_tables() -> [[u32; 64]; 8] {
+    let mut sp = [[0u32; 64]; 8];
+    for (i, sbox) in SBOX.iter().enumerate() {
+        for chunk in 0..64usize {
+            let row = ((chunk & 0x20) >> 4) | (chunk & 0x01);
+            let col = (chunk >> 1) & 0x0F;
+            let val = sbox[row * 16 + col] as u32;
+            // Box i's 4-bit output occupies bits (31-4i)..(28-4i) of the 32-bit
+            // concatenation the original code built via `sbox_out = (sbox_out
+            // << 4) | val` across boxes 0..8.
+            let placed = (val as u64) << (28 - 4 * i);
+            sp[i][chunk] = permute_slow(placed, &P, 32) as u32;
+        }
+    }
+    sp
+}
+
+struct Tables {
+    ip: [[u64; 256]; 8],
+    fp: [[u64; 256]; 8],
+    e: [[u64; 256]; 4],
+    pc1: [[u64; 256]; 8],
+    pc2: [[u64; 256]; 7],
+    sp: [[u32; 64]; 8],
+}
+
+fn tables() -> &'static Tables {
+    static TABLES: OnceLock<Tables> = OnceLock::new();
+    TABLES.get_or_init(|| Tables {
+        ip: build_perm_tables(&IP, 64),
+        fp: build_perm_tables(&FP, 64),
+        e: build_perm_tables(&E, 32),
+        pc1: build_perm_tables(&PC1, 64),
+        pc2: build_perm_tables(&PC2, 56),
+        sp: build_sp_tables(),
+    })
+}
+
 /// The 16 round keys (48 bits each, right aligned in a u64) derived from a
 /// 64-bit (56-bits-+ parity) DES key.
 fn key_schedule(key: &[u8; 8]) -> [u64; 16] {
+    let t = tables();
     let key_bits = u64::from_be_bytes(*key);
-    let pc1 = permute(key_bits, &PC1, 64); // 56 significant bits
+    let pc1 = apply_perm(&t.pc1, key_bits, 64); // 56 significant bits
     let mut c = (pc1 >> 28) & 0x0FFF_FFFF;
     let mut d = pc1 & 0x0FFF_FFFF;
 
@@ -114,31 +226,29 @@ fn key_schedule(key: &[u8; 8]) -> [u64; 16] {
         c = ((c << shift) | (c >> (28 - shift))) & 0x0FFF_FFFF;
         d = ((d << shift) | (d >> (28 - shift))) & 0x0FFF_FFFF;
         let cd = (c << 28) | d;
-        round_keys[i] = permute(cd, &PC2, 56);
+        round_keys[i] = apply_perm(&t.pc2, cd, 56);
     }
     round_keys
 }
 
-fn feistel(r: u32, round_key: u64) -> u32 {
-    let expanded = permute(r as u64, &E, 32); // 48 bits
+#[inline]
+fn feistel(t: &Tables, r: u32, round_key: u64) -> u32 {
+    let expanded = apply_perm(&t.e, r as u64, 32); // 48 bits
     let x = expanded ^ round_key;
-    let mut sbox_out: u32 = 0;
-    for (i, sbox) in SBOX.iter().enumerate() {
+    let mut out = 0u32;
+    for i in 0..8 {
         let chunk = ((x >> (42 - 6 * i)) & 0x3F) as usize;
-        let row = ((chunk & 0x20) >> 4) | (chunk & 0x01);
-        let col = (chunk >> 1) & 0x0F;
-        let val = sbox[row * 16 + col] as u32;
-        sbox_out = (sbox_out << 4) | val;
+        out ^= t.sp[i][chunk];
     }
-    permute(sbox_out as u64, &P, 32) as u32
+    out
 }
 
-fn crypt_block(block: u64, round_keys: &[u64; 16]) -> u64 {
-    let ip = permute(block, &IP, 64);
+fn crypt_block(t: &Tables, block: u64, round_keys: &[u64; 16]) -> u64 {
+    let ip = apply_perm(&t.ip, block, 64);
     let mut l = (ip >> 32) as u32;
     let mut r = ip as u32;
     for &rk in round_keys {
-        let new_r = l ^ feistel(r, rk);
+        let new_r = l ^ feistel(t, r, rk);
         l = r;
         r = new_r;
     }
@@ -148,7 +258,7 @@ fn crypt_block(block: u64, round_keys: &[u64; 16]) -> u64 {
     // equivalent to *not* performing the final swap the Feistel loop above would
     // otherwise apply).
     let combined = ((r as u64) << 32) | (l as u64);
-    permute(combined, &FP, 64)
+    apply_perm(&t.fp, combined, 64)
 }
 
 /// A single DES key, expanded into its 16 round keys.
@@ -164,16 +274,18 @@ impl Des {
     }
 
     pub fn encrypt_block(&self, block: &mut [u8; 8]) {
+        let t = tables();
         let input = u64::from_be_bytes(*block);
-        let output = crypt_block(input, &self.round_keys);
+        let output = crypt_block(t, input, &self.round_keys);
         *block = output.to_be_bytes();
     }
 
     pub fn decrypt_block(&self, block: &mut [u8; 8]) {
+        let t = tables();
         let mut reversed = self.round_keys;
         reversed.reverse();
         let input = u64::from_be_bytes(*block);
-        let output = crypt_block(input, &reversed);
+        let output = crypt_block(t, input, &reversed);
         *block = output.to_be_bytes();
     }
 
@@ -187,12 +299,14 @@ impl Des {
                 data.len()
             )));
         }
+        let t = tables();
+        let mut reversed = self.round_keys;
+        reversed.reverse();
         let mut out = Vec::with_capacity(data.len());
         for chunk in data.chunks_exact(8) {
-            let mut block = [0u8; 8];
-            block.copy_from_slice(chunk);
-            self.decrypt_block(&mut block);
-            out.extend_from_slice(&block);
+            let input = u64::from_be_bytes(chunk.try_into().unwrap());
+            let output = crypt_block(t, input, &reversed);
+            out.extend_from_slice(&output.to_be_bytes());
         }
         Ok(out)
     }
@@ -205,12 +319,12 @@ impl Des {
                 data.len()
             )));
         }
+        let t = tables();
         let mut out = Vec::with_capacity(data.len());
         for chunk in data.chunks_exact(8) {
-            let mut block = [0u8; 8];
-            block.copy_from_slice(chunk);
-            self.encrypt_block(&mut block);
-            out.extend_from_slice(&block);
+            let input = u64::from_be_bytes(chunk.try_into().unwrap());
+            let output = crypt_block(t, input, &self.round_keys);
+            out.extend_from_slice(&output.to_be_bytes());
         }
         Ok(out)
     }
@@ -318,5 +432,61 @@ mod tests {
         let ct = des.ecb_encrypt(&data).unwrap();
         let pt = des.ecb_decrypt(&ct).unwrap();
         assert_eq!(pt, data);
+    }
+
+    // Cross-checks every fast table-driven permutation against the original
+    // bit-loop it was built from, on random inputs -- this is what actually
+    // proves `build_perm_tables`/`apply_perm` compute the same function as
+    // `permute_slow`, independent of whether DES's own answers happen to be
+    // right (which the KAT/differential tests above already establish using
+    // only the fast path).
+    #[test]
+    fn fast_matches_slow_permutation() {
+        let mut rng: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        macro_rules! check {
+            ($n:literal, $table:expr, $in_bits:expr) => {{
+                let fast = build_perm_tables::<$n>($table, $in_bits);
+                for _ in 0..200 {
+                    let raw = next();
+                    let input = if $in_bits == 64 {
+                        raw
+                    } else {
+                        raw & ((1u64 << $in_bits) - 1)
+                    };
+                    assert_eq!(
+                        apply_perm(&fast, input, $in_bits),
+                        permute_slow(input, $table, $in_bits as u32),
+                        "in_bits={} input={input:#x}",
+                        $in_bits
+                    );
+                }
+            }};
+        }
+        check!(8, &IP, 64);
+        check!(8, &FP, 64);
+        check!(4, &E, 32);
+        check!(8, &PC1, 64);
+        check!(7, &PC2, 56);
+    }
+
+    #[test]
+    fn sp_tables_match_sbox_then_p() {
+        let sp = build_sp_tables();
+        for i in 0..8 {
+            for chunk in 0..64usize {
+                let row = ((chunk & 0x20) >> 4) | (chunk & 0x01);
+                let col = (chunk >> 1) & 0x0F;
+                let val = SBOX[i][row * 16 + col] as u64;
+                let placed = val << (28 - 4 * i);
+                let expect = permute_slow(placed, &P, 32) as u32;
+                assert_eq!(sp[i][chunk], expect, "box={i} chunk={chunk}");
+            }
+        }
     }
 }
