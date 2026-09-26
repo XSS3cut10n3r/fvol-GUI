@@ -33,6 +33,7 @@
 //! ```
 
 use super::{FileLayer, Layer, Mapping};
+use std::sync::Arc;
 use crate::util::par;
 use std::cell::RefCell;
 
@@ -89,6 +90,8 @@ enum Src {
     Layer,
     /// read from the scanned layer's lower layer at this address (one mapping run)
     Lower(u64),
+    /// read from dependency `.0` of the scanned layer (a Windows swap layer) at `.1`
+    Dep(u8, u64),
 }
 
 /// One scan chunk: `[start, start+len)` in the scanned layer.
@@ -151,7 +154,7 @@ fn default_sections(layer: &dyn Layer) -> Vec<(u64, u64)> {
 }
 
 /// Build python's chunk list.
-fn build_chunks(layer: &dyn Layer, chunk: u64, overlap: u64, sections: &[(u64, u64)]) -> Vec<Chunk> {
+fn build_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], chunk: u64, overlap: u64, sections: &[(u64, u64)]) -> Vec<Chunk> {
     let mut out = Vec::new();
     if layer.lower().is_none() {
         // DataLayerInterface._scan_iterator
@@ -171,20 +174,39 @@ fn build_chunks(layer: &dyn Layer, chunk: u64, overlap: u64, sections: &[(u64, u
     } else {
         // TranslationLayerInterface._scan_iterator (linear): per mapping run
         for &(start, length) in sections {
-            run_chunks(layer, start, length, chunk, overlap, &mut out);
+            run_chunks(layer, deps, start, length, chunk, overlap, &mut out);
         }
     }
     out
 }
 
+/// A mapping run and the layer it maps into (0 = `lower()`, `i` = `dependencies()[i]`).
+type Run = (Mapping, u8);
+
+/// python `mapping()` runs of `[addr, addr+len)` with their target layer (python's scan also
+/// reads runs that live in Windows swap layers); runs into unknown layers are skipped.
+fn mapping_runs(layer: &dyn Layer, deps: &[Arc<dyn Layer>], addr: u64, len: u64, f: &mut dyn FnMut(Run)) {
+    let lower = layer.lower().map(|l| Arc::as_ptr(l) as *const u8);
+    layer.mapping_targets(addr, len, &mut |m, t| {
+        let tp = t as *const dyn Layer as *const u8;
+        if Some(tp) == lower {
+            f((m, 0));
+        } else if let Some(i) = deps.iter().position(|d| Arc::as_ptr(d) as *const u8 == tp).filter(|&i| i > 0 && i < 256) {
+            f((m, i as u8));
+        }
+        true
+    });
+}
+
 /// python's chunks of one mapping run: `chunk + overlap` pieces stepping by `chunk`.
 #[inline]
-fn cut_run(m: Mapping, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
+fn cut_run((m, t): Run, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
     let run_end = m.offset + m.len;
     let mut piece = m.offset;
     while piece < run_end {
         let len = (run_end - piece).min(chunk + overlap);
-        out.push(Chunk { start: piece, len, src: Src::Lower(m.mapped + (piece - m.offset)) });
+        let at = m.mapped + (piece - m.offset);
+        out.push(Chunk { start: piece, len, src: if t == 0 { Src::Lower(at) } else { Src::Dep(t, at) } });
         piece = match piece.checked_add(chunk) {
             Some(p) => p,
             None => break,
@@ -192,50 +214,61 @@ fn cut_run(m: Mapping, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
     }
 }
 
-/// Whether two runs are one python run (contiguous in both spaces).
+/// Whether two runs are one python run (contiguous in both spaces, same target layer).
 #[inline]
-fn runs_join(a: &Mapping, b: &Mapping) -> bool {
-    a.offset.wrapping_add(a.len) == b.offset && a.mapped.wrapping_add(a.len) == b.mapped
+fn runs_join(a: &Run, b: &Run) -> bool {
+    a.1 == b.1 && a.0.offset.wrapping_add(a.0.len) == b.0.offset && a.0.mapped.wrapping_add(a.0.len) == b.0.mapped
 }
 
 /// The chunks of `[start, start+length)` of a translation layer. Intel layers are walked in
-/// parallel pieces (see [`collect_runs`]); each piece cuts its interior runs into chunks, and
+/// parallel pieces (see [`run_pieces`]); each piece cuts its interior runs into chunks, and
 /// only the runs at piece boundaries (which may continue in the neighbour) are joined and cut
 /// sequentially.
-fn run_chunks(layer: &dyn Layer, start: u64, length: u64, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
+fn run_chunks(layer: &dyn Layer, deps: &[Arc<dyn Layer>], start: u64, length: u64, chunk: u64, overlap: u64, out: &mut Vec<Chunk>) {
     let Some(pieces) = run_pieces(layer, start, length) else {
-        layer.mapping(start, length, &mut |m| {
-            cut_run(m, chunk, overlap, out);
-            true
+        let mut pending: Option<Run> = None;
+        mapping_runs(layer, deps, start, length, &mut |r| match pending.as_mut() {
+            Some(pr) if runs_join(pr, &r) => pr.0.len += r.0.len,
+            _ => {
+                if let Some(pr) = pending.replace(r) {
+                    cut_run(pr, chunk, overlap, out);
+                }
+            }
         });
+        if let Some(pr) = pending {
+            cut_run(pr, chunk, overlap, out);
+        }
         return;
     };
     struct PieceOut {
-        first: Option<Mapping>,
+        first: Option<Run>,
         mid: Vec<Chunk>,
-        last: Option<Mapping>,
+        last: Option<Run>,
     }
     let parts: Vec<PieceOut> = par::par_map(pieces.len(), |i| {
         let (s, l) = pieces[i];
         let mut p = PieceOut { first: None, mid: Vec::new(), last: None };
-        layer.mapping(s, l, &mut |m| {
-            if p.first.is_none() {
-                p.first = Some(m);
-            } else {
-                if let Some(prev) = p.last.replace(m) {
-                    cut_run(prev, chunk, overlap, &mut p.mid);
-                }
+        mapping_runs(layer, deps, s, l, &mut |r| {
+            // runs of one target come coalesced; a swap run between two runs of the same
+            // target keeps them apart (python coalesces per target too)
+            if let Some(l) = p.last.as_mut().filter(|l| runs_join(l, &r)) {
+                l.0.len += r.0.len;
+            } else if p.last.is_none() && p.first.as_ref().is_some_and(|f| runs_join(f, &r)) {
+                p.first.as_mut().unwrap().0.len += r.0.len;
+            } else if p.first.is_none() {
+                p.first = Some(r);
+            } else if let Some(prev) = p.last.replace(r) {
+                cut_run(prev, chunk, overlap, &mut p.mid);
             }
-            true
         });
         p
     });
     out.reserve(parts.iter().map(|p| p.mid.len() + 2).sum());
-    let mut pending: Option<Mapping> = None;
+    let mut pending: Option<Run> = None;
     for p in parts {
         if let Some(f) = p.first {
             match pending.as_mut() {
-                Some(pm) if runs_join(pm, &f) => pm.len += f.len,
+                Some(pm) if runs_join(pm, &f) => pm.0.len += f.0.len,
                 _ => {
                     if let Some(pm) = pending.take() {
                         cut_run(pm, chunk, overlap, out);
@@ -264,12 +297,8 @@ const RUN_PIECE_BITS: u32 = 30;
 /// Finer split (log2) of 1 GiB pieces that are not a single 1 GiB page (pages <= 4 MiB).
 const RUN_SUBPIECE_BITS: u32 = 24;
 
-/// python `layer.mapping(start, length, ignore_errors=True)` as a Vec (runs coalesced exactly
-/// like python). Large ranges of Intel layers are enumerated in parallel: the range is cut at
-/// 1 GiB boundaries (a cheap sequential pass drops pieces under invalid upper-level entries,
-/// which python's walk skips as a whole too), pieces are walked concurrently and runs that
-/// meet at a boundary contiguously in both spaces are merged again. The page-by-page walk
-/// visits every piece boundary it does not skip over, so the result is identical.
+/// python `layer.mapping(start, length, ignore_errors=True)` runs, enumerated with
+/// [`run_pieces`] (tests compare it with the sequential walk).
 #[cfg(test)]
 fn collect_runs(layer: &dyn Layer, start: u64, length: u64) -> Vec<Mapping> {
     let mut out: Vec<Mapping> = Vec::new();
@@ -293,7 +322,7 @@ fn collect_runs(layer: &dyn Layer, start: u64, length: u64) -> Vec<Mapping> {
         let mut it = part.into_iter();
         if let Some(first) = it.next() {
             match out.last_mut() {
-                Some(last) if runs_join(last, &first) => last.len += first.len,
+                Some(last) if runs_join(&(*last, 0), &(first, 0)) => last.len += first.len,
                 _ => out.push(first),
             }
         }
@@ -403,6 +432,8 @@ enum Item {
 }
 
 struct Plan<'a> {
+    /// `layer.dependencies()` (targets of `Src::Dep` chunks)
+    deps: &'a [Arc<dyn Layer>],
     chunks: Vec<Chunk>,
     /// file offset of each chunk (`NO_FILE` if not file-backed)
     offs: Vec<u64>,
@@ -423,21 +454,22 @@ struct ItemOut<H> {
     spans: Vec<(u32, u32, u32)>,
 }
 
-fn chunk_source<'a>(layer: &'a dyn Layer, c: &Chunk) -> Option<(&'a FileLayer, u64)> {
+fn chunk_source<'a>(layer: &'a dyn Layer, deps: &'a [Arc<dyn Layer>], c: &Chunk) -> Option<(&'a FileLayer, u64)> {
     match c.src {
         Src::Layer => file_span(layer, c.start, c.len),
         Src::Lower(m) => layer.lower().and_then(|l| file_span(l.as_ref(), m, c.len)),
+        Src::Dep(i, m) => deps.get(i as usize).and_then(|l| file_span(l.as_ref(), m, c.len)),
     }
 }
 
-fn make_plan(layer: &dyn Layer, chunks: Vec<Chunk>) -> Plan<'_> {
+fn make_plan<'a>(layer: &'a dyn Layer, deps: &'a [Arc<dyn Layer>], chunks: Vec<Chunk>) -> Plan<'a> {
     // file offsets (in parallel; every file-backed chunk lives in the layer stack's base file)
     let file = super::base_file(layer);
     const BLOCK: usize = 1 << 15;
     let blocks = par::par_map(chunks.len().div_ceil(BLOCK), |bi| {
         let cs = &chunks[bi * BLOCK..((bi + 1) * BLOCK).min(chunks.len())];
         cs.iter()
-            .map(|c| match chunk_source(layer, c) {
+            .map(|c| match chunk_source(layer, deps, c) {
                 Some((f, off)) if file.is_some_and(|g| std::ptr::eq(f, g)) => off,
                 _ => NO_FILE,
             })
@@ -484,7 +516,7 @@ fn make_plan(layer: &dyn Layer, chunks: Vec<Chunk>) -> Plan<'_> {
             }
         }
     });
-    let mut plan = Plan { chunks, offs, file, idx: Vec::new(), items: Vec::new(), round_end: Vec::new() };
+    let mut plan = Plan { deps, chunks, offs, file, idx: Vec::new(), items: Vec::new(), round_end: Vec::new() };
     for (idx, items) in rounds {
         let base = plan.idx.len() as u32;
         plan.idx.extend_from_slice(&idx);
@@ -554,13 +586,17 @@ thread_local! {
 }
 
 /// Read chunk `c` through the layer (python `_scan_chunk`: unreadable -> empty data).
-fn read_chunk<R>(layer: &dyn Layer, c: &Chunk, f: impl FnOnce(&[u8]) -> R) -> R {
+fn read_chunk<R>(layer: &dyn Layer, deps: &[Arc<dyn Layer>], c: &Chunk, f: impl FnOnce(&[u8]) -> R) -> R {
     BUF.with(|b| {
         let mut buf = b.borrow_mut();
         buf.resize(c.len as usize, 0);
         let ok = match c.src {
             Src::Layer => layer.read(c.start, &mut buf).is_ok(),
             Src::Lower(m) => match layer.lower() {
+                Some(l) => l.read(m, &mut buf).is_ok(),
+                None => false,
+            },
+            Src::Dep(i, m) => match deps.get(i as usize) {
                 Some(l) => l.read(m, &mut buf).is_ok(),
                 None => false,
             },
@@ -613,7 +649,7 @@ fn run_item<S: Scanner>(layer: &dyn Layer, scanner: &S, plan: &Plan, item: Item)
         Item::Generic { a, b } => {
             for &ci in &plan.idx[a as usize..b as usize] {
                 let c = &plan.chunks[ci as usize];
-                read_chunk(layer, c, |data| {
+                read_chunk(layer, plan.deps, c, |data| {
                     if !data.is_empty() {
                         scanner.scan(data, c.start, &mut out.hits);
                     }
@@ -776,9 +812,10 @@ where
         Some(s) => coalesce_sections(layer, s),
         None => coalesce_sections(layer, &default_sections(layer)),
     };
+    let deps = if layer.lower().is_some() { layer.dependencies() } else { Vec::new() };
     let chunks = {
         let _t = crate::util::trace::span("scan: build chunks");
-        build_chunks(layer, scanner.chunk_size(), scanner.overlap(), &secs)
+        build_chunks(layer, &deps, scanner.chunk_size(), scanner.overlap(), &secs)
     };
     if chunks.is_empty() {
         return;
@@ -788,9 +825,9 @@ where
     if total < (4 << 20) {
         let mut hits = Vec::new();
         for c in &chunks {
-            match chunk_source(layer, c).and_then(|(file, off)| file.slice(off, c.len as usize)) {
+            match chunk_source(layer, &deps, c).and_then(|(file, off)| file.slice(off, c.len as usize)) {
                 Some(data) => scanner.scan(data, c.start, &mut hits),
-                None => read_chunk(layer, c, |data| {
+                None => read_chunk(layer, &deps, c, |data| {
                     if !data.is_empty() {
                         scanner.scan(data, c.start, &mut hits)
                     }
@@ -806,7 +843,7 @@ where
     }
     let plan = {
         let _t = crate::util::trace::span("scan: plan");
-        make_plan(layer, chunks)
+        make_plan(layer, &deps, chunks)
     };
     let _t = crate::util::trace::span("scan: execute");
     let lookahead = par::threads() * 4;
@@ -844,7 +881,8 @@ pub fn chunk_layout(layer: &dyn Layer, chunk: u64, overlap: u64, sections: Optio
         Some(s) => coalesce_sections(layer, s),
         None => coalesce_sections(layer, &default_sections(layer)),
     };
-    build_chunks(layer, chunk, overlap, &secs).iter().map(|c| (c.start, c.len)).collect()
+    let deps = layer.dependencies();
+    build_chunks(layer, &deps, chunk, overlap, &secs).iter().map(|c| (c.start, c.len)).collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1639,10 +1677,11 @@ mod tests {
     /// unreadable), scanned sequentially.
     fn reference_scan<S: Scanner>(layer: &dyn Layer, scanner: &S) -> Vec<S::Hit> {
         let secs = coalesce_sections(layer, &default_sections(layer));
-        let chunks = build_chunks(layer, scanner.chunk_size(), scanner.overlap(), &secs);
+        let deps = layer.dependencies();
+        let chunks = build_chunks(layer, &deps, scanner.chunk_size(), scanner.overlap(), &secs);
         let mut hits = Vec::new();
         for c in &chunks {
-            read_chunk(layer, c, |d| {
+            read_chunk(layer, &deps, c, |d| {
                 if !d.is_empty() {
                     scanner.scan(d, c.start, &mut hits)
                 }
@@ -1799,13 +1838,13 @@ mod tests {
         {
             let mut seq_chunks = Vec::new();
             for m in &seq {
-                cut_run(*m, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &mut seq_chunks);
+                cut_run((*m, 0), DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &mut seq_chunks);
             }
-            let par_chunks = build_chunks(l, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &secs);
+            let par_chunks = build_chunks(l, &l.dependencies(), DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &secs);
             let key = |c: &Chunk| {
                 (c.start, c.len, match c.src {
                     Src::Lower(m) => m,
-                    Src::Layer => u64::MAX,
+                    Src::Layer | Src::Dep(..) => u64::MAX,
                 })
             };
             assert!(seq_chunks.len() == par_chunks.len() && seq_chunks.iter().zip(&par_chunks).all(|(a, b)| key(a) == key(b)), "parallel chunks differ");
@@ -1815,7 +1854,7 @@ mod tests {
         let mut chunks = Vec::new();
         for _ in 0..reps {
             let t = Instant::now();
-            chunks = build_chunks(l, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &secs);
+            chunks = build_chunks(l, &l.dependencies(), DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, &secs);
             best = best.min(t.elapsed().as_secs_f64());
         }
         let total: u64 = chunks.iter().map(|c| c.len).sum();
