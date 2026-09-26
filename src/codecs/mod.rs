@@ -1,7 +1,7 @@
-//! Decompression codecs (std only).
+//! Compression codecs (std only).
 //!
-//! Every codec exposes `decompress(data: &[u8]) -> Result<Vec<u8>>` (plus format specific
-//! helpers). Malformed input never panics; it returns [`crate::error::Error`].
+//! Decoders: every codec exposes `decompress(data: &[u8]) -> Result<Vec<u8>>` (plus format
+//! specific helpers). Malformed input never panics; it returns [`crate::error::Error`].
 //!
 //! * [`xz::decompress`] — `.xz` (all streams/blocks, LZMA2 + x86 BCJ / delta, CRC32/CRC64
 //!   verified; multi-block files decode in parallel). ISF symbol files are `.json.xz`.
@@ -15,7 +15,20 @@
 //! * [`snappy`], [`xpress`] — owned by the formats agent (memory image containers).
 //! * [`crc`] — CRC-32, CRC-64/XZ, CRC-32/BZIP2 (PCLMULQDQ folding).
 //!
-//! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/codecs_run.sh`.
+//! Encoders (streaming ones are `std::io::Write` + `finish() -> io::Result<W>`, compress on
+//! worker threads with bounded memory, and produce output independent of the thread count):
+//! * [`deflate_enc::deflate_compress`], [`deflate_enc::zlib_compress`] (e.g. PNG IDAT),
+//!   [`deflate_enc::Compressor`] — DEFLATE levels 0-9 (lazy hash chains, block splitting).
+//! * [`gzip_enc::GzipEncoder`] / [`gzip_enc::gzip_compress`] — gzip with python's header
+//!   ([`gzip_enc::GzipOptions::python`]), pigz-style parallel; [`gzip_enc::crc32_combine`].
+//! * [`bzip2_enc::Bzip2Encoder`] / [`bzip2_enc::bzip2_compress`] — bzip2, block-parallel
+//!   (SA-IS BWT).
+//! * [`xz_enc::XzEncoder`] / [`xz_enc::xz_compress`] — `.xz` (LZMA2, CRC-64),
+//!   block-parallel.
+//!
+//! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/codecs_run.sh` (decoders),
+//! `bench/refbench/codecs_enc_run.sh` (encoders); system-tool / python round trips:
+//! `bench/refbench/codecs_enc_verify.sh`.
 
 #![allow(dead_code, unexpected_cfgs)]
 

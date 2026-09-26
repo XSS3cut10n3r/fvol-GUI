@@ -61,6 +61,8 @@ const CHUNK_UNCOMPRESSED_MAX: usize = 1 << 21;
 const CHUNK_COMPRESSED_MAX: usize = 1 << 16;
 /// Upper bound of the range coder bytes one symbol (plus the final flush) can add.
 const SYMBOL_MARGIN: usize = 64;
+/// Literals in a row after which the parser only searches every 4th position.
+const MISS_LIMIT: usize = 64;
 
 // ---------------------------------------------------------------------------------------
 // Range encoder
@@ -604,7 +606,8 @@ impl Lzma2Encoder {
                 main_len = self.matches[k].len as usize;
                 main_dist = self.matches[k].dist;
             }
-            if main_len == 2 && main_dist >= 0x80 {
+            // Short matches far away cost more than literals.
+            if (main_len == 2 && main_dist >= 0x80) || (main_len == 3 && main_dist >= 0x8000) {
                 main_len = 0;
             }
         }
@@ -663,6 +666,7 @@ impl Lzma2Encoder {
         let mut chunk_start = 0usize;
         let mut pos = 0usize;
         let mut la: Option<usize> = None;
+        let mut misses = 0usize;
 
         // Ends the current chunk at `pos` (LZMA or stored).
         macro_rules! end_chunk {
@@ -723,9 +727,17 @@ impl Lzma2Encoder {
             {
                 end_chunk!();
             }
+            // Incompressible stretch: after MISS_LIMIT literals in a row, search (and hash)
+            // only every 4th position until something matches again.
+            if misses >= MISS_LIMIT && la.is_none() && pos & 3 != 0 {
+                self.literal(&mut rc, data, pos);
+                pos += 1;
+                continue;
+            }
             let (op, ahead) = self.decide(data, pos, &mut la);
             // First position not yet inserted into the match finder after this op's start.
             let next_ins = pos + 1 + ahead as usize;
+            misses = if matches!(op, Op::Literal) { misses + 1 } else { 0 };
             match op {
                 Op::Literal => {
                     // A byte equal to the one at rep0 right after a match: short rep.
