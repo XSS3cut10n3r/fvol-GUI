@@ -73,9 +73,18 @@ IMAGES = {
                   ref=REF + "/linux/rsvol-jammy-5.15.0-191-elf", sym=True),
     "mac": dict(os="mac", path=ROOT + "/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp",
                 ref=REF + "/mac/rsvol-mac-mavericks-10.9.2", sym=True),
+    # extra images (options only, after everything else): 32-bit PAE Windows and Linux, macOS 10.12
+    "win7x86": dict(os="windows", path=ROOT + "/testdata/images/windows/memlabs-lab0-win7sp1-x86.raw",
+                    ref=REF + "/windows/win7sp1-x86-pae", sym=True),
+    "bionic32": dict(os="linux", path=ROOT + "/testdata/images/linux/rsvol-bionic32-4.15.0-212-i386.elf",
+                     ref=REF + "/linux/bionic32-4.15-pae-elf", sym=True),
+    "mac1012": dict(os="mac", path=ROOT + "/testdata/images/mac/securinets2019-contact_me-macos-10.12.6.raw",
+                    ref=REF + "/mac/mac-10.12.6", sym=True),
 }
+# 0 = primary image of its OS (every case), 1 = second image, 2 = extra image: options only, run later
+IMAGE_RANK = {"win": 0, "noble": 0, "mac": 0, "win1809": 1, "jammy": 1, "win7x86": 2, "bionic32": 2, "mac1012": 2}
 RENDERERS = ["quick", "csv", "json", "jsonl", "pretty", "none", "mermaid"]
-SECOND_IMAGES = ("win1809", "jammy")
+SECOND_IMAGES = ("win1809", "jammy", "win7x86", "bionic32", "mac1012")
 PY_TIMEOUT = 600
 RS_TIMEOUT = 300
 
@@ -259,8 +268,6 @@ def generic_cases(C, os_name, V, alias_ok=False):
         rs = ["json"]
         if e < 60:
             rs += ["csv", "pretty"]
-        if e < 20:
-            rs += ["jsonl"]
         for r in rs:
             C.add(name, "r-" + r, base, gopts=["-r", r])
         # --save-config then -c (without the plugin arguments): python's build_configuration()
@@ -415,6 +422,8 @@ def gen_windows(C, V, inputs):
         "windows.pedump.PEDump": ["--pid", pid1, "--base", hx(V["exe_base"])] if V.get("exe_base") else None,
         # without --pid python maps the whole kernel layer (> 8 GB on the 5 GB image): one small process
         "windows.strings.Strings": ["--pid", small, "--strings-file", sf],
+        # without --pid: the kernel map of every page (python > 8 GB, 2 GB of text)
+        "windows.memmap.Memmap": ["--pid", small],
         "windows.vadregexscan.VadRegExScan": ["--pid", pid1, "--pattern", "kernel32"],
         "regexscan.RegExScan": ["--pattern", "Codebreaker|rsvol"],
         "yarascan.YaraScan": ["--yara-string", V.get("user", "Microsoft")],
@@ -432,6 +441,7 @@ def gen_windows(C, V, inputs):
     C.add(P, "dump-small", ["--pid", small, "--dump"])
     C.add(P, "dump-3", ["--pid"] + p3 + ["--dump"])
     C.add(P, "twice-dump", ["--pid", small, "--dump"], mode="twice")
+    C.add(P, "o-relative", ["--pid", small, "--dump"], gopts=["-o", "."])
     C.add(P, "pid-hex", ["--pid", hx(pid1)])
     C.add(P, "pid-dup", ["--pid", pid1, pid1])
     invalid_cases(C, P)
@@ -669,6 +679,7 @@ def gen_linux(C, V, inputs):
     C.add(L, "threads-pid", ["--threads", "--pid", pid1])
     C.add(L, "dump-small", ["--pid", small, "--dump"])
     C.add(L, "twice-dump", ["--pid", small, "--dump"], mode="twice")
+    C.add(L, "o-relative", ["--pid", small, "--dump"], gopts=["-o", "."])
     C.add(L, "decorate-threads", ["--decorate-comm", "--threads", "--pid"] + p3)
     invalid_cases(C, L)
     filter_cases(C, L, "COMM", "sleep", "PID", "1")
@@ -826,6 +837,9 @@ EXPENSIVE = [
     (r".*", r"PsCallStack~(pid3|pid-none|flag-unresolved|r-)"),
     (r"win1809|jammy", r"^yarascan\.YaraScan~file"),
     (r"jammy", r"pagecache\.(Files~(type-reg|type-2|find-none)|InodePages~(neither|flag-dump|find-none|find-dump))"),
+    # per-plugin renderer runs of minutes-long plugins whose columns other renderer cases cover
+    (r"win", r"(mftscan\.(MFTScan|ResidentData)|malfind\.Malfind|HollowProcesses|SuspiciousThreads|VadInfo|DumpFiles)~r-"),
+    (r"noble", r"(Kallsyms|LibraryList)~r-"),
 ]
 
 
@@ -987,8 +1001,7 @@ def cmd_py(args):
                 continue
             lab = c["id"].split("~", 1)[1]
             phase = 2 if lab.startswith("r-") else 1 if lab.startswith("R") else 0
-            second = 1 if img in SECOND_IMAGES else 0  # the second image of an OS: later
-            jobs.append(((phase, second, c["est"]), img, c))
+            jobs.append(((phase, IMAGE_RANK[img], c["est"]), img, c))
     # breadth first: options before renderers, cheapest first
     jobs.sort(key=lambda j: (j[0], j[2]["id"]))
     print(f"{len(jobs)} python cases to run", flush=True)
@@ -1038,14 +1051,9 @@ KNOWN = [
 
 def sort_strings_revmap(data):
     """windows.strings: each string's mappings come from a python set of (name, offset) tuples
-    (hash-randomized order). Compare them as sets."""
-    out = []
-    for line in data.split(b"\n"):
-        f = line.split(b"\t")
-        if len(f) > 1:
-            f[-1] = b", ".join(sorted(f[-1].split(b", ")))
-        out.append(b"\t".join(f))
-    return b"\n".join(out)
+    (hash-randomized order). Compare them as sets, in any renderer's quoting."""
+    item = rb"(?:kernel|Process \d+):0x[0-9a-f]+"
+    return re.sub(item + rb"(?:, " + item + rb")+", lambda m: b", ".join(sorted(m.group(0).split(b", "))), data)
 
 
 def sort_last_field_items(data):
