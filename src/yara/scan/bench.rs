@@ -83,6 +83,43 @@ pub(crate) fn bench_rule(name: &str) -> Vec<(Vec<u8>, Modifiers)> {
             v.push((b"\x01RE:cmd\\.exe /c [^\\x00]{5,50}", Modifiers { nocase: true, ..m() }));
             v
         }
+        "big" => {
+            // 400 distinct identifiers from the volatility3 sources (rarely in memory).
+            let mut ids = std::collections::BTreeSet::new();
+            let mut stack = vec![std::path::PathBuf::from("/home/user/rs-vol/volatility3/volatility3/framework")];
+            while let Some(d) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().is_some_and(|x| x == "py") {
+                        let Ok(src) = std::fs::read(&p) else { continue };
+                        for w in src.split(|b| !(b.is_ascii_alphanumeric() || *b == b'_')) {
+                            if (8..=24).contains(&w.len()) && !w[0].is_ascii_digit() {
+                                ids.insert(w.to_vec());
+                            }
+                        }
+                    }
+                }
+            }
+            let ids: Vec<Vec<u8>> = ids.into_iter().collect();
+            let step = (ids.len() / 400).max(1);
+            return ids
+                .into_iter()
+                .step_by(step)
+                .take(400)
+                .enumerate()
+                .map(|(i, w)| {
+                    let mo = match i % 3 {
+                        0 => m(),
+                        1 => aw(),
+                        _ => n(),
+                    };
+                    (w, mo)
+                })
+                .collect();
+        }
         "patho" => vec![
             (b"\x00\x00\x00\x00" as &[u8], m()),
             (b"\xff\xff", Modifiers { ascii: true, wide: true, ..m() }),

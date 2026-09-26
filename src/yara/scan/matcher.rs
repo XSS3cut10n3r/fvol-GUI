@@ -25,8 +25,13 @@ use crate::yara::regex::literal::BYTE_FREQ;
 /// Block size for multi-pass scanning (all engines run over one block while it is
 /// hot in L2). Multiple of 32.
 const BLOCK: usize = 128 * 1024;
-/// Most patterns handled by the Teddy engine; larger sets use Aho-Corasick.
-const TEDDY_MAX: usize = 64;
+/// Teddy is tried for up to this many patterns; it is kept when its estimated bucket
+/// hit rate stays below `TEDDY_MAX_RATE` (patterns sharing structure, e.g. variants
+/// of the same words, cluster well), otherwise large sets use the hashed-window
+/// filter / Aho-Corasick.
+const TEDDY_MAX: usize = 512;
+const TEDDY_ALWAYS: usize = 64;
+const TEDDY_MAX_RATE: f64 = 2e-3;
 /// xor strings with at most this many keys are expanded into literal patterns;
 /// larger key ranges are searched in the key-invariant difference stream.
 const XOR_EXPAND: usize = 4;
@@ -247,16 +252,18 @@ impl Engine {
                 })
                 .collect();
             let t = Teddy::new(&wins, ids);
-            let mut strings: Vec<Vec<u32>> = t
-                .buckets()
-                .iter()
-                .map(|b| b.iter().map(|&id| pats[id as usize].string).collect())
-                .collect();
-            for v in &mut strings {
-                v.sort_unstable();
-                v.dedup();
+            if ids.len() <= TEDDY_ALWAYS || t.estimated_rate() <= TEDDY_MAX_RATE {
+                let mut strings: Vec<Vec<u32>> = t
+                    .buckets()
+                    .iter()
+                    .map(|b| b.iter().map(|&id| pats[id as usize].string).collect())
+                    .collect();
+                for v in &mut strings {
+                    v.sort_unstable();
+                    v.dedup();
+                }
+                return Engine::Teddy(Box::new(t), strings);
             }
-            return Engine::Teddy(Box::new(t), strings);
         }
         // Exact windows with every case combination of folded letters.
         let expand = |p: &Pat| -> Vec<Vec<u8>> {

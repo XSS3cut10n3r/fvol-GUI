@@ -3,34 +3,27 @@
 //! load-to-load dependency (one state transition per byte).
 //!
 //! Every haystack position is tested independently, so the CPU overlaps many
-//! positions: stage 1 reads the 16-bit word at `q + I` (the adjacent byte pair of the
-//! windows chosen at build time to minimise the expected hit rate on memory images)
-//! and looks it up in a 64 KiB byte table; the 8 results of an unrolled group are
-//! folded into one bit mask so the common "nothing here" case costs a single branch.
-//! Stage 2 hashes the whole 4-byte word into a small bucket table of exact windows.
-
-use super::freq::pair_bits;
+//! positions. Stage 1 is a Bloom-style bit table over the hashed 4-byte words of all
+//! windows (2^19 bits = 64 KiB): with AVX2, eight overlapping words are built with one
+//! byte shuffle, hashed with one multiply and looked up with one gather. Stage 2
+//! hashes the word into a small bucket table of exact windows.
 
 #[derive(Clone, Debug)]
 pub struct HashFilter {
-    /// Stage-1 pair offset inside the window (0..=2).
-    pair: usize,
-    /// 0xff for 16-bit keys (little-endian pair) present in some window.
-    table: Vec<u8>,
+    /// Stage-1 bit table (u32 words), indexed by `hash(word) >> (32 - BLOOM_BITS)`.
+    bloom: Vec<u32>,
     shift: u32,
     heads: Vec<u32>,
     /// (window as little-endian u32, id), grouped by bucket.
     entries: Vec<(u32, u32)>,
 }
 
-#[inline(always)]
-fn hash(x: u32, shift: u32) -> usize {
-    (x.wrapping_mul(0x9E37_79B1) >> shift) as usize
-}
+const BLOOM_BITS: u32 = 19;
+const MUL: u32 = 0x9E37_79B1;
 
 #[inline(always)]
-fn ld16(b: &[u8], i: usize) -> usize {
-    u16::from_le_bytes([b[i], b[i + 1]]) as usize
+fn hash(x: u32, shift: u32) -> usize {
+    (x.wrapping_mul(MUL) >> shift) as usize
 }
 
 #[inline(always)]
@@ -41,23 +34,10 @@ fn ld32(b: &[u8], i: usize) -> u32 {
 impl HashFilter {
     /// `windows[k]` (exact bytes) belongs to pattern `ids[k]`.
     pub fn new(windows: &[[u8; 4]], ids: &[u32]) -> HashFilter {
-        // Stage-1 pair: minimise the summed frequency of the distinct pair keys.
-        let mut pair = 0;
-        let mut best_cost = f64::MAX;
-        for i in 0..3usize {
-            let mut keys: Vec<u16> = windows.iter().map(|w| u16::from_le_bytes([w[i], w[i + 1]])).collect();
-            keys.sort_unstable();
-            keys.dedup();
-            let cost: f64 = keys.iter().map(|&k| (-pair_bits(k as u8, (k >> 8) as u8)).exp2()).sum();
-            if cost < best_cost {
-                best_cost = cost;
-                pair = i;
-            }
-        }
-        // 3 bytes of padding: the SIMD path gathers 4 bytes at every key.
-        let mut table = vec![0u8; (1 << 16) + 4];
+        let mut bloom = vec![0u32; 1 << (BLOOM_BITS - 5)];
         for w in windows {
-            table[u16::from_le_bytes([w[pair], w[pair + 1]]) as usize] = 0xff;
+            let h = hash(u32::from_le_bytes(*w), 32 - BLOOM_BITS);
+            bloom[h >> 5] |= 1 << (h & 31);
         }
         let n = windows.len().max(1);
         let bits = (usize::BITS - (n * 4 - 1).leading_zeros()).clamp(4, 24);
@@ -79,7 +59,13 @@ impl HashFilter {
             entries[fill[h] as usize] = (x, id);
             fill[h] += 1;
         }
-        HashFilter { pair, table, shift, heads, entries }
+        HashFilter { bloom, shift, heads, entries }
+    }
+
+    #[inline(always)]
+    fn stage1(&self, x: u32) -> bool {
+        let h = hash(x, 32 - BLOOM_BITS);
+        self.bloom.get(h >> 5).is_some_and(|w| w >> (h & 31) & 1 != 0)
     }
 
     #[inline(always)]
@@ -96,32 +82,20 @@ impl HashFilter {
     /// Calls `f(q, id)` for every `q` in `[from, to)` where the window of `id` occurs.
     #[inline]
     pub fn find<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, mut f: F) {
-        match self.pair {
-            0 => self.find_pair::<0, F>(hay, from, to, &mut f),
-            1 => self.find_pair::<1, F>(hay, from, to, &mut f),
-            _ => self.find_pair::<2, F>(hay, from, to, &mut f),
-        }
-    }
-
-    #[inline(always)]
-    fn find_pair<const P: usize, F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, f: &mut F) {
         let end = to.min(hay.len().saturating_sub(3));
-        let t: &[u8; (1 << 16) + 4] = match self.table.as_slice().try_into() {
-            Ok(t) => t,
-            Err(_) => return,
-        };
         let mut q = from;
         #[cfg(target_arch = "x86_64")]
         {
-            if has_avx2() && !super::teddy::force_scalar() {
+            if has_avx2() && !super::teddy::force_scalar() && self.bloom.len() == 1 << (BLOOM_BITS - 5) {
                 let mut cands = [0u64; 256];
                 loop {
-                    // SAFETY: AVX2 checked; the core bounds-checks its loads.
-                    let (next, k) = unsafe { stage1_avx2::<P>(t, hay, q, end, &mut cands) };
+                    // SAFETY: AVX2 checked; the core bounds-checks its loads and the
+                    // table size is checked above.
+                    let (next, k) = unsafe { stage1_avx2(&self.bloom, hay, q, end, &mut cands) };
                     for &c in &cands[..k.min(cands.len())] {
                         let p = c as usize;
-                        if let Some(w) = hay.get(p..p + 4) {
-                            self.stage2(p, u32::from_le_bytes([w[0], w[1], w[2], w[3]]), f);
+                        if p + 4 <= hay.len() {
+                            self.stage2(p, ld32(hay, p), &mut f);
                         }
                     }
                     if next == q {
@@ -131,25 +105,10 @@ impl HashFilter {
                 }
             }
         }
-        while q + 8 <= end {
-            let c: &[u8; 11] = match hay[q..q + 11].try_into() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            let mut bits = 0u32;
-            for k in 0..8 {
-                bits |= (t[ld16(c, k + P)] as u32) & (1 << k);
-            }
-            while bits != 0 {
-                let k = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                self.stage2(q + k, ld32(c, k), f);
-            }
-            q += 8;
-        }
         while q < end {
-            if t[ld16(hay, q + P)] != 0 {
-                self.stage2(q, ld32(hay, q), f);
+            let x = ld32(hay, q);
+            if self.stage1(x) {
+                self.stage2(q, x, &mut f);
             }
             q += 1;
         }
@@ -178,44 +137,40 @@ fn has_avx2() -> bool {
     }
 }
 
-/// Stage 1 with AVX2 gathers: 16 positions per step; the 16-bit keys at `q + P + k`
-/// are built by interleaving the bytes with themselves shifted by one, then one
-/// dword gather per 8 keys reads the table. Writes candidate positions to `out`;
-/// returns (next position, count). Positions are relative to `hay` and kept below
-/// `end` (loads stay inside `hay`).
+/// Stage 1 with AVX2: 16 positions per step. The words at `q..q+8` come from one
+/// 16-byte load broadcast to both lanes and one byte shuffle; one multiply hashes
+/// them, one gather reads the bit-table words. Writes candidate positions to `out`;
+/// returns (next position, count). Loads stay inside `hay`; positions stay below
+/// `end`. `bloom` must hold `1 << (BLOOM_BITS - 5)` words.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline(never)]
-unsafe fn stage1_avx2<const P: usize>(
-    t: &[u8; (1 << 16) + 4],
-    hay: &[u8],
-    mut q: usize,
-    end: usize,
-    out: &mut [u64; 256],
-) -> (usize, usize) {
+unsafe fn stage1_avx2(bloom: &[u32], hay: &[u8], mut q: usize, end: usize, out: &mut [u64; 256]) -> (usize, usize) {
     let n = hay.len();
     let ptr = hay.as_ptr();
-    let tp = t.as_ptr() as *const i32;
-    let lowbyte = _mm256_set1_epi32(0xff);
+    let tp = bloom.as_ptr() as *const i32;
+    let idx = _mm256_setr_epi8(
+        0, 1, 2, 3, 1, 2, 3, 4, 2, 3, 4, 5, 3, 4, 5, 6, 4, 5, 6, 7, 5, 6, 7, 8, 6, 7, 8, 9, 7, 8, 9, 10,
+    );
+    let mul = _mm256_set1_epi32(MUL as i32);
+    let low5 = _mm256_set1_epi32(31);
+    let one = _mm256_set1_epi32(1);
     let zero = _mm256_setzero_si256();
+    // The caller guarantees p + 16 <= n; hash indices are < 2^BLOOM_BITS so word
+    // indices are < bloom.len().
+    let group = |p: usize| -> u32 {
+        // SAFETY: see above.
+        let x = unsafe { _mm256_broadcastsi128_si256(_mm_loadu_si128(ptr.add(p) as *const __m128i)) };
+        let w = _mm256_shuffle_epi8(x, idx);
+        let h = _mm256_srli_epi32(_mm256_mullo_epi32(w, mul), (32 - BLOOM_BITS) as i32);
+        // SAFETY: see above.
+        let g = unsafe { _mm256_i32gather_epi32::<4>(tp, _mm256_srli_epi32(h, 5)) };
+        let bit = _mm256_and_si256(_mm256_srlv_epi32(g, _mm256_and_si256(h, low5)), one);
+        (!_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(bit, zero))) & 0xff) as u32
+    };
     let mut k = 0usize;
-    // Loads read [q + P, q + P + 32) (17 bytes needed); positions q..q+16 < end.
-    while q + 16 <= end && q + P + 32 <= n && k + 16 <= out.len() {
-        // SAFETY: bounds checked above; table has 4 bytes of padding past any key.
-        let (m0, m1) = unsafe {
-            let x = _mm_loadu_si128(ptr.add(q + P) as *const __m128i);
-            let y = _mm_loadu_si128(ptr.add(q + P + 1) as *const __m128i);
-            let w0 = _mm_unpacklo_epi8(x, y); // keys for k = 0..8
-            let w1 = _mm_unpackhi_epi8(x, y); // keys for k = 8..16
-            let i0 = _mm256_cvtepu16_epi32(w0);
-            let i1 = _mm256_cvtepu16_epi32(w1);
-            let g0 = _mm256_and_si256(_mm256_i32gather_epi32::<1>(tp, i0), lowbyte);
-            let g1 = _mm256_and_si256(_mm256_i32gather_epi32::<1>(tp, i1), lowbyte);
-            let m0 = !_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(g0, zero))) & 0xff;
-            let m1 = !_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(g1, zero))) & 0xff;
-            (m0 as u32, m1 as u32)
-        };
-        let mut bits = m0 | m1 << 8;
+    while q + 16 <= end && q + 24 <= n && k + 16 <= out.len() {
+        let mut bits = group(q) | group(q + 8) << 8;
         while bits != 0 {
             let i = bits.trailing_zeros() as usize;
             bits &= bits - 1;

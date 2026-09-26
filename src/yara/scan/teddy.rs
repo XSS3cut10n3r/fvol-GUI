@@ -111,6 +111,71 @@ fn union(a: &[Nib; MAX_WINDOW], b: &[Nib; MAX_WINDOW]) -> [Nib; MAX_WINDOW] {
     u
 }
 
+type Cluster = ([Nib; MAX_WINDOW], Vec<usize>);
+
+/// Merges clusters until `NB` remain, always the pair whose union adds the least
+/// cost. Each active cluster caches its best partner, so a merge only rescans the
+/// rows that pointed at the merged pair (about O(n^2) cost evaluations overall).
+fn cluster(mut cl: Vec<Cluster>, cost: &dyn Fn(&[Nib; MAX_WINDOW], usize) -> f64) -> Vec<Cluster> {
+    let n = cl.len();
+    let mut active = vec![true; n];
+    let mut own: Vec<f64> = cl.iter().map(|c| cost(&c.0, c.1.len())).collect();
+    let delta = |cl: &[Cluster], own: &[f64], a: usize, b: usize| {
+        cost(&union(&cl[a].0, &cl[b].0), cl[a].1.len() + cl[b].1.len()) - own[a] - own[b]
+    };
+    let mut best: Vec<(f64, usize)> = vec![(f64::INFINITY, usize::MAX); n];
+    let rescan = |cl: &[Cluster], own: &[f64], active: &[bool], a: usize| -> (f64, usize) {
+        let mut r = (f64::INFINITY, usize::MAX);
+        for b in 0..cl.len() {
+            if b != a && active[b] {
+                let d = delta(cl, own, a, b);
+                if d < r.0 {
+                    r = (d, b);
+                }
+            }
+        }
+        r
+    };
+    for a in 0..n {
+        best[a] = rescan(&cl, &own, &active, a);
+    }
+    let mut left = n;
+    while left > NB {
+        let mut a = usize::MAX;
+        for x in 0..n {
+            if active[x] && best[x].1 != usize::MAX && (a == usize::MAX || best[x].0 < best[a].0) {
+                a = x;
+            }
+        }
+        if a == usize::MAX {
+            break;
+        }
+        let b = best[a].1;
+        let taken = std::mem::take(&mut cl[b].1);
+        let nb = cl[b].0;
+        cl[a].0 = union(&cl[a].0, &nb);
+        cl[a].1.extend(taken);
+        active[b] = false;
+        own[a] = cost(&cl[a].0, cl[a].1.len());
+        left -= 1;
+        best[a] = rescan(&cl, &own, &active, a);
+        for x in 0..n {
+            if !active[x] || x == a {
+                continue;
+            }
+            if best[x].1 == a || best[x].1 == b {
+                best[x] = rescan(&cl, &own, &active, x);
+            } else {
+                let d = delta(&cl, &own, x, a);
+                if d < best[x].0 {
+                    best[x] = (d, a);
+                }
+            }
+        }
+    }
+    cl.into_iter().zip(active).filter(|(_, act)| *act).map(|(c, _)| c).collect()
+}
+
 /// Exact window test run on each bucket member before reporting it:
 /// `(word | fold) & mask == val` on the 4 bytes at the candidate position.
 #[derive(Clone, Copy, Debug, Default)]
@@ -172,25 +237,8 @@ impl Teddy {
                 None => clusters.push((*n, vec![i])),
             }
         }
-        while clusters.len() > NB {
-            let mut best = (0usize, 1usize);
-            let mut best_delta = f64::INFINITY;
-            for a in 0..clusters.len() {
-                for b in a + 1..clusters.len() {
-                    let u = union(&clusters[a].0, &clusters[b].0);
-                    let delta = cost(&u, clusters[a].1.len() + clusters[b].1.len())
-                        - cost(&clusters[a].0, clusters[a].1.len())
-                        - cost(&clusters[b].0, clusters[b].1.len());
-                    if delta < best_delta {
-                        best_delta = delta;
-                        best = (a, b);
-                    }
-                }
-            }
-            let (a, b) = best;
-            let cb = clusters.swap_remove(b);
-            clusters[a].0 = union(&clusters[a].0, &cb.0);
-            clusters[a].1.extend(cb.1);
+        if clusters.len() > NB {
+            clusters = cluster(clusters, &cost);
         }
         let mut lo = [[0u8; 16]; MAX_WINDOW];
         let mut hi = [[0u8; 16]; MAX_WINDOW];
