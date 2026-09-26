@@ -874,6 +874,65 @@ where
         eprintln!("[trace] scan: {} items, worker busy {:.1} ms total, slowest item {:.2} ms", plan.items.len(), BUSY.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6, MAXI.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6);
     }
 }
+/// [`scan_each`] over the whole layer (python default sections and chunking, hits in python
+/// order, `f` returns false to stop) for scans that usually stop at an early hit, like banner
+/// scans: the chunks are scanned in growing batches (2, 4, 8, ... up to 4x the thread count)
+/// instead of with `scan_each`'s fixed look-ahead of 2x threads 16 MiB chunks. A banner in
+/// chunk 4 then costs 6 chunks of work in 2 short rounds rather than a memory-bandwidth-bound
+/// wave of ~40 chunks (4 chunks already saturate the memory bus); a full scan pays a handful
+/// of batch barriers (a few percent).
+///
+/// Each batch is scanned with a section starting exactly at its first chunk, so the batch's
+/// chunks are python's chunks; the section ends where python's last chunk of the batch ends,
+/// which makes the layer produce one extra overlap-sized tail chunk whose hits (offset >= last
+/// chunk start + chunk_size) belong to the next batch and are dropped via `offset_of`.
+pub fn scan_each_progressive<S, F, O>(layer: &dyn Layer, scanner: &S, offset_of: O, mut f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+    O: Fn(&S::Hit) -> u64,
+{
+    let cs = scanner.chunk_size();
+    let chunks = chunk_layout(layer, cs, scanner.overlap(), None);
+    let n = chunks.len();
+    if n == 0 {
+        return;
+    }
+    // python default section: (min_address, max_address - min_address)
+    let section_end = layer.max_address();
+    let max_batch = crate::util::par::threads() * 4;
+    let (mut i0, mut batch) = (0usize, 2usize);
+    while i0 < n {
+        let i1 = (i0 + batch).min(n);
+        let start = chunks[i0].0;
+        let (end, limit) = if i1 == n {
+            (section_end, u64::MAX)
+        } else {
+            let (ls, ll) = chunks[i1 - 1];
+            (ls.saturating_add(ll), ls.saturating_add(cs))
+        };
+        let mut stopped = false;
+        if end > start {
+            scan_each(layer, scanner, Some(&[(start, end - start)]), |h| {
+                if offset_of(&h) >= limit {
+                    return true;
+                }
+                if f(h) {
+                    true
+                } else {
+                    stopped = true;
+                    false
+                }
+            });
+        }
+        if stopped {
+            return;
+        }
+        i0 = i1;
+        batch = (batch * 2).min(max_batch);
+    }
+}
+
 /// Trace counters: total worker time and the slowest item of the last scan.
 static BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static MAXI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
