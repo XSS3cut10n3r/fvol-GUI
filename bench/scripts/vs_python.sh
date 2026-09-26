@@ -25,7 +25,9 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 RS=$ROOT/target/release/vol
 PY=${PY:-$ROOT/bench/venv/bin/python}; [ -x "$PY" ] || PY=python3
 VOL=$ROOT/volatility3/vol.py
-OUT=$ROOT/testdata/scratch/vs_python; mkdir -p "$OUT"
+# a private dir per invocation (concurrent runs used to overwrite each other's outputs); kept for inspection
+mkdir -p "$ROOT/testdata/scratch/vs_python"; OUT=$(mktemp -d "$ROOT/testdata/scratch/vs_python/run-XXXXXX")
+echo "outputs: $OUT (py.txt / rs.txt of the last plugin)" >&2
 now() { date +%s%N; }
 printf "%-42s %10s %10s %9s\n" plugin python rsvol speedup
 for p in "${PLUGINS[@]}"; do
