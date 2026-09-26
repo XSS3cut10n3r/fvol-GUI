@@ -28,6 +28,7 @@ pub mod gzip_enc;
 pub mod inflate;
 pub mod lzma;
 pub mod lznt1;
+pub mod png;
 pub mod snappy;
 #[cfg(test)]
 mod testdata;
