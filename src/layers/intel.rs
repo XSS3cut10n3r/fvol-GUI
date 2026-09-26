@@ -392,8 +392,15 @@ impl IntelLayer {
     /// python `_translate_entry(page_address)`: walk the tables; returns (entry, position).
     #[inline]
     fn translate_entry(&self, addr: u64) -> std::result::Result<(u64, u32), Fault> {
+        self.translate_entry_ex(addr).map(|(e, p, _)| (e, p))
+    }
+
+    /// `translate_entry` that also returns the base of the table the final entry came from.
+    #[inline]
+    fn translate_entry_ex(&self, addr: u64) -> std::result::Result<(u64, u32, u64), Fault> {
         let mut position = self.initial_position;
         let mut entry = self.initial_entry;
+        let mut last_base = 0;
         for &(size, large) in self.p.levels {
             if !self.entry_valid(entry) {
                 return Err(Fault { invalid_bits: position + 1, entry, swap_offset: None });
@@ -410,6 +417,7 @@ impl IntelLayer {
                 None => return Err(Fault { invalid_bits: start + 1, entry, swap_offset: None }),
             };
             entry = e;
+            last_base = base;
             if large && entry & (1 << 7) != 0 {
                 if entry & (1 << 12) != 0 {
                     entry -= 1 << 12;
@@ -417,7 +425,44 @@ impl IntelLayer {
                 break;
             }
         }
-        Ok((entry, position))
+        Ok((entry, position, last_base))
+    }
+
+    /// `translate_raw` for sequential walks: `cur` remembers the last page table reached
+    /// (region key, table base), so consecutive 4 KiB pages under the same table only read
+    /// their PTE. Semantics are identical to `translate_raw` (invalid PTEs take the full path
+    /// for python's fault / swap handling).
+    #[inline]
+    fn translate_cursor(&self, addr: u64, cur: &mut (u64, u64)) -> std::result::Result<(u64, u32, Target), Fault> {
+        let last_bits = self.p.levels[self.p.levels.len() - 1].0;
+        let key = ((addr & self.vmask) >> (12 + last_bits)) + 1;
+        if cur.0 == key {
+            let idx = (addr >> 12) & ((1u64 << last_bits) - 1);
+            if let Some(e) = self.read_entry(cur.1 + (idx << self.p.index_shift)) {
+                if self.entry_valid(e) {
+                    return Ok(((self.pte_pfn(e) << 12) | (addr & 0xfff), 12, Target::Phys));
+                }
+                // exactly what the full walk returns for an invalid PTE (position 11)
+                let f = Fault { invalid_bits: 12, entry: e, swap_offset: None };
+                return if self.flavor == PteFlavor::Windows { self.translate_swap(f) } else { Err(f) };
+            }
+        }
+        let r = self.translate_entry_ex(addr & !0xfff).and_then(|(entry, position, base)| {
+            if position == 11 {
+                *cur = (key, base);
+            }
+            if !self.entry_valid(entry) {
+                return Err(Fault { invalid_bits: position + 1, entry, swap_offset: None });
+            }
+            let pfn = self.pte_pfn(entry);
+            let page = (pfn << 12) | mask_bits(addr, position, 0);
+            Ok((page, position + 1, Target::Phys))
+        });
+        match r {
+            Ok(v) => Ok(v),
+            Err(f) if self.flavor == PteFlavor::Windows => self.translate_swap(f),
+            Err(f) => Err(f),
+        }
     }
 
     /// python `_translate` (with the Windows swap handling): physical address, log2 of the
@@ -538,9 +583,10 @@ impl IntelLayer {
             return Ok(());
         }
         let mut length = length as u128;
+        let mut cur = (0u64, 0u64);
         while length > 0 {
             let skip_mask: u64;
-            match self.translate_raw(offset) {
+            match self.translate_cursor(offset, &mut cur) {
                 Ok((chunk_offset, bits, t)) => {
                     let page_size = 1u128 << bits;
                     let chunk_size = (page_size - (offset as u128 & (page_size - 1))).min(length) as u64;

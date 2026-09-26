@@ -6,6 +6,7 @@ pub mod json;
 pub mod mmap;
 pub mod par;
 pub mod paths;
+pub mod pyformat;
 pub mod time;
 pub mod trace;
 

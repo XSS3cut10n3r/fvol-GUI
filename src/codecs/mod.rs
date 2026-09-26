@@ -1,8 +1,13 @@
 //! codecs
-// STUB module list (core agent) -- the codecs agent's version replaces this file at merge.
+// NOTE (core agent): bzip2 / gzip / xz / zip below are STUBS shelling out to external tools until
+// the codecs agent's native decoders are merged (their mod.rs replaces this list).
 
 pub mod bzip2;
 pub mod gzip;
+pub mod snappy;
+#[cfg(test)]
+mod testdata;
+pub mod xpress;
 pub mod xz;
 pub mod zip;
 
