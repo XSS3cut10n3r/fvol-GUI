@@ -152,6 +152,7 @@ pub fn kernel_tree(ctx: &Context, plugin: &str, prefix: &str) -> Result<Items> {
         (k.layer, k.dtb, k.base, None, k.base, k.table, "windows.WindowsKernelIntermedSymbols", true)
     };
     out.push((format!("{l}.class"), s(layer_class_path(crate::layers::Layer::class_name(layer)))));
+    let banner_ident = banner.clone();
     if let Some(b) = banner {
         out.push((format!("{l}.kernel_banner"), s(b.iter().map(|&c| c as char).collect::<String>())));
     }
@@ -164,7 +165,15 @@ pub fn kernel_tree(ctx: &Context, plugin: &str, prefix: &str) -> Result<Items> {
     }
     out.push((format!("{prefix}.offset"), Json::Int(offset as i128)));
     out.push((format!("{prefix}.symbol_table_name.class"), s(format!("volatility3.framework.symbols.{sym_class}"))));
-    out.push((format!("{prefix}.symbol_table_name.isf_url"), s(table.isf_url())));
+    // Linux/Mac kernels are found by banner through python's identifier cache: among several
+    // ISFs with the same banner python takes the one its SQLite cache lists last
+    let mut url = table.isf_url().to_string();
+    if let Some(b) = &banner_ident {
+        if let Some(loc) = super::isfinfo::python_identifier_location(ctx, b) {
+            url = loc;
+        }
+    }
+    out.push((format!("{prefix}.symbol_table_name.isf_url"), s(url)));
     out.push((format!("{prefix}.symbol_table_name.symbol_mask"), Json::Int(table.symbol_mask() as i128)));
     Ok(out)
 }

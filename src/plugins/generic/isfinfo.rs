@@ -93,6 +93,23 @@ impl Plugin for IsfInfo {
     }
 }
 
+/// The location python's `SqliteCache.get_identifier_dictionary()` maps `identifier` to (last
+/// row wins, after the `SymbolCacheMagic` update), i.e. which of several ISFs with the same
+/// banner / PDB identifier python loads -- its choice depends on the history of its SQLite cache.
+/// `None` when python's database has no such identifier.
+pub fn python_identifier_location(ctx: &Context, identifier: &[u8]) -> Option<String> {
+    let db_path = paths::vol3_cache_dir(ctx.opts.cache_path.as_deref()).join("identifier.cache");
+    let mut table = if ctx.opts.clear_cache { Vec::new() } else { read_identifier_cache(&db_path) };
+    let mut summaries = SummaryCache::load();
+    symbol_cache_update(&mut table, &python_symbol_roots(ctx), &mut summaries);
+    summaries.save();
+    table
+        .iter()
+        .rev()
+        .find(|r| matches!(&r.identifier, sqlite::Value::Blob(b) | sqlite::Value::Text(b) if b.as_ref() == identifier))
+        .map(|r| r.location.clone())
+}
+
 // ---------------------------------------------------------------------------------------------
 // symbol path
 // ---------------------------------------------------------------------------------------------
