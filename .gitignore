@@ -6,3 +6,4 @@
 /bench/venv/
 /testdata/
 __pycache__/
+/.claude/
