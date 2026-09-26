@@ -134,8 +134,13 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
     let mut result: Option<Result<MacAutomagic>> = None;
     {
         let _t = span("mac: banner scan + validation");
+        let t0 = std::time::Instant::now();
         scan_each(phys.as_ref(), &scanner, None, |(off, idx)| {
+            if crate::util::trace::enabled() {
+                eprintln!("[trace] mac: banner hit at {off:#x} after {:.3}ms", t0.elapsed().as_secs_f64() * 1e3);
+            }
             let (banner, loc) = &banners[idx as usize];
+            let _t = span("mac: banner validation");
             match try_banner(phys, banner, loc, off) {
                 Ok(Some(a)) => {
                     result = Some(Ok(a));
@@ -480,6 +485,35 @@ fn cache_store(image: &std::path::Path, fp: &str, a: &MacAutomagic) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Full-image scan throughput of the banner scanners (heavy: run through limit.sh with
+    /// `RSVOL_MAC_IMAGE=<image> cargo test --profile fast mac_scan_bench -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn mac_scan_bench() {
+        let Some(img) = std::env::var_os("RSVOL_MAC_IMAGE") else { return };
+        let phys: Arc<dyn Layer> = crate::automagic::stack_physical(std::path::Path::new(&img)).unwrap();
+        let sp = symbols::SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
+        let banners = symbols::store::identifier_index(&sp).dictionary("mac");
+        let pats: Vec<&[u8]> = banners.iter().map(|(b, _)| b.as_slice()).collect();
+        let gb = phys.max_address() as f64 / 1e9;
+        for round in 0..2 {
+            let t = std::time::Instant::now();
+            let hits = crate::layers::scan::scan(phys.as_ref(), &BannerScanner::new(pats.clone()), None);
+            let s = t.elapsed().as_secs_f64();
+            eprintln!("[{round}] BannerScanner (memmem prefix): {} hits, {:.3}s, {:.2} GB/s", hits.len(), s, gb / s);
+            let t = std::time::Instant::now();
+            let hits2 = crate::layers::scan::scan(phys.as_ref(), &MultiStringScanner::new(&pats), None);
+            let s = t.elapsed().as_secs_f64();
+            eprintln!("[{round}] MultiStringScanner (trie):     {} hits, {:.3}s, {:.2} GB/s", hits2.len(), s, gb / s);
+            assert_eq!(hits, hits2);
+            let t = std::time::Instant::now();
+            let sc = FnScanner::new(|data: &[u8], off: u64, hits: &mut Vec<u64>| darwin_scan(data, off, DEFAULT_CHUNK_SIZE, hits));
+            let hits3 = crate::layers::scan::scan(phys.as_ref(), &sc, None);
+            let s = t.elapsed().as_secs_f64();
+            eprintln!("[{round}] Darwin regex scanner:          {} hits, {:.3}s, {:.2} GB/s", hits3.len(), s, gb / s);
+        }
+    }
 
     fn darwin_all(data: &[u8]) -> Vec<u64> {
         let mut v = Vec::new();
