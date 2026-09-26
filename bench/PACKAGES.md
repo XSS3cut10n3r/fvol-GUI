@@ -28,3 +28,8 @@ Round A = foundations (start right after core merges). Round B = dependents.
   processghosting, psxview, suspicious_threads, drivermodule, skeleton_key_check, direct/indirect/unhooked syscalls),
   shimcachemem, vadregexscan, vadyarascan.
 - **L2 linux kernel**, **L3 linux fs/net**, **M1 mac**.
+
+## Perf follow-ups (later)
+- crypto still < OpenSSL on bulk: SHA1/SHA256 0.9x, MD5 0.77x, DES 0.38x (small 0.64x), AES128-CBC 0.72x,
+  small AES 0.75-0.96x (per-call Vec alloc / key schedule). Wins: all small-message hash/HMAC/RC4 (1.2-3.4x),
+  AES256-ECB bulk 1.03x.
