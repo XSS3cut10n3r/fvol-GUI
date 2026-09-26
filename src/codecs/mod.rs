@@ -12,9 +12,10 @@
 //! * [`bzip2::decompress`] (multi-stream).
 //! * [`zip::ZipArchive`] — `parse`, `entries`, `find(name)`, `read(&entry)`.
 //! * [`lznt1::decompress`] — NTFS / RtlDecompressBuffer LZNT1.
+//! * [`snappy`], [`xpress`] — owned by the formats agent (memory image containers).
 //! * [`crc`] — CRC-32, CRC-64/XZ, CRC-32/BZIP2 (PCLMULQDQ folding).
 //!
-//! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/run.sh`.
+//! Benchmarks against liblzma / zlib / libbz2: `bench/refbench/codecs_run.sh`.
 
 #![allow(dead_code, unexpected_cfgs)]
 
@@ -24,6 +25,10 @@ pub mod gzip;
 pub mod inflate;
 pub mod lzma;
 pub mod lznt1;
+pub mod snappy;
+#[cfg(test)]
+mod testdata;
+pub mod xpress;
 pub mod xz;
 pub mod zip;
 pub mod zlib;

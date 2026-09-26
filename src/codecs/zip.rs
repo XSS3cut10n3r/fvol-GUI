@@ -494,11 +494,38 @@ impl<'a> ZipArchive<'a> {
     }
 }
 
-
+/// Inflates the raw DEFLATE data of a zip member (method 8) and verifies the CRC-32 and the
+/// (32-bit) uncompressed size from its directory entry, like `gzip -dc` on the equivalent
+/// gzip member. Used by `symbols::zipfile`, which parses the archive itself.
+pub fn inflate(raw: &[u8], crc: u32, size: u32) -> Result<Vec<u8>> {
+    // DEFLATE cannot expand more than 1032:1, so a larger declared size is only a hint.
+    let hint = (size as usize).min(raw.len().saturating_mul(1032).saturating_add(64));
+    let mut out = Vec::new();
+    out.try_reserve_exact(hint.saturating_add(512)).map_err(|_| err("entry too large"))?;
+    super::inflate::inflate_into(raw, &mut out)?;
+    if out.len() as u32 != size {
+        return Err(err("uncompressed size mismatch"));
+    }
+    if crc32(&out) != crc {
+        return Err(err("bad CRC-32"));
+    }
+    Ok(out)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codecs_zip_inflate_shim() {
+        // A raw DEFLATE stream holding one stored block "hello".
+        let stored = [&[0x01u8, 0x05, 0x00, 0xfa, 0xff][..], b"hello"].concat();
+        assert_eq!(inflate(&stored, crc32(b"hello"), 5).unwrap(), b"hello");
+        assert!(inflate(&stored, crc32(b"hello") ^ 1, 5).is_err());
+        assert!(inflate(&stored, crc32(b"hello"), 6).is_err());
+        assert!(inflate(&stored, crc32(b"hello"), u32::MAX).is_err());
+        assert!(inflate(&stored[..7], crc32(b"hello"), 5).is_err());
+    }
 
     fn unhex(s: &str) -> Vec<u8> {
         let s: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();

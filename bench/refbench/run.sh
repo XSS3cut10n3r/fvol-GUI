@@ -1,65 +1,36 @@
-#!/bin/bash
-# Rust codecs vs reference C libraries (liblzma / zlib / libbz2): in-process decode
-# throughput, same inputs, same machine, best of N, fresh output buffer per run.
-#
-#   bench/refbench/run.sh [CORPUS_DIR] [RUNS] [NAME_FILTER]
-#
-# CORPUS_DIR (default /home/user/rs-vol/testdata/scratch/codecs/corpus) is made by
-# bench/refbench/gen_corpus.sh; keep it on disk, never on tmpfs /tmp.
-# Both sides run pinned to one CPU ($CPU, default 8) and are interleaved ($ROUNDS rounds,
-# best taken) so background load affects them alike. Besides wall-clock MB/s, both harnesses
-# read user-mode CPU cycles with perf_event_open; the cycle ratio is insensitive to frequency
-# changes and preemption (useful on a loaded machine). Files named *.mt.xz run unpinned
-# (multi-threaded decoders on both sides: lzma_stream_decoder_mt vs block-parallel rsvol);
-# their cycle columns are the calling thread only and not comparable.
+#!/usr/bin/env bash
+# Codec throughput: reference C libraries vs rsvol (src/codecs), same inputs, in-process,
+# best of N.
+#   snappy       libsnappy (system, -lsnappy)
+#   xpress_huff  wimlib 1.14.4 XPRESS decompressor (built from source into $WORK)
+#   xpress_lz77  samba lib/compression/lzxpress.c (plain LZ77)
+# Usage: bench/refbench/run.sh [RAW_IMAGE] [NCHUNKS] [REPS]
 set -euo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=$(cd "$HERE/../.." && pwd)
-CORPUS=${1:-/home/user/rs-vol/testdata/scratch/codecs/corpus}
-RUNS=${2:-10}
-FILTER=${3:-}
-CPU=${CPU:-8}
-ROUNDS=${ROUNDS:-3}
-# Memory-capped scopes (see DESIGN.md "Resource safety").
-LIMIT=${LIMIT:-/home/user/rs-vol/bench/scripts/limit.sh}
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+RAW="${1:-/home/user/cbc2/task2/memory-dirty.raw}"
+N="${2:-2048}"
+REPS="${3:-7}"
+export RSVOL_BENCH_CPU="${RSVOL_BENCH_CPU:-2}"   # pin both sides to one P-core
+WORK="${WORK:-/tmp/rsvol-refbench}"
+mkdir -p "$WORK"
+cd "$WORK"
 
-gcc -O3 -march=native -o "$HERE/refbench" "$HERE/refbench.c" -llzma -lz -lbz2
-BIN=$(cd "$ROOT" && "$LIMIT" -m 6G cargo test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
-BIN="$ROOT/$BIN"
-
-printf '%-24s %-7s %8s %9s %9s %7s %9s %9s %7s\n' file codec out_MB C_MB/s rust_MB/s speedup C_Mcyc rust_Mcyc cyc_x
-for f in "$CORPUS"/*; do
-    name=$(basename "$f")
-    [[ -n "$FILTER" && "$name" != *$FILTER* ]] && continue
-    case "$name" in
-        *.mt.xz|*.mt[0-9]*.xz) codec=xz-mt ;;
-        *.xz) codec=xz ;;
-        *.lzma) codec=lzma ;;
-        *.gz) codec=gzip ;;
-        *.zz) codec=zlib ;;
-        *.bz2) codec=bz2 ;;
-        *.lznt1) codec=lznt1 ;;
-        *) continue ;;
-    esac
-    base=${f%.*}
-    case "${base##*.}" in l[0-9]*|mt|mt[0-9]*|x86|delta) base=${base%.*} ;; esac
-    pin=("$LIMIT" -m 2G taskset -c "$CPU")
-    [[ $codec == xz-mt ]] && pin=("$LIMIT" -m 2G)
-    cms=1e18; rms=1e18; ccy=1e18; rcy=1e18; out=0
-    for ((r = 0; r < ROUNDS; r++)); do
-        if [[ $codec != lznt1 ]]; then
-            read -r _ _ _ out ms _ cyc _ _ <<< "$("${pin[@]}" "$HERE/refbench" "$codec" "$f" "$RUNS" "$base")"
-            cms=$(awk -v a="$cms" -v b="$ms" 'BEGIN{print (b<a)?b:a}')
-            [[ $cyc != 0 ]] && ccy=$(awk -v a="$ccy" -v b="$cyc" 'BEGIN{print (b<a)?b:a}')
-        fi
-        read -r _ _ _ out ms _ cyc _ _ <<< "$(CODECS_BENCH_FILE="$f" CODECS_BENCH_CODEC="$codec" CODECS_RUNS="$RUNS" \
-            "${pin[@]}" "$BIN" codecs_bench_file --ignored --nocapture --test-threads=1 | grep -oE 'rust [a-z0-9-]+ .*')"
-        rms=$(awk -v a="$rms" -v b="$ms" 'BEGIN{print (b<a)?b:a}')
-        [[ $cyc != 0 ]] && rcy=$(awk -v a="$rcy" -v b="$cyc" 'BEGIN{print (b<a)?b:a}')
-    done
-    awk -v n="$name" -v c="$codec" -v out="$out" -v cms="$cms" -v rms="$rms" -v ccy="$ccy" -v rcy="$rcy" 'BEGIN{
-        cmb = (cms < 1e17) ? out / cms / 1e3 : 0; rmb = out / rms / 1e3;
-        printf "%-24s %-7s %8.1f %9.1f %9.1f %6.2fx %9.1f %9.1f %6.2fx\n", n, c, out / 1e6, cmb, rmb,
-            (cmb > 0) ? rmb / cmb : 0, (ccy < 1e17) ? ccy / 1e6 : 0, (rcy < 1e17) ? rcy / 1e6 : 0,
-            (ccy < 1e17 && rcy < 1e17) ? ccy / rcy : 0 }'
-done
+if [ ! -f wimlib-1.14.4/.libs/libwim.a ]; then
+    curl -sSLO https://wimlib.net/downloads/wimlib-1.14.4.tar.gz
+    tar xzf wimlib-1.14.4.tar.gz
+    (cd wimlib-1.14.4 && ./configure --without-fuse --without-ntfs-3g --disable-shared --enable-static \
+        CFLAGS="-O3 -march=native" >/dev/null && make -j"$(nproc)" libwim.la >/dev/null)
+fi
+if [ ! -f lzxpress.c ]; then
+    curl -sSLO https://raw.githubusercontent.com/samba-team/samba/master/lib/compression/lzxpress.c
+    curl -sSLO https://raw.githubusercontent.com/samba-team/samba/master/lib/compression/lzxpress.h
+fi
+gcc -O3 -march=native -o refbench "$HERE/refbench.c" lzxpress.c \
+    -I. -I"$HERE/shim/inc" -Iwimlib-1.14.4/include \
+    wimlib-1.14.4/.libs/libwim.a -lsnappy -lpthread
+[ -f snappy.vec ] || ./refbench mkvec "$RAW" "$WORK" "$N"
+./refbench bench "$WORK" "$REPS"
+cd "$ROOT"
+RSVOL_CODEC_BENCH="$WORK" RSVOL_BENCH_REPS="$REPS" cargo test --release codec_bench -- --ignored --nocapture 2>/dev/null \
+    | grep -E "rsvol"

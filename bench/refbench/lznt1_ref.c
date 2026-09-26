@@ -6,7 +6,7 @@
  *   lznt1_ref compress IN OUT              ntfs-3g's compressor (4096-byte blocks, as NTFS)
  *   lznt1_ref DECODER FILE RUNS [EXPECTED] decode throughput, DECODER: ntfs3g | libfwnt | wine
  *
- * Methodology as refbench.c: the compressed file is loaded once; each timed run allocates a
+ * Methodology as codecs_refbench.c: the compressed file is loaded once; each timed run allocates a
  * fresh output buffer of the exact uncompressed size (like the Rust API, which returns a new
  * Vec) and decodes the whole stream; the buffer is freed outside the timed region.
  * Prints "c lznt1-<decoder> <file> <out_bytes> <best_ms> <MB/s> <cycles> <instructions>

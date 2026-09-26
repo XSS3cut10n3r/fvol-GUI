@@ -8,7 +8,7 @@
 //! the best of a few runs is reported.
 //!
 //! `codecs_bench_file` benches a single file the same way the C reference harness in
-//! `bench/refbench/refbench.c` does (fresh output per run, best of N) and prints
+//! `bench/refbench/codecs_refbench.c` does (fresh output per run, best of N) and prints
 //! `rust <codec> <file> <out_bytes> <best_ms> <MB/s>`.
 
 use std::path::{Path, PathBuf};

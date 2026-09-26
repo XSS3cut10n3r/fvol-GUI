@@ -1,74 +1,32 @@
 /*
- * Reference decompression throughput harness (liblzma, zlib, libbz2).
+ * Reference codec throughput for rsvol's src/codecs (see run.sh).
  *
- *   gcc -O3 -march=native -o refbench refbench.c -llzma -lz -lbz2
- *   refbench CODEC FILE RUNS [EXPECTED_OUTPUT_FILE]
+ *   refbench mkvec RAW_IMAGE OUTDIR NCHUNKS   write snappy.vec, xpress_huff.vec, xpress_lz77.vec
+ *   refbench bench OUTDIR REPS                in-process decode throughput, best of REPS
  *
- * CODEC: xz | xz-mt | lzma | gzip | zlib | deflate | bz2
- *
- * The compressed file is loaded into memory once. Each timed run allocates a fresh output
- * buffer of the exact uncompressed size (like the Rust API, which returns a new Vec), decodes
- * the whole input in one call sequence, and frees the buffer outside the timed region.
- * Prints: "c <codec> <file> <out_bytes> <best_ms> <MB/s> <cycles> <instructions> <branch_misses>"
- * (MB = 1e6 bytes of output; the last three are user-mode perf counters of the run with the
- * fewest cycles, 0 if perf_event_open is unavailable).
+ * Vectors: 64 KiB chunks of real memory taken at evenly spaced offsets of the raw image
+ * (all-zero chunks skipped), each stored as [u32 ulen][u32 clen][clen bytes].
+ *   snappy.vec       libsnappy snappy_compress        -> reference: snappy_uncompress
+ *   xpress_huff.vec  wimlib XPRESS (LZ77+Huffman)     -> reference: wimlib_decompress
+ *   xpress_lz77.vec  samba lzxpress_compress (plain)  -> reference: lzxpress_decompress
  */
-#include <bzlib.h>
-#include <lzma.h>
-#include <zlib.h>
-
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <linux/perf_event.h>
-#include <sys/ioctl.h>
-#include <sys/syscall.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-/* perf counters: cycles, instructions, branch-misses (user mode, this thread). */
-static int perf_fds[3] = {-1, -1, -1};
+#include <snappy-c.h>
+#include <wimlib.h>
+#include "lzxpress.h"
 
-static void perf_open(void) {
-    static const unsigned long long cfg[3] = {PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_HW_INSTRUCTIONS,
-                                              PERF_COUNT_HW_BRANCH_MISSES};
-    unsigned long long pmu = 0;
-    FILE *f = fopen("/sys/bus/event_source/devices/cpu_core/type", "r");
-    if (f) {
-        if (fscanf(f, "%llu", &pmu) != 1) pmu = 0;
-        fclose(f);
-    }
-    for (int i = 0; i < 3; i++) {
-        struct perf_event_attr a;
-        memset(&a, 0, sizeof a);
-        a.type = PERF_TYPE_HARDWARE;
-        a.size = sizeof a;
-        a.config = cfg[i] | (pmu << 32);
-        a.disabled = 1;
-        a.exclude_kernel = 1;
-        a.exclude_hv = 1;
-        perf_fds[i] = syscall(__NR_perf_event_open, &a, 0, -1, -1, 0);
-    }
-}
-
-static void perf_start(void) {
-    for (int i = 0; i < 3; i++)
-        if (perf_fds[i] >= 0) {
-            ioctl(perf_fds[i], PERF_EVENT_IOC_RESET, 0);
-            ioctl(perf_fds[i], PERF_EVENT_IOC_ENABLE, 0);
-        }
-}
-
-static void perf_stop(unsigned long long v[3]) {
-    for (int i = 0; i < 3; i++) {
-        v[i] = 0;
-        if (perf_fds[i] >= 0) {
-            ioctl(perf_fds[i], PERF_EVENT_IOC_DISABLE, 0);
-            if (read(perf_fds[i], &v[i], 8) != 8) v[i] = 0;
-        }
-    }
-}
+#define CHUNK 65536
 
 static double now(void) {
     struct timespec ts;
@@ -76,151 +34,134 @@ static double now(void) {
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
-static unsigned char *read_file(const char *path, size_t *len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); exit(2); }
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    unsigned char *buf = malloc(n ? n : 1);
-    if (n && fread(buf, 1, n, f) != (size_t)n) { perror("read"); exit(2); }
-    fclose(f);
-    *len = n;
-    return buf;
+static void put(FILE *f, const void *c, uint32_t ulen, uint32_t clen) {
+    fwrite(&ulen, 4, 1, f);
+    fwrite(&clen, 4, 1, f);
+    fwrite(c, 1, clen, f);
 }
 
-/* Decodes `in` into `out` (capacity cap). Returns bytes produced, or (size_t)-1 on error or
- * if the output does not fit. */
-static size_t decode(const char *codec, const unsigned char *in, size_t in_len, unsigned char *out, size_t cap) {
-    if (!strcmp(codec, "xz") || !strcmp(codec, "xz-mt") || !strcmp(codec, "lzma")) {
-        lzma_stream s = LZMA_STREAM_INIT;
-        lzma_ret r;
-        if (!strcmp(codec, "lzma")) {
-            r = lzma_alone_decoder(&s, UINT64_MAX);
-        } else if (!strcmp(codec, "xz-mt")) {
-            lzma_mt mt;
-            memset(&mt, 0, sizeof mt);
-            mt.flags = LZMA_CONCATENATED;
-            mt.threads = lzma_cputhreads();
-            if (mt.threads == 0) mt.threads = 1;
-            mt.memlimit_threading = UINT64_MAX;
-            mt.memlimit_stop = UINT64_MAX;
-            r = lzma_stream_decoder_mt(&s, &mt);
-        } else {
-            r = lzma_stream_decoder(&s, UINT64_MAX, LZMA_CONCATENATED);
-        }
-        if (r != LZMA_OK) return (size_t)-1;
-        s.next_in = in;
-        s.avail_in = in_len;
-        s.next_out = out;
-        s.avail_out = cap;
-        r = lzma_code(&s, LZMA_FINISH);
-        size_t n = cap - s.avail_out;
-        lzma_end(&s);
-        return r == LZMA_STREAM_END ? n : (size_t)-1;
+static int mkvec(const char *raw, const char *dir, long n) {
+    int fd = open(raw, O_RDONLY);
+    if (fd < 0) { perror(raw); return 1; }
+    struct stat st;
+    fstat(fd, &st);
+    const uint8_t *m = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { perror("mmap"); return 1; }
+    char p[4096];
+    snprintf(p, sizeof p, "%s/snappy.vec", dir);
+    FILE *fs = fopen(p, "wb");
+    snprintf(p, sizeof p, "%s/xpress_huff.vec", dir);
+    FILE *fh = fopen(p, "wb");
+    snprintf(p, sizeof p, "%s/xpress_lz77.vec", dir);
+    FILE *fl = fopen(p, "wb");
+    if (!fs || !fh || !fl) { perror("fopen"); return 1; }
+    struct wimlib_compressor *wc;
+    if (wimlib_create_compressor(WIMLIB_COMPRESSION_TYPE_XPRESS, CHUNK, 0, &wc)) { fprintf(stderr, "wimlib compressor\n"); return 1; }
+    static uint8_t out[CHUNK * 2];
+    long stride = (st.st_size / CHUNK) / n;
+    if (stride < 1) stride = 1;
+    long written = 0;
+    for (long i = 0; written < n && (i * stride + 1) * CHUNK <= st.st_size; i++) {
+        const uint8_t *in = m + i * stride * CHUNK;
+        int zero = 1;
+        for (int k = 0; k < CHUNK; k++) if (in[k]) { zero = 0; break; }
+        if (zero) continue;
+        size_t sl = sizeof out;
+        snappy_compress((const char *)in, CHUNK, (char *)out, &sl);
+        size_t hl = wimlib_compress(in, CHUNK, out + CHUNK, CHUNK - 1, wc);
+        ssize_t ll = lzxpress_compress(in, CHUNK, out + 0, sizeof out);
+        if (hl == 0 || ll <= 0) continue; /* incompressible for one of the formats */
+        /* recompute snappy into its own buffer (lzxpress reused `out`) */
+        static uint8_t sb[CHUNK * 2];
+        sl = sizeof sb;
+        snappy_compress((const char *)in, CHUNK, (char *)sb, &sl);
+        static uint8_t hb[CHUNK];
+        hl = wimlib_compress(in, CHUNK, hb, CHUNK - 1, wc);
+        put(fs, sb, CHUNK, sl);
+        put(fh, hb, CHUNK, hl);
+        put(fl, out, CHUNK, ll);
+        written++;
     }
-    if (!strcmp(codec, "gzip") || !strcmp(codec, "zlib") || !strcmp(codec, "deflate")) {
-        int wbits = !strcmp(codec, "gzip") ? 31 : !strcmp(codec, "zlib") ? 15 : -15;
-        z_stream z;
-        memset(&z, 0, sizeof z);
-        if (inflateInit2(&z, wbits) != Z_OK) return (size_t)-1;
-        z.next_in = (unsigned char *)in;
-        z.avail_in = in_len;
-        z.next_out = out;
-        z.avail_out = cap;
-        int r;
-        for (;;) {
-            /* avail_in/avail_out are uInt: feed in chunks for > 4 GiB inputs (not needed here). */
-            r = inflate(&z, Z_FINISH);
-            if (r == Z_STREAM_END && wbits == 31 && z.avail_in > 0 && z.next_in[0] == 0x1f) {
-                inflateReset(&z); /* next gzip member */
-                continue;
-            }
-            break;
-        }
-        size_t n = cap - z.avail_out;
-        inflateEnd(&z);
-        return r == Z_STREAM_END ? n : (size_t)-1;
-    }
-    if (!strcmp(codec, "bz2")) {
-        size_t produced = 0;
+    fclose(fs); fclose(fh); fclose(fl);
+    printf("wrote %ld chunks of %d bytes\n", written, CHUNK);
+    return 0;
+}
+
+struct vec { uint8_t *data; size_t len; };
+
+static struct vec load(const char *dir, const char *name) {
+    char p[4096];
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    FILE *f = fopen(p, "rb");
+    struct vec v = {0};
+    if (!f) { perror(p); exit(1); }
+    fseek(f, 0, SEEK_END);
+    v.len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    v.data = malloc(v.len);
+    if (fread(v.data, 1, v.len, f) != v.len) { perror("read"); exit(1); }
+    fclose(f);
+    return v;
+}
+
+typedef int (*decode_fn)(const uint8_t *c, uint32_t clen, uint8_t *out, uint32_t ulen, void *ctx);
+
+static int d_snappy(const uint8_t *c, uint32_t clen, uint8_t *out, uint32_t ulen, void *ctx) {
+    (void)ctx;
+    size_t l = ulen;
+    return snappy_uncompress((const char *)c, clen, (char *)out, &l) != SNAPPY_OK || l != ulen;
+}
+static int d_huff(const uint8_t *c, uint32_t clen, uint8_t *out, uint32_t ulen, void *ctx) {
+    return wimlib_decompress(c, clen, out, ulen, ctx);
+}
+static int d_lz77(const uint8_t *c, uint32_t clen, uint8_t *out, uint32_t ulen, void *ctx) {
+    (void)ctx;
+    return lzxpress_decompress(c, clen, out, ulen) != (ssize_t)ulen;
+}
+
+static void bench(const char *label, struct vec v, decode_fn fn, void *ctx, int reps) {
+    static uint8_t out[CHUNK];
+    double best = 1e30;
+    size_t total = 0, chunks = 0, ctotal = 0;
+    for (int r = 0; r < reps; r++) {
+        double t = now();
         size_t off = 0;
-        while (off < in_len) {
-            bz_stream b;
-            memset(&b, 0, sizeof b);
-            if (BZ2_bzDecompressInit(&b, 0, 0) != BZ_OK) return (size_t)-1;
-            b.next_in = (char *)in + off;
-            b.avail_in = in_len - off;
-            b.next_out = (char *)out + produced;
-            b.avail_out = cap - produced;
-            int r = BZ2_bzDecompress(&b);
-            size_t used = (in_len - off) - b.avail_in;
-            produced = cap - b.avail_out;
-            BZ2_bzDecompressEnd(&b);
-            if (r != BZ_STREAM_END) return (size_t)-1;
-            off += used; /* multi-stream: continue with the next "BZh" stream */
+        total = chunks = ctotal = 0;
+        while (off + 8 <= v.len) {
+            uint32_t ul, cl;
+            memcpy(&ul, v.data + off, 4);
+            memcpy(&cl, v.data + off + 4, 4);
+            if (fn(v.data + off + 8, cl, out, ul, ctx)) { fprintf(stderr, "%s: decode error\n", label); exit(1); }
+            total += ul;
+            ctotal += cl;
+            chunks++;
+            off += 8 + cl;
         }
-        return produced;
+        t = now() - t;
+        if (t < best) best = t;
     }
-    fprintf(stderr, "unknown codec %s\n", codec);
-    exit(2);
+    printf("%-12s ref  %8.1f MB/s  (%zu chunks, ratio %.2f, best of %d)\n", label, total / best / 1e6, chunks,
+           (double)total / ctotal, reps);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4) {
-        fprintf(stderr, "usage: %s CODEC FILE RUNS [EXPECTED]\n", argv[0]);
-        return 2;
+    const char *cpu = getenv("RSVOL_BENCH_CPU");
+    if (cpu) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(atoi(cpu), &set);
+        sched_setaffinity(0, sizeof set, &set);
     }
-    const char *codec = argv[1];
-    size_t in_len;
-    unsigned char *in = read_file(argv[2], &in_len);
-    int runs = atoi(argv[3]);
-
-    /* Find the output size with a generous buffer. */
-    size_t cap = in_len * 16 + (1 << 20);
-    size_t n;
-    for (;;) {
-        unsigned char *probe = malloc(cap);
-        n = decode(codec, in, in_len, probe, cap);
-        if (n != (size_t)-1 && n < cap) {
-            if (argc > 4) {
-                size_t elen;
-                unsigned char *exp = read_file(argv[4], &elen);
-                if (elen != n || memcmp(exp, probe, n)) {
-                    fprintf(stderr, "%s: output differs from %s\n", argv[2], argv[4]);
-                    return 1;
-                }
-                free(exp);
-            }
-            free(probe);
-            break;
-        }
-        free(probe);
-        if (cap > ((size_t)1 << 36)) {
-            fprintf(stderr, "%s: decode error\n", argv[2]);
-            return 1;
-        }
-        cap *= 4;
+    if (argc >= 5 && !strcmp(argv[1], "mkvec")) return mkvec(argv[2], argv[3], atol(argv[4]));
+    if (argc >= 4 && !strcmp(argv[1], "bench")) {
+        int reps = atoi(argv[3]);
+        struct wimlib_decompressor *wd;
+        if (wimlib_create_decompressor(WIMLIB_COMPRESSION_TYPE_XPRESS, CHUNK, &wd)) return 1;
+        bench("snappy", load(argv[2], "snappy.vec"), d_snappy, NULL, reps);
+        bench("xpress_huff", load(argv[2], "xpress_huff.vec"), d_huff, wd, reps);
+        bench("xpress_lz77", load(argv[2], "xpress_lz77.vec"), d_lz77, NULL, reps);
+        return 0;
     }
-
-    double best = 1e30;
-    unsigned sink = 0;
-    unsigned long long best_c[3] = {0, 0, 0}, c[3];
-    perf_open();
-    for (int i = 0; i < runs; i++) {
-        perf_start();
-        double t = now();
-        unsigned char *out = malloc(n ? n : 1);
-        size_t m = decode(codec, in, in_len, out, n);
-        double dt = now() - t;
-        perf_stop(c);
-        if (best_c[0] == 0 || c[0] < best_c[0]) memcpy(best_c, c, sizeof c);
-        if (m != n) { fprintf(stderr, "decode failed\n"); return 1; }
-        sink += n ? out[n / 2] : 0;
-        free(out);
-        if (dt < best) best = dt;
-    }
-    printf("c %s %s %zu %.3f %.1f %llu %llu %llu\n", codec, argv[2], n, best * 1e3, n / best / 1e6, best_c[0],
-           best_c[1], best_c[2]);
-    return sink == 0xFFFFFFFF;
+    fprintf(stderr, "usage: %s mkvec RAW OUTDIR N | bench OUTDIR REPS\n", argv[0]);
+    return 2;
 }
