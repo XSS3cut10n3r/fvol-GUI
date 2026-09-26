@@ -91,7 +91,9 @@ impl Pat {
 /// Candidate search engine over one byte domain.
 enum Engine {
     None,
-    Teddy(Teddy),
+    /// Teddy plus, per bucket, the strings its patterns belong to (buckets whose
+    /// strings are all disabled are switched off).
+    Teddy(Teddy, Vec<Vec<u32>>),
     /// Aho-Corasick over exact window atoms; `map[atom] = pattern`.
     Aho { ac: AhoCorasick, map: Vec<u32> },
     /// Large sets: hashed 4-byte windows, plus an engine for the shorter windows.
@@ -121,6 +123,10 @@ pub struct Scratch {
     tmp: Vec<Match>,
     re_states: Vec<Option<ReState>>,
     re_hits: Vec<ReHit>,
+    /// Teddy bucket masks (buckets of disabled strings switched off).
+    live_raw: u8,
+    live_diff: u8,
+    dead_changed: bool,
 }
 
 impl Scratch {
@@ -224,7 +230,17 @@ impl Engine {
                         .collect()
                 })
                 .collect();
-            return Engine::Teddy(Teddy::new(&wins, ids));
+            let t = Teddy::new(&wins, ids);
+            let mut strings: Vec<Vec<u32>> = t
+                .buckets()
+                .iter()
+                .map(|b| b.iter().map(|&id| pats[id as usize].string).collect())
+                .collect();
+            for v in &mut strings {
+                v.sort_unstable();
+                v.dedup();
+            }
+            return Engine::Teddy(t, strings);
         }
         // Exact windows with every case combination of folded letters.
         let expand = |p: &Pat| -> Vec<Vec<u8>> {
@@ -276,10 +292,26 @@ impl Engine {
 
     /// Candidate windows in `hay[from..to)`: `f(q, pattern)` with `q` the window start.
     #[inline]
-    fn run<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, state: &mut u32, mut f: F) {
+    /// Bucket mask of a Teddy engine given the disabled strings.
+    fn live(&self, disabled: &[bool]) -> u8 {
+        match self {
+            Engine::Teddy(_, strings) => {
+                let mut m = 0u8;
+                for (b, v) in strings.iter().enumerate() {
+                    if v.iter().any(|&si| !disabled.get(si as usize).copied().unwrap_or(true)) {
+                        m |= 1 << b;
+                    }
+                }
+                m
+            }
+            _ => 0xff,
+        }
+    }
+
+    fn run<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, state: &mut u32, live: u8, mut f: F) {
         match self {
             Engine::None => {}
-            Engine::Teddy(t) => t.find(hay, from, to, f),
+            Engine::Teddy(t, _) => t.find_live(hay, from, to, live, f),
             Engine::Aho { ac, map } => ac.scan(hay, from, to, state, |a, end| {
                 let len = ac.pattern_len(a);
                 if let Some(&p) = map.get(a as usize) {
@@ -288,7 +320,7 @@ impl Engine {
             }),
             Engine::Hash { hf, short } => {
                 hf.find(hay, from, to, &mut f);
-                short.run(hay, from, to, state, f);
+                short.run(hay, from, to, state, live, f);
             }
         }
     }
@@ -428,7 +460,7 @@ impl Matcher {
         fn kind(e: &Engine) -> String {
             match e {
                 Engine::None => "none".into(),
-                Engine::Teddy(t) => format!("teddy(est {:.2e})", t.estimated_rate()),
+                Engine::Teddy(t, _) => format!("teddy(est {:.2e})", t.estimated_rate()),
                 Engine::Aho { ac, .. } => format!("aho({} states)", ac.state_count()),
                 Engine::Hash { short, .. } => format!("hash+{}", kind(short)),
             }
@@ -438,7 +470,7 @@ impl Matcher {
         let mut verified = 0usize;
         let mut winok = 0usize;
         let mut per = vec![0usize; self.pats.len()];
-        self.raw.run(data, 0, data.len(), &mut st, |q, p| {
+        self.raw.run(data, 0, data.len(), &mut st, 0xff, |q, p| {
             raw += 1;
             per[p as usize] += 1;
             winok += self.pats[p as usize].window_ok(data, q) as usize;
@@ -506,6 +538,9 @@ impl Matcher {
         sc.over.resize(ns, false);
         sc.any_over = false;
         sc.re_hits.clear();
+        sc.live_raw = 0xff;
+        sc.live_diff = 0xff;
+        sc.dead_changed = false;
         if self.has_re {
             if sc.matcher != self.id || sc.re_states.len() != ns {
                 sc.re_states = self
@@ -542,7 +577,13 @@ impl Matcher {
         let mut b0 = 0usize;
         while b0 < n {
             let b1 = (b0 + BLOCK).min(n);
-            self.raw.run(data, b0, b1, &mut raw_state, |q, p| self.on_raw(data, q, p, out, sc));
+            if sc.dead_changed {
+                sc.dead_changed = false;
+                sc.live_raw = self.raw.live(&sc.disabled);
+                sc.live_diff = self.diff.live(&sc.disabled);
+            }
+            let (live_raw, live_diff) = (sc.live_raw, sc.live_diff);
+            self.raw.run(data, b0, b1, &mut raw_state, live_raw, |q, p| self.on_raw(data, q, p, out, sc));
             if !self.diff.is_none() && n >= 2 {
                 // D[i] = data[i] ^ data[i+1] for i in [b0, e).
                 let e = (b1 + 64).min(n - 1);
@@ -550,7 +591,9 @@ impl Matcher {
                     dbuf.clear();
                     dbuf.extend(data[b0..e].iter().zip(&data[b0 + 1..e + 1]).map(|(a, b)| a ^ b));
                     let to = b1.min(e) - b0;
-                    self.diff.run(&dbuf, 0, to, &mut diff_state, |q, p| self.on_diff(data, b0 + q, p, out, sc));
+                    self.diff.run(&dbuf, 0, to, &mut diff_state, live_diff, |q, p| {
+                        self.on_diff(data, b0 + q, p, out, sc)
+                    });
                 }
             }
             if self.has_re {
@@ -601,6 +644,7 @@ impl Matcher {
                 v.truncate(MAX_STRING_MATCHES);
             }
             sc.disabled[si] = true;
+            sc.dead_changed = true;
         }
         sc.any_over = any;
     }
@@ -725,6 +769,7 @@ impl Matcher {
             // libyara: a full list disables the string (even for a duplicate offset).
             if v.len() >= MAX_STRING_MATCHES {
                 sc.disabled[si] = true;
+                sc.dead_changed = true;
                 break;
             }
             insert_match(v, *m, greedy);

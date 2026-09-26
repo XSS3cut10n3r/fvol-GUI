@@ -289,7 +289,21 @@ impl Teddy {
     /// Calls `f(q, id)` for every position `q` in `[from, to)` whose window matches the
     /// buckets of pattern `id` (a superset of the true window matches).
     #[inline]
-    pub fn find<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, mut f: F) {
+    pub fn find<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, f: F) {
+        self.find_live(hay, from, to, 0xff, f)
+    }
+
+    /// Ids of the patterns in each bucket.
+    pub fn buckets(&self) -> Vec<Vec<u32>> {
+        (0..NB).map(|b| self.bucket(b).iter().map(|m| m.id).collect()).collect()
+    }
+
+    /// [`Teddy::find`] restricted to the buckets set in `live` (bit b = bucket b).
+    #[inline]
+    pub fn find_live<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, live: u8, mut f: F) {
+        if live == 0 {
+            return;
+        }
         let to = to.min(hay.len());
         let mut q = from;
         #[cfg(target_arch = "x86_64")]
@@ -300,10 +314,10 @@ impl Teddy {
                     // SAFETY: AVX2 availability checked at runtime.
                     let (next, k) = unsafe {
                         match self.m {
-                            1 => core_avx2::<1>(&self.lo, &self.hi, hay, q, to, &mut cands),
-                            2 => core_avx2::<2>(&self.lo, &self.hi, hay, q, to, &mut cands),
-                            3 => core_avx2::<3>(&self.lo, &self.hi, hay, q, to, &mut cands),
-                            _ => core_avx2::<4>(&self.lo, &self.hi, hay, q, to, &mut cands),
+                            1 => core_avx2::<1>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                            2 => core_avx2::<2>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                            3 => core_avx2::<3>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                            _ => core_avx2::<4>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
                         }
                     };
                     for &c in &cands[..k.min(CAND_CAP)] {
@@ -317,7 +331,7 @@ impl Teddy {
             }
         }
         while q < to {
-            let bits = self.scalar_bits(hay, q);
+            let bits = self.scalar_bits(hay, q) & live;
             if bits != 0 {
                 self.emit(hay, q, bits, &mut f);
             }
@@ -338,6 +352,7 @@ const CAND_CAP: usize = 256;
 unsafe fn core_avx2<const M: usize>(
     lo_t: &[[u8; 16]; MAX_WINDOW],
     hi_t: &[[u8; 16]; MAX_WINDOW],
+    live: u8,
     hay: &[u8],
     mut q: usize,
     to: usize,
@@ -356,6 +371,8 @@ unsafe fn core_avx2<const M: usize>(
             hi[j] = _mm256_broadcastsi128_si256(_mm_loadu_si128(hi_t[j].as_ptr() as *const __m128i));
         }
     }
+    // Dead buckets never match: clear them from the first table.
+    lo[0] = _mm256_and_si256(lo[0], _mm256_set1_epi8(live as i8));
     let classify = |p: usize| -> __m256i {
         // SAFETY: the caller guarantees p + 32 + M - 1 <= n.
         unsafe {
