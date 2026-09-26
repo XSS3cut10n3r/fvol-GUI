@@ -15,18 +15,6 @@ static DEC2: [[u8; 2]; 100] = {
     t
 };
 
-/// "00" "01" ... "ff"
-static HEX2: [[u8; 2]; 256] = {
-    let h = b"0123456789abcdef";
-    let mut t = [[0u8; 2]; 256];
-    let mut i = 0;
-    while i < 256 {
-        t[i] = [h[i >> 4], h[i & 15]];
-        i += 1;
-    }
-    t
-};
-
 /// Digits are formatted right-aligned to `END` in a `[u8; 48]` scratch buffer.
 const END: usize = 24;
 
@@ -66,23 +54,89 @@ pub fn push_u64(out: &mut Vec<u8>, mut v: u64) {
     push_tail(out, &buf, i);
 }
 
-/// Append python `f"{v:x}"` for a u64 (lower case, no prefix), a byte per step.
-#[inline]
-pub fn push_hex_u64(out: &mut Vec<u8>, mut v: u64) {
+/// The 8 nibbles of `v` as lower-case hex digits, most significant first in memory order
+/// (SWAR: spread the nibbles into bytes, then '0'..'9' / 'a'..'f' without branches).
+#[inline(always)]
+fn hex8(v: u32) -> u64 {
+    let mut x = v as u64;
+    x = (x | (x << 16)) & 0x0000_ffff_0000_ffff;
+    x = (x | (x << 8)) & 0x00ff_00ff_00ff_00ff;
+    x = (x | (x << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+    // byte i = nibble i; > 9 gets 'a' - '0' - 10 = 39 extra
+    let letters = ((x + 0x0606_0606_0606_0606) >> 4) & 0x0101_0101_0101_0101;
+    (x + 0x3030_3030_3030_3030 + letters * 39).swap_bytes()
+}
+
+/// Append `prefix` (at most 2 bytes) + python `f"{v:x}"` for a u64 with one 18-byte store.
+#[inline(always)]
+fn push_hex_u64_prefixed(out: &mut Vec<u8>, prefix: &[u8], v: u64) {
+    // digits (at least one); shift them to the top so the first `n` characters are the digits
+    let n = ((67 - (v | 1).leading_zeros()) / 4) as usize;
+    let x = v << (4 * (16 - n));
+    let (hi, lo) = (hex8((x >> 32) as u32), hex8(x as u32));
+    out.reserve(24);
+    unsafe {
+        let len = out.len();
+        let dst = out.as_mut_ptr().add(len);
+        let p = prefix.len();
+        std::ptr::copy_nonoverlapping(prefix.as_ptr(), dst, p);
+        std::ptr::copy_nonoverlapping(hi.to_le_bytes().as_ptr(), dst.add(p), 8);
+        std::ptr::copy_nonoverlapping(lo.to_le_bytes().as_ptr(), dst.add(p + 8), 8);
+        out.set_len(len + p + n);
+    }
+}
+
+/// Write `0x` + python `f"{v:x}"` to `dst` (18 bytes are written); returns the length.
+///
+/// # Safety
+/// `dst` must be valid for 18 bytes of writes.
+#[inline(always)]
+pub unsafe fn write_0x_hex_u64(dst: *mut u8, v: u64) -> usize {
+    let n = ((67 - (v | 1).leading_zeros()) / 4) as usize;
+    let x = v << (4 * (16 - n));
+    let (hi, lo) = (hex8((x >> 32) as u32), hex8(x as u32));
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"0x".as_ptr(), dst, 2);
+        std::ptr::copy_nonoverlapping(hi.to_le_bytes().as_ptr(), dst.add(2), 8);
+        std::ptr::copy_nonoverlapping(lo.to_le_bytes().as_ptr(), dst.add(10), 8);
+    }
+    2 + n
+}
+
+/// Write python `str(v)` to `dst` (24 bytes are written); returns the length.
+///
+/// # Safety
+/// `dst` must be valid for 24 bytes of writes.
+#[inline(always)]
+pub unsafe fn write_u64(dst: *mut u8, mut v: u64) -> usize {
     let mut buf = [0u8; 48];
     let mut i = END;
-    loop {
+    while v >= 100 {
         i -= 2;
-        buf[i..i + 2].copy_from_slice(&HEX2[(v & 0xff) as usize]);
-        v >>= 8;
-        if v == 0 {
-            break;
-        }
+        buf[i..i + 2].copy_from_slice(&DEC2[(v % 100) as usize]);
+        v /= 100;
     }
-    if buf[i] == b'0' {
-        i += 1;
+    if v >= 10 {
+        i -= 2;
+        buf[i..i + 2].copy_from_slice(&DEC2[v as usize]);
+    } else {
+        i -= 1;
+        buf[i] = b'0' + v as u8;
     }
-    push_tail(out, &buf, i);
+    unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr().add(i), dst, 24) };
+    END - i
+}
+
+/// Append python `f"{v:x}"` for a u64 (lower case, no prefix).
+#[inline]
+pub fn push_hex_u64(out: &mut Vec<u8>, v: u64) {
+    push_hex_u64_prefixed(out, b"", v)
+}
+
+/// Append python `hex(v)` (`0x` + digits) for a u64.
+#[inline]
+pub fn push_0x_hex_u64(out: &mut Vec<u8>, v: u64) {
+    push_hex_u64_prefixed(out, b"0x", v)
 }
 
 /// Append the decimal representation of `v` (python `str(int)`).

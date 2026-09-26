@@ -224,6 +224,23 @@ fn absent_text(v: &Value) -> Option<&'static [u8]> {
     }
 }
 
+/// Values whose cell text (in any column) is plain printable ASCII without tabs, newlines or
+/// csv specials: numbers, hex / binary, booleans, datetimes, absent markers.
+#[inline(always)]
+fn plain_cell(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Int(_)
+            | Value::Float(_)
+            | Value::Bool(_)
+            | Value::DateTime(_)
+            | Value::Unreadable
+            | Value::Unparsable
+            | Value::NotApplicable
+            | Value::NotAvailable
+    )
+}
+
 /// `hex_bytes_as_text(value)`
 pub fn hex_bytes_as_text(out: &mut Vec<u8>, data: &[u8], errors: &[u32]) {
     const WIDTH: usize = 16;
@@ -352,6 +369,15 @@ fn value_bytes(v: &Value) -> Option<&[u8]> {
 /// `mermaid` switches to `MermaidRenderer._type_renderers` (Disassembly and LayerData columns use
 /// the default renderer there).
 pub fn render_cell(out: &mut Vec<u8>, ty: ColType, v: &Value, mermaid: bool) {
+    // the common cells first (same results as the general rules below)
+    match (ty, v) {
+        (ColType::Hex, Value::Int(i)) if *i >= 0 && *i <= u64::MAX as i128 => return push_0x_hex_u64(out, *i as u64),
+        (ColType::Int, Value::Int(i)) => return push_i128(out, *i),
+        (_, Value::SStr(s)) => return out.extend_from_slice(s.as_bytes()),
+        (_, Value::Str(s)) => return out.extend_from_slice(s.as_bytes()),
+        (ColType::DateTime, Value::DateTime(dt)) => return push_datetime_cli(out, dt),
+        _ => {}
+    }
     if let Some(t) = absent_text(v) {
         out.extend_from_slice(t);
         return;
@@ -538,16 +564,90 @@ pub struct RowEncoder {
     keys: Vec<(Vec<u8>, usize)>,
     /// every column's type
     types: Vec<ColType>,
+    /// per column: how an integer cell is written (`cell_u64`)
+    int_cells: Vec<IntCell>,
+}
+
+/// How [`RowEncoder::cell_u64`] writes an integer cell of a column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntCell {
+    /// not shown
+    Hidden,
+    /// `0x` + hex (a Hex column in quick / csv)
+    Hex,
+    /// decimal (an Int column in quick / csv; json writes the number)
+    Dec,
+    /// pretty's cell record around `0x` + hex / decimal
+    PrettyHex,
+    PrettyDec,
+    /// anything else: through `push_cell`
+    Other,
 }
 
 impl RowEncoder {
     fn new(kind: EncKind, columns: &[Column], hidden: &[bool], keys: Vec<(Vec<u8>, usize)>) -> RowEncoder {
+        let int_cells = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let shown = match kind {
+                    EncKind::Jsonl | EncKind::Json => keys.iter().any(|k| k.1 == i),
+                    EncKind::Null => false,
+                    _ => !hidden[i],
+                };
+                match (kind, c.ty) {
+                    _ if !shown => IntCell::Hidden,
+                    (EncKind::Quick | EncKind::Csv, ColType::Hex) => IntCell::Hex,
+                    (EncKind::Quick | EncKind::Csv, ColType::Int) => IntCell::Dec,
+                    (EncKind::Pretty, ColType::Hex) => IntCell::PrettyHex,
+                    (EncKind::Pretty, ColType::Int) => IntCell::PrettyDec,
+                    (EncKind::Jsonl | EncKind::Json, ty) if !matches!(ty, ColType::Disassembly | ColType::MultiTypeData) => IntCell::Dec,
+                    _ => IntCell::Other,
+                }
+            })
+            .collect();
         RowEncoder {
             kind,
             ncols: columns.len(),
             cols: columns.iter().enumerate().filter(|(i, _)| !hidden[*i]).map(|(i, c)| (i, c.ty)).collect(),
             keys,
             types: columns.iter().map(|c| c.ty).collect(),
+            int_cells,
+        }
+    }
+
+    /// How [`RowEncoder::cell_u64`] writes column `col`, when it is plain text: `Some(true)` =
+    /// `0x` + hex ([`crate::renderers::pyfmt::write_0x_hex_u64`]), `Some(false)` = decimal
+    /// ([`crate::renderers::pyfmt::write_u64`]); None = anything else (use `cell_u64`).
+    pub fn u64_cell_text(&self, col: usize) -> Option<bool> {
+        match self.int_cells[col] {
+            IntCell::Hex => Some(true),
+            IntCell::Dec => Some(false),
+            _ => None,
+        }
+    }
+
+    /// [`RowEncoder::cell`] of `Value::Int(v)`, without building the value (hot template loops).
+    #[inline]
+    pub fn cell_u64(&self, out: &mut Vec<u8>, col: usize, v: u64) {
+        match self.int_cells[col] {
+            IntCell::Hidden => {}
+            IntCell::Hex => push_0x_hex_u64(out, v),
+            IntCell::Dec => push_u64(out, v),
+            IntCell::PrettyHex | IntCell::PrettyDec => {
+                let hdr = out.len();
+                out.extend_from_slice(&[0u8; 8]);
+                let st = out.len();
+                if self.int_cells[col] == IntCell::PrettyHex {
+                    push_0x_hex_u64(out, v);
+                } else {
+                    push_u64(out, v);
+                }
+                let len = (out.len() - st) as u32;
+                out[hdr..hdr + 4].copy_from_slice(&len.to_le_bytes());
+                out[hdr + 4..hdr + 8].copy_from_slice(&len.to_le_bytes());
+            }
+            IntCell::Other => self.push_cell(out, col, self.types[col], &Value::Int(v as i128)),
         }
     }
 
@@ -557,51 +657,136 @@ impl RowEncoder {
     }
 
     /// Append one depth-0 row. `values.len()` must be the number of columns.
+    #[inline]
     pub fn row(&self, out: &mut Vec<u8>, values: &[Value]) {
+        self.encode(out, 0, values)
+    }
+
+    /// Whether [`RowEncoder::row_at`] is available: quick / csv / pretty / none (json and jsonl
+    /// nest child rows inside their parents).
+    pub fn supports_depth(&self) -> bool {
+        !matches!(self.kind, EncKind::Jsonl | EncKind::Json)
+    }
+
+    /// Append one row at tree depth `depth` (see [`RowSink::rows_encoded_at`]: the depths of a
+    /// block must be valid without clamping, each at most one more than the previous row's).
+    /// Only when [`RowEncoder::supports_depth`].
+    #[inline]
+    pub fn row_at(&self, out: &mut Vec<u8>, depth: usize, values: &[Value]) {
+        assert!(depth == 0 || self.supports_depth(), "RowEncoder::row_at: json rows can't be encoded below the top level");
+        self.encode(out, depth, values)
+    }
+
+    #[inline]
+    fn encode(&self, out: &mut Vec<u8>, depth: usize, values: &[Value]) {
+        self.encode_marked(out, depth, values, usize::MAX);
+    }
+
+    /// One visible cell of column `i` in this renderer's row format.
+    #[inline]
+    fn push_cell(&self, out: &mut Vec<u8>, i: usize, ty: ColType, v: &Value) {
+        match self.kind {
+            EncKind::Quick => render_cell(out, ty, v, false),
+            EncKind::Csv => {
+                let st = out.len();
+                render_cell(out, ty, v, false);
+                if !plain_cell(v) {
+                    csv_fix_field(out, st);
+                }
+            }
+            EncKind::Jsonl | EncKind::Json => write_json_cell(out, self.types[i], v, &mut Vec::new()),
+            EncKind::Pretty => {
+                // u32 length, u32 width (| SLOW), bytes
+                let hdr = out.len();
+                out.extend_from_slice(&[0u8; 8]);
+                let st = out.len();
+                render_cell(out, ty, v, false);
+                let len = (out.len() - st) as u32;
+                let w = if plain_cell(v) { len } else { pretty_width(&out[st..]) };
+                out[hdr..hdr + 4].copy_from_slice(&len.to_le_bytes());
+                out[hdr + 4..hdr + 8].copy_from_slice(&w.to_le_bytes());
+            }
+            EncKind::Null => {}
+        }
+    }
+
+    /// `encode`, returning where column `mark`'s cell went in `out` (an empty span at the end
+    /// when that column is not shown).
+    fn encode_marked(&self, out: &mut Vec<u8>, depth: usize, values: &[Value], mark: usize) -> (usize, usize) {
         assert_eq!(values.len(), self.ncols, "RowEncoder::row: wrong number of values");
+        let mut span = None;
         match self.kind {
             EncKind::Quick => {
                 out.push(b'\n');
+                push_tree_prefix(out, depth);
                 for (k, &(i, ty)) in self.cols.iter().enumerate() {
                     if k > 0 {
                         out.push(b'\t');
                     }
-                    render_cell(out, ty, &values[i], false);
+                    let st = out.len();
+                    self.push_cell(out, i, ty, &values[i]);
+                    if i == mark {
+                        span = Some((st, out.len()));
+                    }
                 }
             }
             EncKind::Csv => {
-                out.push(b'0');
+                push_u64(out, depth as u64);
                 for &(i, ty) in &self.cols {
                     out.push(b',');
                     let st = out.len();
-                    render_cell(out, ty, &values[i], false);
-                    csv_fix_field(out, st);
+                    self.push_cell(out, i, ty, &values[i]);
+                    if i == mark {
+                        span = Some((st, out.len()));
+                    }
                 }
                 out.push(b'\n');
             }
             EncKind::Jsonl => {
-                push_json_node(out, &self.keys, &self.types, values, 1, true, true, &mut Vec::new());
+                push_json_node(out, &self.keys, &self.types, values, 1, true, true, &mut Vec::new(), mark, &mut span);
                 out.push(b'\n');
             }
             EncKind::Json => {
                 out.push(b',');
                 push_newline_indent(out, 1);
-                push_json_node(out, &self.keys, &self.types, values, 1, false, true, &mut Vec::new());
+                push_json_node(out, &self.keys, &self.types, values, 1, false, true, &mut Vec::new(), mark, &mut span);
             }
             EncKind::Pretty => {
-                // per visible cell: u32 length, u32 width (| SLOW), bytes
+                // u32 depth, then the cells
+                out.extend_from_slice(&(depth as u32).to_le_bytes());
                 for &(i, ty) in &self.cols {
-                    let hdr = out.len();
-                    out.extend_from_slice(&[0u8; 8]);
                     let st = out.len();
-                    render_cell(out, ty, &values[i], false);
-                    let len = (out.len() - st) as u32;
-                    let w = pretty_width(&out[st..]);
-                    out[hdr..hdr + 4].copy_from_slice(&len.to_le_bytes());
-                    out[hdr + 4..hdr + 8].copy_from_slice(&w.to_le_bytes());
+                    self.push_cell(out, i, ty, &values[i]);
+                    if i == mark {
+                        span = Some((st, out.len()));
+                    }
                 }
             }
             EncKind::Null => {}
+        }
+        span.unwrap_or((out.len(), out.len()))
+    }
+
+    /// A template for depth-0 rows that differ only in column `col`: `prefix` + the
+    /// [`RowEncoder::cell`] of that column + `suffix` is exactly [`RowEncoder::row`] (appends
+    /// to both buffers; `values[col]` is a placeholder).
+    pub fn row_template(&self, values: &[Value], col: usize, prefix: &mut Vec<u8>, suffix: &mut Vec<u8>) {
+        let mut buf = Vec::new();
+        let (a, b) = self.encode_marked(&mut buf, 0, values, col);
+        prefix.extend_from_slice(&buf[..a]);
+        suffix.extend_from_slice(&buf[b..]);
+    }
+
+    /// The cell of column `col` as it appears inside this encoder's rows (the gap of a
+    /// [`RowEncoder::row_template`]; nothing for a hidden column).
+    #[inline]
+    pub fn cell(&self, out: &mut Vec<u8>, col: usize, v: &Value) {
+        let shown = match self.kind {
+            EncKind::Jsonl | EncKind::Json => self.keys.iter().any(|k| k.1 == col),
+            _ => self.cols.iter().any(|c| c.0 == col),
+        };
+        if shown {
+            self.push_cell(out, col, self.types[col], v);
         }
     }
 }
@@ -616,10 +801,10 @@ impl<'a> Base<'a> {
         Some(RowEncoder::new(kind, &self.columns, &self.hidden, keys))
     }
 
-    /// Streaming renderers: append pre-formatted depth-0 rows. Big blocks go straight to the
-    /// output after whatever is buffered (no copy).
-    fn append_encoded(&mut self, block: &[u8], nrows: usize) -> Result<()> {
-        self.encoded_rows(nrows);
+    /// Streaming renderers: append pre-formatted rows (the last one at `last_depth`). Big
+    /// blocks go straight to the output after whatever is buffered (no copy).
+    fn append_encoded(&mut self, block: &[u8], nrows: usize, last_depth: usize) -> Result<()> {
+        self.encoded_rows(nrows, last_depth);
         if block.len() >= FLUSH_AT {
             self.flush_buf()?;
             self.flushed = true;
@@ -630,13 +815,19 @@ impl<'a> Base<'a> {
         self.maybe_flush()
     }
 
-    /// Bookkeeping for `nrows` encoded depth-0 rows.
+    /// Bookkeeping for `nrows` encoded rows, the last one at `last_depth`.
     #[inline]
-    fn encoded_rows(&mut self, nrows: usize) {
+    fn encoded_rows(&mut self, nrows: usize, last_depth: usize) {
         if nrows > 0 {
-            self.depth_len = 1;
+            self.depth_len = last_depth + 1;
             self.rows += nrows;
         }
+    }
+
+    /// Whether a block whose first row is at `first_depth` needs no clamping.
+    #[inline]
+    fn depth_fits(&self, nrows: usize, first_depth: usize) -> bool {
+        nrows == 0 || first_depth <= self.depth_len
     }
 }
 
@@ -717,7 +908,15 @@ impl RowSink for Quick<'_> {
     }
 
     fn rows_encoded(&mut self, block: &[u8], nrows: usize) -> Result<()> {
-        self.b.append_encoded(block, nrows)
+        self.b.append_encoded(block, nrows, 0)
+    }
+
+    fn rows_encoded_at(&mut self, block: &[u8], nrows: usize, first_depth: usize, last_depth: usize) -> Result<bool> {
+        if !self.b.depth_fits(nrows, first_depth) {
+            return Ok(false);
+        }
+        self.b.append_encoded(block, nrows, last_depth)?;
+        Ok(true)
     }
 }
 
@@ -841,7 +1040,9 @@ impl RowSink for Csv<'_> {
                 b.buf.push(b',');
                 let st = b.buf.len();
                 render_cell(&mut b.buf, b.columns[i].ty, v, false);
-                csv_fix_field(&mut b.buf, st);
+                if !plain_cell(v) {
+                    csv_fix_field(&mut b.buf, st);
+                }
             }
         }
         self.b.buf.push(b'\n');
@@ -854,7 +1055,15 @@ impl RowSink for Csv<'_> {
     }
 
     fn rows_encoded(&mut self, block: &[u8], nrows: usize) -> Result<()> {
-        self.b.append_encoded(block, nrows)
+        self.b.append_encoded(block, nrows, 0)
+    }
+
+    fn rows_encoded_at(&mut self, block: &[u8], nrows: usize, first_depth: usize, last_depth: usize) -> Result<bool> {
+        if !self.b.depth_fits(nrows, first_depth) {
+            return Ok(false);
+        }
+        self.b.append_encoded(block, nrows, last_depth)?;
+        Ok(true)
     }
 }
 
@@ -1002,7 +1211,7 @@ impl RowSink for Pretty<'_> {
                 }
                 let st = self.arena.len();
                 render_cell(&mut self.arena, self.b.columns[i].ty, v, false);
-                let w = pretty_width(&self.arena[st..]);
+                let w = if plain_cell(v) { (self.arena.len() - st) as u32 } else { pretty_width(&self.arena[st..]) };
                 self.widths[i] = self.widths[i].max((w & !SLOW) as usize);
                 self.cells.push(((self.arena.len() - st) as u32, w));
             }
@@ -1017,10 +1226,21 @@ impl RowSink for Pretty<'_> {
     }
 
     fn rows_encoded(&mut self, block: &[u8], nrows: usize) -> Result<()> {
+        self.rows_encoded_at(block, nrows, 0, 0).map(|_| ())
+    }
+
+    fn rows_encoded_at(&mut self, block: &[u8], nrows: usize, first_depth: usize, last_depth: usize) -> Result<bool> {
+        if !self.b.depth_fits(nrows, first_depth) {
+            return Ok(false);
+        }
         let visible = self.visible();
         let mut p = 0usize;
         let u32_at = |p: usize| u32::from_le_bytes(block[p..p + 4].try_into().unwrap());
         for _ in 0..nrows {
+            let d = u32_at(p) + 1; // path_depth
+            p += 4;
+            self.tree_width = self.tree_width.max(d as usize);
+            self.depths.push(d);
             for &i in &visible {
                 let (len, w) = (u32_at(p), u32_at(p + 4));
                 p += 8;
@@ -1029,13 +1249,9 @@ impl RowSink for Pretty<'_> {
                 self.widths[i] = self.widths[i].max((w & !SLOW) as usize);
                 self.cells.push((len, w));
             }
-            self.depths.push(1);
         }
-        if nrows > 0 {
-            self.tree_width = self.tree_width.max(1);
-        }
-        self.b.encoded_rows(nrows);
-        Ok(())
+        self.b.encoded_rows(nrows, last_depth);
+        Ok(true)
     }
 }
 
@@ -1143,6 +1359,8 @@ struct Json<'a> {
     scratch: Vec<u8>,
     /// json: the finished top-level nodes in order, each as `,\n  {...}`
     done: Vec<u8>,
+    /// node buffers to reuse
+    spare: Vec<Vec<u8>>,
 }
 
 /// A row's JSON object (`json.dumps(..., sort_keys=True)` layout, `indent=2` unless `lines`)
@@ -1158,6 +1376,8 @@ fn push_json_node(
     lines: bool,
     leaf: bool,
     scratch: &mut Vec<u8>,
+    mark: usize,
+    span: &mut Option<(usize, usize)>,
 ) -> usize {
     let mut split = 0;
     out.push(b'{');
@@ -1180,7 +1400,11 @@ fn push_json_node(
                 out.extend_from_slice(b"[]");
             }
         } else {
+            let st = out.len();
             write_json_cell(out, types[*col], &values[*col], scratch);
+            if *col == mark {
+                *span = Some((st, out.len()));
+            }
         }
     }
     if !lines {
@@ -1229,6 +1453,7 @@ impl<'a> Json<'a> {
             top_base: 0,
             scratch: Vec::new(),
             done: Vec::new(),
+            spare: Vec::new(),
         }
     }
 
@@ -1249,8 +1474,8 @@ impl<'a> Json<'a> {
     }
 
     fn build_node(&mut self, values: &[Value], level: usize) -> JNode {
-        let mut data = Vec::with_capacity(64 + 24 * self.keys.len());
-        let split = push_json_node(&mut data, &self.keys, &self.types, values, level, self.lines, false, &mut self.scratch);
+        let mut data = self.spare.pop().unwrap_or_else(|| Vec::with_capacity(64 + 24 * self.keys.len()));
+        let split = push_json_node(&mut data, &self.keys, &self.types, values, level, self.lines, false, &mut self.scratch, usize::MAX, &mut None);
         JNode { data, split, level, children: Vec::new() }
     }
 
@@ -1267,6 +1492,12 @@ impl<'a> Json<'a> {
                 self.done.push(b',');
                 push_newline_indent(&mut self.done, 1);
                 write_json_node(&mut self.done, &node, false);
+            }
+            // reuse the buffer of a finished leaf node (the common case) for the next row
+            if node.children.is_empty() && self.spare.len() < 64 {
+                let mut d = node.data;
+                d.clear();
+                self.spare.push(d);
             }
         }
         if self.lines { self.b.maybe_flush() } else { Ok(()) }
@@ -1359,12 +1590,15 @@ impl RowSink for Json<'_> {
         self.close_to(0);
         self.emit_ready()?;
         if self.lines {
-            return self.b.append_encoded(block, nrows);
+            return self.b.append_encoded(block, nrows, 0);
         }
         self.done.extend_from_slice(block);
-        self.b.encoded_rows(nrows);
+        self.b.encoded_rows(nrows, 0);
         Ok(())
     }
+
+    // rows_encoded_at: json nests child rows in their parents, which a block can't (its rows
+    // would be closed before the next row arrives): the default (not taken) applies
 }
 
 impl TextRenderer for Json<'_> {
@@ -1430,6 +1664,9 @@ impl RowSink for NoneRenderer<'_> {
     }
     fn rows_encoded(&mut self, _block: &[u8], _nrows: usize) -> Result<()> {
         Ok(())
+    }
+    fn rows_encoded_at(&mut self, _block: &[u8], _nrows: usize, _first_depth: usize, _last_depth: usize) -> Result<bool> {
+        Ok(true)
     }
 }
 

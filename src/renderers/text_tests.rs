@@ -212,6 +212,100 @@ fn encoded_rows_match_row_path() {
             }
         }
     }
+    // tree rows (quick / csv / pretty / none): blocks encoded with row_at; json: only depth 0
+    let depths: Vec<usize> = {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut d = 0usize;
+        (0..600)
+            .map(|k| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                // mostly valid steps, sometimes a jump python clamps
+                d = match x % 7 {
+                    0 if k > 0 => d + 1,
+                    1 => d.saturating_sub(1),
+                    2 => 0,
+                    3 => d + 3,
+                    _ => d,
+                };
+                d
+            })
+            .collect()
+    };
+    let rows: Vec<Vec<Value>> = (0..depths.len()).map(|i| base[i % base.len()].clone()).collect();
+    for name in ["quick", "csv", "pretty", "none", "jsonl", "json"] {
+        let plain = {
+            let mut out: Vec<u8> = Vec::new();
+            {
+                let mut r = create(name, &mut out, RenderOptions::default()).unwrap();
+                r.begin(cols.clone()).unwrap();
+                for (v, &d) in rows.iter().zip(&depths) {
+                    r.row(d, v.clone()).unwrap();
+                }
+                r.finish().unwrap();
+            }
+            out
+        };
+        for bs in [1usize, 7, 64, 600] {
+            let mut out: Vec<u8> = Vec::new();
+            {
+                let mut r = create(name, &mut out, RenderOptions::default()).unwrap();
+                r.begin(cols.clone()).unwrap();
+                let enc = r.encoder().unwrap();
+                let mut s = 0;
+                while s < rows.len() {
+                    let e = (s + bs).min(rows.len());
+                    // a block is only encodable if its depths are valid without clamping
+                    let valid = (s + 1..e).all(|i| depths[i] <= depths[i - 1] + 1);
+                    let mut took = false;
+                    if valid && (enc.supports_depth() || depths[s..e].iter().all(|&d| d == 0)) {
+                        let mut blk = Vec::new();
+                        for i in s..e {
+                            enc.row_at(&mut blk, depths[i], &rows[i]);
+                        }
+                        took = r.rows_encoded_at(&blk, e - s, depths[s], depths[e - 1]).unwrap();
+                    }
+                    if !took {
+                        for i in s..e {
+                            r.row_ref(depths[i], &rows[i]).unwrap();
+                        }
+                    }
+                    s = e;
+                }
+                r.finish().unwrap();
+            }
+            assert!(out == plain, "{name} tree rows, blocks of {bs}");
+        }
+    }
+    // row templates: prefix + cell + suffix == row, for every column as the varying one
+    for name in ["quick", "csv", "jsonl", "json", "pretty", "none"] {
+        for hide in [None, Some(vec!["name".to_string(), "off".to_string(), "dump".to_string()])] {
+            let mut sink: Vec<u8> = Vec::new();
+            let mut r = create(name, &mut sink, RenderOptions { filters: Vec::new(), hide_columns: hide.clone(), flush_rows: false }).unwrap();
+            r.begin(cols.clone()).unwrap();
+            let enc = r.encoder().unwrap();
+            for v in &base {
+                let mut want = Vec::new();
+                enc.row(&mut want, v);
+                for c in 0..cols.len() {
+                    let mut placeholder = v.clone();
+                    placeholder[c] = Value::Int(0);
+                    let (mut pre, mut suf) = (Vec::new(), Vec::new());
+                    enc.row_template(&placeholder, c, &mut pre, &mut suf);
+                    enc.cell(&mut pre, c, &v[c]);
+                    pre.extend_from_slice(&suf);
+                    assert!(pre == want, "{name} hide={hide:?} template column {c}");
+                    for x in [0u64, 9, 10, 0xfff, 0x1000, 123456789, u64::MAX] {
+                        let (mut a, mut b) = (Vec::new(), Vec::new());
+                        enc.cell(&mut a, c, &Value::Int(x as i128));
+                        enc.cell_u64(&mut b, c, x);
+                        assert!(a == b, "{name} hide={hide:?} cell_u64 column {c} value {x}");
+                    }
+                }
+            }
+        }
+    }
     // an active filter disables the encoder
     let mut out: Vec<u8> = Vec::new();
     let mut r = create("quick", &mut out, RenderOptions { filters: vec!["str,x".into()], hide_columns: None, flush_rows: false }).unwrap();

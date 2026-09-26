@@ -160,6 +160,15 @@ pub trait RowSink {
     fn rows_encoded(&mut self, _block: &[u8], _nrows: usize) -> Result<()> {
         Err(crate::error::Error::msg("rows_encoded: this sink has no row encoder"))
     }
+
+    /// [`RowSink::rows_encoded`] for rows encoded with `RowEncoder::row_at` (tree depths, the
+    /// first row at `first_depth`, the last at `last_depth`; within the block each row at most
+    /// one level below the previous one). Returns `false` and appends nothing when the block
+    /// can't be taken as is (its first row would be clamped to a shallower depth, or json
+    /// nesting): the caller then emits those rows one by one.
+    fn rows_encoded_at(&mut self, _block: &[u8], _nrows: usize, _first_depth: usize, _last_depth: usize) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// In-memory sink, handy for tests and for plugins that post-process another plugin's rows.
