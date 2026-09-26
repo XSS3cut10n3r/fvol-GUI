@@ -13,6 +13,7 @@ pub mod hivelist;
 pub mod hivescan;
 pub mod lsadump;
 pub mod printkey;
+pub mod scheduled_tasks;
 pub mod userassist;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
@@ -30,4 +31,6 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&userassist::UserAssist);
     v.push(&amcache::Amcache);
     v.push(&amcache::AmcacheDeprecated);
+    v.push(&scheduled_tasks::ScheduledTasks);
+    v.push(&scheduled_tasks::ScheduledTasksDeprecated);
 }
