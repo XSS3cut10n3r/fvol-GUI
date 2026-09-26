@@ -63,12 +63,13 @@ struct Pat {
 
 impl Pat {
     fn new(string: u32, sub: u32, off: usize, pat: &[u8], fold: &[u8], w: usize, wlen: usize) -> Pat {
-        let (mut wval, mut wfold, mut wmask) = (0, 0, 0);
-        if wlen == 4 {
-            let le = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            wval = le(&pat[w..w + 4]);
-            wfold = le(&fold[w..w + 4]);
-            wmask = u32::MAX;
+        let (mut wval, mut wfold, mut wmask) = (0u32, 0u32, 0u32);
+        if (1..=4).contains(&wlen) {
+            for j in 0..wlen {
+                wval |= (pat[w + j] as u32) << (8 * j);
+                wfold |= (fold[w + j] as u32) << (8 * j);
+            }
+            wmask = u32::MAX >> (32 - 8 * wlen);
         }
         Pat {
             string,
@@ -111,7 +112,6 @@ struct ReHit {
     end: usize,
     /// `u32::MAX - atom length`: longer atoms first at the same end.
     rlen: u32,
-    string: u32,
     /// `u32::MAX - atom index`: identical atoms in descending index order.
     ratom: u32,
     pos: usize,
@@ -127,7 +127,8 @@ pub struct Scratch {
     dbuf: Vec<u8>,
     tmp: Vec<Match>,
     re_states: Vec<Option<ReState>>,
-    re_hits: Vec<ReHit>,
+    /// Pending hex/regex hits per hex/regex string (`Matcher::re_slot`).
+    re_hits: Vec<Vec<ReHit>>,
     /// Teddy bucket masks (buckets of disabled strings switched off).
     live_raw: u8,
     live_diff: u8,
@@ -141,6 +142,14 @@ impl Scratch {
 }
 
 static MATCHER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Benchmark diagnostics: time spent in `ReString::verify`, and a knob to skip it.
+#[cfg(test)]
+pub(crate) static VERIFY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub(crate) static SKIP_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static TIME_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Benchmark knob: materialize the difference stream instead of fusing it into Teddy.
 #[cfg(test)]
@@ -175,6 +184,9 @@ pub struct Matcher {
     /// Hex/regex atoms with no bytes: verify at every offset (string, atom), in
     /// libyara order (descending atom index within a string).
     every: Vec<(u32, u32)>,
+    /// Hex/regex strings: `re_slot[string]` = index into `re_strings` / scratch lists.
+    re_slot: Vec<u32>,
+    re_strings: Vec<u32>,
     /// Any hex/regex strings?
     has_re: bool,
     /// One-byte xor strings with many keys: resolve at every offset.
@@ -389,6 +401,8 @@ impl Matcher {
             dpats: Vec::new(),
             diff: Engine::None,
             every: Vec::new(),
+            re_slot: Vec::new(),
+            re_strings: Vec::new(),
             has_re: false,
             every_text: Vec::new(),
             max_span: 1,
@@ -444,6 +458,9 @@ impl Matcher {
                     }
                     let rs = build_re(def).map_err(|e| format!("{}: {e}", def.id))?;
                     m.has_re = true;
+                    m.re_slot.resize(si as usize, u32::MAX);
+                    m.re_slot.push(m.re_strings.len() as u32);
+                    m.re_strings.push(si);
                     for (k, a) in rs.atoms().iter().enumerate().rev() {
                         if a.bytes.is_empty() {
                             m.every.push((si, k as u32));
@@ -493,6 +510,7 @@ impl Matcher {
         let mut verified = 0usize;
         let mut winok = 0usize;
         let mut per = vec![0usize; self.pats.len()];
+        let mut per_string = vec![0usize; self.kinds.len()];
         self.raw.run(data, 0, data.len(), &mut st, 0xff, |q, p| {
             raw += 1;
             per[p as usize] += 1;
@@ -502,6 +520,7 @@ impl Matcher {
                 let (a, e) = (pat.off as usize, (pat.off + pat.len) as usize);
                 if eq_at(data, s, &self.bytes[a..e], &self.folds[a..e], 0) {
                     verified += 1;
+                    per_string[pat.string as usize] += 1;
                 }
             }
         });
@@ -517,7 +536,8 @@ impl Matcher {
             })
             .collect();
         format!(
-            "top windows {}\nraw: {} pats, {}, {} candidates, {} window ok, {} verified; diff: {} pats, {}",
+            "atom/variant hits per string {:?}\ntop windows {}\nraw: {} pats, {}, {} candidates, {} window ok, {} verified; diff: {} pats, {}",
+            per_string,
             top.join(" "),
             self.pats.len(),
             kind(&self.raw),
@@ -560,7 +580,10 @@ impl Matcher {
         sc.over.clear();
         sc.over.resize(ns, false);
         sc.any_over = false;
-        sc.re_hits.clear();
+        sc.re_hits.resize_with(self.re_strings.len(), Vec::new);
+        for v in &mut sc.re_hits {
+            v.clear();
+        }
         sc.live_raw = 0xff;
         sc.live_diff = 0xff;
         sc.dead_changed = false;
@@ -694,17 +717,22 @@ impl Matcher {
     #[inline]
     fn on_raw(&self, data: &[u8], q: usize, p: u32, out: &mut [Vec<Match>], sc: &mut Scratch) {
         let Some(pat) = self.pats.get(p as usize) else { return };
-        if !pat.window_ok(data, q) {
-            return;
-        }
         let Some(s) = q.checked_sub(pat.w as usize) else { return };
         let si = pat.string as usize;
         if sc.disabled[si] {
             return;
         }
-        let (a, e) = (pat.off as usize, (pat.off + pat.len) as usize);
-        if !eq_at(data, s, &self.bytes[a..e], &self.folds[a..e], 0) {
-            return;
+        // Every engine reports exact window matches, so a pattern that is its own
+        // window only needs the bounds check.
+        if pat.wlen == pat.len && pat.wmask == u32::MAX >> (32 - 8 * pat.wlen.min(4)) {
+            if s + pat.len as usize > data.len() {
+                return;
+            }
+        } else {
+            let (a, e) = (pat.off as usize, (pat.off + pat.len) as usize);
+            if !eq_at(data, s, &self.bytes[a..e], &self.folds[a..e], 0) {
+                return;
+            }
         }
         match &self.kinds[si] {
             Kind::Text(ts) => {
@@ -715,13 +743,11 @@ impl Matcher {
                     self.add_text(si, m, out, sc);
                 }
             }
-            Kind::Re(_) => sc.re_hits.push(ReHit {
-                end: s + pat.len as usize,
-                rlen: u32::MAX - pat.len,
-                string: pat.string,
-                ratom: u32::MAX - pat.sub,
-                pos: s,
-            }),
+            Kind::Re(_) => {
+                if let Some(v) = self.re_slot.get(si).and_then(|&k| sc.re_hits.get_mut(k as usize)) {
+                    v.push(ReHit { end: s + pat.len as usize, rlen: u32::MAX - pat.len, ratom: u32::MAX - pat.sub, pos: s });
+                }
+            }
         }
     }
 
@@ -751,52 +777,92 @@ impl Matcher {
 
     /// Processes the pending hex/regex hits that end at or before `b1` (all when
     /// `last`) in libyara order, interleaved with the zero-length atoms at every
-    /// position of `[b0, b1)`. Hits of later blocks always end after `b1`.
+    /// position of `[b0, b1)`. Hits of later blocks always end after `b1`. Strings are
+    /// independent, so each string's hits are ordered and replayed on their own
+    /// (usually already in order: no sort).
     fn flush_re(&self, data: &[u8], b0: usize, b1: usize, last: bool, out: &mut [Vec<Match>], sc: &mut Scratch) {
-        let mut hits = std::mem::take(&mut sc.re_hits);
-        hits.sort_unstable();
-        let ready = if last { hits.len() } else { hits.partition_point(|h| h.end <= b1) };
-        let mut i = 0;
-        if !self.every.is_empty() {
-            for p in b0..b1 {
-                while i < ready && hits[i].end <= p {
-                    let h = hits[i];
-                    self.re_hit(data, h.string as usize, (u32::MAX - h.ratom) as usize, h.pos, out, sc);
-                    i += 1;
-                }
-                for &(si, k) in &self.every {
-                    if !sc.disabled[si as usize] {
-                        self.re_hit(data, si as usize, k as usize, p, out, sc);
+        for (slot, &si) in self.re_strings.iter().enumerate() {
+            let si = si as usize;
+            let every: Vec<u32> = self.every.iter().filter(|e| e.0 as usize == si).map(|e| e.1).collect();
+            if sc.re_hits[slot].is_empty() && every.is_empty() {
+                continue;
+            }
+            let (Some(Kind::Re(rs)), Some(Some(mut st))) = (self.kinds.get(si), sc.re_states.get_mut(si).map(Option::take))
+            else {
+                continue;
+            };
+            let mut hits = std::mem::take(&mut sc.re_hits[slot]);
+            if !hits.is_sorted() {
+                hits.sort_unstable();
+            }
+            let ready = if last { hits.len() } else { hits.partition_point(|h| h.end <= b1) };
+            let mut tmp = std::mem::take(&mut sc.tmp);
+            let mut i = 0;
+            if !every.is_empty() {
+                for p in b0..b1 {
+                    while i < ready && hits[i].end <= p {
+                        let h = hits[i];
+                        self.re_hit(data, si, rs, &mut st, (u32::MAX - h.ratom) as usize, h.pos, &mut tmp, out, sc);
+                        i += 1;
+                    }
+                    for &k in &every {
+                        self.re_hit(data, si, rs, &mut st, k as usize, p, &mut tmp, out, sc);
                     }
                 }
             }
+            while i < ready {
+                let h = hits[i];
+                self.re_hit(data, si, rs, &mut st, (u32::MAX - h.ratom) as usize, h.pos, &mut tmp, out, sc);
+                i += 1;
+            }
+            hits.drain(..ready);
+            sc.re_hits[slot] = hits;
+            sc.tmp = tmp;
+            sc.re_states[si] = Some(st);
         }
-        while i < ready {
-            let h = hits[i];
-            self.re_hit(data, h.string as usize, (u32::MAX - h.ratom) as usize, h.pos, out, sc);
-            i += 1;
-        }
-        hits.drain(..ready);
-        sc.re_hits = hits;
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn re_hit(&self, data: &[u8], si: usize, atom: usize, pos: usize, out: &mut [Vec<Match>], sc: &mut Scratch) {
+    fn re_hit(
+        &self,
+        data: &[u8],
+        si: usize,
+        rs: &ReString,
+        st: &mut ReState,
+        atom: usize,
+        pos: usize,
+        tmp: &mut Vec<Match>,
+        out: &mut [Vec<Match>],
+        sc: &mut Scratch,
+    ) {
         if sc.disabled[si] {
             return;
         }
-        let (Some(Kind::Re(rs)), Some(Some(st))) = (self.kinds.get(si), sc.re_states.get_mut(si)) else {
-            return;
-        };
-        let mut tmp = std::mem::take(&mut sc.tmp);
         tmp.clear();
-        rs.verify(st, data, atom, pos, &mut tmp);
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            if SKIP_VERIFY.load(Relaxed) {
+            } else if TIME_VERIFY.load(Relaxed) {
+                let t0 = std::time::Instant::now();
+                rs.verify(st, data, atom, pos, tmp);
+                VERIFY_NS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+            } else {
+                rs.verify(st, data, atom, pos, tmp);
+            }
+        }
+        #[cfg(not(test))]
+        rs.verify(st, data, atom, pos, tmp);
+        if tmp.is_empty() {
+            return;
+        }
         let greedy = rs.greedy();
+        let v = &mut out[si];
         for m in tmp.iter() {
             if m.offset >= data.len() || m.len > data.len() - m.offset {
                 continue;
             }
-            let v = &mut out[si];
             // libyara: a full list disables the string (even for a duplicate offset).
             if v.len() >= MAX_STRING_MATCHES {
                 sc.disabled[si] = true;
@@ -805,6 +871,5 @@ impl Matcher {
             }
             insert_match(v, *m, greedy);
         }
-        sc.tmp = tmp;
     }
 }

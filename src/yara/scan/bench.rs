@@ -120,6 +120,29 @@ pub(crate) fn bench_rule(name: &str) -> Vec<(Vec<u8>, Modifiers)> {
                 })
                 .collect();
         }
+        "hexre" | "hexonly" | "reonly" => {
+            let hex: Vec<(&[u8], Modifiers)> = vec![
+                (b"\x01HEX:{ 4D 5A 90 00 03 00 00 00 04 00 }", m()),
+                (b"\x01HEX:{ 50 45 00 00 ( 4C 01 | 64 86 ) }", m()),
+                (b"\x01HEX:{ 54 68 69 73 20 70 72 6F 67 72 61 6D [4-12] 44 4F 53 }", m()),
+                (b"\x01HEX:{ 4C 8B D1 B8 ?? ?? 00 00 }", m()),
+                (b"\x01HEX:{ 48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC ?? }", m()),
+                (b"\x01HEX:{ 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 8? C0 }", m()),
+                (b"\x01HEX:{ 48 8B 05 ?? ?? ?? ?? [2-6] FF 15 }", m()),
+                (b"\x01HEX:{ FF 15 ?? ?? ?? ?? ( 85 C0 | 48 85 C0 | 3B C3 ) 7? }", m()),
+            ];
+            let re: Vec<(&[u8], Modifiers)> = vec![
+                (b"\x01RE:https?://[a-zA-Z0-9./?=_%:-]{4,64}", m()),
+                (b"\x01RE:\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b", m()),
+                (b"\x01RE:[a-z0-9_]{3,16}\\.(exe|dll|sys)", Modifiers { nocase: true, ..m() }),
+                (b"\x01RE:\\\\Device\\\\HarddiskVolume\\d{1,2}", m()),
+            ];
+            match name {
+                "hexonly" => hex,
+                "reonly" => re,
+                _ => hex.into_iter().chain(re).collect(),
+            }
+        }
         "patho" => vec![
             (b"\x00\x00\x00\x00" as &[u8], m()),
             (b"\xff\xff", Modifiers { ascii: true, wide: true, ..m() }),
@@ -269,6 +292,12 @@ fn yara_scan_bench() {
     let mut best = f64::MAX;
     let mut counts = vec![0usize; defs.len()];
     let ab = std::env::var("RSVOL_YARA_AB").is_ok();
+    if std::env::var("RSVOL_YARA_SKIP_VERIFY").is_ok() {
+        super::matcher::SKIP_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var("RSVOL_YARA_TIME_VERIFY").is_ok() {
+        super::matcher::TIME_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut best_ab = [f64::MAX; 2];
     for pass in 0..if ab { 12 } else { 6 } {
         if ab {
@@ -291,6 +320,10 @@ fn yara_scan_bench() {
             p += chunk;
         }
         let wall = t.elapsed().as_secs_f64();
+        let vns = super::matcher::VERIFY_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if vns > 0 {
+            eprintln!("  (ReString::verify: {:.3} s)", vns as f64 * 1e-9);
+        }
         // Thread CPU time: robust against being descheduled on a busy machine.
         let dt = thread_cpu() - c0;
         eprintln!("pass {pass}: cpu {:.3} s (wall {:.3})  {:.0} MB/s", dt, wall, data.len() as f64 / dt / 1e6);
