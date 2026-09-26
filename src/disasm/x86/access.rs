@@ -657,6 +657,8 @@ struct Tpl {
     n: u8,
     nrd: u8,
     nwr: u8,
+    /// detail operand i == instruction operand i for all i (the common case)
+    ident: bool,
     src: [u8; detail::MAX_DETAIL_OPS],
     size: [u8; detail::MAX_DETAIL_OPS],
     access: [u8; detail::MAX_DETAIL_OPS],
@@ -669,11 +671,22 @@ const TPL_EMPTY: Tpl = Tpl {
     n: 0,
     nrd: 0,
     nwr: 0,
+    ident: false,
     src: [0; detail::MAX_DETAIL_OPS],
     size: [0; detail::MAX_DETAIL_OPS],
     access: [0; detail::MAX_DETAIL_OPS],
     rd: [Reg::NONE; TPL_REGS],
     wr: [Reg::NONE; TPL_REGS],
+};
+
+const IDENT_SRC: [u8; detail::MAX_DETAIL_OPS] = {
+    let mut a = [0u8; detail::MAX_DETAIL_OPS];
+    let mut i = 0;
+    while i < detail::MAX_DETAIL_OPS {
+        a[i] = i as u8;
+        i += 1;
+    }
+    a
 };
 
 thread_local! {
@@ -824,16 +837,24 @@ fn fill(insn: &Insn, ops: &mut DetailOps, read: &mut RegList, write: &mut RegLis
         if t.key == key {
             let src_ops = &insn.operands;
             let n = t.n as usize;
-            for i in 0..n {
-                let s = t.src[i];
-                let op = match s {
-                    detail::SRC_ST0 => Operand::Reg(Reg(regs::ST0)),
-                    detail::SRC_ONE => Operand::Imm(1),
-                    detail::SRC_KMASK => Operand::Reg(Reg(regs::K0 + (insn.evex & 7))),
-                    k => src_ops[(k as usize).min(super::MAX_OPS - 1)],
-                };
-                ops.ops[i] = DetailOp { op, size: t.size[i], access: t.access[i] };
-                ops.src[i] = s;
+            if t.ident {
+                // detail operand i is instruction operand i: fixed-trip copy, no dispatch
+                for i in 0..super::MAX_OPS {
+                    ops.ops[i] = DetailOp { op: src_ops[i], size: t.size[i], access: t.access[i] };
+                }
+                ops.src = IDENT_SRC;
+            } else {
+                for i in 0..n {
+                    let s = t.src[i];
+                    let op = match s {
+                        detail::SRC_ST0 => Operand::Reg(Reg(regs::ST0)),
+                        detail::SRC_ONE => Operand::Imm(1),
+                        detail::SRC_KMASK => Operand::Reg(Reg(regs::K0 + (insn.evex & 7))),
+                        k => src_ops[(k as usize).min(super::MAX_OPS - 1)],
+                    };
+                    ops.ops[i] = DetailOp { op, size: t.size[i], access: t.access[i] };
+                    ops.src[i] = s;
+                }
             }
             ops.n = t.n;
             read.set_fixed(insn.mode, &t.rd, t.nrd);
@@ -856,6 +877,7 @@ fn fill(insn: &Insn, ops: &mut DetailOps, read: &mut RegList, write: &mut RegLis
             t.size[i] = ops.ops[i].size;
             t.access[i] = ops.ops[i].access;
         }
+        t.ident = (ops.n as usize) <= super::MAX_OPS && (0..ops.n as usize).all(|i| ops.src[i] == i as u8);
         t.nrd = read.len() as u8;
         t.nwr = write.len() as u8;
         t.rd[..read.len()].copy_from_slice(read);
