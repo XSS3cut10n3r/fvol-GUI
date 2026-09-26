@@ -43,7 +43,6 @@
 
 use super::Layer;
 use super::scan::{self, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP, MultiStringScanner, Scanner};
-use crate::util::fxhash::hash_bytes;
 use crate::util::{par, paths};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,6 +110,35 @@ pub const VMCS_REVISION_IDS: [u32; 5] = [4, 14, 15, 16, 18];
 // ---------------------------------------------------------------------------------------------
 // Keys
 // ---------------------------------------------------------------------------------------------
+
+/// 64-bit hash of key material / payloads (file names, checksums): every 8-byte word is fully
+/// mixed (murmur3 `fmix64`) before the next one. NOT FxHash: its multiply only carries a
+/// difference upwards, so two keys differing in the top byte of one word and the low byte of
+/// the next collide easily -- measured on real keys (kernel-address needles straddling a word
+/// boundary). Every step is a bijection of the state, so keys that differ in one word never
+/// collide; the length is mixed in first.
+fn key_hash(b: &[u8]) -> u64 {
+    #[inline(always)]
+    fn fmix(mut h: u64) -> u64 {
+        h ^= h >> 33;
+        h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        h ^= h >> 33;
+        h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        h ^ (h >> 33)
+    }
+    let mut h = fmix(0x9e37_79b9_7f4a_7c15 ^ b.len() as u64);
+    let mut words = b.chunks_exact(8);
+    for w in &mut words {
+        h = fmix(h ^ u64::from_le_bytes(w.try_into().unwrap()));
+    }
+    let rest = words.remainder();
+    if !rest.is_empty() {
+        let mut w = [0u8; 8];
+        w[..rest.len()].copy_from_slice(rest);
+        h = fmix(h ^ u64::from_le_bytes(w));
+    }
+    h
+}
 
 /// Canonical key material builder.
 struct Key(Vec<u8>);
@@ -260,7 +288,7 @@ impl Session {
         img.u64(CACHE_VERSION as u64);
         exe_identity(&mut img);
         file_identity(file, &mut img)?;
-        let dir = root.join(format!("{:016x}", hash_bytes(&img.0)));
+        let dir = root.join(format!("{:016x}", key_hash(&img.0)));
         let mut k = Key(Vec::new());
         k.bytes(b"rsvol-scan");
         k.u64(CACHE_VERSION as u64);
@@ -290,13 +318,25 @@ impl Session {
     }
 
     fn atom_path(&self, key: &[u8]) -> PathBuf {
-        self.dir.join(format!("{:016x}.hits", hash_bytes(key)))
+        self.dir.join(format!("{:016x}.hits", key_hash(key)))
     }
 
     fn load(&self, atom: &Atom) -> Option<Groups> {
         let key = self.atom_key(atom);
-        let buf = std::fs::read(self.atom_path(&key)).ok()?;
-        decode(&buf, atom.kind(), atom.tagged(), &key)
+        let path = self.atom_path(&key);
+        let Ok(buf) = std::fs::read(&path) else {
+            crate::util::trace::note(|| format!("scan cache: no {atom:?} ({})", path.display()));
+            return None;
+        };
+        let g = decode(&buf, atom.kind(), atom.tagged(), &key);
+        if g.is_none() {
+            crate::util::trace::note(|| {
+                let stored = buf.get(HEADER..).unwrap_or(&[]);
+                let diff = key.iter().zip(stored).position(|(a, b)| a != b);
+                format!("scan cache: damaged {atom:?} ({}), key len {} first key difference at {diff:?}", path.display(), key.len())
+            });
+        }
+        g
     }
 
     /// Write the atoms, then keep the cache under its size cap when this created the image
@@ -309,8 +349,11 @@ impl Session {
         }
         for (atom, g) in atoms {
             let key = self.atom_key(atom);
-            if let Some(buf) = encode(atom.kind(), atom.tagged(), &key, g) {
-                let _ = write_atomic(&self.atom_path(&key), &buf);
+            match encode(atom.kind(), atom.tagged(), &key, g) {
+                Some(buf) => {
+                    let _ = write_atomic(&self.atom_path(&key), &buf);
+                }
+                None => crate::util::trace::note(|| format!("scan cache: {atom:?} not stored ({} chunks, {} matches)", g.starts.len(), g.rels.len())),
             }
         }
         if !self.dir_existed {
@@ -421,7 +464,7 @@ fn unzigzag(v: u64) -> i64 {
 }
 
 fn checksum(key: &[u8], payload: &[u8]) -> u64 {
-    hash_bytes(key) ^ hash_bytes(payload).rotate_left(17)
+    key_hash(key) ^ key_hash(payload).rotate_left(17)
 }
 
 /// Serialize `g` (None when too big or malformed).
@@ -1357,6 +1400,32 @@ mod tests {
         v
     }
 
+    /// Keys that differ only in a pattern straddling a word boundary (kernel-address needles:
+    /// FxHash collided on real ones) all get distinct names.
+    #[test]
+    fn key_hash_no_structured_collisions() {
+        let mut key = vec![0u8; 431];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = (i * 37 % 251) as u8;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for p0 in 0..=255u8 {
+            for p1 in 0..=255u8 {
+                key[423] = p0;
+                key[424] = p1;
+                assert!(seen.insert(key_hash(&key)), "collision at {p0} {p1}");
+            }
+        }
+        // the real pair
+        let mut a = key.clone();
+        let mut b = key.clone();
+        a[423..431].copy_from_slice(&[40, 135, 79, 184, 255, 255, 255, 255]);
+        b[423..431].copy_from_slice(&[120, 133, 79, 184, 255, 255, 255, 255]);
+        assert_ne!(key_hash(&a), key_hash(&b));
+        // length matters, zero padding does not alias
+        assert_ne!(key_hash(b"abc"), key_hash(b"abc\0"));
+    }
+
     #[test]
     fn varint_roundtrip() {
         for v in [0u64, 1, 127, 128, 300, 1 << 35, u64::MAX - 1, u64::MAX] {
@@ -1868,6 +1937,19 @@ mod tests {
         let mut all: Vec<&[u8]> = PHYS_LITERALS.to_vec();
         all.extend(POOL_TAGS);
         eprintln!("phys sweep mft+all+pg    {:?}", run_sweep(k.phys, &mft, &all, true));
+    }
+
+    /// Decode a cache file with the key stored in it: `RSVOL_HITS_FILE=f cargo test decode_file -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn decode_file() {
+        let Ok(p) = std::env::var("RSVOL_HITS_FILE") else { return };
+        let buf = std::fs::read(p).unwrap();
+        let klen = u64::from_le_bytes(buf[16..24].try_into().unwrap()) as usize;
+        let kind = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+        let key = buf[HEADER..HEADER + klen].to_vec();
+        let g = decode(&buf, kind, kind == 2, &key);
+        eprintln!("decode: {:?}", g.as_ref().map(|g| (g.starts.len(), g.rels.len())));
     }
 
     /// Occurrence counts of candidate batch patterns:
