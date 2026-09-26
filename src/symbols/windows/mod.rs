@@ -11,6 +11,7 @@
 //! ```
 
 pub mod cache;
+pub mod consoles;
 pub mod ext;
 pub mod gui;
 pub mod kdbg;
