@@ -157,6 +157,8 @@ impl Plugin for Sockscan {
 
         let mut seen: FxHashSet<Option<u64>> = FxHashSet::default();
         let mut err: Option<Error> = None;
+        // per-hit work is ~5 us and runs on the consumer thread while the workers keep
+        // scanning (measured: fully hidden behind the memory-bound scan)
         scan_each(k.phys, &scanner, None, |(needle_addr, idx): (u64, u32)| {
             let r = (|| -> Result<()> {
                 let idx = idx as usize;

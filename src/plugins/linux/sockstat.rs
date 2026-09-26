@@ -646,3 +646,28 @@ impl Plugin for Sockstat {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socket_filter_keeps_python_dict_order() {
+        let mut f = SockFilter::default();
+        f.set("filter_type", "socket_filter");
+        f.set("bpf_filter_type", "eBPF");
+        f.set("bpf_filter_id", "7");
+        // the reuseport filter overwrites existing keys in place, like a python dict
+        f.set("filter_type", "reuseport_filter");
+        f.set("bpf_filter_type", "cBPF");
+        match f.to_value() {
+            Value::Str(s) => assert_eq!(s, "filter_type=reuseport_filter,bpf_filter_type=cBPF,bpf_filter_id=7"),
+            v => panic!("{v:?}"),
+        }
+        assert!(matches!(SockFilter::default().to_value(), Value::NotAvailable));
+        assert_eq!(hex08(2), "00000002");
+        assert_eq!(hex08(0x1_2345_6789), "123456789");
+        assert!(!StatVal::opt_int(Some(15739)).to_value().is_absent());
+        assert!(StatVal::None.to_value().is_absent());
+    }
+}
