@@ -179,6 +179,119 @@ fn walk_dentry(w: &WalkFields, seen: &mut FxHashSet<u64>, root: Obj, parent_dir:
 /// parent: smear / corruption) would make python's `seen` set change the walk, so it falls
 /// back to the sequential walk ([`get_inodes_seq`]).
 pub fn get_inodes(k: &LinuxKernel, follow_symlinks: bool, f: &mut dyn FnMut(InodeInternal) -> Result<bool>) -> Result<()> {
+    match prepare_walk(k, follow_symlinks)? {
+        Prepared::Forest(mut walk, tail) => {
+            let _s = crate::util::trace::span("pagecache: replay");
+            if walk.replay(&mut |w, r| {
+                let v = w.view(&r);
+                f(InodeInternal { superblock: v.superblock, mountpoint: w.roots[r.root as usize].mountpoint.clone(), inode: v.inode, path: v.path.into_owned() })
+            })? {
+                tail.map_or(Ok(()), Err)?;
+            }
+            Ok(())
+        }
+        Prepared::Seq(w, roots) => get_inodes_seq(&w, roots, follow_symlinks, f),
+    }
+}
+
+/// [`get_inodes`] collected for parallel consumers: python's inodes in order (see
+/// [`InodeList::view`]) and the `Err` python raised after them, if any. The walk only records
+/// where each inode is; paths are built by the consumers.
+pub fn collect_inode_list(k: &LinuxKernel, follow_symlinks: bool) -> (InodeList, Option<Error>) {
+    let prepared = match prepare_walk(k, follow_symlinks) {
+        Ok(p) => p,
+        Err(e) => return (InodeList::Owned(Vec::new()), Some(e)),
+    };
+    match prepared {
+        Prepared::Forest(mut walk, tail) => {
+            let _s = crate::util::trace::span("pagecache: replay");
+            let mut refs = Vec::with_capacity(walk.forest.children() + walk.roots.len());
+            let r = walk.replay(&mut |_, r| {
+                refs.push(r);
+                Ok(true)
+            });
+            (InodeList::Refs { walk, refs }, r.err().or(tail))
+        }
+        Prepared::Seq(w, roots) => {
+            let mut v = Vec::new();
+            let r = get_inodes_seq(&w, roots, follow_symlinks, &mut |i| {
+                v.push(i);
+                Ok(true)
+            });
+            (InodeList::Owned(v), r.err())
+        }
+    }
+}
+
+/// python's inodes of [`collect_inode_list`].
+pub enum InodeList {
+    /// positions in a replayed [`Walk`]
+    Refs { walk: Walk, refs: Vec<InodeRef> },
+    /// from the sequential walk
+    Owned(Vec<InodeInternal>),
+}
+
+impl InodeList {
+    pub fn len(&self) -> usize {
+        match self {
+            InodeList::Refs { refs, .. } => refs.len(),
+            InodeList::Owned(v) => v.len(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// The `i`-th inode.
+    pub fn view(&self, i: usize) -> InodeView<'_> {
+        match self {
+            InodeList::Refs { walk, refs } => walk.view(&refs[i]),
+            InodeList::Owned(v) => {
+                let ii = &v[i];
+                InodeView { superblock: ii.superblock, mountpoint: &ii.mountpoint, inode: ii.inode, path: std::borrow::Cow::Borrowed(&ii.path) }
+            }
+        }
+    }
+}
+
+/// An [`InodeInternal`] borrowed from an [`InodeList`].
+pub struct InodeView<'a> {
+    pub superblock: Obj,
+    pub mountpoint: &'a str,
+    pub inode: Obj,
+    pub path: std::borrow::Cow<'a, str>,
+}
+
+/// Where an inode python yields is in a [`Walk`]: the root inode of tree `root` (`node ==
+/// u32::MAX`) or child `child` of directory node `node`, whose path is `dirs[dir]`.
+#[derive(Clone, Copy, Debug)]
+pub struct InodeRef {
+    root: u32,
+    node: u32,
+    child: u32,
+    dir: u32,
+}
+
+/// The listed dentry forest with the superblock roots it starts from, replayed in python's
+/// order.
+pub struct Walk {
+    /// the roots that passed python's checks, in order (tree `i` of the forest is `roots[i]`)
+    roots: Vec<SbRoot>,
+    forest: DentryForest,
+    /// paths of the directories python descends into (and each tree's `parent_dir`)
+    dirs: Vec<String>,
+    follow_symlinks: bool,
+}
+
+/// What [`prepare_walk`] found.
+enum Prepared {
+    /// the forest and the `Err` python raised after its trees (while listing superblocks)
+    Forest(Walk, Option<Error>),
+    /// not a forest: python's sequential walk over these roots
+    Seq(WalkFields, Vec<Result<Option<SbRoot>>>),
+}
+
+/// The superblock roots and the parallel dentry listing of [`get_inodes`].
+fn prepare_walk(k: &LinuxKernel, follow_symlinks: bool) -> Result<Prepared> {
     let w = WalkFields::new(k.table)?;
     let sbs = {
         let _s = crate::util::trace::span("pagecache: get_superblocks");
@@ -201,54 +314,123 @@ pub fn get_inodes(k: &LinuxKernel, follow_symlinks: bool, f: &mut dyn FnMut(Inod
     };
     // RSVOL_PAGECACHE_SEQ=1 forces the sequential walk (cross-checks the parallel one)
     let forest = forest.filter(|_| std::env::var_os("RSVOL_PAGECACHE_SEQ").is_none());
-    let Some(forest) = forest else {
-        return get_inodes_seq(&w, roots, follow_symlinks, f);
-    };
-    let _s = crate::util::trace::span("pagecache: replay");
-    let mut seen_inodes = FxHashSet::default();
-    let mut tree = 0usize;
+    let Some(forest) = forest else { return Ok(Prepared::Seq(w, roots)) };
+    // an `Err` can only be the last entry: python raised after the trees before it
+    let mut tail = None;
+    let mut ok = Vec::with_capacity(roots.len());
     for r in roots {
-        let Some(root) = r? else { continue };
-        let this_tree = tree;
-        tree += 1;
-        if !root.mapping_ok {
-            continue;
-        }
-        if !seen_inodes.insert(root.root_inode_ptr) {
-            continue;
-        }
-        if !f(InodeInternal { superblock: root.superblock, mountpoint: root.mountpoint.clone(), inode: root.root_inode, path: root.mountpoint.to_string() })? {
-            return Ok(());
-        }
-        let cont = forest.replay(this_tree, &root.parent_dir, &mut |c: &ChildInfo, path: String| {
-            // python re-checks `d_inode` readable + `is_valid()` here: same memory, same result
-            if !*c.mapping_ok.as_ref().map_err(CloneErr::clone_err)? {
-                return Ok(true);
-            }
-            if !seen_inodes.insert(c.inode_ptr) {
-                return Ok(true);
-            }
-            let path = if follow_symlinks {
-                // `_follow_symlink`: `inode.is_link` reads i_mode
-                match &c.mode {
-                    Err(e) => return Err(e.clone_err()),
-                    Ok(m) if m & S_IFMT == S_IFLNK => match &c.symlink {
-                        Some(Ok(Some(dest))) => format!("{path} -> {dest}"),
-                        Some(Err(e)) => return Err(e.clone_err()),
-                        _ => path,
-                    },
-                    Ok(_) => path,
-                }
-            } else {
-                path
-            };
-            f(InodeInternal { superblock: root.superblock, mountpoint: root.mountpoint.clone(), inode: c.inode, path })
-        })?;
-        if !cont {
-            return Ok(());
+        match r {
+            Ok(Some(root)) => ok.push(root),
+            Ok(None) => {}
+            Err(e) => tail = Some(e),
         }
     }
-    Ok(())
+    Ok(Prepared::Forest(Walk { roots: ok, forest, dirs: Vec::new(), follow_symlinks }, tail))
+}
+
+impl Walk {
+    /// python's `get_inodes` loop over the trees: `f(self, inode)` for every inode python
+    /// yields, in order (`Ok(false)`: `f` asked to stop). `Err` where python raises.
+    fn replay(&mut self, f: &mut dyn FnMut(&Walk, InodeRef) -> Result<bool>) -> Result<bool> {
+        let mut seen_inodes = FxHashSet::default();
+        seen_inodes.reserve(self.forest.children() + self.roots.len());
+        for t in 0..self.roots.len() {
+            let root = &self.roots[t];
+            if !root.mapping_ok {
+                continue;
+            }
+            if !seen_inodes.insert(root.root_inode_ptr) {
+                continue;
+            }
+            if !f(self, InodeRef { root: t as u32, node: u32::MAX, child: 0, dir: 0 })? {
+                return Ok(false);
+            }
+            let root_dir = self.dirs.len() as u32;
+            self.dirs.push(self.roots[t].parent_dir.clone());
+            if !self.replay_tree(t, root_dir, &mut seen_inodes, f)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Replays tree `t` in python's depth-first order (`_walk_dentry` + `get_inodes`'s checks):
+    /// calls `f` for every inode python yields, then descends into directories;
+    /// `Ok(false)` when `f` asked to stop, `Err` where python raises.
+    fn replay_tree(&mut self, t: usize, root_dir: u32, seen_inodes: &mut FxHashSet<u64>, f: &mut dyn FnMut(&Walk, InodeRef) -> Result<bool>) -> Result<bool> {
+        let mut stack: Vec<(usize, usize, u32)> = vec![(t, 0, root_dir)];
+        while let Some(&(n, i, d)) = stack.last() {
+            let node = &self.forest.dirs[n];
+            if i >= node.children.len() {
+                if let Some(e) = &node.err {
+                    return Err(e.clone_err());
+                }
+                stack.pop();
+                continue;
+            }
+            stack.last_mut().unwrap().1 += 1;
+            let c = &node.children[i];
+            if c.skip {
+                continue;
+            }
+            // python re-checks `d_inode` readable + `is_valid()` here: same memory, same result
+            if *c.mapping_ok.as_ref().map_err(CloneErr::clone_err)? && seen_inodes.insert(c.inode_ptr) {
+                if self.follow_symlinks {
+                    // `_follow_symlink`: `inode.is_link` reads i_mode
+                    match &c.mode {
+                        Err(e) => return Err(e.clone_err()),
+                        Ok(m) if m & S_IFMT == S_IFLNK => {
+                            if let Some(Err(e)) = &c.symlink {
+                                return Err(e.clone_err());
+                            }
+                        }
+                        Ok(_) => {}
+                    }
+                }
+                if !f(self, InodeRef { root: t as u32, node: n as u32, child: i as u32, dir: d })? {
+                    return Ok(false);
+                }
+            }
+            // python: `if inode.is_dir:` after the consumer
+            if let Err(e) = &c.mode {
+                return Err(e.clone_err());
+            }
+            if let Some(sub) = c.dir {
+                let parent = &self.dirs[d as usize];
+                let mut path = String::with_capacity(parent.len() + 1 + c.name.len());
+                path.push_str(parent);
+                path.push('/');
+                path.push_str(&c.name);
+                let id = self.dirs.len() as u32;
+                self.dirs.push(path);
+                stack.push((sub, 0, id));
+            }
+        }
+        Ok(true)
+    }
+
+    /// The inode `r` points to, with its path (`"a -> b"` for a followed symlink).
+    fn view(&self, r: &InodeRef) -> InodeView<'_> {
+        let root = &self.roots[r.root as usize];
+        if r.node == u32::MAX {
+            return InodeView { superblock: root.superblock, mountpoint: &root.mountpoint, inode: root.root_inode, path: std::borrow::Cow::Borrowed(&root.mountpoint) };
+        }
+        let c = &self.forest.dirs[r.node as usize].children[r.child as usize];
+        let parent = &self.dirs[r.dir as usize];
+        let dest = match (&c.mode, &c.symlink) {
+            (Ok(m), Some(Ok(Some(dest)))) if self.follow_symlinks && m & S_IFMT == S_IFLNK => Some(dest.as_str()),
+            _ => None,
+        };
+        let mut path = String::with_capacity(parent.len() + 1 + c.name.len() + dest.map_or(0, |d| d.len() + 4));
+        path.push_str(parent);
+        path.push('/');
+        path.push_str(&c.name);
+        if let Some(dest) = dest {
+            path.push_str(" -> ");
+            path.push_str(dest);
+        }
+        InodeView { superblock: root.superblock, mountpoint: &root.mountpoint, inode: c.inode, path: std::borrow::Cow::Owned(path) }
+    }
 }
 
 /// A superblock root that passed python's checks (`s_root`, `is_root()`, readable + valid
@@ -436,42 +618,9 @@ impl DentryForest {
         Some(DentryForest { dirs: dirs? })
     }
 
-    /// Replays tree `root` (an index into `starts`) in python's depth-first order: calls
-    /// `f(child, file_path)` for every child python yields (the consumer), descends into
-    /// directories after it; `Ok(false)` when `f` asked to stop, `Err` where python raises.
-    fn replay(&self, root: usize, parent_dir: &str, f: &mut dyn FnMut(&ChildInfo, String) -> Result<bool>) -> Result<bool> {
-        let mut stack: Vec<(usize, usize, String)> = vec![(root, 0, parent_dir.to_string())];
-        while let Some(top) = stack.last_mut() {
-            let node = &self.dirs[top.0];
-            if top.1 >= node.children.len() {
-                if let Some(e) = &node.err {
-                    return Err(e.clone_err());
-                }
-                stack.pop();
-                continue;
-            }
-            let c = &node.children[top.1];
-            top.1 += 1;
-            if c.skip {
-                continue;
-            }
-            let mut path = String::with_capacity(top.2.len() + 1 + c.name.len());
-            path.push_str(&top.2);
-            path.push('/');
-            path.push_str(&c.name);
-            let dir_path = c.dir.map(|d| (d, path.clone()));
-            if !f(c, path)? {
-                return Ok(false);
-            }
-            // python: `if inode.is_dir:` after the consumer
-            if let Err(e) = &c.mode {
-                return Err(e.clone_err());
-            }
-            if let Some((d, p)) = dir_path {
-                stack.push((d, 0, p));
-            }
-        }
-        Ok(true)
+    /// Number of children of all directories.
+    fn children(&self) -> usize {
+        self.dirs.iter().map(|d| d.children.len()).sum()
     }
 }
 
@@ -570,6 +719,12 @@ pub fn collect_inodes(k: &LinuxKernel, follow_symlinks: bool) -> (Vec<InodeInter
 /// python `InodeInternal.to_user(kernel_layer)` formatted by `Files.format_fields_with_headers`:
 /// the 14 `Files` columns. `Err` where python raises.
 pub fn inode_user_row(ii: &InodeInternal, page_size: u64) -> Result<Vec<Value>> {
+    let v = InodeView { superblock: ii.superblock, mountpoint: &ii.mountpoint, inode: ii.inode, path: std::borrow::Cow::Borrowed(&ii.path) };
+    inode_user_values(v, page_size).map(Vec::from)
+}
+
+/// [`inode_user_row`] of an [`InodeView`], as an array (no `Vec` per row).
+pub fn inode_user_values(ii: InodeView, page_size: u64) -> Result<[Value; 14]> {
     let sb = &ii.superblock;
     let i = &ii.inode;
     let device = format!("{}:{}", sb.major()?, sb.minor()?);
@@ -583,7 +738,7 @@ pub fn inode_user_row(ii: &InodeInternal, page_size: u64) -> Result<Vec<Value>> 
     let atime = i.get_access_time()?;
     let mtime = i.get_modification_time()?;
     let ctime = i.get_change_time()?;
-    Ok(vec![
+    Ok([
         Value::Int(sb.addr as i128),
         Value::Str(ii.mountpoint.to_string()),
         Value::Str(device),
@@ -596,7 +751,7 @@ pub fn inode_user_row(ii: &InodeInternal, page_size: u64) -> Result<Vec<Value>> 
         atime,
         mtime,
         ctime,
-        Value::Str(ii.path.clone()),
+        Value::Str(ii.path.into_owned()),
         Value::Int(i_size),
     ])
 }
@@ -648,18 +803,18 @@ impl Plugin for Files {
         let ps = page_size(k);
         let types = cfg.get_strs("type");
         let find = cfg.get_str("find").filter(|s| !s.is_empty()).map(str::to_string);
-        let type_ok = |ii: &InodeInternal| -> Result<bool> {
+        let type_ok = |inode: &Obj| -> Result<bool> {
             if types.is_empty() {
                 return Ok(true);
             }
             // `get_inode_type() not in types_filter` (None is never in a list of str)
-            Ok(ii.inode.get_inode_type()?.is_some_and(|t| types.iter().any(|x| x == t)))
+            Ok(inode.get_inode_type()?.is_some_and(|t| types.iter().any(|x| x == t)))
         };
         if let Some(find) = find {
             // python breaks at the first match: stream and stop there
             let mut found = None;
             get_inodes(k, true, &mut |ii| {
-                if !type_ok(&ii)? {
+                if !type_ok(&ii.inode)? {
                     return Ok(true);
                 }
                 if ii.path == find {
@@ -675,17 +830,22 @@ impl Plugin for Files {
         }
         let (inodes, tail) = {
             let _s = crate::util::trace::span("pagecache: get_inodes walk");
-            collect_inodes(k, true)
+            collect_inode_list(k, true)
         };
-        let rows = {
-            let _s = crate::util::trace::span("pagecache: to_user rows");
-            par_rows(&inodes, |ii| if type_ok(ii)? { inode_user_row(ii, ps).map(Some) } else { Ok(None) })
-        };
-        let _s = crate::util::trace::span("pagecache: render");
-        for r in rows {
-            if let Some(row) = r? {
-                out.row(0, row)?;
-            }
+        {
+            // rows built (paths too) and formatted on all cores, in python's order
+            let _s = crate::util::trace::span("pagecache: to_user rows + render");
+            super::stream_chunks(out, inodes.len(), 128, |r, b| {
+                for i in r {
+                    let ii = inodes.view(i);
+                    match type_ok(&ii.inode).and_then(|ok| if ok { inode_user_values(ii, ps).map(Some) } else { Ok(None) }) {
+                        Ok(Some(row)) => b.push_ref(&row),
+                        Ok(None) => {}
+                        Err(e) => return Some(e),
+                    }
+                }
+                None
+            })?;
         }
         tail.map_or(Ok(()), Err)
     }
