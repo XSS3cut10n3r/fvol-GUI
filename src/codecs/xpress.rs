@@ -124,13 +124,152 @@ fn copy_match(out: &mut [u8], op: usize, off: usize, len: usize) -> Result<usize
 
 /// Decompress Xpress "Plain LZ77" data into `out`; returns the number of bytes produced.
 pub fn lz77_decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, XpressError> {
+    lz77_impl::<true>(input, out)
+}
+
+/// Plain LZ77 decoder state (shared by the fast and the checked loop).
+#[derive(Clone, Copy)]
+struct Lz77State {
+    ip: usize,
+    op: usize,
+    /// Flag bits not yet used: the low `flag_count` bits of `flags`, MSB first.
+    flags: u32,
+    flag_count: u32,
+    /// Input position of the shared length nibble byte (0 = none; position 0 always holds
+    /// flags).
+    last_half: usize,
+}
+
+/// `FAST = false`: the checked loop alone (the differential oracle of the tests).
+fn lz77_impl<const FAST: bool>(input: &[u8], out: &mut [u8]) -> Result<usize, XpressError> {
+    let mut st = Lz77State { ip: 0, op: 0, flags: 0, flag_count: 0, last_half: 0 };
+    if FAST {
+        lz77_fast(input, out, &mut st)?;
+    }
+    lz77_checked(input, out, st)
+}
+
+/// Match length after the 3-bit field 7 ([MS-XCA] 2.4.4: shared nibbles, then 1, 2 or 4
+/// extra bytes), without the minimum length 3. `ip` must be past the match word.
+#[inline(always)]
+fn lz77_long_len(input: &[u8], ip: &mut usize, last_half: &mut usize) -> Result<usize, XpressError> {
     let n = input.len();
-    let mut ip = 0usize;
-    let mut op = 0usize;
-    let mut flags: u32 = 0;
-    let mut flag_count: u32 = 0;
-    // input position of the shared length nibble byte (0 = none; position 0 always holds flags)
-    let mut last_half = 0usize;
+    let mut len;
+    if *last_half == 0 {
+        if *ip >= n {
+            return Err(XpressError::Truncated);
+        }
+        len = (input[*ip] & 0xf) as usize;
+        *last_half = *ip;
+        *ip += 1;
+    } else {
+        len = (input[*last_half] >> 4) as usize;
+        *last_half = 0;
+    }
+    if len == 15 {
+        if *ip >= n {
+            return Err(XpressError::Truncated);
+        }
+        len = input[*ip] as usize;
+        *ip += 1;
+        if len == 255 {
+            if n - *ip < 2 {
+                return Err(XpressError::Truncated);
+            }
+            len = u16::from_le_bytes([input[*ip], input[*ip + 1]]) as usize;
+            *ip += 2;
+            if len == 0 {
+                if n - *ip < 4 {
+                    return Err(XpressError::Truncated);
+                }
+                len = u32::from_le_bytes([input[*ip], input[*ip + 1], input[*ip + 2], input[*ip + 3]]) as usize;
+                *ip += 4;
+            }
+            if len < 15 + 7 {
+                return Err(XpressError::BadLength);
+            }
+            len -= 15 + 7;
+        }
+        len += 15;
+    }
+    Ok(len + 7)
+}
+
+/// The bulk loop while the input has 64 and the output 64 bytes of slack: a whole run of
+/// literal flags and a short non-overlapping match are one fixed 32-byte move each, and the
+/// flag word is kept left-aligned above a sentinel bit. Everything else goes through the
+/// same helpers as the checked loop, so results and errors are identical.
+#[inline(never)]
+fn lz77_fast(input: &[u8], out: &mut [u8], st: &mut Lz77State) -> Result<(), XpressError> {
+    // per iteration at most: flags 4 + literals 32 + match 2 + length bytes 8
+    const IN_SLACK: usize = 64;
+    const SENTINEL: u64 = 1 << 63;
+    if input.len() < IN_SLACK || out.len() < 64 {
+        return Ok(());
+    }
+    let ip_end = input.len() - IN_SLACK; // ip <= ip_end at the top of an iteration
+    let op_end = out.len() - 64; // op <= op_end: 32 literal bytes, then a 32-byte match
+    let sp = input.as_ptr();
+    let dp = out.as_mut_ptr();
+    let (mut ip, mut op, mut last_half) = (st.ip, st.op, st.last_half);
+    // the remaining flags in the top bits, then a one
+    let mut fw: u64 = match st.flag_count {
+        0 => SENTINEL,
+        k => ((st.flags as u64) << (64 - k)) | (1 << (63 - k)),
+    };
+    while ip <= ip_end && op <= op_end {
+        if fw == SENTINEL {
+            // SAFETY: ip + 4 <= input.len()
+            let f = u32::from_le(unsafe { (sp.add(ip) as *const u32).read_unaligned() });
+            fw = ((f as u64) << 32) | (1 << 31);
+            ip += 4;
+        }
+        // literal run: up to 32 zero flags
+        let lits = fw.leading_zeros() as usize;
+        // SAFETY: ip + 32 <= input.len() and op + 32 <= out.len() (slack above)
+        unsafe {
+            let v = (sp.add(ip) as *const [u8; 32]).read_unaligned();
+            (dp.add(op) as *mut [u8; 32]).write_unaligned(v);
+        }
+        ip += lits;
+        op += lits;
+        fw <<= lits;
+        if fw == SENTINEL {
+            continue;
+        }
+        fw <<= 1;
+        // match
+        // SAFETY: ip + 2 <= input.len()
+        let mb = u16::from_le(unsafe { (sp.add(ip) as *const u16).read_unaligned() }) as usize;
+        ip += 2;
+        let off = (mb >> 3) + 1;
+        let mut len = mb & 7;
+        if len == 7 {
+            len = lz77_long_len(input, &mut ip, &mut last_half)?;
+        }
+        len += 3;
+        if len <= off && off <= op && len <= 32 {
+            // SAFETY: op + 32 <= out.len(); one 32-byte load before the store equals the
+            // forward byte copy because len <= off
+            unsafe {
+                let v = (dp.add(op - off) as *const [u8; 32]).read_unaligned();
+                (dp.add(op) as *mut [u8; 32]).write_unaligned(v);
+            }
+            op += len;
+        } else {
+            op = copy_match(out, op, off, len)?;
+        }
+    }
+    let k = 63 - fw.trailing_zeros();
+    let flags = if k == 0 { 0 } else { (fw >> (64 - k)) as u32 };
+    *st = Lz77State { ip, op, flags, flag_count: k, last_half };
+    Ok(())
+}
+
+/// The checked loop (every bounds check, stream ends and errors), from `st`.
+fn lz77_checked(input: &[u8], out: &mut [u8], st: Lz77State) -> Result<usize, XpressError> {
+    let n = input.len();
+    let Lz77State { mut ip, mut op, mut flags, mut flag_count, mut last_half } = st;
     while op < out.len() {
         if flag_count == 0 {
             if n - ip < 4 {
@@ -170,44 +309,7 @@ pub fn lz77_decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, Xpres
         let mut len = mb & 7;
         let off = (mb >> 3) + 1;
         if len == 7 {
-            if last_half == 0 {
-                if ip >= n {
-                    return Err(XpressError::Truncated);
-                }
-                len = (input[ip] & 0xf) as usize;
-                last_half = ip;
-                ip += 1;
-            } else {
-                len = (input[last_half] >> 4) as usize;
-                last_half = 0;
-            }
-            if len == 15 {
-                if ip >= n {
-                    return Err(XpressError::Truncated);
-                }
-                len = input[ip] as usize;
-                ip += 1;
-                if len == 255 {
-                    if n - ip < 2 {
-                        return Err(XpressError::Truncated);
-                    }
-                    len = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
-                    ip += 2;
-                    if len == 0 {
-                        if n - ip < 4 {
-                            return Err(XpressError::Truncated);
-                        }
-                        len = u32::from_le_bytes([input[ip], input[ip + 1], input[ip + 2], input[ip + 3]]) as usize;
-                        ip += 4;
-                    }
-                    if len < 15 + 7 {
-                        return Err(XpressError::BadLength);
-                    }
-                    len -= 15 + 7;
-                }
-                len += 15;
-            }
-            len += 7;
+            len = lz77_long_len(input, &mut ip, &mut last_half)?;
         }
         len += 3;
         op = copy_match(out, op, off, len)?;
@@ -910,6 +1012,51 @@ mod fixture_tests {
             assert_eq!(lz77_decompress(&c, want.len()).unwrap(), want, "lz77 {name}");
             let c = fixture(&format!("xpress_huff_{name}.bin"));
             assert_eq!(huffman_decompress(&c, want.len()).unwrap(), want, "huffman {name}");
+        }
+    }
+
+    /// Plain LZ77: the fast loop against the checked loop alone.
+    #[test]
+    fn lz77_fast_loop_matches_checked_loop() {
+        let mut x: u64 = 0x1f83_d9ab_fb41_bd6b;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let check = |c: &[u8], n: usize| {
+            let mut a = vec![0u8; n];
+            let mut b = vec![0u8; n];
+            let ra = lz77_impl::<true>(c, &mut a);
+            let rb = lz77_impl::<false>(c, &mut b);
+            assert_eq!(ra, rb);
+            if let Ok(k) = ra {
+                assert!(a[..k] == b[..k], "outputs differ");
+            }
+        };
+        for name in ["small", "medium", "multiblock", "zeros_runs"] {
+            let c = fixture(&format!("xpress_lz77_{name}.bin"));
+            let n = vector(name).len();
+            check(&c, n);
+            check(&c, n / 3);
+            check(&c, n + 999);
+            for _ in 0..300 {
+                let mut m = c.clone();
+                for _ in 0..1 + next() % 3 {
+                    let at = (next() as usize) % m.len();
+                    m[at] ^= 1 << (next() % 8);
+                }
+                if next() % 4 == 0 {
+                    m.truncate((next() as usize) % m.len());
+                }
+                check(&m, n);
+            }
+        }
+        for _ in 0..500 {
+            let len = (next() % 3000) as usize;
+            let m: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            check(&m, 1 + (next() % 20000) as usize);
         }
     }
 
