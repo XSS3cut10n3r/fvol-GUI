@@ -78,8 +78,38 @@ impl From<Error> for crate::error::Error {
 
 /// Which engine answers searches.
 enum Engine {
+    /// Fixed-length sequence of byte sets (literals, case-insensitive / wide literals):
+    /// the prefilter alone yields exact matches.
+    Fixed { finder: literal::SeqFinder, seq: Vec<hir::ByteSet> },
     Dfa(Box<dfa::Searcher>),
     Backtrack,
+}
+
+/// The byte-set sequence if every match of `h` is exactly one fixed-length sequence of
+/// byte sets (no assertions, no variable repeats).
+fn fixed_sequence(h: &hir::Hir) -> Option<Vec<hir::ByteSet>> {
+    fn walk(h: &hir::Hir, out: &mut Vec<hir::ByteSet>, depth: usize) -> bool {
+        if depth > 100 || out.len() > 256 {
+            return false;
+        }
+        match h {
+            hir::Hir::Class(s) => {
+                if s.is_empty() {
+                    return false;
+                }
+                out.push(*s);
+                true
+            }
+            hir::Hir::Concat(v) => v.iter().all(|x| walk(x, out, depth + 1)),
+            hir::Hir::Capture { sub, .. } => walk(sub, out, depth + 1),
+            hir::Hir::Repeat { min, max: Some(max), sub, .. } if min == max && *min <= 64 => {
+                (0..*min).all(|_| walk(sub, out, depth + 1))
+            }
+            _ => false,
+        }
+    }
+    let mut out = Vec::new();
+    if walk(h, &mut out, 0) && !out.is_empty() { Some(out) } else { None }
 }
 
 /// A compiled regular expression (thread-safe; scratch space is pooled).
@@ -114,7 +144,10 @@ impl Regex {
         if lowered.hir.min_width(&lowered.group_widths) > 0 {
             bt.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
         }
-        let engine = if props.is_regular() && props.nfa_size < 50_000 {
+        let fixed = fixed_sequence(&lowered.hir).and_then(|seq| literal::SeqFinder::new(&seq).map(|f| (f, seq)));
+        let engine = if let Some((finder, seq)) = fixed {
+            Engine::Fixed { finder, seq }
+        } else if props.is_regular() && props.nfa_size < 50_000 {
             match dfa::Searcher::new(&lowered.hir) {
                 Some(s) => Engine::Dfa(Box::new(s)),
                 None => Engine::Backtrack,
@@ -161,6 +194,7 @@ impl Regex {
     /// Name of the engine used (for diagnostics / benchmarks).
     pub fn engine_name(&self) -> &'static str {
         match &self.engine {
+            Engine::Fixed { .. } => "literal",
             Engine::Dfa(s) => s.strategy_name(),
             Engine::Backtrack => "backtrack",
         }
@@ -182,7 +216,7 @@ impl Regex {
                 bt: backtrack::Cache::new(),
                 dfa: match &self.engine {
                     Engine::Dfa(s) => Some(s.new_cache()),
-                    Engine::Backtrack => None,
+                    Engine::Backtrack | Engine::Fixed { .. } => None,
                 },
             })
         })
@@ -198,6 +232,15 @@ impl Regex {
 
     fn find_with(&self, sc: &mut Scratch, hay: &[u8], start: usize, anchored: bool, must_advance: bool) -> Option<(usize, usize)> {
         match (&self.engine, sc.dfa.as_mut()) {
+            (Engine::Fixed { finder, seq }, _) => {
+                let n = seq.len();
+                if anchored {
+                    let ok = start + n <= hay.len() && seq.iter().zip(&hay[start..start + n]).all(|(s, &b)| s.contains(b));
+                    return if ok { Some((start, start + n)) } else { None };
+                }
+                let p = finder.find(hay, start)?;
+                Some((p, p + n))
+            }
             (Engine::Dfa(s), Some(c)) => s.find(c, hay, start, anchored, must_advance),
             _ => {
                 let search = backtrack::Search { prog: &self.bt, hay };

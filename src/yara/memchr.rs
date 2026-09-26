@@ -374,7 +374,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    pub unsafe fn pair_set_dispatch(
+    pub unsafe fn pair_set_dispatch<F: FnMut(usize) -> bool>(
         hay: &[u8],
         from: usize,
         last: usize,
@@ -382,7 +382,7 @@ mod avx2 {
         s1: &super::SetDesc,
         i2: usize,
         s2: &super::SetDesc,
-        verify: &mut dyn FnMut(usize) -> bool,
+        verify: &mut F,
     ) -> Option<usize> {
         use super::vset::{Any, build};
         unsafe {
@@ -410,7 +410,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn pair_set_g<A: super::vset::VSet, B: super::vset::VSet>(
+    unsafe fn pair_set_g<A: super::vset::VSet, B: super::vset::VSet, F: FnMut(usize) -> bool>(
         hay: &[u8],
         from: usize,
         last: usize,
@@ -418,11 +418,28 @@ mod avx2 {
         a: &A,
         i2: usize,
         b: &B,
-        verify: &mut dyn FnMut(usize) -> bool,
+        verify: &mut F,
     ) -> Option<usize> {
         let ptr = hay.as_ptr();
         let mut p = from;
         unsafe {
+            while p + 63 <= last {
+                let m0 = _mm256_movemask_epi8(_mm256_and_si256(a.test(load(ptr.add(p + i1))), b.test(load(ptr.add(p + i2)))))
+                    as u32 as u64;
+                let m1 = _mm256_movemask_epi8(_mm256_and_si256(
+                    a.test(load(ptr.add(p + 32 + i1))),
+                    b.test(load(ptr.add(p + 32 + i2))),
+                )) as u32 as u64;
+                let mut m = m0 | (m1 << 32);
+                while m != 0 {
+                    let q = p + m.trailing_zeros() as usize;
+                    if verify(q) {
+                        return Some(q);
+                    }
+                    m &= m - 1;
+                }
+                p += 64;
+            }
             while p + 31 <= last {
                 let m1 = a.test(load(ptr.add(p + i1)));
                 let m2 = b.test(load(ptr.add(p + i2)));
@@ -595,7 +612,7 @@ impl SetDesc {
 
 /// Leftmost p in [from, last] with hay[p+i1] in s1, hay[p+i2] in s2 and `verify(p)`.
 /// Requires last + max(i1, i2) < hay.len().
-pub fn pair_set_find(
+pub fn pair_set_find<F: FnMut(usize) -> bool>(
     hay: &[u8],
     from: usize,
     last: usize,
@@ -603,7 +620,7 @@ pub fn pair_set_find(
     s1: &SetDesc,
     i2: usize,
     s2: &SetDesc,
-    verify: &mut dyn FnMut(usize) -> bool,
+    verify: &mut F,
 ) -> Option<usize> {
     if from > last || last + i1.max(i2) >= hay.len() {
         return None;
@@ -791,6 +808,9 @@ impl ByteSetFinder {
 // Substring search
 // ---------------------------------------------------------------------------------------
 
+/// Bytes searched with Two-Way before the SIMD prefilter is retried.
+const FALLBACK_WINDOW: usize = 64 << 10;
+
 /// Precompiled substring searcher.
 #[derive(Clone, Debug)]
 pub struct Memmem {
@@ -833,13 +853,32 @@ impl Memmem {
         #[cfg(target_arch = "x86_64")]
         {
             if last - from >= 32 && has_avx2() {
-                let verify = |q: usize| hay[q..q + m] == *n;
-                // SAFETY: AVX2 checked; last + max(i1, i2) < hay.len() since i1,i2 < m.
-                let r = unsafe { avx2::pair_find(hay, from, last, self.i1, n[self.i1], self.i2, n[self.i2], verify) };
-                return match r {
-                    Ok(x) => x,
-                    Err(resume) => self.tw.find(hay, resume, n),
-                };
+                let (b2, i2) = (n[self.i2], self.i2);
+                let mut start = from;
+                loop {
+                    let verify = |q: usize| hay[q..q + m] == *n;
+                    // SAFETY: AVX2 checked; last + max(i1, i2) < hay.len() since i1,i2 < m.
+                    let r = unsafe { avx2::pair_find(hay, start, last, self.i1, n[self.i1], i2, b2, verify) };
+                    match r {
+                        Ok(x) => return x,
+                        Err(resume) => {
+                            // Dense false candidates: Two-Way over a bounded window, then
+                            // retry the SIMD scan (worst case stays linear).
+                            let wend = resume.saturating_add(FALLBACK_WINDOW).min(hay.len());
+                            let wlim = (wend + m - 1).min(hay.len());
+                            if let Some(x) = self.tw.find(&hay[..wlim], resume, n) {
+                                return Some(x);
+                            }
+                            if wend >= hay.len() || wend > last {
+                                return None;
+                            }
+                            start = wend;
+                            if last - start < 32 {
+                                return self.tw.find(hay, start, n);
+                            }
+                        }
+                    }
+                }
             }
         }
         // Scalar: memchr on the rarest byte, verify, with Two-Way fallback.
@@ -857,7 +896,17 @@ impl Memmem {
                     }
                     budget -= 1;
                     if budget < 0 {
-                        return self.tw.find(hay, q + 1, n);
+                        let wend = (q + 1).saturating_add(FALLBACK_WINDOW).min(hay.len());
+                        let wlim = (wend + m - 1).min(hay.len());
+                        if let Some(x) = self.tw.find(&hay[..wlim], q + 1, n) {
+                            return Some(x);
+                        }
+                        if wend > last {
+                            return None;
+                        }
+                        p = wend;
+                        budget = 64;
+                        continue;
                     }
                     budget += (k / 16) as isize;
                     p = q + 1;
@@ -1068,6 +1117,7 @@ mod tests {
             let mm = Memmem::new(&n);
             let from = (r.next() as usize) % (len + 2);
             assert_eq!(mm.find_at(&h, from), naive(&h, &n, from), "h={:?} n={:?}", h, n);
+
             let tw = TwoWay::new(&n);
             if from <= h.len() {
                 assert_eq!(tw.find(&h, from, &n), naive(&h, &n, from));
