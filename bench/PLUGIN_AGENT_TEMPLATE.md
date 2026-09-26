@@ -30,8 +30,13 @@ FOR EACH PLUGIN YOU OWN:
    (`/home/user/rs-vol/bench/venv/bin/python /home/user/rs-vol/volatility3/vol.py -q -f IMG -o DIR <plugin> <args>`)
    and diff. Some argument-case references exist in /home/user/rs-vol/bench/ref/pyargs/ (see
    /home/user/rs-vol/bench/args_cases.txt).
+   OTHER IMAGES (verify there too — different builds/layouts catch bugs): Windows 10 1809:
+   /home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw, refs /home/user/rs-vol/bench/ref/win1809/
+   (use `IMG=... REF=... compare.sh`). Linux (6.8 + 5.15, ELF and LiME) and macOS 10.9 images + refs: see
+   /home/user/rs-vol/testdata/README.md, refs in /home/user/rs-vol/bench/ref/{linux,mac}/<image>/, symbols need
+   `-s /home/user/rs-vol/testdata/symbols`.
 4. timeline(): implement where the python plugin implements TimeLinerInterface.generate_timeline.
-5. SPEED: build with `cargo build --release` and time against vol-rs (`bench/ref/volrs/times.tsv` has its times on
+5. SPEED: build with `bench/scripts/cargo.sh build --release` and time against vol-rs (`bench/ref/volrs/times.tsv` has its times on
    this image). You must beat it; aim for a large margin. Use the core's parallel scanning primitives, parallelise
    independent per-process/per-object work with util::par while preserving python's output order, avoid
    re-reading/re-parsing, pre-resolve struct field offsets in hot loops, no per-row allocations you can avoid.
@@ -43,10 +48,19 @@ in your tree yet, write a minimal private version inside your plugin file marked
 Don't refactor core APIs; if a core API is missing something small you need, add it additively and mention it in
 your final report. If you find a core bug, fix it minimally and report it.
 
+RESOURCES (MANDATORY, we were OOM-killed once): build/test ONLY via `/home/user/rs-vol/bench/scripts/cargo.sh ...`
+(global build-slot pool, memory-capped); run python volatility / big benchmarks via
+`/home/user/rs-vol/bench/scripts/limit.sh [-m 8G] ...`, at most one python volatility process at a time; never load
+memory images into RAM; files > 50 MB go in /home/user/rs-vol/testdata/scratch/<you>/ (never /tmp — it is RAM).
+
+WORKSPACE: if your working directory is not a git checkout of /home/user/rs-vol (check `git remote -v`/`ls Cargo.toml`),
+`git clone /home/user/rs-vol <somewhere under /home/user/rs-vol/testdata/scratch/>` and work there on a new branch.
+Paths to the python source, references and images are absolute (they are not in the git repo).
+
 GIT: commit often on your branch (conventional commits like `feat(windows): port psscan`), each commit message
 ending with the line "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>". Before finishing,
-`git merge main` (resolve conflicts) — actually, merge the latest /home/user/rs-vol main branch into yours:
-`git fetch /home/user/rs-vol main && git merge FETCH_HEAD` — make sure `cargo build --release` and `cargo test` pass.
+merge the latest /home/user/rs-vol main into your branch (`git fetch /home/user/rs-vol main && git merge FETCH_HEAD`,
+resolve conflicts) and make sure `bench/scripts/cargo.sh build --release` and `bench/scripts/cargo.sh test --profile fast` pass.
 
 FINAL REPLY: branch name; per plugin: OK/DIFF status vs reference (and for DIFF, why), release timing vs vol-rs;
 shared helpers you created (paths + one-line purpose); any core changes; known gaps.

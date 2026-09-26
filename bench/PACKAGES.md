@@ -33,3 +33,8 @@ Round A = foundations (start right after core merges). Round B = dependents.
 - crypto still < OpenSSL on bulk: SHA1/SHA256 0.9x, MD5 0.77x, DES 0.38x (small 0.64x), AES128-CBC 0.72x,
   small AES 0.75-0.96x (per-call Vec alloc / key schedule). Wins: all small-message hash/HMAC/RC4 (1.2-3.4x),
   AES256-ECB bulk 1.03x.
+
+## Wave 2 (launched after core merge 0630ba6)
+Running: W1 scanners+kernel objects, W2a process, W2b PE/files, W3 registry, W4 net+gui, G generic,
+L1 linux ext+process, M1 mac. Pending: W5 malware+services (after disasm + yara land), L2 linux kernel,
+L3 linux fs/net (after L1's extensions land).
