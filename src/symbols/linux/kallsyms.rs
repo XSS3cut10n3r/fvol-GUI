@@ -763,10 +763,12 @@ impl Kallsyms {
         let vm = &self.vm;
         let root = vm.object_abs("mod_tree_root", self.cfg.mod_tree.unwrap())?.m("root")?;
         let t = vm.table();
-        let mm_ty = t.user_type("module_memory").map(|_| ());
-        let mtn_off = if mm_ty.is_some() { Some(vm.offset_of("module_memory", "mtn")?) } else { None };
         let mut comp = |key: u64, lt: &Obj| -> Result<Option<i64>> {
-            let Some(mtn_off) = mtn_off else { return Ok(None) };
+            // python `_mod_tree_comp` (reads `module_memory` at lt_node + mtn + mod offsets)
+            if t.user_type("module_memory").is_none() {
+                return Ok(None);
+            }
+            let mtn_off = vm.offset_of("module_memory", "mtn")?;
             if !t.has_type("mod_tree_node") {
                 return Ok(None);
             }

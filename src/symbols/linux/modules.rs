@@ -194,19 +194,17 @@ pub fn module_lookup_by_address(vm: &Module, modules: &[ModuleInfo], target_addr
         return Err(Error::msg("ValueError: Empty list sent to `module_lookup_by_address`"));
     }
     let mut first: Option<&ModuleInfo> = None;
-    let mut n_matches = 0usize;
     for m in modules {
         if m.start != m.start & mask {
             return Err(Error::msg("ValueError: Modules list must be gathered from `run_modules_scanners` to be used in this function"));
         }
         if m.start <= target_address && target_address < m.end {
-            n_matches += 1;
+            // python warns (stderr) when several modules match
             if first.is_none() {
                 first = Some(m);
             }
         }
     }
-    let _ = n_matches; // python warns on overlaps (stderr only)
     let Some(matched) = first else { return Ok((None, None)) };
     let mut symbol_name: Option<String> = if matched.name == KERNEL_NAME {
         vm.symbols_at(target_address, 0).first().map(|s| format!("{}!{}", vm.symbol_table_name(), s))
@@ -219,9 +217,6 @@ pub fn module_lookup_by_address(vm: &Module, modules: &[ModuleInfo], target_addr
         if s.contains('!') {
             symbol_name = s.split('!').nth(1).map(str::to_string);
         }
-    }
-    if symbol_name.as_deref() == Some("") {
-        // python: `if symbol_name and ...` leaves "" untouched
     }
     Ok((Some(matched.clone()), symbol_name))
 }
