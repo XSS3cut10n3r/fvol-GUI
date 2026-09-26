@@ -4,6 +4,7 @@
 
 use crate::plugins::Plugin;
 
+pub mod amcache;
 pub mod cachedump;
 pub mod certificates;
 pub mod getcellroutine;
@@ -27,4 +28,6 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&certificates::Certificates);
     v.push(&getcellroutine::GetCellRoutine);
     v.push(&userassist::UserAssist);
+    v.push(&amcache::Amcache);
+    v.push(&amcache::AmcacheDeprecated);
 }
