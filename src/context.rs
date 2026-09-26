@@ -358,21 +358,37 @@ impl Context {
 }
 
 fn percent_decode(s: &str) -> String {
+    // python `urllib.parse.unquote`: only `%` + two hex digits is decoded (bytewise, so a
+    // multi-byte char after `%` can never split a str slice), then UTF-8 with replacement
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() + 0 && i + 2 <= b.len() - 1 {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|&c| hex(c)), b.get(i + 2).and_then(|&c| hex(c)))
+        {
+            out.push(h << 4 | l);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod percent_tests {
+    #[test]
+    fn percent_decode_like_python() {
+        use super::percent_decode;
+        assert_eq!(percent_decode("/a%20b%2Fc"), "/a b/c");
+        assert_eq!(percent_decode("%+5%zz%4"), "%+5%zz%4");
+        assert_eq!(percent_decode("%é%%41"), "%é%A");
+        assert_eq!(percent_decode("%ff"), "\u{fffd}");
+        assert_eq!(percent_decode("%"), "%");
+    }
 }
 
 #[cfg(test)]
