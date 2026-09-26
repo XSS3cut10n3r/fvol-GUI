@@ -64,17 +64,22 @@ fi
 
 echo
 echo "== PNG: Pillow 12.3.0 Image.save (C encoder) vs png_rgba_pillow (Rust), identical bytes =="
-printf '%-26s %10s %10s %10s %8s\n' image png_bytes pillow_ms rust_ms speedup
+echo "   (Pillow is single-threaded; rust_1c pinned to one core, rust_2c = filter + deflate threads)"
+printf '%-26s %10s %10s %10s %10s %8s %8s\n' image png_bytes pillow_ms rust_1c_ms rust_2c_ms x_1c x_2c
+pin2=("$LIMIT" -m 2G taskset -c "$CPU,${CPU2:-$((CPU + 2))}")
 for img in desktop_1920x1080 text_1920x1080 gradient_1920x1080 black_1920x1080 noise_1920x1080 desktop_1024x768; do
     f="$PNGDIR/$img.rgba"
     [[ -f $f ]] || continue
-    pms=1e18; rms=1e18
+    pms=1e18; rms=1e18; r2ms=1e18
     for ((r = 0; r < ROUNDS; r++)); do
         read -r _ _ _ pn ms <<< "$("${pin[@]}" "$PY" "$HERE/png_pillow_bench.py" bench "$f" "$RUNS")"
         pms=$(min "$pms" "$ms")
         read -r _ _ _ rn ms <<< "$(PNG_BENCH="$f" PNG_RUNS="$RUNS" "${pin[@]}" "$BIN" png_bench --ignored --nocapture --test-threads=1 | grep -oE 'rust png .*')"
         rms=$(min "$rms" "$ms")
+        read -r _ _ _ rn ms <<< "$(PNG_BENCH="$f" PNG_RUNS="$RUNS" "${pin2[@]}" "$BIN" png_bench --ignored --nocapture --test-threads=1 | grep -oE 'rust png .*')"
+        r2ms=$(min "$r2ms" "$ms")
     done
     [[ $pn == "$rn" ]] || echo "SIZE MISMATCH $img: pillow $pn rust $rn"
-    awk -v n="$img" -v b="$pn" -v p="$pms" -v r="$rms" 'BEGIN{ printf "%-26s %10d %10.2f %10.2f %7.2fx\n", n, b, p, r, p/r }'
+    awk -v n="$img" -v b="$pn" -v p="$pms" -v r="$rms" -v r2="$r2ms" \
+        'BEGIN{ printf "%-26s %10d %10.2f %10.2f %10.2f %7.2fx %7.2fx\n", n, b, p, r, r2, p/r, p/r2 }'
 done

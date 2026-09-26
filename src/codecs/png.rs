@@ -93,11 +93,45 @@ fn idat_stream(w: usize, h: usize, rgba: &[u8]) -> Vec<u8> {
             &zero
         }
     };
-    let mut filtered = vec![0u8; stride + 1];
-    for y in 0..h {
-        let prev = if y == 0 { &zero[..] } else { row(y - 1) };
-        filter_row(row(y), prev, &mut filtered);
-        d.deflate_vec(&filtered, &mut z, Z_NO_FLUSH);
+    let filter_rows = |y0: usize, y1: usize, buf: &mut Vec<u8>| {
+        buf.resize((y1 - y0) * (stride + 1), 0);
+        for (y, out) in (y0..y1).zip(buf.chunks_exact_mut(stride + 1)) {
+            let prev = if y == 0 { &zero[..] } else { row(y - 1) };
+            filter_row(row(y), prev, out);
+        }
+    };
+    // Rows are filtered on a helper thread, a chunk ahead of the (sequential, exact) deflate
+    // that consumes them: filtering then costs no wall time.
+    let chunk_rows = ((256 << 10) / (stride + 1)).max(1);
+    let nchunks = h.div_ceil(chunk_rows);
+    if nchunks < 3 || crate::util::par::threads() < 2 {
+        let mut buf = Vec::new();
+        for c in 0..nchunks {
+            filter_rows(c * chunk_rows, ((c + 1) * chunk_rows).min(h), &mut buf);
+            for r in buf.chunks_exact(stride + 1) {
+                d.deflate_vec(r, &mut z, Z_NO_FLUSH);
+            }
+        }
+    } else {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(3);
+        let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                for c in 0..nchunks {
+                    let mut buf = back_rx.try_recv().unwrap_or_default();
+                    filter_rows(c * chunk_rows, ((c + 1) * chunk_rows).min(h), &mut buf);
+                    if tx.send(buf).is_err() {
+                        return;
+                    }
+                }
+            });
+            for buf in rx.iter() {
+                for r in buf.chunks_exact(stride + 1) {
+                    d.deflate_vec(r, &mut z, Z_NO_FLUSH);
+                }
+                let _ = back_tx.send(buf);
+            }
+        });
     }
     d.deflate_vec(&[], &mut z, Z_FINISH);
     z
