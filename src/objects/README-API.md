@@ -84,6 +84,7 @@ use crate::renderers::{Value, ColType, Column};
 | `enum.description` / `.lookup()` | `e.description()?` (Err outside the choices, like python's ValueError) |
 | `enum.is_valid_choice` / `EnumName.CONSTANT` | `e.is_valid_choice()` / `e.enum_value("CONSTANT")?` |
 | bitfields | `obj.m("Flag")?.int()?` (already `(v & ((1<<end)-1)) >> start`) |
+| `container_of(ptr, "task_struct", "tasks")` / `obj.vol.offset - relative_child_offset` | `list_head.container_of("task_struct", "tasks")?` / `obj.container_at(addr, "task_struct", "tasks")?` |
 | `objects.utility.array_to_string(arr)` | `array_to_string(&arr, None)?` |
 | `utility.pointer_to_string(ptr, count)` | `pointer_to_string(&ptr, count)?` |
 | `utility.rol / bswap_64` | `crate::objects::util::{rol, bswap_32, bswap_64}` |
