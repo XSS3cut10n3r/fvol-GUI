@@ -155,7 +155,7 @@ pub enum Ty {
 
 pub(crate) const MAGIC: &[u8; 8] = b"RSVOLIS1";
 /// Bump when the blob layout or the builder semantics change (invalidates caches).
-pub(crate) const BLOB_VERSION: u32 = 3;
+pub(crate) const BLOB_VERSION: u32 = 4;
 
 /// Section indexes in the header.
 pub(crate) mod sec {
@@ -173,7 +173,8 @@ pub(crate) mod sec {
     pub const H_ENUMS: usize = 11;
     pub const H_BASES: usize = 12;
     pub const META: usize = 13;
-    pub const N: usize = 14;
+    pub const CDATA: usize = 14;
+    pub const N: usize = 15;
 }
 
 /// Record sizes.
@@ -394,6 +395,39 @@ impl SymbolTable {
         }
         let fo = 16 + sec::N * 16;
         let format = (rd32(b, fo), rd32(b, fo + 4), rd32(b, fo + 8));
+        // The string pool holds only names: validate it once (one SIMD-friendly pass) so name
+        // slices only need char-boundary checks afterwards.
+        let (so, sl) = secs[sec::STRINGS];
+        if std::str::from_utf8(&b[so..so + sl]).is_err() {
+            return Err(Error::msg("corrupt symbol table blob (strings)"));
+        }
+        // Validate the structures `member()` reads without bounds checks (one cheap pass).
+        {
+            let (uo, ul) = secs[sec::UTYPES];
+            let (mo, ml) = secs[sec::MEMBERS];
+            let (ho, hl) = secs[sec::MHASH];
+            let nmembers = ml / MEMBER_SZ;
+            let nslots = hl / 4;
+            if ul % UTYPE_SZ != 0 || ml % MEMBER_SZ != 0 {
+                return Err(Error::msg("corrupt symbol table blob (types)"));
+            }
+            for r in b[uo..uo + ul].chunks_exact(UTYPE_SZ) {
+                let (ms, mc, hs, hn) = (rd32(r, 16) as usize, rd32(r, 20) as usize, rd32(r, 24) as usize, rd32(r, 28) as usize);
+                let ok = ms.checked_add(mc).is_some_and(|e| e <= nmembers)
+                    && hs.checked_add(hn).is_some_and(|e| e <= nslots)
+                    && (hn == 0 || hn.is_power_of_two())
+                    && b[ho + hs * 4..ho + (hs + hn) * 4].chunks_exact(4).all(|v| (u32::from_le_bytes(v.try_into().unwrap()) as usize) <= mc);
+                if !ok {
+                    return Err(Error::msg("corrupt symbol table blob (member index)"));
+                }
+            }
+            for r in b[mo..mo + ml].chunks_exact(MEMBER_SZ) {
+                let (off, len) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
+                if off.checked_add(len).is_none_or(|e| e > sl) {
+                    return Err(Error::msg("corrupt symbol table blob (member names)"));
+                }
+            }
+        }
         Ok(SymbolTable {
             name: name.to_string(),
             blob,
@@ -460,10 +494,15 @@ impl SymbolTable {
     }
     #[inline(always)]
     fn str_at(&self, off: u32, len: u32) -> &str {
-        let s = self.sec(sec::STRINGS);
-        let bytes = &s[off as usize..off as usize + len as usize];
-        // the builder only stores valid UTF-8
-        std::str::from_utf8(bytes).unwrap_or("")
+        // SAFETY: the whole pool was validated as UTF-8 in `from_blob`; `get` checks bounds and
+        // char boundaries, so any slice it returns is valid UTF-8 too
+        let pool = unsafe { std::str::from_utf8_unchecked(self.sec(sec::STRINGS)) };
+        pool.get(off as usize..(off as usize).saturating_add(len as usize)).unwrap_or("")
+    }
+    #[inline(always)]
+    fn name_eq(&self, rec: &[u8], name: &[u8]) -> bool {
+        let (off, len) = (rd32(rec, 0) as usize, rd32(rec, 4) as usize);
+        len == name.len() && self.sec(sec::STRINGS).get(off..off.saturating_add(len)) == Some(name)
     }
     #[inline(always)]
     fn rec_str(&self, rec: &[u8]) -> &str {
@@ -481,18 +520,19 @@ impl SymbolTable {
         let recs = self.sec(rs);
         let mask = nslots - 1;
         let mut i = hash_bytes(name.as_bytes()) as usize & mask;
-        loop {
+        for _ in 0..nslots {
             let v = rd32(idx, i * 4);
             if v == 0 {
                 return None;
             }
             let r = (v - 1) as usize;
-            let rec = &recs[r * rsz..(r + 1) * rsz];
-            if self.rec_str(rec) == name {
+            let rec = recs.get(r * rsz..(r + 1) * rsz)?;
+            if self.name_eq(rec, name.as_bytes()) {
                 return Some(r as u32);
             }
             i = (i + 1) & mask;
         }
+        None
     }
 
     // ------------------------------------------------------------------ nodes
@@ -560,27 +600,47 @@ impl SymbolTable {
     /// Look up a member of user type `ut` (hashed; ~20ns).
     #[inline]
     pub fn member(&self, ut: u32, name: &str) -> Option<Member<'_>> {
-        let r = self.utype_rec(ut);
-        let (mstart, mcount, hstart, hlen) = (rd32(r, 16), rd32(r, 20), rd32(r, 24), rd32(r, 28));
-        if mcount == 0 || hlen == 0 {
+        let b = self.b();
+        let (uo, ul) = self.secs[sec::UTYPES];
+        let ut = ut as usize;
+        if (ut + 1) * UTYPE_SZ > ul {
             return None;
         }
-        let hs = self.sec(sec::MHASH);
-        let ms = self.sec(sec::MEMBERS);
-        let mask = hlen as usize - 1;
-        let mut i = hash_bytes(name.as_bytes()) as usize & mask;
-        loop {
-            let v = rd32(hs, (hstart as usize + i) * 4);
-            if v == 0 {
+        // SAFETY: `from_blob` validated every user type's member range, hash range (power of
+        // two, slot values <= member count) and every member name range, so all reads below
+        // stay inside the blob.
+        unsafe {
+            let base = b.as_ptr();
+            let rd = |p: *const u8, o: usize| -> usize { u32::from_le((p.add(o) as *const u32).read_unaligned()) as usize };
+            let r = base.add(uo + ut * UTYPE_SZ);
+            let (mstart, hstart, hlen) = (rd(r, 16), rd(r, 24), rd(r, 28));
+            if hlen == 0 {
                 return None;
             }
-            let mi = (mstart + v - 1) as usize;
-            let rec = &ms[mi * MEMBER_SZ..(mi + 1) * MEMBER_SZ];
-            let n = self.rec_str(rec);
-            if n == name {
-                return Some(Member { name: n, offset: rd32(rec, 8) as u64, ty: ty_decode(&rec[16..32]) });
+            let hs = base.add(self.secs[sec::MHASH].0 + hstart * 4);
+            let ms = base.add(self.secs[sec::MEMBERS].0);
+            let pool = base.add(self.secs[sec::STRINGS].0);
+            let nb = name.as_bytes();
+            let mask = hlen - 1;
+            let mut i = hash_bytes(nb) as usize & mask;
+            for _ in 0..hlen {
+                let v = rd(hs, i * 4);
+                if v == 0 {
+                    return None;
+                }
+                let rec = ms.add((mstart + v - 1) * MEMBER_SZ);
+                let (off, len) = (rd(rec, 0), rd(rec, 4));
+                if len == nb.len() {
+                    let s = std::slice::from_raw_parts(pool.add(off), len);
+                    if s == nb {
+                        // byte-equal to a valid &str, hence valid UTF-8
+                        let n = std::str::from_utf8_unchecked(s);
+                        return Some(Member { name: n, offset: rd(rec, 8) as u64, ty: ty_decode(std::slice::from_raw_parts(rec.add(16), 16)) });
+                    }
+                }
+                i = (i + 1) & mask;
             }
-            i = (i + 1) & mask;
+            None
         }
     }
     /// All members of user type `ut` in ISF order.
@@ -691,8 +751,7 @@ impl SymbolTable {
         let flags = rd32(r, 20);
         let cdata = if flags & 1 != 0 {
             let (o, l) = (rd32(r, 24) as usize, rd32(r, 28) as usize);
-            let s = self.sec(sec::STRINGS);
-            Some(&s[o..o + l])
+            self.sec(sec::CDATA).get(o..o.saturating_add(l))
         } else {
             None
         };
