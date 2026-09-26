@@ -427,7 +427,7 @@ impl Prog {
 
 const PAGE_SHIFT: usize = 10;
 const PAGE: usize = 1 << PAGE_SHIFT;
-const MEMO_BUDGET_BYTES: usize = 256 << 20;
+const MEMO_BUDGET_BYTES: usize = 64 << 20;
 
 struct Memo {
     /// Bits per position: keys * variants.

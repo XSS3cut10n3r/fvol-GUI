@@ -111,7 +111,7 @@ impl Dir {
 /// Byte classes shared by all directions of a searcher.
 struct Classes {
     map: [u8; 256],
-    n: usize,
+    _n: usize,
     rep: Vec<u8>,
     ctx: Vec<u8>,
     stride: usize,
@@ -196,7 +196,7 @@ impl Classes {
         };
         rep.insert(n, 0); // eoi placeholder rep (never consumed)
         let stride = n + if has_final { 2 } else { 1 };
-        Classes { map, n, rep, ctx, stride, eoi: n, final_nl }
+        Classes { map, _n: n, rep, ctx, stride, eoi: n, final_nl }
     }
 
     #[inline]
