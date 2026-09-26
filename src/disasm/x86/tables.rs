@@ -192,6 +192,12 @@ pub(crate) struct Entry {
     pub dn: u8,
     /// First alias mnemonic id (cmpXXps style predicates), 0 if none.
     pub alias: u16,
+    /// (derived) register class of the last S_VSIB operand, 0 if none.
+    pub vsib: u8,
+    /// (derived) has an S_KMASK operand.
+    pub kmask: bool,
+    /// (derived) has an S_KMASK or S_RC operand (formatted by the general op_str loop).
+    pub fdeco: bool,
 }
 
 const CMP_PREDS: [&str; 32] = [
@@ -202,6 +208,8 @@ const CMP_PREDS: [&str; 32] = [
 
 pub(crate) struct Tables {
     pub mnems: Vec<&'static str>,
+    /// Mnemonics zero-padded to 31 bytes, byte 31 = length (fixed-size copies when formatting).
+    pub mnem_pad: Vec<[u8; 32]>,
     pub entries: Vec<Entry>,
     pub roots: Vec<[u32; 256]>,
     pub nodes: Vec<u32>,
@@ -645,6 +653,16 @@ impl Builder {
                 e.nops += 1;
             }
         }
+        for o in &e.ops[..e.nops as usize] {
+            if o.src == S_VSIB {
+                e.vsib = o.cls;
+            } else if o.src == S_KMASK {
+                e.kmask = true;
+            }
+            if o.src == S_KMASK || o.src == S_RC {
+                e.fdeco = true;
+            }
+        }
         for t in flags_s.split_whitespace() {
             if let Some(n) = t.strip_prefix('n').and_then(|x| x.parse::<u8>().ok()) {
                 e.dn = n;
@@ -776,6 +794,17 @@ fn build() -> Tables {
         eprintln!("x86 spec errors:\n{}", b.errors.join("\n"));
     }
     let _ = regs::NREGS;
-    Tables { mnems: b.mnems, entries: b.entries, roots, nodes, aliases: b.aliases }
+    let mnem_pad = b
+        .mnems
+        .iter()
+        .map(|m| {
+            let mut p = [0u8; 32];
+            let n = m.len().min(31);
+            p[..n].copy_from_slice(&m.as_bytes()[..n]);
+            p[31] = n as u8;
+            p
+        })
+        .collect();
+    Tables { mnems: b.mnems, mnem_pad, entries: b.entries, roots, nodes, aliases: b.aliases }
 }
 

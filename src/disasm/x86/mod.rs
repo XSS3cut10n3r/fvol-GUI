@@ -113,8 +113,8 @@ pub struct Insn {
     /// Length in bytes (1..=15).
     pub size: u8,
     pub mode: Mode,
-    /// Raw instruction bytes (`bytes[..size]`).
-    pub bytes: [u8; 15],
+    /// Raw instruction bytes (`bytes[..size]`, zero padded; 16 so it is one vector store).
+    pub bytes: [u8; 16],
     pub op_count: u8,
     pub operands: [Operand; MAX_OPS],
     /// Mnemonic id (index into the mnemonic table).
@@ -141,7 +141,7 @@ impl Default for Insn {
             address: 0,
             size: 0,
             mode: Mode::X86_64,
-            bytes: [0; 15],
+            bytes: [0; 16],
             op_count: 0,
             operands: [Operand::None; MAX_OPS],
             mnem: 0,
@@ -194,6 +194,11 @@ impl Insn {
     pub fn write_op_str(&self, out: &mut String) {
         format::write_op_str(self, out)
     }
+    /// Append volatility's disassembly renderer line `"\n{address:#x}:\t{mnemonic}\t{op_str}"`.
+    #[inline]
+    pub fn write_line(&self, out: &mut String) {
+        format::write_line(self, out)
+    }
     /// Address of the next instruction.
     #[inline]
     pub fn next_address(&self) -> u64 {
@@ -221,12 +226,22 @@ pub fn decode_into(data: &[u8], address: u64, mode: Mode, insn: &mut Insn) -> bo
     decode::decode_into(data, address, mode, insn)
 }
 
-/// Length of the instruction at the start of `data` (0 if invalid), without building operands
-/// text. (Operand structures are still decoded; this is the same work as `decode`.)
+/// Length of the instruction at the start of `data` (0 if invalid), exactly as `decode` would
+/// report it, from a length-only instantiation of the decoder (no operand values are built).
 #[inline]
 pub fn insn_len(data: &[u8], mode: Mode) -> usize {
-    let mut insn = Insn::default();
-    if decode::decode_into(data, 0, mode, &mut insn) { insn.size as usize } else { 0 }
+    decode::insn_len(data, mode)
+}
+
+/// Append volatility's renderer lines (`Insn::write_line`) for consecutive instructions from the
+/// start of `data` (located at `address`) until the first undecodable one; returns (bytes
+/// consumed, instructions written). This is `format_capstone`'s loop, with the decoder
+/// specialized for `mode`.
+pub fn write_lines(data: &[u8], address: u64, mode: Mode, out: &mut String) -> (usize, usize) {
+    match mode {
+        Mode::X86_64 => format::write_lines::<true>(data, address, out),
+        Mode::X86_32 => format::write_lines::<false>(data, address, out),
+    }
 }
 
 /// Iterator over consecutive instructions, stopping at the first undecodable one

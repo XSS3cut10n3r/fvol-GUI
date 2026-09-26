@@ -29,6 +29,46 @@ fn is_legacy_prefix(b: u8) -> bool {
     matches!(b, 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 | 0x67)
 }
 
+/// Prefix byte classes: bit 0 legacy prefix, bit 1 REX (0x40-0x4F, 64-bit mode only).
+static PFX_CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut b = 0;
+    while b < 256 {
+        let v = b as u8;
+        if matches!(v, 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 | 0x67) {
+            t[b] = 1;
+        } else if v & 0xF0 == 0x40 {
+            t[b] = 2;
+        }
+        b += 1;
+    }
+    t
+};
+
+/// ModRM byte -> its mod==3 / reg / rm selector fields, pre-packed at SEL_MOD / SEL_REG / SEL_RM.
+static MODRM_SEL: [u64; 256] = {
+    let mut t = [0u64; 256];
+    let mut m = 0;
+    while m < 256 {
+        t[m] = ((m >> 6 == 3) as u64) << (4 * SEL_MOD)
+            | (((m >> 3) & 7) as u64) << (4 * SEL_REG)
+            | ((m & 7) as u64) << (4 * SEL_RM);
+        m += 1;
+    }
+    t
+};
+
+/// Opcode bytes that start a 0F escape or a VEX / EVEX / XOP prefix.
+static ESC_BYTE: [bool; 256] = {
+    let mut t = [false; 256];
+    t[0x0F] = true;
+    t[0xC4] = true;
+    t[0xC5] = true;
+    t[0x62] = true;
+    t[0x8F] = true;
+    t
+};
+
 const VEX_NONE: u8 = 0;
 const VEX_VEX: u8 = 1;
 const VEX_EVEX: u8 = 2;
@@ -36,6 +76,7 @@ const VEX_XOP: u8 = 3;
 
 struct St<'a> {
     d: &'a [u8],
+    data: &'a [u8], // the caller's whole buffer (d = data[..min(len, 15)])
     n: usize,
     pos: usize,
     m64: bool,
@@ -64,6 +105,7 @@ struct St<'a> {
     z16: bool,
     is4: u8,
     vsib: u8,   // VSIB index register class (0 = normal SIB)
+    rel: u8,    // 1 + index of the relative branch operand (0 = none)
 }
 
 impl St<'_> {
@@ -105,10 +147,51 @@ fn seg_reg(prefix: u8) -> u8 {
 }
 
 pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
+    match mode {
+        Mode::X86_64 => decode_impl::<true, true, true>(data, addr, mode, out),
+        Mode::X86_32 => decode_impl::<true, false, true>(data, addr, mode, out),
+    }
+}
+
+/// `decode_into` for a mode known at compile time, fully inlined (for decode loops such as
+/// the renderer's, which then pay no call / mode dispatch per instruction).
+#[inline(always)]
+pub(crate) fn decode_mode<const M64: bool>(data: &[u8], addr: u64, out: &mut Insn) -> bool {
+    let mode = if M64 { Mode::X86_64 } else { Mode::X86_32 };
+    decode_impl::<true, M64, true>(data, addr, mode, out)
+}
+
+/// Length-only decode: the same decoder instantiated into a local scratch `Insn`, so the
+/// operand values it never reads are dead code; validity checks are all kept.
+pub(crate) fn insn_len(data: &[u8], mode: Mode) -> usize {
+    let mut insn = Insn::default();
+    let ok = match mode {
+        Mode::X86_64 => decode_impl::<true, true, false>(data, 0, mode, &mut insn),
+        Mode::X86_32 => decode_impl::<true, false, false>(data, 0, mode, &mut insn),
+    };
+    if ok { insn.size as usize } else { 0 }
+}
+
+/// Instructions with legacy prefixes (restart of the specialized path below).
+#[inline(never)]
+fn decode_prefixed(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
+    match mode {
+        Mode::X86_64 => decode_impl::<false, true, true>(data, addr, mode, out),
+        Mode::X86_32 => decode_impl::<false, false, true>(data, addr, mode, out),
+    }
+}
+
+/// The decoder. `NOLEG = true` is the common-case instantiation: it hands any instruction with a
+/// legacy (non-REX) prefix or a C4/C5/62/8F first opcode byte to the `false` one, so all legacy
+/// prefix and VEX/EVEX/XOP state is compile-time constant there and those rules fold away.
+/// Same source for both.
+/// `FULL = false` (insn_len) only needs validity + length: operand values are not stored.
+#[inline(always)]
+fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
     let t = tables();
     let n = data.len().min(15);
     let d = &data[..n];
-    let m64 = mode == Mode::X86_64;
+    let m64 = M64; // == (mode == Mode::X86_64), a constant per instantiation
     let mut i = 0usize;
     let mut lockrep = 0u8;
     let mut segp = 0u8;
@@ -119,11 +202,15 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     // LLVM-7 style mandatory prefix: the last F2/F3 immediately followed by 0F/66/REX, else a 66
     // immediately followed by 0F/REX (only if no F2/F3 was mandatory).
     let mut mand = 0u8;
+    let pfx_mask = 1 | ((m64 as u8) << 1);
     loop {
         if i >= n {
             return false;
         }
         let b = d[i];
+        if PFX_CLASS[b as usize] & pfx_mask == 0 {
+            break; // not a prefix: fast exit (common case)
+        }
         if m64 && b & 0xF0 == 0x40 {
             let mut j = i + 1;
             while j < n && d[j] & 0xF0 == 0x40 {
@@ -139,6 +226,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             rex = d[j - 1];
             i = j;
             break;
+        }
+        if NOLEG {
+            return decode_prefixed(data, addr, mode, out);
         }
         match b {
             0xF0 | 0xF2 | 0xF3 => {
@@ -183,6 +273,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
 
     let mut st = St {
         d,
+        data,
         n,
         pos: i,
         m64,
@@ -209,15 +300,23 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         vvvv_hi: 0,
         z16: false,
         is4: 0,
+        rel: 0,
     };
 
     // ------------------------------------------------------------------ opcode / vector prefixes
     let b = st.byte().unwrap_or(0);
+    // one table lookup rules out all escape / vector-prefix bytes for most opcodes
+    let esc = ESC_BYTE[b as usize];
+    if NOLEG && esc && b != 0x0F {
+        // VEX / EVEX / XOP candidates also take the general instantiation, so st.vex is a
+        // constant VEX_NONE here and all vector-extension state folds away
+        return decode_prefixed(data, addr, mode, out);
+    }
     let map: usize;
     let op: u8;
     let mut pfx: usize; // mandatory prefix selector value
     let mut opcode = [0u8; 4];
-    if b == 0x0F {
+    if esc && b == 0x0F {
         let b2 = match st.byte() {
             Some(x) => x,
             None => return false,
@@ -266,7 +365,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 }
             }
         };
-    } else if (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
+    } else if esc && (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
         // VEX (a LOCK or REX prefix makes it invalid; 66/F2/F3 are ignored)
         if lockrep == 0xF0 || rex != 0 {
             return false;
@@ -307,7 +406,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         };
         opcode = [op, 0, 0, 0];
         let _ = (lockrep, has66, rex);
-    } else if b == 0x62 && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
+    } else if esc && b == 0x62 && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
         // EVEX (a LOCK or REX prefix makes it invalid)
         if st.pos + 3 > n || lockrep == 0xF0 || rex != 0 {
             return false;
@@ -356,7 +455,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             None => return false,
         };
         opcode = [op, 0, 0, 0];
-    } else if b == 0x8F && st.pos < n && d[st.pos] & 0x38 != 0 {
+    } else if esc && b == 0x8F && st.pos < n && d[st.pos] & 0x38 != 0 {
         // XOP
         if st.pos + 2 > n {
             return false;
@@ -445,59 +544,54 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     } else {
         let modrm_pos = st.pos;
         let (mm, have_modrm) = if modrm_pos < n { (d[modrm_pos], true) } else { (0, false) };
-        let sz = |s: u8| -> u8 {
-            match s {
-                2 => 0,
-                4 => 1,
-                _ => 2,
-            }
-        };
-        let w = if st.vex != VEX_NONE { st.w } else { rexw };
-        let mut sel: [u8; NSEL] = [
-            m64 as u8,
-            pfx as u8,
-            w as u8,
-            if st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3 { 2 } else { st.l },
-            st.evex_b as u8,
-            (mm >> 6 == 3) as u8,
-            (mm >> 3) & 7,
-            mm & 7,
-            st.rex & 1,
-            sz(osz_def),
-            sz(osz_d64),
-            sz(st.asz),
-            has66 as u8,
-        ];
+        // operand / address size selector value: 2 -> 0, 4 -> 1, 8 -> 2
+        let sz = |s: u8| -> u64 { (s >> 2) as u64 };
         let root = node;
-        node = match walk(t, root, &sel, have_modrm) {
-            Some(x) => x,
-            None => return false,
-        };
-        if node == 0 && st.vex == VEX_NONE && mand == 0 && pfx == 1 && has67 && map != MAP_1 {
-            // OPSIZE_ADSIZE context also inherits the prefix-less entries (via ADSIZE)
-            sel[SEL_PFX as usize] = 0;
-            node = match walk(t, root, &sel, have_modrm) {
+        if root != 0 && root & LEAF == 0 {
+            // decision node: selector values packed 4 bits each, in SEL_* order (built only when
+            // the opcode actually needs one)
+            let w = if st.vex != VEX_NONE { st.w } else { rexw };
+            let evex_rc = st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3;
+            let mut sw: u64 = (m64 as u64)
+                | (pfx as u64) << (4 * SEL_PFX)
+                | (w as u64) << (4 * SEL_W)
+                | (if evex_rc { 2 } else { st.l as u64 }) << (4 * SEL_L)
+                | (st.evex_b as u64) << (4 * SEL_B)
+                | MODRM_SEL[mm as usize]
+                | ((st.rex & 1) as u64) << (4 * SEL_REXB)
+                | sz(osz_def) << (4 * SEL_O)
+                | sz(osz_d64) << (4 * SEL_D)
+                | sz(st.asz) << (4 * SEL_A)
+                | (has66 as u64) << (4 * SEL_H66);
+            node = match walk(t, root, sw, have_modrm) {
                 Some(x) => x,
                 None => return false,
             };
-        }
-        if node == 0 && st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3 {
-            // rounding / sae register forms: scalar (LIG) entries are listed under L=0
-            sel[SEL_L as usize] = 0;
-            node = match walk(t, root, &sel, have_modrm) {
-                Some(x) => x,
-                None => return false,
-            };
-        }
-        if node == 0 && rexw && pfx != 0 && st.vex == VEX_NONE && map != MAP_1 {
-            // capstone/LLVM REX.W contexts inherit the no-prefix (W0) entries
-            sel[SEL_PFX as usize] = 0;
-            sel[SEL_W as usize] = 0;
-            node = match walk(t, root, &sel, have_modrm) {
-                Some(x) => x,
-                None => return false,
-            };
-            fallback = true;
+            if node == 0 && st.vex == VEX_NONE && mand == 0 && pfx == 1 && has67 && map != MAP_1 {
+                // OPSIZE_ADSIZE context also inherits the prefix-less entries (via ADSIZE)
+                sw &= !(0xF << (4 * SEL_PFX));
+                node = match walk(t, root, sw, have_modrm) {
+                    Some(x) => x,
+                    None => return false,
+                };
+            }
+            if node == 0 && evex_rc {
+                // rounding / sae register forms: scalar (LIG) entries are listed under L=0
+                sw &= !(0xF << (4 * SEL_L));
+                node = match walk(t, root, sw, have_modrm) {
+                    Some(x) => x,
+                    None => return false,
+                };
+            }
+            if node == 0 && rexw && pfx != 0 && st.vex == VEX_NONE && map != MAP_1 {
+                // capstone/LLVM REX.W contexts inherit the no-prefix (W0) entries
+                sw &= !((0xF << (4 * SEL_PFX)) | (0xF << (4 * SEL_W)));
+                node = match walk(t, root, sw, have_modrm) {
+                    Some(x) => x,
+                    None => return false,
+                };
+                fallback = true;
+            }
         }
         if node == 0 {
             return false;
@@ -523,9 +617,12 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             mnem: 0,
             alias: 0,
             dn: 0,
+            vsib: 0,
+            kmask: false,
+            fdeco: false,
         };
         st.osz = osz_def;
-        if !operands(&mut st, &e, out, addr, mode, 0) {
+        if !operands::<FULL>(&mut st, &e, out, addr, mode, 0) {
             return false;
         }
         let sfx = match st.byte() {
@@ -544,7 +641,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         out.entry = (node & 0xFFFF) as u16;
         out.pfx = P_NONE;
         opcode = [0x0F, 0x0F, sfx, 0];
-        return finish(&st, out, addr, mode, opcode);
+        return finish::<FULL>(&st, out, addr, mode, opcode);
     }
 
     let e = &t.entries[entry_idx];
@@ -666,12 +763,12 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             nn
         };
     }
-    for o in &e.ops[..e.nops as usize] {
-        if o.src == S_VSIB {
-            st.vsib = o.cls;
-        } else if o.src == S_KMASK {
-            deco &= 0x7F;
-        }
+    // (precomputed from the operand list: last S_VSIB class, any S_KMASK)
+    if e.vsib != 0 {
+        st.vsib = e.vsib;
+    }
+    if e.kmask {
+        deco &= 0x7F;
     }
 
     if lockrep == 0xF0 && flags & F_LOCK == 0 {
@@ -680,12 +777,12 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     out.mnem = e.mnem;
     out.entry = entry_idx as u16;
 
-    if !operands(&mut st, e, out, addr, mode, op) {
+    if !operands::<FULL>(&mut st, e, out, addr, mode, op) {
         return false;
     }
-    out.evex = deco;
+    out.evex = deco | if e.fdeco { EVEX_FMT_DECO } else { 0 };
     out.sae = sae;
-    if bcst_elem != 0 {
+    if FULL && bcst_elem != 0 {
         let vl: u8 = if st.l >= 2 { 64 } else { 16 << st.l };
         for k in 0..out.op_count as usize {
             if let Operand::Mem(ref mut m) = out.operands[k] {
@@ -703,7 +800,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         }
     }
     let has_mem = st.has_modrm && st.modrm >> 6 != 3;
-    if flags & (F_CMP8 | F_CMP32 | F_VPCMP | F_VPCOM) != 0 && out.op_count > 0 {
+    if FULL && flags & (F_CMP8 | F_CMP32 | F_VPCMP | F_VPCOM) != 0 && out.op_count > 0 {
         let last = out.op_count as usize - 1;
         if let Operand::Imm(v) = out.operands[last] {
             let lim = if flags & F_CMP32 != 0 { 32 } else { 8 };
@@ -768,39 +865,69 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         pp = if pp == P_BND { P_BND_NOTRACK } else { P_NOTRACK };
     }
     out.pfx = pp;
-    finish(&st, out, addr, mode, opcode)
+    finish::<FULL>(&st, out, addr, mode, opcode)
 }
 
 /// Walk the decision tree from `node`; `None` if a ModRM selector is needed but missing.
 #[inline(always)]
-fn walk(t: &Tables, mut node: u32, sel: &[u8; NSEL], have_modrm: bool) -> Option<u32> {
+fn walk(t: &Tables, mut node: u32, sw: u64, have_modrm: bool) -> Option<u32> {
     while node != 0 && node & LEAF == 0 {
         let off = node as usize;
-        let kind = t.nodes[off] as usize;
-        if !have_modrm && (SEL_MOD as usize..=SEL_RM as usize).contains(&kind) {
+        let kind = t.nodes[off];
+        if !have_modrm && kind.wrapping_sub(SEL_MOD) <= SEL_RM - SEL_MOD {
             return None;
         }
-        node = t.nodes[off + 1 + sel[kind] as usize];
+        let v = (sw.wrapping_shr(kind.wrapping_mul(4)) & 15) as usize;
+        node = t.nodes[off + 1 + v];
     }
     Some(node)
 }
 
-#[inline]
-fn finish(st: &St, out: &mut Insn, addr: u64, mode: Mode, opcode: [u8; 4]) -> bool {
+/// `KEEP[n]`: mask keeping the low `n` bytes of a little-endian u128.
+static KEEP: [u128; 16] = {
+    let mut t = [0u128; 16];
+    let mut k = 1;
+    while k < 16 {
+        t[k] = (1u128 << (8 * k)) - 1;
+        k += 1;
+    }
+    t
+};
+
+/// The first `len` bytes of `data` (`len <= 15`), zero padded to 16.
+#[inline(always)]
+fn insn_bytes(data: &[u8], len: usize) -> [u8; 16] {
+    if let Some(w) = data.first_chunk::<16>() {
+        // one 16-byte load + mask instead of a variable-length memcpy
+        (u128::from_le_bytes(*w) & KEEP[len & 15]).to_le_bytes()
+    } else {
+        let mut out = [0u8; 16];
+        let len = len.min(data.len()).min(15);
+        out[..len].copy_from_slice(&data[..len]);
+        out
+    }
+}
+
+#[inline(always)]
+fn finish<const FULL: bool>(st: &St, out: &mut Insn, addr: u64, mode: Mode, opcode: [u8; 4]) -> bool {
     let len = st.pos;
-    if len > 15 || len > st.n {
+    if len > st.n {
+        // (st.n <= 15)
         return false;
     }
-    out.address = addr;
     out.size = len as u8;
+    if !FULL {
+        return true;
+    }
+    out.address = addr;
     out.mode = mode;
-    out.bytes = [0; 15];
-    out.bytes[..len].copy_from_slice(&st.d[..len]);
+    out.bytes = insn_bytes(st.data, len);
     out.opcode = opcode;
     out.rex = st.rex;
-    // resolve relative branch targets now that the length is known
-    for k in 0..out.op_count as usize {
-        if out.ofmt[k] & OF_REL != 0 {
+    // resolve the relative branch target now that the length is known
+    if st.rel != 0 {
+        let k = st.rel as usize - 1;
+        if k < out.op_count as usize && k < MAX_OPS && out.ofmt[k] & OF_REL != 0 {
             if let Operand::Imm(rel) = out.operands[k] {
                 let mut tgt = addr.wrapping_add(len as u64).wrapping_add(rel as u64);
                 if mode != Mode::X86_64 {
@@ -823,12 +950,16 @@ pub(crate) const OF_BCST: u8 = 32;
 pub(crate) const OF_FARSEP: u8 = 64; // printed after ':' instead of ", "
 pub(crate) const OF_RC: u8 = 128; // EVEX rounding slot (printed only when active)
 pub(crate) const OF_KMASK: u8 = 4; // standalone {kN}
+/// `Insn::evex` bit: the instruction has an OF_RC / OF_KMASK operand (formatting fast-path test;
+/// bits 0x80 / 0x40 / 0x07 are the opmask decoration).
+pub(crate) const EVEX_FMT_DECO: u8 = 0x20;
 
 #[inline]
 fn gpr_by_size(n: u8, size: u8, rex: bool) -> u8 {
     gpr(n, size, rex)
 }
 
+#[inline(always)]
 fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
     let mk = if mk == K_DEF {
         match cls {
@@ -930,7 +1061,7 @@ fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
 
 /// Register id for register class `cls` and register number `num` (already REX-extended).
 /// Returns 0 when invalid.
-#[inline]
+#[inline(always)]
 fn reg_for(st: &St, cls: u8, num: u8) -> u8 {
     let rexp = st.rex != 0;
     match cls {
@@ -1017,6 +1148,7 @@ fn is_vec_class(cls: u8) -> bool {
 }
 
 /// Parse the ModRM memory operand (st.modrm already read, mod != 3).
+#[inline(always)]
 fn parse_mem(st: &mut St) -> Option<Mem> {
     let md = st.modrm >> 6;
     let rm = st.modrm & 7;
@@ -1104,7 +1236,8 @@ fn parse_mem(st: &mut St) -> Option<Mem> {
     Some(m)
 }
 
-fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: u8) -> bool {
+#[inline(always)]
+fn operands<const FULL: bool>(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: u8) -> bool {
     let m64 = mode == Mode::X86_64;
     // ModRM / memory
     let mut mem = Mem::default();
@@ -1124,16 +1257,51 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
             };
         }
     }
-    let modrm = st.modrm;
-    let is_reg = modrm >> 6 == 3;
-    let rexr = if st.rex & 4 != 0 { 8 } else { 0 };
-    let rexb = if st.rex & 1 != 0 { 8 } else { 0 };
     out.op_count = e.nops;
     out.ofmt = [0; MAX_OPS];
     out.evex = 0;
     out.sae = 0;
-    for k in 0..e.nops as usize {
-        let s = e.ops[k];
+    // The first two operands are expanded straight-line (in a loop over all operands LLVM
+    // hoists the many per-source invariants into a costly prologue); 3+ operands loop.
+    let nops = (e.nops as usize).min(MAX_OPS);
+    if nops > 0 {
+        if !operand_inl::<FULL>(st, e, 0, &mem, out, m64, op) {
+            return false;
+        }
+        if nops > 1 {
+            if !operand_inl::<FULL>(st, e, 1, &mem, out, m64, op) {
+                return false;
+            }
+            for k in 2..nops {
+                if !operand_inl::<FULL>(st, e, k, &mem, out, m64, op) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Store operand `k` (FULL only); the common sources return through here directly from their
+/// match arm, so each gets its own small store instead of one merged 16-byte write.
+#[inline(always)]
+fn put_op<const FULL: bool>(out: &mut Insn, k: usize, o: Operand) -> bool {
+    if FULL {
+        out.operands[k] = o;
+    }
+    true
+}
+
+/// Decode explicit operand `k` (spec `e.ops[k]`).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
+    let s = e.ops[k];
+    let modrm = st.modrm;
+    let is_reg = modrm >> 6 == 3;
+    let rexr = if st.rex & 4 != 0 { 8 } else { 0 };
+    let rexb = if st.rex & 1 != 0 { 8 } else { 0 };
+    {
         let o = match s.src {
             S_REG => {
                 let mut num = ((modrm >> 3) & 7) | rexr;
@@ -1146,7 +1314,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 if r == 0 {
                     return false;
                 }
-                Operand::Reg(Reg(r))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(r)));
             }
             S_RM | S_MEM | S_RMREG | S_VSIB => {
                 if is_reg {
@@ -1161,14 +1329,14 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     if r == 0 {
                         return false;
                     }
-                    Operand::Reg(Reg(r))
+                    return put_op::<FULL>(out, k, Operand::Reg(Reg(r)));
                 } else {
                     if s.src == S_RMREG {
                         return false;
                     }
-                    let mut mm = mem;
+                    let mut mm = *mem;
                     mm.size = memsize_for(st, s.cls, s.mk);
-                    Operand::Mem(mm)
+                    return put_op::<FULL>(out, k, Operand::Mem(mm));
                 }
             }
             S_VVVV => {
@@ -1176,11 +1344,11 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 if r == 0 {
                     return false;
                 }
-                Operand::Reg(Reg(r))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(r)));
             }
             S_OPREG => {
                 let num = (op & 7) | rexb;
-                Operand::Reg(Reg(reg_for(st, s.cls, num)))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(reg_for(st, s.cls, num))));
             }
             S_IS4 => {
                 let b = match st.byte() {
@@ -1190,9 +1358,9 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 st.is4 = b;
                 // capstone does not mask the is4 register to 3 bits in 32-bit mode
                 let num = b >> 4;
-                Operand::Reg(Reg(reg_for(st, s.cls, num)))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(reg_for(st, s.cls, num))));
             }
-            S_FIXED => Operand::Reg(Reg(s.cls)),
+            S_FIXED => return put_op::<FULL>(out, k, Operand::Reg(Reg(s.cls))),
             S_ACC => {
                 let size = if s.cls == C_A {
                     if m64 { st.asz } else { 4 }
@@ -1203,9 +1371,9 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 } else {
                     st.osz
                 };
-                Operand::Reg(Reg(gpr(0, size, false)))
+                return put_op::<FULL>(out, k, Operand::Reg(Reg(gpr(0, size, false))));
             }
-            S_CONST1 => Operand::Imm(1),
+            S_CONST1 => return put_op::<FULL>(out, k, Operand::Imm(1)),
             S_RC => {
                 out.ofmt[k] |= OF_RC;
                 Operand::None
@@ -1292,7 +1460,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 if signed {
                     out.ofmt[k] |= OF_SIGNED;
                 }
-                Operand::Imm(v)
+                return put_op::<FULL>(out, k, Operand::Imm(v));
             }
             S_REL => {
                 let rel = if s.cls == 1 {
@@ -1328,7 +1496,8 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     }
                 };
                 out.ofmt[k] |= OF_REL;
-                Operand::Imm(rel)
+                st.rel = k as u8 + 1;
+                return put_op::<FULL>(out, k, Operand::Imm(rel));
             }
             S_MOFFS => {
                 let v = match st.le(st.asz as usize) {
@@ -1377,11 +1546,13 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     out.ofmt[k + 1] = if s.cls == 0 { OF_FARSEP } else { 0 };
                     out.op_count = out.op_count.max(k as u8 + 2);
                 }
-                continue;
+                return true;
             }
             _ => Operand::None,
         };
-        out.operands[k] = o;
+        if FULL {
+            out.operands[k] = o;
+        }
     }
     true
 }
