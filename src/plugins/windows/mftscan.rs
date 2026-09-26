@@ -487,6 +487,26 @@ pub fn primary_memory_layer(ctx: &Context) -> Result<LayerRef> {
     }
 }
 
+/// Config flag set by the timeliner: python chooses the automagic stackers by the category of
+/// the plugin run from the CLI (`choose_os_stackers`). A standalone `windows.*` plugin only
+/// gets the Windows stacker, but the timeliner's category excludes none, so inside the
+/// timeliner MFTScan's `primary` is also satisfied by a Linux or Mac layer.
+pub const ANY_OS_STACKER: &str = "rsvol-any-os-stacker";
+
+/// [`primary_memory_layer`] when every OS stacker may build the `primary` layer: the physical
+/// layer below the Windows, else the Linux, else the Mac translation layer.
+pub fn any_os_memory_layer(ctx: &Context) -> Result<LayerRef> {
+    primary_memory_layer(ctx).or_else(|e| {
+        if let Ok(k) = ctx.linux_kernel() {
+            return Ok(k.phys);
+        }
+        if let Ok(k) = ctx.mac_kernel() {
+            return Ok(k.phys);
+        }
+        Err(e)
+    })
+}
+
 /// Scan the physical layer, build batches with `add`, render them with `emit`.
 fn run_batches<'a, B: Default + Send>(
     layer: &'a dyn Layer,
@@ -530,8 +550,8 @@ impl Plugin for MFTScan {
     /// python `generate_timeline()`. If python raises midway (an unreadable FILE_NAME name or
     /// record flags) the events generated before stay in python's timeline, so they are
     /// returned without the error.
-    fn timeline(&self, ctx: &Context, _cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
-        let layer = match primary_memory_layer(ctx) {
+    fn timeline(&self, ctx: &Context, cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
+        let layer = match if cfg.get_bool(ANY_OS_STACKER) { any_os_memory_layer(ctx) } else { primary_memory_layer(ctx) } {
             Ok(l) => l,
             Err(e) => return Some(Err(e)),
         };
