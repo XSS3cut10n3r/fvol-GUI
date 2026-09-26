@@ -1,11 +1,15 @@
-//! yarascan.YaraScan (python `plugins/yarascan.py`).
+//! yarascan.YaraScan (python `plugins/yarascan.py`) and python's `YaraScanner` layer scanner.
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
 use crate::context::Context;
-use crate::error::{Error, Result};
+use crate::error::Result;
+use crate::layers::scan::{Scanner, scan};
+use crate::layers::{Layer, LayerExt};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
-use crate::renderers::RowSink;
+use crate::renderers::{ColType, Column, RowSink, Value};
+use crate::yara::rules::Rules;
+use crate::yara::rules::volatility::{Hit, process_yara_options, scanner_hits};
 
 pub struct YaraScan;
 
@@ -24,6 +28,83 @@ pub fn yarascan_option_requirements() -> Vec<Requirement> {
     ]
 }
 
+/// python `YaraScan.process_yara_options(dict(self.config))` for a plugin config: `Ok(None)` when
+/// no rules were given (python logs an error and returns None). A rule file is read like
+/// python's `ResourceAccessor().open(...)` (file:// URIs and plain paths); a compile error or
+/// an unreadable file is python's uncaught exception (we panic with its text).
+pub fn rules_from_config(cfg: &Config) -> Option<Rules> {
+    let file_src = if cfg.get_str("yara_string").is_none() {
+        cfg.get_str("yara_file").map(|u| {
+            let path = crate::util::paths::file_uri_to_path(u).unwrap_or_else(|| std::path::PathBuf::from(u));
+            std::fs::read(&path).unwrap_or_else(|e| panic!("FileNotFoundError: {e}: '{u}'"))
+        })
+    } else {
+        None
+    };
+    if cfg.get_str("yara_string").is_none() && file_src.is_none() {
+        if let Some(u) = cfg.get_str("yara_compiled_file") {
+            // yara.load(file=...) of a compiled rules file: not supported by the yara engine
+            panic!("yara.Error: could not load compiled rules from {u} (unsupported)");
+        }
+    }
+    match process_yara_options(cfg.get_str("yara_string"), file_src.as_deref(), cfg.get_bool("insensitive"), cfg.get_bool("wide")) {
+        Ok(r) => r,
+        Err(e) => panic!("yara.SyntaxError: {e}"),
+    }
+}
+
+/// python `YaraScanner(rules)` as a layer scanner: every instance of every matching string of
+/// every matching rule in the chunk's data, INCLUDING the overlap (python applies no
+/// `chunk_size` filter here, so matches in a chunk's overlap are reported twice).
+pub struct YaraScanner<'a> {
+    pub rules: &'a Rules,
+}
+
+impl Scanner for YaraScanner<'_> {
+    type Hit = Hit;
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<Hit>) {
+        hits.extend(scanner_hits(self.rules, data, data_offset));
+    }
+}
+
+/// python `renderers.LayerData(context, layer_name, offset, length)` as the CLI's
+/// `LayerDataRenderer.render_bytes` sees it (no surrounding context bytes): the padded read and
+/// the "error" byte indices, computed with python's exact (quirky) walk over
+/// `layer.mapping(start, end, ignore_errors=True)` for translation layers.
+pub fn layer_data_value(layer: &dyn Layer, offset: u64, length: u64) -> Value {
+    let start = offset;
+    let end = offset.wrapping_add(length);
+    let mut errors = Vec::new();
+    if layer.lower().is_some() && end > start {
+        // python passes `end_offset` as the LENGTH; only the first few runs are ever consumed
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        layer.mapping(start, end, &mut |m| {
+            runs.push((m.offset, m.len));
+            m.offset <= end
+        });
+        let mut it = runs.into_iter();
+        // python: `next(mapping)` on an empty mapping raises StopIteration (uncaught)
+        let mut cur = it.next().unwrap_or_else(|| panic!("StopIteration"));
+        for i in start..end {
+            let (o, l) = cur;
+            if i < o {
+                errors.push((i - start) as u32);
+            }
+            if i > o.wrapping_add(l) {
+                if let Some(n) = it.next() {
+                    cur = n;
+                }
+            }
+            let (o, l) = cur;
+            if i > o.wrapping_add(l) {
+                errors.push((i - start) as u32);
+            }
+        }
+    }
+    let data = layer.read_vec_padded(start, length as usize);
+    Value::LayerBytes { data, errors }
+}
+
 impl Plugin for YaraScan {
     fn name(&self) -> &'static str {
         "yarascan.YaraScan"
@@ -34,7 +115,20 @@ impl Plugin for YaraScan {
     fn requirements(&self) -> Vec<Requirement> {
         yarascan_option_requirements()
     }
-    fn run(&self, _ctx: &Context, _cfg: &Config, _out: &mut dyn RowSink) -> Result<()> {
-        Err(Error::msg("yarascan.YaraScan: not implemented yet"))
+    fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
+        let p = super::primary::primary(ctx, "Memory layer for the kernel")?;
+        out.begin(vec![
+            Column::new("Offset", ColType::Hex),
+            Column::new("Rule", ColType::Str),
+            Column::new("Component", ColType::Str),
+            Column::new("Value", ColType::LayerData),
+        ])?;
+        // python: `YaraScanner(rules=None)` raises ValueError("No rules provided to YaraScanner")
+        let rules = rules_from_config(cfg).unwrap_or_else(|| panic!("ValueError: No rules provided to YaraScanner"));
+        for (offset, rule, name, value) in scan(p.layer, &YaraScanner { rules: &rules }, None) {
+            let v = layer_data_value(p.layer, offset, value.len() as u64);
+            out.row(0, vec![Value::Int(offset as i128), Value::Str(rule), Value::Str(name), v])?;
+        }
+        Ok(())
     }
 }
