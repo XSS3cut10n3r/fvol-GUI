@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="rsvol-version" content="{{VERSION}}">
+<meta name="color-scheme" content="dark light">
+<title>rsvol</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/assets/mono-400.woff2" as="font" type="font/woff2" crossorigin>
+<script src="/assets/theme.js"></script>
+<link rel="stylesheet" href="/assets/app.css">
+<script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to results</a>
+<header class="topbar" role="banner">
+  <div class="brand" aria-label="rsvol">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6 15h3l2-6 2 9 2-5h3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    <span>rsvol</span>
+  </div>
+  <button class="evidence" id="evidence" type="button" title="Evidence details (open another image)">
+    <span class="ev-tag">EVIDENCE</span>
+    <span class="ev-name" id="ev-name">no image</span>
+    <span class="ev-meta" id="ev-meta"></span>
+  </button>
+  <button class="cmdk" id="cmdk" type="button" aria-keyshortcuts="Control+K Meta+K">
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <span>Run a plugin…</span><kbd>Ctrl K</kbd>
+  </button>
+  <div class="activity" id="activity" role="status" aria-live="polite"></div>
+  <button class="iconbtn" id="theme" type="button" title="Toggle light/dark theme (Shift+T)" aria-label="Toggle theme">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg>
+  </button>
+  <button class="iconbtn" id="help" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+</header>
+<div class="shell">
+  <aside class="rail" id="rail" aria-label="Processes and history">
+    <section class="rail-sec procs" aria-labelledby="procs-h">
+      <div class="rail-head">
+        <h2 id="procs-h">Processes <span class="count" id="proc-count"></span></h2>
+        <div class="rail-tools">
+          <button class="mini" id="tree-expand" type="button" title="Expand all (*)">+</button>
+          <button class="mini" id="tree-collapse" type="button" title="Collapse all">−</button>
+        </div>
+      </div>
+      <div class="rail-filter"><input id="proc-filter" type="search" placeholder="Filter name or PID  (T)" aria-label="Filter processes" autocomplete="off" spellcheck="false"></div>
+      <div class="lifeaxis" id="lifeaxis" aria-hidden="true"></div>
+      <div class="tree" id="tree" role="tree" aria-label="Process tree" tabindex="0"></div>
+    </section>
+    <div class="rail-split" id="rail-split" role="separator" aria-orientation="horizontal" aria-label="Resize history" tabindex="0"></div>
+    <section class="rail-sec history" aria-labelledby="hist-h">
+      <div class="rail-head">
+        <h2 id="hist-h">Runs <span class="count" id="run-count"></span></h2>
+        <div class="rail-tools"><button class="mini" id="compare-btn" type="button" title="Compare two runs side by side">⇆</button></div>
+      </div>
+      <ol class="runlist" id="runlist" aria-label="Run history"></ol>
+    </section>
+  </aside>
+  <div class="rail-resize" id="rail-resize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"></div>
+  <main class="work" id="main">
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Open views"></nav>
+    <div class="panes" id="panes"></div>
+  </main>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<div class="conn" id="conn" role="alert" hidden>Connection to the rsvol server lost — reconnecting…</div>
+<noscript><p class="noscript">The rsvol UI needs JavaScript.</p></noscript>
+</body>
+</html>
