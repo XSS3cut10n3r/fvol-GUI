@@ -318,6 +318,48 @@ impl SymbolPath {
         paths::hex(&k)
     }
 
+    /// python `file_symbol_url(sub_path)` without a filename: every ISF under
+    /// `<root>/<sub_path>` of each root (python's `rglob("*" + ext)` per extension, then the
+    /// members of the zip packs in that tree), in search order. Only the `sub_path` trees are
+    /// walked (python does not look anywhere else), and the embedded roots are filtered by the
+    /// compact name table (no embedded file is touched unless it matches).
+    pub fn all_under(&self, sub_path: &str) -> Vec<IsfLocation> {
+        let mut out = Vec::new();
+        for root in &self.roots {
+            match root {
+                Root::Dir(d) => {
+                    let base = d.join(sub_path);
+                    if !base.is_dir() {
+                        continue;
+                    }
+                    let files = walk_files(&base);
+                    for ext in ISF_EXTENSIONS {
+                        out.extend(files.iter().filter(|f| f.to_string_lossy().ends_with(ext)).map(|f| IsfLocation::File(f.clone())));
+                    }
+                    for f in files.iter().filter(|f| f.to_string_lossy().ends_with(".zip")) {
+                        if let Ok(names) = super::zipfile::list(f) {
+                            for name in names.into_iter().filter(|n| ISF_EXTENSIONS.iter().any(|e| n.ends_with(e))) {
+                                out.push(IsfLocation::Zip { zip: f.clone(), member: name });
+                            }
+                        }
+                    }
+                }
+                Root::Embedded { top } => {
+                    for i in 0..super::embedded::FILES.len() {
+                        let rel = embedded_rel(i);
+                        if (sub_path.is_empty() || rel.strip_prefix(sub_path).is_some_and(|r| r.starts_with('/')))
+                            && let Some(&(_, is_top, data)) = super::embedded::FILES.get(i)
+                            && is_top == *top
+                        {
+                            out.push(IsfLocation::Embedded { rel, top: *top, data });
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn all(&self) -> Vec<IsfLocation> {
         let mut out = Vec::new();
         for root in &self.roots {
@@ -393,6 +435,13 @@ pub fn python_install() -> Option<PathBuf> {
 pub(crate) fn python_install_cached() -> Option<&'static Path> {
     static PY: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     PY.get_or_init(python_install).as_deref()
+}
+
+/// The embedded ISF `rel` (a path under volatility3/symbols or framework/symbols), found via the
+/// file-name index (touches no other embedded file).
+pub(crate) fn embedded_file(rel: &str) -> Option<&'static [u8]> {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    embedded_named(name).iter().find(|&&i| embedded_rel(i as usize) == rel).and_then(|&i| super::embedded::FILES.get(i as usize)).map(|f| f.2)
 }
 
 /// Relative path of embedded file `i`, from the compact name table.
@@ -2229,6 +2278,35 @@ mod tests {
         assert_eq!(paths[1].find_first("windows", "pe"), Some(IsfLocation::File(user.join("windows/pe.json"))));
         assert_eq!(paths[2].find_first("windows", "kdbg"), Some(IsfLocation::File(deep.join("windows/sub/dir/kdbg.json.xz"))));
         assert_eq!(paths[2].find_first("linux", "elf"), Some(IsfLocation::File(deep.join("linux/elf.json.gz"))));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `all_under(sub)` = python `file_symbol_url(sub)`: every ISF in `<root>/<sub>` trees
+    /// (per extension, then zip members), nothing outside them; the embedded roots give what
+    /// `all()` gives under `sub`.
+    #[test]
+    fn all_under_is_the_sub_path_trees() {
+        let tmp = std::env::temp_dir().join(format!("rsvol-allunder-{}", std::process::id()));
+        for rel in ["generic/vmcs/b.json", "generic/vmcs/a.json.xz", "generic/vmcs/deep/c.json", "generic/vmcs/x.txt", "other/generic/vmcs/d.json", "generic/vmcsx/e.json"] {
+            let f = tmp.join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"{}").unwrap();
+        }
+        let embedded = |sub: &str| -> Vec<IsfLocation> {
+            let path = SymbolPath { roots: vec![Root::Embedded { top: true }, Root::Embedded { top: false }], download_dir: PathBuf::new() };
+            let want: Vec<IsfLocation> = path.all().into_iter().filter(|l| matches!(l, IsfLocation::Embedded { rel, .. } if rel.starts_with(&format!("{sub}/")))).collect();
+            assert_eq!(path.all_under(sub), want, "{sub}");
+            want
+        };
+        assert_eq!(embedded("generic/vmcs").len(), 5);
+        assert!(!embedded("windows").is_empty());
+        assert!(embedded("nonexistent").is_empty());
+        let path = SymbolPath { roots: vec![Root::Dir(tmp.clone()), Root::Embedded { top: true }], download_dir: PathBuf::new() };
+        let got = path.all_under("generic/vmcs");
+        let files: Vec<IsfLocation> = ["generic/vmcs/b.json", "generic/vmcs/deep/c.json", "generic/vmcs/a.json.xz"].iter().map(|r| IsfLocation::File(tmp.join(r))).collect();
+        assert_eq!(got[..3], files[..]);
+        assert_eq!(got.len(), 3 + 5);
+        assert!(got[3..].iter().all(|l| matches!(l, IsfLocation::Embedded { top: true, .. })));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

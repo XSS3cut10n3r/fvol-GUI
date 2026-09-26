@@ -571,7 +571,7 @@ mod tests {
     #[ignore]
     fn mac_scan_bench() {
         let Some(img) = std::env::var_os("RSVOL_MAC_IMAGE") else { return };
-        let phys: Arc<dyn Layer> = crate::automagic::stack_physical(std::path::Path::new(&img), None).unwrap().0;
+        let phys: Arc<dyn Layer> = crate::automagic::stack_physical(std::path::Path::new(&img), None, false, None).unwrap().0;
         let sp = symbols::SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
         let banners = symbols::store::identifier_index(&sp).dictionary("mac");
         let pats: Vec<&[u8]> = banners.iter().map(|(b, _)| b.as_slice()).collect();

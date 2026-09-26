@@ -41,6 +41,12 @@ stacks with the same names, because layer names appear in output such as `window
 
 - **The file layer** maps the image read-only with `mmap`. Reads are a bounds check and a copy,
   and `slice()` returns the mapped bytes themselves when a range is contiguous in the file.
+  python reads a `.gz`, `.bz2` or `.xz` image through a decompressing file object, where every
+  backwards seek decompresses again from the start of the file. rsvol decompresses such an image
+  once into its cache and maps the result, so the file layer stays a mapping. The decoders
+  stream to disk with bounded memory: xz blocks, bzip2 blocks and gzip members decode on all
+  cores and a single DEFLATE stream decodes on one, with a writer thread copying the output
+  into the page cache meanwhile (`src/util/resource.rs`, `src/codecs/sink.rs`).
 - **Container layers** describe where physical memory lives inside an image format: LiME, ELF
   cores including QEMU and VirtualBox dumps, Xen cores, Windows crash dumps, VMware `.vmem` files
   with their `.vmss` or `.vmsn` metadata, QEMU savevm streams and AVML. They are detected in
@@ -172,6 +178,11 @@ Scanners are split into two phases: a pure byte search, `prescan`, and the pytho
 match, `finish`. The scan cache stores only the prescan output, the raw byte positions, per image
 and per layer configuration. A repeated scan replays those positions through `finish`, so all of
 python's validation still runs, in python's order.
+
+vmscan's checks read a few hundred bytes of each page whose first four bytes are a VMCS revision
+id (about 1,900 pages on the 5 GiB test image). Those bytes are a pure function of the image, so
+they are cached with the matches as fixed-size records; a warm vmscan maps one cache file, runs the
+checks on the records and reads no image page.
 
 A full scan that misses the cache also records a family of well-known patterns in the same sweep:
 every built-in pool tag, the MFT and MBR signatures and the VMCS page signatures. The next

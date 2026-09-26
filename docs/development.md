@@ -227,6 +227,86 @@ To make new references, use `bench/scripts/py_refs.sh` for the Windows image,
 `py_refs_linux.sh` and `py_refs_mac.sh` with `IMG` and `NAME` set for the others, and
 `py_args_refs.sh` for the argument cases in `bench/args_cases.txt`.
 
+## Fuzz the plugins for robustness
+
+DESIGN.md rule 4 is that no plugin may panic, hang, exhaust memory or run away on a malformed
+image; it must degrade the way python does (skip the bad object, render `UnreadableValue`, or, where
+python itself raises an uncaught exception, mirror python's exit code and partial output). The fuzz
+driver `bench/scripts/fuzz_images.py` (standard-library python, helper modules `fuzz_geom.py`,
+`fuzz_targets.py`, `fuzz_mutate.py`, `fuzz_cmds.py`) proves and enforces this.
+
+It builds corrupted copies of the real test images *without copying them*: `cp --reflink=auto`
+shares every extent with the base on btrfs, then targeted in-place writes, hole punches and
+truncation cost only the changed blocks (about 10 MB per mutant of a 2 GB image). It corrupts the
+structures that matter — page-table entries, kernel objects (`_EPROCESS`/`task_struct`/hives/
+drivers/files/...) and their linked-list pointers (made cyclic), kernel symbols, container headers
+(ELF/LiME/crash/...), plus generic damage (zeroed/garbage pages, huge counts, truncation) — locating
+them by parsing the image geometry, walking the page tables and reading the ISF. It then runs every
+plugin of the image's OS on each mutant through `limit.sh` (memory cap `-m`, default 4G) with a
+per-run timeout of `max(--min-timeout, --mult × the clean run time)`, and classifies each run:
+
+| Class     | Meaning                                                       | Bug? |
+| --------- | ------------------------------------------------------------- | ---- |
+| `OK`      | exit 0                                                        | no   |
+| `ERROR`   | other clean exit (a python-style error/traceback)            | no   |
+| `PYRAISE` | a `panic!` whose message names a python exception — rsvol's intended emulation of python's uncaught `raise`; the CLI catches it and exits 1 exactly as python does (stderr text does not affect parity) | no   |
+| `PANIC`   | a Rust-internal panic (index/unwrap/overflow/slice/unreachable/stack overflow) | **yes** |
+| `HANG`    | killed by the per-run timeout                                 | **yes** |
+| `OOM`     | killed by the memory cgroup cap                               | **yes** |
+| `SIGNAL`  | died by another signal                                        | **yes** |
+| `RUNAWAY` | stdout exceeded the output cap                                | **yes** |
+
+Distinguishing `PYRAISE` from `PANIC` matters: rsvol deliberately emulates python's uncaught
+exceptions by panicking with the exception's message, so `panicked at` in stderr is not by itself a
+bug. Only a Rust-internal fault (which means the plugin diverged from python instead of skipping the
+object) or a hang/OOM/signal/runaway is a bug.
+
+Workflow (all scratch lives on disk under `testdata/scratch/fuzz/`, never `/tmp`, and clean mutants
+are deleted immediately — only mutants that produced a bug are kept, with a `.mutlog.json` that
+reproduces them):
+
+```bash
+# 0. a release binary the driver will use (default: testdata/scratch/fuzz/bin/vol-base)
+cp target/release/vol testdata/scratch/fuzz/bin/vol-base
+
+# 1. find structures to corrupt in a clean image (runs a few clean plugins, walks page tables)
+bench/scripts/fuzz_images.py targets win1809      # -> testdata/scratch/fuzz/targets/win1809.json
+
+# 2. record clean-image times + output hashes (used for per-run timeouts)
+bench/scripts/fuzz_images.py baseline win1809     # -> testdata/scratch/fuzz/baseline/win1809.json
+
+# 3. campaign: N mutants x every plugin case; keeps only mutants that produced a bug
+bench/scripts/fuzz_images.py campaign win1809 --mutants 30 --par 2 --mem 4G
+
+# 4. summarise, and reproduce/inspect one kept mutant
+bench/scripts/fuzz_images.py report testdata/scratch/fuzz/results/win1809.jsonl
+bench/scripts/fuzz_images.py rerun testdata/scratch/fuzz/kept/win1809-s7.img.mutlog.json --keep
+
+# 5. confirm we degrade the SAME way as python on a sample (python via limit.sh, <=2 at a time)
+bench/scripts/fuzz_images.py pycompare testdata/scratch/fuzz/results/win1809.jsonl --limit 20
+
+# 6. the small synthetic container fixtures (tests/fixtures/containers)
+bench/scripts/fuzz_images.py containers
+```
+
+Base image names for `targets`/`baseline`/`campaign`: `win10` (the 5 GiB main Windows image),
+`win1809`, `noble-elf`, `noble-lime`, `jammy-elf`, `jammy-lime`, `mac`. Bugs found by a campaign are
+reduced to small crafted-input unit tests next to the code they fix, so they never regress. Two the
+driver has found so far, both cases where python's own lazy enumeration would run forever on the
+corrupted count, so rsvol bounds it and stops instead of hanging/OOMing:
+
+- a corrupted `kallsyms_num_syms` made `linux.kallsyms.Kallsyms` loop up to ~1.8 billion times
+  (python does the same unbounded `range(num_syms)`); guarded in `src/symbols/linux/kallsyms.rs`
+  (`MAX_PLAUSIBLE_SYMS`), test `tests_robustness::huge_num_syms_does_not_hang`.
+- corrupted page tables (a garbage page read as a page table) made the translation walk enumerate a
+  practically unbounded mapped space, which every scanning plugin and `windows.memmap` collected into
+  memory and OOMed on (python streams it lazily and hangs instead); bounded in `src/layers/scan.rs`
+  (`MAX_SCAN_CHUNKS`, the chunk list) and `src/layers/intel.rs` (`MAX_MAPPING_RUNS`, one
+  `mapping_with_targets` call), test `scan::tests::scan_chunk_list_is_bounded_on_corrupt_layer`.
+
+Run the driver through `limit.sh` yourself only when you invoke a subcommand that does not already
+wrap its own image work — the campaign, baseline and pycompare all wrap every image run internally.
+
 ## Measure performance
 
 For quick measurements during development:

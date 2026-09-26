@@ -16,6 +16,7 @@ unsafe extern "C" {
 }
 
 const PROT_READ: i32 = 1;
+const PROT_WRITE: i32 = 2;
 const MAP_SHARED: i32 = 1;
 const MAP_POPULATE: i32 = 0x8000;
 const MAP_FAILED: *mut u8 = !0usize as *mut u8;
@@ -23,6 +24,9 @@ pub const MADV_NORMAL: i32 = 0;
 pub const MADV_RANDOM: i32 = 1;
 pub const MADV_SEQUENTIAL: i32 = 2;
 pub const MADV_WILLNEED: i32 = 3;
+/// Drop the range's page-table entries (shared file mappings: the data stays in the page cache
+/// and a later access maps it again).
+pub const MADV_DONTNEED: i32 = 4;
 pub const MADV_POPULATE_READ: i32 = 22;
 
 /// A read-only shared mapping of an entire file.
@@ -78,6 +82,49 @@ impl Mmap {
 }
 
 impl Drop for Mmap {
+    fn drop(&mut self) {
+        if self.len != 0 {
+            unsafe {
+                munmap(self.ptr, self.len);
+            }
+        }
+    }
+}
+
+/// A writable shared mapping of `[off, off+len)` of a file (`off` page aligned): stores go
+/// to the page cache and reach the file on write-back. Used to decode straight into an
+/// output file whose size is known up front.
+pub struct MmapMut {
+    ptr: *mut u8,
+    len: usize,
+}
+
+// The mapping is exclusively owned; &mut access is required to write.
+unsafe impl Send for MmapMut {}
+unsafe impl Sync for MmapMut {}
+
+impl MmapMut {
+    pub fn map(file: &File, off: u64, len: usize) -> io::Result<MmapMut> {
+        if len == 0 {
+            return Ok(MmapMut { ptr: std::ptr::NonNull::<u8>::dangling().as_ptr(), len: 0 });
+        }
+        if off & 0xfff != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "unaligned mapping offset"));
+        }
+        let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ | PROT_WRITE, MAP_SHARED, file.as_raw_fd(), off as i64) };
+        if ptr == MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(MmapMut { ptr, len })
+    }
+
+    #[inline(always)]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for MmapMut {
     fn drop(&mut self) {
         if self.len != 0 {
             unsafe {

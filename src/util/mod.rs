@@ -13,6 +13,7 @@ pub mod pool;
 pub mod pyformat;
 pub mod pyset;
 pub mod pytar;
+pub mod resource;
 pub mod sqlite;
 pub mod time;
 pub mod trace;

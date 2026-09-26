@@ -210,7 +210,14 @@ fn read_note_data(layer: &dyn Layer, off: u64, len: u64) -> Result<Option<Vec<u8
 /// offset, table)` for each valid VMCOREINFO note in python order until `f` returns false.
 /// `Err` where python's generator raises (which aborts the caller's iteration).
 pub fn search_vmcoreinfo_elf_note(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
-    search_notes(layer, false, f)
+    search_with(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), false, f)
+}
+
+/// [`search_vmcoreinfo_elf_note`] with the magic's full-layer scan answered by the per-image
+/// scan cache on repeated runs (the vmcoreinfo plugin; the automagic's searches are covered by
+/// the automagic cache). The notes are parsed from the layer every time.
+pub fn search_vmcoreinfo_elf_note_cached(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
+    search_with(layer, &FastBytesScanner::cached(VMCOREINFO_MAGIC_ALIGNED), false, f)
 }
 
 /// [`search_vmcoreinfo_elf_note`] for a caller that stops at an early note (the VMCOREINFO
@@ -218,12 +225,11 @@ pub fn search_vmcoreinfo_elf_note(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreI
 /// chunks (at most one per core), in python's hit order, so the scan reads little past that
 /// note instead of the whole layer.
 pub fn search_vmcoreinfo_elf_note_early(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
-    search_notes(layer, true, f)
+    search_with(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), true, f)
 }
 
-fn search_notes(layer: &dyn Layer, early: bool, mut f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
+fn search_with(layer: &dyn Layer, scanner: &FastBytesScanner, early: bool, mut f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
     let mut err = None;
-    let scanner = FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED);
     let on_hit = |magic_off: u64| -> bool {
         match note_at(layer, magic_off) {
             Ok(Some((off, t))) => f(off, &t),
@@ -235,9 +241,9 @@ fn search_notes(layer: &dyn Layer, early: bool, mut f: impl FnMut(u64, &VmCoreIn
         }
     };
     if early {
-        crate::layers::scan::scan_each_progressive_max(layer, &scanner, crate::util::par::threads(), |h| *h, on_hit);
+        crate::layers::scan::scan_each_progressive_max(layer, scanner, crate::util::par::threads(), |h| *h, on_hit);
     } else {
-        scan_each(layer, &scanner, None, on_hit);
+        scan_each(layer, scanner, None, on_hit);
     }
     match err {
         Some(e) => Err(e),

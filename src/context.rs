@@ -88,8 +88,8 @@ type Lazy<T> = OnceLock<std::result::Result<T, String>>;
 
 pub struct Context {
     pub opts: GlobalOptions,
-    /// the local file of a remote (http/https/ftp) location, downloaded on first use
-    remote_image: Lazy<PathBuf>,
+    /// the local file of the image's data (downloaded / decompressed on first use)
+    image: Lazy<PathBuf>,
     physical: Lazy<(Arc<dyn Layer>, LayerRef)>,
     physical_listing: OnceLock<Vec<crate::automagic::StackEntry>>,
     win: Lazy<WinKernel>,
@@ -126,9 +126,12 @@ impl Context {
         symbols::store::set_python_identifier_cache(
             (!opts.clear_cache).then(|| symbols::pycache::db_path(opts.cache_path.as_deref())),
         );
+        // downloaded PDBs are kept in python's cache directory, as python keeps them (after
+        // --clear-cache python has deleted them, so they are downloaded again)
+        symbols::windows::pdb::set_python_cache(crate::util::paths::vol3_cache_dir(opts.cache_path.as_deref()), !opts.clear_cache);
         Ok(Context {
             opts,
-            remote_image: OnceLock::new(),
+            image: OnceLock::new(),
             physical: OnceLock::new(),
             physical_listing: OnceLock::new(),
             win: OnceLock::new(),
@@ -143,32 +146,46 @@ impl Context {
         symbols::symbol_path()
     }
 
-    /// Path of the input image (`-f` or a `file://` `--single-location`). A `http://`,
-    /// `https://` or `ftp://` location is downloaded once into the rsvol cache (python
-    /// `ResourceAccessor`: `data_<sha512>.cache`, reused until `--clear-cache`) and that
-    /// file is the image.
+    /// Path of the file holding the input image's data (`-f` or `--single-location`), opened
+    /// like python's `ResourceAccessor`: a `http://`, `https://` or `ftp://` location is
+    /// downloaded once into the rsvol cache (`data_<sha512>.cache`, reused until
+    /// `--clear-cache`), and a location ending in `.gz`, `.bz2` or `.xz` is decompressed once
+    /// into the rsvol cache (see [`crate::util::resource`]).
     pub fn image_path(&self) -> Result<PathBuf> {
-        if let Some(f) = &self.opts.file {
-            return Ok(PathBuf::from(f));
+        let Some(url) = self.image_url() else {
+            return Err(Error::Unsatisfied("Unable to run LayerStacker, single_location parameter not provided".into()));
+        };
+        let r = self.image.get_or_init(|| {
+            let _t = crate::util::trace::span("image open (download / decompression)");
+            crate::util::resource::open(&url, self.opts.file.as_deref().map(std::path::Path::new), self.opts.offline).map_err(|e| {
+                // python logs the stacking exception at warning level
+                eprintln!("WARNING  volatility3.framework.plugins: Automagic exception occurred: {e}");
+                e.to_string()
+            })
+        });
+        r.clone().map_err(Error::Msg)
+    }
+
+    /// python's location of the image: `--single-location` (what `-f` became), or the `file:`
+    /// URL of `-f`.
+    pub fn image_url(&self) -> Option<String> {
+        match (&self.opts.single_location, &self.opts.file) {
+            (Some(loc), _) => Some(loc.clone()),
+            (None, Some(f)) => Some(crate::util::paths::path_to_file_uri(&std::path::absolute(f).unwrap_or_else(|_| PathBuf::from(f)))),
+            (None, None) => None,
         }
-        if let Some(loc) = &self.opts.single_location {
-            if let Some(p) = loc.strip_prefix("file://") {
-                return Ok(PathBuf::from(crate::util::paths::unquote(p)));
-            }
-            if crate::util::download::is_remote(loc) {
-                let r = self.remote_image.get_or_init(|| {
-                    let _t = crate::util::trace::span("image download");
-                    crate::util::download::fetch(loc, self.opts.offline).map_err(|e| {
-                        // python logs the stacking exception at warning level
-                        eprintln!("WARNING  volatility3.framework.plugins: Automagic exception occurred: {e}");
-                        e.to_string()
-                    })
-                });
-                return r.clone().map_err(Error::Msg);
-            }
-            return Ok(PathBuf::from(loc));
-        }
-        Err(Error::Unsatisfied("Unable to run LayerStacker, single_location parameter not provided".into()))
+    }
+
+    /// The local file of another location a layer reads (swap files), opened like the image.
+    fn open_location(&self, loc: &str) -> Option<PathBuf> {
+        let local = loc.strip_prefix("file://").map(|p| PathBuf::from(crate::util::paths::unquote(p)));
+        let url = match &local {
+            Some(_) => loc.to_string(),
+            None if crate::util::download::is_remote(loc) => loc.to_string(),
+            None => crate::util::paths::path_to_file_uri(&std::path::absolute(loc).unwrap_or_else(|_| PathBuf::from(loc))),
+        };
+        let local = local.or_else(|| (!crate::util::download::is_remote(loc)).then(|| PathBuf::from(loc)));
+        crate::util::resource::open(&url, local.as_deref(), self.opts.offline).ok()
     }
 
     /// python `memory_layer`: the input file with container layers stacked on it.
@@ -180,7 +197,9 @@ impl Context {
     pub fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
         keep_err(self.physical.get_or_init(|| {
             let path = self.image_path().map_err(err_text)?;
-            let (l, listing) = crate::automagic::stack_physical(&path, self.opts.stackers.as_deref()).map_err(err_text)?;
+            let url = self.image_url();
+            let (l, listing) =
+                crate::automagic::stack_physical(&path, url.as_deref(), self.opts.offline, self.opts.stackers.as_deref()).map_err(err_text)?;
             let _ = self.physical_listing.set(listing);
             let r = leak_layer(l.clone());
             Ok((l, r))
@@ -308,11 +327,7 @@ impl Context {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
-                let p = match s.strip_prefix("file://") {
-                    Some(p) => PathBuf::from(crate::util::paths::unquote(p)),
-                    None if crate::util::download::is_remote(s) => crate::util::download::fetch(s, self.opts.offline).ok()?,
-                    None => PathBuf::from(s),
-                };
+                let p = self.open_location(s)?;
                 crate::layers::FileLayer::open(&p).ok().map(|f| Arc::new(f.with_name(&format!("swap_layers{i}"))) as Arc<dyn Layer>)
             })
             .collect();
