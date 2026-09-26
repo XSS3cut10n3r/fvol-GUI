@@ -6,7 +6,7 @@
 use crate::context::Context;
 use crate::error::Result;
 use crate::objects::util::array_to_string;
-use crate::plugins::windows::thread_pe_symbols::{CollectedModules, Range, get_process_modules, get_proc_vads_with_file_paths, path_and_symbol_for_address};
+use crate::plugins::windows::thread_pe_symbols::{CollectedModules, Range, get_process_modules, path_and_symbol_for_address, vads_for_process_cache};
 use crate::plugins::windows::threads::list_process_threads;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -14,18 +14,6 @@ use crate::symbols::windows::WinExt;
 use crate::util::FxHashMap;
 
 pub struct SuspendedThreads;
-
-/// python `PESymbols.get_vads_for_process_cache(vads_cache, owner_proc)`: the cached VAD file
-/// ranges of `proc` (None when it has none).
-// TODO(dedupe): owned by W2b pe_symbols
-pub fn vads_for_process_cache<'a>(cache: &'a mut FxHashMap<u64, Vec<Range>>, proc: &crate::objects::Obj) -> Result<Option<&'a Vec<Range>>> {
-    if !cache.contains_key(&proc.addr) {
-        let v = get_proc_vads_with_file_paths(proc)?;
-        cache.insert(proc.addr, v);
-    }
-    let v = &cache[&proc.addr];
-    Ok(if v.is_empty() { None } else { Some(v) })
-}
 
 /// `value or renderers.NotAvailableValue()`.
 fn or_na(s: Option<String>) -> Value {
@@ -82,12 +70,15 @@ impl Plugin for SuspendedThreads {
                 Err(e) if e.is_invalid_address() => continue,
                 Err(e) => return Err(e),
             };
-            let Some(vads) = vads_for_process_cache(&mut vads_cache, &owner)? else { continue };
+            if vads_for_process_cache(&mut vads_cache, &owner)?.is_none() {
+                continue;
+            }
             // python: `if not proc_modules` (an empty collection is rebuilt next time)
             if proc_modules.as_ref().is_none_or(|m| m.order.is_empty()) {
-                proc_modules = Some(get_process_modules(k)?);
+                proc_modules = Some(get_process_modules(k, &mut vads_cache)?);
             }
             let pm = proc_modules.as_ref().unwrap();
+            let vads = &vads_cache[&owner.addr];
             let (start_file, start_sym) = path_and_symbol_for_address(ctx, pm, vads, start)?;
             let (win32_file, win32_sym) = path_and_symbol_for_address(ctx, pm, vads, win32)?;
             // the only false positive found in mass scanning of samples

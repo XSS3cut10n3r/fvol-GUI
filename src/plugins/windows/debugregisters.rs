@@ -6,8 +6,7 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::objects::Obj;
-use crate::plugins::windows::suspended_threads::vads_for_process_cache;
-use crate::plugins::windows::thread_pe_symbols::{CollectedModules, Range, get_process_modules, path_and_symbol_for_address};
+use crate::plugins::windows::thread_pe_symbols::{CollectedModules, Range, get_process_modules, path_and_symbol_for_address, vads_for_process_cache};
 use crate::plugins::windows::threads::list_process_threads;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -72,12 +71,15 @@ impl Plugin for DebugRegisters {
         for thread in list_process_threads(k) {
             let thread = thread?;
             let Some((owner, dr7, drs)) = get_debug_info(&thread)? else { continue };
-            let Some(vads) = vads_for_process_cache(&mut vads_cache, &owner)? else { continue };
+            if vads_for_process_cache(&mut vads_cache, &owner)?.is_none() {
+                continue;
+            }
             // python: `if not proc_modules` (an empty collection is rebuilt next time)
             if proc_modules.as_ref().is_none_or(|m| m.order.is_empty()) {
-                proc_modules = Some(get_process_modules(k)?);
+                proc_modules = Some(get_process_modules(k, &mut vads_cache)?);
             }
             let pm = proc_modules.as_ref().unwrap();
+            let vads = &vads_cache[&owner.addr];
             let mut resolved = Vec::with_capacity(4);
             for d in drs {
                 resolved.push(path_and_symbol_for_address(ctx, pm, vads, d)?);

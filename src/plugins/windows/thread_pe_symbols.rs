@@ -39,6 +39,18 @@ pub fn get_proc_vads_with_file_paths(proc: &Obj) -> Result<Vec<Range>> {
     Ok(vads)
 }
 
+/// python `PESymbols.get_vads_for_process_cache(vads_cache, owner_proc)`: the cached VAD file
+/// ranges of `proc` (None when it has none).
+// TODO(dedupe): owned by W2b pe_symbols
+pub fn vads_for_process_cache<'a>(cache: &'a mut FxHashMap<u64, Vec<Range>>, proc: &Obj) -> Result<Option<&'a Vec<Range>>> {
+    if !cache.contains_key(&proc.addr) {
+        let v = get_proc_vads_with_file_paths(proc)?;
+        cache.insert(proc.addr, v);
+    }
+    let v = &cache[&proc.addr];
+    Ok(if v.is_empty() { None } else { Some(v) })
+}
+
 /// python `PESymbols.range_info_for_address(ranges, address)`.
 // TODO(dedupe): owned by W2b pe_symbols
 pub fn range_info_for_address(ranges: &[Range], address: u64) -> Option<&Range> {
@@ -67,27 +79,36 @@ pub struct CollectedModules {
 }
 
 /// python `PESymbols.get_process_modules(context, kernel_module_name, None)`: every file mapped
-/// in every process (by file name), with the process layer and VAD range.
+/// in every process (by file name), with the process layer and VAD range. `vads_cache`
+/// (python's `get_vads_for_process_cache` dict, keyed by `_EPROCESS` address) is reused and
+/// filled: a process' file VADs do not depend on who asks for them.
 // TODO(dedupe): owned by W2b pe_symbols
-pub fn get_process_modules(k: &WinKernel) -> Result<CollectedModules> {
+pub fn get_process_modules(k: &WinKernel, vads_cache: &mut FxHashMap<u64, Vec<Range>>) -> Result<CollectedModules> {
     let _t = crate::util::trace::span("get_process_modules");
     let mut out = CollectedModules::default();
     let procs = crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false));
     // the per-process VAD walks are independent: run them in parallel, merge in python's order
-    let per = crate::util::par::par_map(procs.len(), |i| -> Option<Result<(LayerRef, Vec<Range>)>> {
+    let cache: &FxHashMap<u64, Vec<Range>> = vads_cache;
+    let per = crate::util::par::par_map(procs.len(), |i| -> Option<Result<(LayerRef, Option<Vec<Range>>)>> {
         let proc = procs[i].as_ref().ok()?;
         let layer = match proc.add_process_layer() {
             Ok(l) => l,
             Err(e) if e.is_invalid_address() => return None,
             Err(e) => return Some(Err(e)),
         };
-        Some(get_proc_vads_with_file_paths(proc).map(|v| (layer, v)))
+        if cache.contains_key(&proc.addr) {
+            return Some(Ok((layer, None)));
+        }
+        Some(get_proc_vads_with_file_paths(proc).map(|v| (layer, Some(v))))
     });
     for (p, r) in procs.into_iter().zip(per) {
-        p?;
+        let proc = p?;
         let Some(r) = r else { continue };
-        let (layer, vads) = r?;
-        for (start, size, path) in vads {
+        let (layer, computed) = r?;
+        if let Some(v) = computed {
+            vads_cache.insert(proc.addr, v);
+        }
+        for (start, size, path) in vads_cache[&proc.addr].iter().cloned() {
             let name = filename_for_path(&path);
             let e = out.map.entry(name.clone()).or_default();
             if e.is_empty() {
