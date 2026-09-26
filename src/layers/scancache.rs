@@ -60,6 +60,12 @@ const MAX_ATOM_BYTES: usize = 64 << 20;
 /// A sweep stops recording (the scan goes on, uncached) beyond this many matches: bounds the
 /// memory of pathological queries (a very common needle over a huge layer).
 const MAX_RECORDS: usize = 16 << 20;
+/// Scans of fewer section bytes are not cached: they read at most this much (~1 ms), a cache
+/// file costs about as much (e.g. linux.bash's heap scans).
+const MIN_CACHED_SPAN: u128 = 16 << 20;
+/// Greedy queries over more distinct literals (e.g. linux.bash's pointer needles, one per heap
+/// hit) are cached whole (one atom keyed by the full query) instead of per literal.
+const MAX_LITERAL_ATOMS: usize = 64;
 
 /// What a scanner's `prescan` computes (see [`Scanner::cache_query`]). The description must be
 /// exact: the cache answers a scan with matches derived from it, and the scanner's `finish`
@@ -271,7 +277,7 @@ impl Session {
     /// sections) of `layer` with the given chunking, or `None` when the scan is not cacheable
     /// (cache disabled, no backing file, unidentifiable layer, nothing to scan).
     pub fn new(layer: &dyn Layer, secs: &[(u64, u64)], full: bool, chunk_size: u64, overlap: u64) -> Option<Session> {
-        if !enabled() {
+        if !enabled() || secs.iter().map(|s| s.1 as u128).sum::<u128>() < MIN_CACHED_SPAN {
             return None;
         }
         Session::with_root(&cache_root(), layer, secs, full, chunk_size, overlap)
@@ -616,6 +622,20 @@ fn prune(root: &Path, keep: &Path, cap: u64) {
 // Scanning through the cache
 // ---------------------------------------------------------------------------------------------
 
+/// The opaque key of a greedy query cached whole: every pattern in order (tags are indices),
+/// the start limit and the cap. The scanner's prescan computes exactly this query.
+fn whole_query_key(patterns: &[Vec<u8>], limit: u64, cap: usize) -> Vec<u8> {
+    let mut k = Key(Vec::new());
+    k.bytes(b"greedy-query/1");
+    k.u64(limit);
+    k.u64(cap as u64);
+    k.u64(patterns.len() as u64);
+    for p in patterns {
+        k.bytes(p);
+    }
+    k.0
+}
+
 /// Distinct non-empty patterns of a query: `(bytes, tag = index of the first equal pattern)`.
 fn distinct_patterns(patterns: &[Vec<u8>]) -> Vec<(&[u8], u32)> {
     let mut out: Vec<(&[u8], u32)> = Vec::new();
@@ -689,6 +709,12 @@ where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
 {
+    let q = match q {
+        CacheQuery::Greedy { patterns, limit, cap } if distinct_patterns(patterns).len() > MAX_LITERAL_ATOMS => {
+            CacheQuery::Opaque { key: whole_query_key(patterns, limit, cap) }
+        }
+        q => q,
+    };
     let cached = {
         let _t = crate::util::trace::span("scan cache: load");
         load_query(session, &q)
@@ -1780,6 +1806,31 @@ mod tests {
         });
         assert_eq!(got, want[0]);
         assert_eq!(inner, want[1]);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A greedy query over many literals is cached whole (one file) and replays exactly.
+    #[test]
+    fn many_literals_one_atom() {
+        let data = planted(6 << 20, &[b"ABCD", b"ABCE", b"XYZW"], 17);
+        let (p, file) = file_with(&data);
+        let l: &dyn Layer = file.as_ref();
+        let root = scratch("root");
+        let mut pats: Vec<Vec<u8>> = (0..200u32).map(|i| format!("N{i:03}").into_bytes()).collect();
+        pats.push(b"ABCD".to_vec());
+        pats.push(b"ABC".to_vec());
+        pats.push(b"ABCD".to_vec());
+        let ms = MultiStringScanner::new(&pats);
+        let want = reference(l, &ms, None);
+        assert!(!want.is_empty());
+        let (cold, h0) = cached(&root, l, &ms, None);
+        let (warm, _) = cached(&root, l, &ms, None);
+        assert!(!h0);
+        assert_eq!(cold, want);
+        assert_eq!(warm, want);
+        let dir = std::fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "one atom for the whole query");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&p);
     }
