@@ -1355,6 +1355,95 @@ mod tests {
         assert_eq!(ord_lookup(b"kernel32.dll", 1), None);
     }
 
+    fn hexs(b: &Option<Vec<u8>>) -> String {
+        match b {
+            None => "-".into(),
+            Some(v) => v.iter().map(|c| format!("{c:02x}")).collect(),
+        }
+    }
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+
+    /// Differential test against python pefile: `W2B_PE_DIRS=dir1:dir2 W2B_PE_OUT=file cargo
+    /// test --profile fast differential_dump -- --ignored`, then diff with the output of the
+    /// python oracle (`pefile.PE(fast_load=True)` + one directory per fresh object) over the
+    /// same dirs.
+    #[test]
+    #[ignore]
+    fn differential_dump() {
+        use std::fmt::Write as _;
+        let (Ok(dirs), Ok(outp)) = (std::env::var("W2B_PE_DIRS"), std::env::var("W2B_PE_OUT")) else { return };
+        let mut files = Vec::new();
+        for d in dirs.split(':') {
+            walk(std::path::Path::new(d), &mut files);
+        }
+        files.sort_by(|a, b| a.as_os_str().as_encoded_bytes().cmp(b.as_os_str().as_encoded_bytes()));
+        let mut out = String::new();
+        for path in files {
+            let data = std::fs::read(&path).unwrap();
+            if !data.starts_with(b"MZ") {
+                continue;
+            }
+            let _ = writeln!(out, "FILE {} {}", path.file_name().unwrap().to_string_lossy(), data.len());
+            let pe = match PeFile::parse(&data) {
+                Ok(p) => p,
+                Err(PeError::Format(_)) => {
+                    out.push_str("ERR PEFormatError\n");
+                    continue;
+                }
+                Err(PeError::Attribute(_)) => {
+                    out.push_str("ERR AttributeError\n");
+                    continue;
+                }
+            };
+            let pt = pe.pe_type.map(|t| t.to_string()).unwrap_or_else(|| "None".into());
+            let _ = writeln!(out, "HDR {pt} {:x} {} {}", pe.optional_header.image_base, pe.sections.len(), pe.data_directories.len());
+            match pe.parse_exports() {
+                Some(d) => {
+                    let _ = writeln!(out, "EXP {}", d.symbols.len());
+                    for s in &d.symbols {
+                        let a = s.address.map(|a| format!("{a:x}")).unwrap_or_else(|| "-".into());
+                        let _ = writeln!(out, " E {} {a} {} {}", s.ordinal, hexs(&s.name), hexs(&s.forwarder));
+                    }
+                }
+                None => out.push_str("EXP none\n"),
+            }
+            let pe = PeFile::parse(&data).unwrap();
+            match pe.parse_imports() {
+                Some(v) => {
+                    let _ = writeln!(out, "IMP {}", v.len());
+                    for d in &v {
+                        let _ = writeln!(out, " D {} {} {}", hexs(&Some(d.dll.clone())), d.time_date_stamp, d.imports.len());
+                        for i in &d.imports {
+                            let o = i.ordinal.map(|o| o.to_string()).unwrap_or_else(|| "-".into());
+                            let _ = writeln!(out, "  I {} {o} {:x}", hexs(&i.name), i.address);
+                        }
+                    }
+                }
+                None => out.push_str("IMP none\n"),
+            }
+            let pe = PeFile::parse(&data).unwrap();
+            let v = pe.parse_version_info();
+            if v.is_empty() {
+                out.push_str("VER none\n");
+            }
+            for f in v {
+                let _ = writeln!(out, "VER {:x} {:x} {:x} {:x}", f.file_version_ms, f.file_version_ls, f.product_version_ms, f.product_version_ls);
+            }
+        }
+        std::fs::write(outp, out).unwrap();
+    }
+
     #[test]
     fn align() {
         assert_eq!(dword_align(38, 0x1000), 40);
