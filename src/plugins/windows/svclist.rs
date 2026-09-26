@@ -7,8 +7,9 @@ use crate::context::{Context, WinKernel};
 use crate::error::Result;
 use crate::layers::scan::{BytesScanner, scan};
 use crate::objects::Obj;
-use crate::plugins::windows::svcscan::{Prereq, ServiceRow, columns, enumerate_vista_or_later_header, get_prereq_info, services_filter};
+use crate::plugins::windows::svcscan::{Prereq, ServiceRow, columns, enumerate_headers, get_prereq_info, services_filter};
 use crate::plugins::{Config, Plugin};
+use crate::renderers::text::RowEncoder;
 use crate::renderers::{RowSink, Value};
 use crate::symbols::windows::prelude::*;
 use crate::symbols::windows::versions;
@@ -29,8 +30,9 @@ fn get_exe_range(proc: &Obj) -> Result<Option<(u64, u64)>> {
     Ok(None)
 }
 
-/// python `SvcList.service_list(...)`: every row python yields, in order.
-pub fn service_list(k: &WinKernel, pre: &Prereq, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
+/// python `SvcList.service_list(...)`: every row python yields, in order (formatted with `enc`
+/// when given).
+pub fn service_list(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
     if !k.table.is_64bit() || !versions::IS_WIN10_15063_OR_LATER.check(k.table) {
         // python: vollog.warning("This plugin only supports Windows 10 version 15063+ ...")
         return Ok(());
@@ -47,19 +49,8 @@ pub fn service_list(k: &WinKernel, pre: &Prereq, f: &mut dyn FnMut(ServiceRow) -
             Err(e) => return Err(e),
         };
         let Some(range) = get_exe_range(&proc)? else { continue };
-        for offset in scan(proc_layer, &BytesScanner::new(b"Sc27"), Some(&[range])) {
-            let mut err = None;
-            enumerate_vista_or_later_header(pre.table, &pre.binary_map, proc_layer, offset, &mut |row| match f(row) {
-                Ok(()) => true,
-                Err(e) => {
-                    err = Some(e);
-                    false
-                }
-            })?;
-            if let Some(e) = err {
-                return Err(e);
-            }
-        }
+        let offsets = scan(proc_layer, &BytesScanner::new(b"Sc27"), Some(&[range]));
+        enumerate_headers(pre.table, &pre.binary_map, proc_layer, &offsets, enc, f)?;
     }
     Ok(())
 }
@@ -75,6 +66,7 @@ impl Plugin for SvcList {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
         let pre = get_prereq_info(ctx, k)?;
-        service_list(k, &pre, &mut |row| out.row(0, row.values))
+        let enc = out.encoder();
+        service_list(k, &pre, enc.as_ref(), &mut |row| row.emit(out))
     }
 }
