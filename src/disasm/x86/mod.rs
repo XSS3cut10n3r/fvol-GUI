@@ -216,12 +216,11 @@ pub fn decode_into(data: &[u8], address: u64, mode: Mode, insn: &mut Insn) -> bo
     decode::decode_into(data, address, mode, insn)
 }
 
-/// Length of the instruction at the start of `data` (0 if invalid), without building operands
-/// text. (Operand structures are still decoded; this is the same work as `decode`.)
+/// Length of the instruction at the start of `data` (0 if invalid), exactly as `decode` would
+/// report it, from a length-only instantiation of the decoder (no operand values are built).
 #[inline]
 pub fn insn_len(data: &[u8], mode: Mode) -> usize {
-    let mut insn = Insn::default();
-    if decode::decode_into(data, 0, mode, &mut insn) { insn.size as usize } else { 0 }
+    decode::insn_len(data, mode)
 }
 
 /// Iterator over consecutive instructions, stopping at the first undecodable one

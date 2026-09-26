@@ -123,25 +123,37 @@ fn seg_reg(prefix: u8) -> u8 {
 
 pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
     match mode {
-        Mode::X86_64 => decode_impl::<true, true>(data, addr, mode, out),
-        Mode::X86_32 => decode_impl::<true, false>(data, addr, mode, out),
+        Mode::X86_64 => decode_impl::<true, true, true>(data, addr, mode, out),
+        Mode::X86_32 => decode_impl::<true, false, true>(data, addr, mode, out),
     }
+}
+
+/// Length-only decode: the same decoder instantiated into a local scratch `Insn`, so the
+/// operand values it never reads are dead code; validity checks are all kept.
+pub(crate) fn insn_len(data: &[u8], mode: Mode) -> usize {
+    let mut insn = Insn::default();
+    let ok = match mode {
+        Mode::X86_64 => decode_impl::<true, true, false>(data, 0, mode, &mut insn),
+        Mode::X86_32 => decode_impl::<true, false, false>(data, 0, mode, &mut insn),
+    };
+    if ok { insn.size as usize } else { 0 }
 }
 
 /// Instructions with legacy prefixes (restart of the specialized path below).
 #[inline(never)]
 fn decode_prefixed(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
     match mode {
-        Mode::X86_64 => decode_impl::<false, true>(data, addr, mode, out),
-        Mode::X86_32 => decode_impl::<false, false>(data, addr, mode, out),
+        Mode::X86_64 => decode_impl::<false, true, true>(data, addr, mode, out),
+        Mode::X86_32 => decode_impl::<false, false, true>(data, addr, mode, out),
     }
 }
 
 /// The decoder. `NOLEG = true` is the common-case instantiation: it hands any instruction with a
 /// legacy (non-REX) prefix to the `false` one, so all legacy prefix state is compile-time
 /// constant there and the prefix rules below fold away. Same source for both.
+/// `FULL = false` (insn_len) only needs validity + length: operand values are not stored.
 #[inline(always)]
-fn decode_impl<const NOLEG: bool, const M64: bool>(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
+fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) -> bool {
     let t = tables();
     let n = data.len().min(15);
     let d = &data[..n];
@@ -574,7 +586,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool>(data: &[u8], addr: u64, mode:
             kmask: false,
         };
         st.osz = osz_def;
-        if !operands(&mut st, &e, out, addr, mode, 0) {
+        if !operands::<FULL>(&mut st, &e, out, addr, mode, 0) {
             return false;
         }
         let sfx = match st.byte() {
@@ -593,7 +605,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool>(data: &[u8], addr: u64, mode:
         out.entry = (node & 0xFFFF) as u16;
         out.pfx = P_NONE;
         opcode = [0x0F, 0x0F, sfx, 0];
-        return finish(&st, out, addr, mode, opcode);
+        return finish::<FULL>(&st, out, addr, mode, opcode);
     }
 
     let e = &t.entries[entry_idx];
@@ -729,12 +741,12 @@ fn decode_impl<const NOLEG: bool, const M64: bool>(data: &[u8], addr: u64, mode:
     out.mnem = e.mnem;
     out.entry = entry_idx as u16;
 
-    if !operands(&mut st, e, out, addr, mode, op) {
+    if !operands::<FULL>(&mut st, e, out, addr, mode, op) {
         return false;
     }
     out.evex = deco;
     out.sae = sae;
-    if bcst_elem != 0 {
+    if FULL && bcst_elem != 0 {
         let vl: u8 = if st.l >= 2 { 64 } else { 16 << st.l };
         for k in 0..out.op_count as usize {
             if let Operand::Mem(ref mut m) = out.operands[k] {
@@ -752,7 +764,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool>(data: &[u8], addr: u64, mode:
         }
     }
     let has_mem = st.has_modrm && st.modrm >> 6 != 3;
-    if flags & (F_CMP8 | F_CMP32 | F_VPCMP | F_VPCOM) != 0 && out.op_count > 0 {
+    if FULL && flags & (F_CMP8 | F_CMP32 | F_VPCMP | F_VPCOM) != 0 && out.op_count > 0 {
         let last = out.op_count as usize - 1;
         if let Operand::Imm(v) = out.operands[last] {
             let lim = if flags & F_CMP32 != 0 { 32 } else { 8 };
@@ -817,7 +829,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool>(data: &[u8], addr: u64, mode:
         pp = if pp == P_BND { P_BND_NOTRACK } else { P_NOTRACK };
     }
     out.pfx = pp;
-    finish(&st, out, addr, mode, opcode)
+    finish::<FULL>(&st, out, addr, mode, opcode)
 }
 
 /// Walk the decision tree from `node`; `None` if a ModRM selector is needed but missing.
@@ -864,13 +876,16 @@ fn insn_bytes(d: &[u8], len: usize) -> [u8; 15] {
 }
 
 #[inline(always)]
-fn finish(st: &St, out: &mut Insn, addr: u64, mode: Mode, opcode: [u8; 4]) -> bool {
+fn finish<const FULL: bool>(st: &St, out: &mut Insn, addr: u64, mode: Mode, opcode: [u8; 4]) -> bool {
     let len = st.pos;
     if len > 15 || len > st.n {
         return false;
     }
-    out.address = addr;
     out.size = len as u8;
+    if !FULL {
+        return true;
+    }
+    out.address = addr;
     out.mode = mode;
     out.bytes = insn_bytes(st.d, len);
     out.opcode = opcode;
@@ -1096,6 +1111,7 @@ fn is_vec_class(cls: u8) -> bool {
 }
 
 /// Parse the ModRM memory operand (st.modrm already read, mod != 3).
+#[inline(always)]
 fn parse_mem(st: &mut St) -> Option<Mem> {
     let md = st.modrm >> 6;
     let rm = st.modrm & 7;
@@ -1184,7 +1200,7 @@ fn parse_mem(st: &mut St) -> Option<Mem> {
 }
 
 #[inline(always)]
-fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: u8) -> bool {
+fn operands<const FULL: bool>(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: u8) -> bool {
     let m64 = mode == Mode::X86_64;
     // ModRM / memory
     let mut mem = Mem::default();
@@ -1212,11 +1228,11 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
     // hoists the many per-source invariants into a costly prologue); the rest go out of line.
     let nops = (e.nops as usize).min(MAX_OPS);
     if nops > 0 {
-        if !operand_inl(st, e, 0, &mem, out, m64, op) {
+        if !operand_inl::<FULL>(st, e, 0, &mem, out, m64, op) {
             return false;
         }
         if nops > 1 {
-            if !operand_inl(st, e, 1, &mem, out, m64, op) {
+            if !operand_inl::<FULL>(st, e, 1, &mem, out, m64, op) {
                 return false;
             }
             for k in 2..nops {
@@ -1232,13 +1248,13 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn operand(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
-    operand_inl(st, e, k, mem, out, m64, op)
+    operand_inl::<true>(st, e, k, mem, out, m64, op)
 }
 
 /// Decode explicit operand `k` (spec `e.ops[k]`).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn operand_inl(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
+fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64: bool, op: u8) -> bool {
     let s = e.ops[k];
     let modrm = st.modrm;
     let is_reg = modrm >> 6 == 3;
@@ -1493,7 +1509,9 @@ fn operand_inl(st: &mut St, e: &Entry, k: usize, mem: &Mem, out: &mut Insn, m64:
             }
             _ => Operand::None,
         };
-        out.operands[k] = o;
+        if FULL {
+            out.operands[k] = o;
+        }
     }
     true
 }
