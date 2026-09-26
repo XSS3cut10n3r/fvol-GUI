@@ -741,15 +741,18 @@ impl Plugin for Timeliner {
             }
             return Ok(());
         };
-        // format blocks of rows on all cores, hand them to the renderer in order
+        // format blocks of rows on all cores, hand them to the renderer in order; the block
+        // buffers are recycled (no fresh pages to fault in for every block)
         const BLOCK: usize = 1 << 14;
+        let pool: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
         let mut result = Ok(());
         crate::util::par::par_map_stream(
             rows.len().div_ceil(BLOCK),
             64,
             |b| {
                 let part = &rows[b * BLOCK..((b + 1) * BLOCK).min(rows.len())];
-                let mut buf = Vec::with_capacity(part.len() * 160);
+                let mut buf = pool.lock().unwrap_or_else(|e| e.into_inner()).pop().unwrap_or_default();
+                buf.clear();
                 for r in part {
                     enc.row(&mut buf, &values(r));
                 }
@@ -757,6 +760,7 @@ impl Plugin for Timeliner {
             },
             |_, (buf, n)| {
                 result = out.rows_encoded(&buf, n);
+                pool.lock().unwrap_or_else(|e| e.into_inner()).push(buf);
                 result.is_ok()
             },
         );

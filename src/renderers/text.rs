@@ -1361,6 +1361,13 @@ struct Json<'a> {
     done: Vec<u8>,
     /// node buffers to reuse
     spare: Vec<Vec<u8>>,
+    /// the last top-level row, written straight into the output (`b.buf` / `done`) as a leaf:
+    /// (start of its bytes, start of the object, position of its `[]`). A child row turns it
+    /// back into an open node; anything else leaves it as it is.
+    spec: Option<(usize, usize, usize)>,
+    /// whether the previous top-level row stayed a leaf (then the next one is written
+    /// speculatively; plugins whose rows have children skip the round trip)
+    leafy: bool,
 }
 
 /// A row's JSON object (`json.dumps(..., sort_keys=True)` layout, `indent=2` unless `lines`)
@@ -1454,6 +1461,8 @@ impl<'a> Json<'a> {
             scratch: Vec::new(),
             done: Vec::new(),
             spare: Vec::new(),
+            spec: None,
+            leafy: true,
         }
     }
 
@@ -1471,6 +1480,45 @@ impl<'a> Json<'a> {
                 }
             }
         }
+    }
+
+    /// A top-level row (nothing open, no filter) as a finished leaf, straight into the output.
+    fn write_spec(&mut self, values: &[Value]) -> Result<()> {
+        if self.lines {
+            // flush first: the speculative bytes must stay in the buffer
+            self.b.maybe_flush()?;
+            let out = &mut self.b.buf;
+            let start = out.len();
+            let split = push_json_node(out, &self.keys, &self.types, values, 1, true, true, &mut self.scratch, usize::MAX, &mut None);
+            out.push(b'\n');
+            self.spec = Some((start, start, split));
+        } else {
+            let out = &mut self.done;
+            let start = out.len();
+            out.push(b',');
+            push_newline_indent(out, 1);
+            let node = out.len();
+            let split = push_json_node(out, &self.keys, &self.types, values, 1, false, true, &mut self.scratch, usize::MAX, &mut None);
+            self.spec = Some((start, node, split));
+        }
+        self.b.rows += 1;
+        Ok(())
+    }
+
+    /// The speculative row gets a child: take it back out of the output as an open node.
+    fn unspec(&mut self) {
+        let Some((start, node, split)) = self.spec.take() else { return };
+        let out = if self.lines { &mut self.b.buf } else { &mut self.done };
+        // jsonl: without the line's "\n"
+        let end = if self.lines { out.len() - 1 } else { out.len() };
+        let mut data = self.spare.pop().unwrap_or_default();
+        data.clear();
+        data.extend_from_slice(&out[node..split]);
+        data.extend_from_slice(&out[split + 2..end]);
+        out.truncate(start);
+        self.top.push_back(None);
+        let top = Some(self.top_base + self.top.len() - 1);
+        self.stack.push(Slot { node: Some(JNode { data, split: split - node, level: 1, children: Vec::new() }), top });
     }
 
     fn build_node(&mut self, values: &[Value], level: usize) -> JNode {
@@ -1552,6 +1600,21 @@ impl RowSink for Json<'_> {
     fn row_ref(&mut self, depth: usize, values: &[Value]) -> Result<()> {
         check_len(&self.b.columns, values)?;
         let d = self.b.depth(depth);
+        if d == 0 && self.b.filter.is_none() {
+            // the previous top-level row is complete
+            if self.spec.take().is_some() {
+                self.leafy = true;
+            } else if let Some(n) = self.stack.first().and_then(|s| s.node.as_ref()) {
+                self.leafy = n.children.is_empty() && self.stack.len() == 1;
+            }
+            self.close_to(0);
+            self.emit_ready()?;
+            if self.leafy && self.top.is_empty() {
+                return self.write_spec(values);
+            }
+        } else {
+            self.unspec();
+        }
         self.close_to(d);
         let keep = if self.b.filter.is_some() {
             let line: Vec<String> = (0..values.len())
@@ -1587,6 +1650,7 @@ impl RowSink for Json<'_> {
 
     fn rows_encoded(&mut self, block: &[u8], nrows: usize) -> Result<()> {
         // everything emitted so far comes first
+        self.spec = None;
         self.close_to(0);
         self.emit_ready()?;
         if self.lines {
@@ -1606,6 +1670,7 @@ impl TextRenderer for Json<'_> {
         if !self.b.begun {
             return self.b.flush();
         }
+        self.spec = None;
         self.close_to(0);
         self.emit_ready()?;
         if !self.lines {
