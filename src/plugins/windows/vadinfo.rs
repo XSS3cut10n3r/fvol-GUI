@@ -141,44 +141,72 @@ impl Plugin for VadInfo {
                 None => Ok(false),
             }
         };
-        let mut pv: Option<Vec<i128>> = None;
-        for p in super::pslist::list_processes(k, &pid_filter) {
-            let proc = p?;
-            let process_name = array_to_string(&proc.m("ImageFileName")?, None)?;
-            for v in list_vads(&proc, &filter) {
-                let vad = v?;
-                let file_output = if dump {
-                    match vad_dump(ctx, &proc, &vad, maxsize) {
-                        Some(n) => Value::Str(n),
-                        None => Value::SStr("Error outputting file"),
-                    }
-                } else {
-                    Value::SStr("Disabled")
-                };
-                if pv.is_none() {
-                    pv = Some(protect_values(k)?);
-                }
-                let tag = match vad.get_tag() {
-                    Some(t) => Value::Str(t),
-                    None => Value::SStr("None"),
-                };
-                out.row(
-                    0,
-                    vec![
+        // python reads MmProtectToValue per row; read it once, failing at the first row like python
+        let pv = std::sync::OnceLock::new();
+        let pv_get = || -> Result<&Vec<i128>> {
+            match pv.get_or_init(|| protect_values(k).map_err(|e| e.to_string())) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(crate::error::Error::msg(e.clone())),
+            }
+        };
+        // rows of one process, in python order; a trailing Err = python raised there
+        let proc_rows = |proc: &Obj| -> Vec<Result<Vec<Value>>> {
+            let mut rows = Vec::new();
+            let r = (|| -> Result<()> {
+                let process_name = array_to_string(&proc.m("ImageFileName")?, None)?;
+                for v in list_vads(proc, &filter) {
+                    let vad = v?;
+                    let file_output = if dump {
+                        match vad_dump(ctx, proc, &vad, maxsize) {
+                            Some(n) => Value::Str(n),
+                            None => Value::SStr("Error outputting file"),
+                        }
+                    } else {
+                        Value::SStr("Disabled")
+                    };
+                    let tag = match vad.get_tag() {
+                        Some(t) => Value::Str(t),
+                        None => Value::SStr("None"),
+                    };
+                    rows.push(Ok(vec![
                         Value::Int(proc.m("UniqueProcessId")?.int()?),
                         Value::Str(process_name.clone()),
                         Value::Int(k.layer.canonicalize(vad.addr) as i128),
                         Value::Int(vad.get_start()? as i128),
                         Value::Int(vad.get_end()? as i128),
                         tag,
-                        Value::Str(vad.get_protection(pv.as_ref().unwrap(), &WINNT_PROTECTIONS)?),
+                        Value::Str(vad.get_protection(pv_get()?, &WINNT_PROTECTIONS)?),
                         Value::Int(vad.get_commit_charge()?.int()?),
                         Value::Int(vad.get_private_memory()?.int()?),
                         Value::Int(vad.get_parent()?),
                         vad.get_file_name(),
                         file_output,
-                    ],
-                )?;
+                    ]));
+                }
+                Ok(())
+            })();
+            if let Err(e) = r {
+                rows.push(Err(e));
+            }
+            rows
+        };
+        let procs = super::pslist::list_processes(k, &pid_filter);
+        // processes are independent: compute in parallel, emit in python order. With --dump,
+        // stay sequential so a failure stops before later dumps exactly like python.
+        let per_proc: Vec<Vec<Result<Vec<Value>>>> = if dump {
+            Vec::new()
+        } else {
+            crate::util::par::par_map(procs.len(), |i| match &procs[i] {
+                Ok(p) => proc_rows(p),
+                Err(_) => Vec::new(),
+            })
+        };
+        let mut per_proc = per_proc.into_iter();
+        for p in procs {
+            let proc = p?;
+            let rows = if dump { proc_rows(&proc) } else { per_proc.next().unwrap_or_default() };
+            for r in rows {
+                out.row(0, r?)?;
             }
         }
         Ok(())
