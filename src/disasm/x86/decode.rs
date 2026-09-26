@@ -45,6 +45,17 @@ static PFX_CLASS: [u8; 256] = {
     t
 };
 
+/// Opcode bytes that start a 0F escape or a VEX / EVEX / XOP prefix.
+static ESC_BYTE: [bool; 256] = {
+    let mut t = [false; 256];
+    t[0x0F] = true;
+    t[0xC4] = true;
+    t[0xC5] = true;
+    t[0x62] = true;
+    t[0x8F] = true;
+    t
+};
+
 const VEX_NONE: u8 = 0;
 const VEX_VEX: u8 = 1;
 const VEX_EVEX: u8 = 2;
@@ -270,11 +281,13 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
 
     // ------------------------------------------------------------------ opcode / vector prefixes
     let b = st.byte().unwrap_or(0);
+    // one table lookup rules out all escape / vector-prefix bytes for most opcodes
+    let esc = ESC_BYTE[b as usize];
     let map: usize;
     let op: u8;
     let mut pfx: usize; // mandatory prefix selector value
     let mut opcode = [0u8; 4];
-    if b == 0x0F {
+    if esc && b == 0x0F {
         let b2 = match st.byte() {
             Some(x) => x,
             None => return false,
@@ -323,7 +336,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
                 }
             }
         };
-    } else if (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
+    } else if esc && (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
         // VEX (a LOCK or REX prefix makes it invalid; 66/F2/F3 are ignored)
         if lockrep == 0xF0 || rex != 0 {
             return false;
@@ -364,7 +377,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
         };
         opcode = [op, 0, 0, 0];
         let _ = (lockrep, has66, rex);
-    } else if b == 0x62 && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
+    } else if esc && b == 0x62 && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
         // EVEX (a LOCK or REX prefix makes it invalid)
         if st.pos + 3 > n || lockrep == 0xF0 || rex != 0 {
             return false;
@@ -413,7 +426,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
             None => return false,
         };
         opcode = [op, 0, 0, 0];
-    } else if b == 0x8F && st.pos < n && d[st.pos] & 0x38 != 0 {
+    } else if esc && b == 0x8F && st.pos < n && d[st.pos] & 0x38 != 0 {
         // XOP
         if st.pos + 2 > n {
             return false;
@@ -1510,7 +1523,14 @@ fn operand_inl<const FULL: bool>(st: &mut St, e: &Entry, k: usize, mem: &Mem, ou
             _ => Operand::None,
         };
         if FULL {
-            out.operands[k] = o;
+            // per-variant stores: lets LLVM thread each source arm to its own (small) store
+            // instead of merging every variant's fields into one generic 16-byte write
+            out.operands[k] = match o {
+                Operand::Reg(r) => Operand::Reg(r),
+                Operand::Imm(v) => Operand::Imm(v),
+                Operand::Mem(m) => Operand::Mem(m),
+                Operand::None => Operand::None,
+            };
         }
     }
     true

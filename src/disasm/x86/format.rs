@@ -331,6 +331,44 @@ pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
 
 #[inline(always)]
 fn op_str(w: &mut W, insn: &Insn) {
+    let f = &insn.ofmt;
+    if (f[0] | f[1] | f[2] | f[3] | f[4]) & (OF_RC | OF_KMASK) != 0 || insn.evex & 0x80 != 0 {
+        return op_str_decorated(w, insn);
+    }
+    // common case (no EVEX rounding / mask decorations): separators + plain operands
+    for k in 0..(insn.op_count as usize).min(insn.operands.len()) {
+        w.room(ROOM);
+        let f = insn.ofmt[k];
+        if k != 0 {
+            if f & OF_FARSEP != 0 {
+                w.b(b':');
+            } else {
+                w.s2(b", ");
+            }
+        }
+        operand(w, insn, k, f);
+    }
+}
+
+#[inline(always)]
+fn operand(w: &mut W, insn: &Insn, k: usize, f: u8) {
+    match insn.operands[k] {
+        Operand::Reg(r) => w.reg(r.0),
+        Operand::Imm(v) => {
+            if f & OF_SIGNED != 0 {
+                w.simm(v)
+            } else {
+                w.uimm(v as u64)
+            }
+        }
+        Operand::Mem(ref m) => write_mem(w, m, insn.mode, f & OF_MOFFS != 0),
+        Operand::None => {}
+    }
+}
+
+/// General operand string: EVEX rounding / sae slot, standalone {kN}, first-operand {kN}{z}.
+#[inline(never)]
+fn op_str_decorated(w: &mut W, insn: &Insn) {
     let mut first = true;
     for k in 0..(insn.op_count as usize).min(insn.operands.len()) {
         w.room(ROOM);
@@ -360,18 +398,7 @@ fn op_str(w: &mut W, insn: &Insn) {
             w.b(b'}');
             continue;
         }
-        match insn.operands[k] {
-            Operand::Reg(r) => w.reg(r.0),
-            Operand::Imm(v) => {
-                if f & OF_SIGNED != 0 {
-                    w.simm(v)
-                } else {
-                    w.uimm(v as u64)
-                }
-            }
-            Operand::Mem(ref m) => write_mem(w, m, insn.mode, f & OF_MOFFS != 0),
-            Operand::None => {}
-        }
+        operand(w, insn, k, f);
         if k == 0 && insn.evex & 0x80 != 0 {
             w.s3(b" {k");
             w.b(b'0' + (insn.evex & 7));
