@@ -208,7 +208,10 @@ impl Tok {
             Tok::Text(_) => "text string".into(),
             Tok::Regex { .. } => "regular expression".into(),
             Tok::Hex(_) => "hex string".into(),
-            Tok::Char(c) => format!("'{}'", *c as char),
+            Tok::Char(b'\\') => "'\\\\'".into(),
+            // Characters the grammar never uses map to bison's YYUNDEF.
+            Tok::Char(c) if b"|^&+-*%~{}:=().[],".contains(c) => format!("'{}'", *c as char),
+            Tok::Char(_) => "invalid token".into(),
         }
     }
 }

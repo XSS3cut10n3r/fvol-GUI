@@ -26,6 +26,8 @@ pub mod regex;
 pub mod volatility;
 
 #[cfg(test)]
+mod difftest;
+#[cfg(test)]
 mod tests;
 
 use crate::yara::scan::{Match, Matcher, StringDef, MAX_MATCH_DATA};

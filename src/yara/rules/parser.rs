@@ -179,6 +179,9 @@ struct Parser<'a, 'c> {
     error: Option<CompileError>,
     /// Bison yyerrstatus: tokens to shift before syntax errors are reported again.
     grace: u32,
+    /// The last failure was a syntax error (bison discards the lookahead when
+    /// such an error happens right after a recovery).
+    syntax_fail: bool,
     consumed: u64,
     // Current rule.
     rule: u32,
@@ -201,6 +204,7 @@ impl<'a, 'c> Parser<'a, 'c> {
             ahead: None,
             error: None,
             grace: 0,
+            syntax_fail: false,
             consumed: 0,
             rule: 0,
             rule_strings_start: 0,
@@ -236,6 +240,16 @@ impl<'a, 'c> Parser<'a, 'c> {
         }
     }
 
+    /// Drop the lookahead during error recovery (not a shift: `grace` stays).
+    fn discard(&mut self) {
+        let (t, l) = match self.ahead.take() {
+            Some(x) => x,
+            None => self.lex(),
+        };
+        self.tok = t;
+        self.tok_line = l;
+    }
+
     fn peek2(&mut self) -> &Tok {
         if self.ahead.is_none() {
             let x = self.lex();
@@ -264,12 +278,12 @@ impl<'a, 'c> Parser<'a, 'c> {
     /// Semantic error (yyerror from an action): always reported.
     fn sem<T>(&mut self, msg: impl Into<String>) -> PResult<T> {
         let line = self.tok_line;
-        self.record(msg.into(), line);
-        Err(Fail)
+        self.sem_at(msg, line)
     }
 
     fn sem_at<T>(&mut self, msg: impl Into<String>, line: usize) -> PResult<T> {
         self.record(msg.into(), line);
+        self.syntax_fail = false;
         Err(Fail)
     }
 
@@ -284,6 +298,7 @@ impl<'a, 'c> Parser<'a, 'c> {
             let line = self.tok_line;
             self.record(msg, line);
         }
+        self.syntax_fail = true;
         Err(Fail)
     }
 
@@ -326,27 +341,28 @@ impl<'a, 'c> Parser<'a, 'c> {
         }
     }
 
-    /// Error recovery: discard tokens until one that can start a rule / import.
-    /// Returns false when the end of input is reached.
+    /// Bison error recovery (`rules: rules error rule | rules error import`):
+    /// a syntax error right after a recovery (yyerrstatus == 3) discards the
+    /// lookahead, then tokens are discarded until one that can start a rule or
+    /// an import. Returns false when the end of input is reached (YYABORT).
     fn recover(&mut self, start: u64) -> bool {
         self.loops.clear();
-        self.for_of_slot = None;
+        // libyara never resets loop_for_of_var_index on errors: a failed for-of
+        // body leaves it set for the rest of the source (later for-of loops then
+        // report "can't be nested").
         self.depth = 0;
-        if self.consumed == start || self.grace > 0 {
-            // No progress since the last recovery: drop the offending token.
+        if (self.syntax_fail && self.grace == 3) || self.consumed == start {
             if self.tok == Tok::Eof {
                 return false;
             }
-            self.advance();
+            self.discard();
         }
+        self.grace = 3;
         loop {
             match self.tok {
                 Tok::Eof => return false,
-                Tok::Kw(Kw::Rule | Kw::Private | Kw::Global | Kw::Import) => {
-                    self.grace = 3;
-                    return true;
-                }
-                _ => self.advance(),
+                Tok::Kw(Kw::Rule | Kw::Private | Kw::Global | Kw::Import) => return true,
+                _ => self.discard(),
             }
         }
     }
@@ -411,7 +427,6 @@ impl<'a, 'c> Parser<'a, 'c> {
         self.rule_strings_start = sstart;
         self.str_lookup.clear();
         self.loops.clear();
-        self.for_of_slot = None;
         self.depth = 0;
 
         // Tags.
