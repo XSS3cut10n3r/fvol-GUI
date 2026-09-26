@@ -60,6 +60,8 @@ struct St<'a> {
     disp8n: u8, // EVEX compressed disp8 scale
     has66: bool,
     mosz: u8, // operand size used for memory size keywords
+    vvvv_hi: u8, // 32-bit mode: ignored vvvv bit 3 (still must be 0 when vvvv is unused)
+    z16: bool,
     is4: u8,
     vsib: u8,   // VSIB index register class (0 = normal SIB)
 }
@@ -114,6 +116,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     let mut has67 = false;
     let mut rex = 0u8;
     let mut xacq = 0u8;
+    // LLVM-7 style mandatory prefix: the last F2/F3 immediately followed by 0F/66/REX, else a 66
+    // immediately followed by 0F/REX (only if no F2/F3 was mandatory).
+    let mut mand = 0u8;
     loop {
         if i >= n {
             return false;
@@ -152,10 +157,24 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                         return false;
                     }
                 }
+                if b != 0xF0 && i + 1 < n {
+                    let nb = d[i + 1];
+                    if nb == 0x0F || nb == 0x66 || (m64 && nb & 0xF0 == 0x40) {
+                        mand = b;
+                    }
+                }
                 lockrep = b;
             }
             0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 => segp = b,
-            0x66 => has66 = true,
+            0x66 => {
+                has66 = true;
+                if mand == 0 && i + 1 < n {
+                    let nb = d[i + 1];
+                    if nb == 0x0F || (m64 && nb & 0xF0 == 0x40) {
+                        mand = 0x66;
+                    }
+                }
+            }
             0x67 => has67 = true,
             _ => break,
         }
@@ -187,6 +206,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         vsib: 0,
         has66,
         mosz: 4,
+        vvvv_hi: 0,
+        z16: false,
         is4: 0,
     };
 
@@ -218,10 +239,32 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             op = b2;
             opcode = [0x0F, b2, 0, 0];
         }
-        pfx = match lockrep {
-            0xF3 => 2 + 2 * has66 as usize,
-            0xF2 => 3 + 2 * has66 as usize,
-            _ => has66 as usize,
+        // context: the mandatory prefix alone, else the legacy prefixes (66 / F2|F3)
+        pfx = match mand {
+            0x66 => 1,
+            0xF3 => 2,
+            0xF2 => 3,
+            _ => {
+                let r = match lockrep {
+                    0xF3 => 2,
+                    0xF2 => 3,
+                    _ => 0,
+                };
+                if r != 0 {
+                    // XS/XD + ADSIZE contexts are empty in 32-bit mode
+                    if has67 && !m64 && !has66 {
+                        return false;
+                    }
+                    // REX.W contexts have no OPSIZE variant (REXW_XS / REXW_XD win)
+                    if m64 && rex & 8 != 0 {
+                        r
+                    } else {
+                        r + 2 * has66 as usize
+                    }
+                } else {
+                    has66 as usize
+                }
+            }
         };
     } else if (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
         // VEX (a LOCK or REX prefix makes it invalid; 66/F2/F3 are ignored)
@@ -252,6 +295,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         } else {
             st.rex = 0;
             st.vvvv = vvvv & 7;
+            st.vvvv_hi = vvvv & 8;
         }
         if !(1..=3).contains(&mmmmm) {
             return false;
@@ -264,8 +308,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         opcode = [op, 0, 0, 0];
         let _ = (lockrep, has66, rex);
     } else if b == 0x62 && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
-        // EVEX
-        if st.pos + 3 > n {
+        // EVEX (a LOCK or REX prefix makes it invalid)
+        if st.pos + 3 > n || lockrep == 0xF0 || rex != 0 {
             return false;
         }
         let p0 = d[st.pos];
@@ -299,6 +343,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         } else {
             st.rex = 0;
             st.vvvv = vvvv & 7;
+            st.vvvv_hi = vvvv & 8;
         }
         map = match mm {
             1 => MAP_E1,
@@ -335,6 +380,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         } else {
             st.rex = 0;
             st.vvvv = vvvv & 7;
+            st.vvvv_hi = vvvv & 8;
         }
         map = match mmmmm {
             8 => MAP_X8,
@@ -355,8 +401,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         op = b;
         opcode = [b, 0, 0, 0];
         pfx = match lockrep {
-            0xF3 => 2 + 2 * has66 as usize,
-            0xF2 => 3 + 2 * has66 as usize,
+            0xF3 => 2,
+            0xF2 => 3,
             _ => has66 as usize,
         };
     }
@@ -411,7 +457,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             m64 as u8,
             pfx as u8,
             w as u8,
-            st.l,
+            if st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3 { 2 } else { st.l },
             st.evex_b as u8,
             (mm >> 6 == 3) as u8,
             (mm >> 3) & 7,
@@ -427,6 +473,22 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             Some(x) => x,
             None => return false,
         };
+        if node == 0 && st.vex == VEX_NONE && mand == 0 && pfx == 1 && has67 && map != MAP_1 {
+            // OPSIZE_ADSIZE context also inherits the prefix-less entries (via ADSIZE)
+            sel[SEL_PFX as usize] = 0;
+            node = match walk(t, root, &sel, have_modrm) {
+                Some(x) => x,
+                None => return false,
+            };
+        }
+        if node == 0 && st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3 {
+            // rounding / sae register forms: scalar (LIG) entries are listed under L=0
+            sel[SEL_L as usize] = 0;
+            node = match walk(t, root, &sel, have_modrm) {
+                Some(x) => x,
+                None => return false,
+            };
+        }
         if node == 0 && rexw && pfx != 0 && st.vex == VEX_NONE && map != MAP_1 {
             // capstone/LLVM REX.W contexts inherit the no-prefix (W0) entries
             sel[SEL_PFX as usize] = 0;
@@ -501,7 +563,15 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         osz_def
     };
 
-    if flags & F_NOVVVV != 0 && st.vvvv != 0 && st.vex != VEX_NONE {
+    if flags & F_NOVVVV != 0 && st.vex != VEX_NONE {
+        let uses_vsib = e.ops[..e.nops as usize].iter().any(|o| o.src == S_VSIB);
+        let v = if uses_vsib { st.vvvv & 15 } else { st.vvvv };
+        if (v | st.vvvv_hi) != 0 {
+            return false;
+        }
+    }
+    if st.vex == VEX_EVEX && st.evex_b && e.ops[..e.nops as usize].iter().any(|o| o.src == S_VSIB) {
+        // gathers / scatters: no embedded broadcast
         return false;
     }
     st.has66 = has66;
@@ -513,12 +583,25 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             st.w = false;
             st.mosz = 4;
         } else if flags & F_NOPFX != 0 {
-            if pfx >= 4 {
-                st.mosz = 4;
+            if pfx >= 4 && !(m64 && map == MAP_0F && (0x82..=0x8F).contains(&op)) {
+                // XS_OPSIZE / XD_OPSIZE contexts hold no prefix-less instructions
+                // (capstone quirk: except jcc rel32 in 64-bit mode)
+                return false;
+            }
+            if (mand == 0xF2 || mand == 0xF3) && has66 {
+                // F2/F3 context: the 32/64-bit variant is matched (no 16-bit equivalent)
+                st.mosz = if rexw { 8 } else { 4 };
+            }
+            if pfx == 1 && rexw {
+                // hint nops (/z keyword) have no 64-bit variant: the 16-bit one wins
+                st.z16 = true;
             }
         } else if pfx == 1 && rexw {
             st.mosz = 2;
         }
+    } else if map == MAP_1 && flags & F_D64 != 0 && has66 {
+        // push/pop memory forms: 66 wins over REX.W for the memory size
+        st.mosz = 2;
     }
 
     // EVEX decorations / validity
@@ -607,6 +690,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         for k in 0..out.op_count as usize {
             if let Operand::Mem(ref mut m) = out.operands[k] {
                 m.bcst = vl / (bcst_elem & 0x0F);
+                if flags & F_BCST_HALF != 0 {
+                    m.bcst /= 2;
+                }
                 m.size = match bcst_elem {
                     2 => MemSize::Word,
                     4 => MemSize::Dword,
@@ -617,13 +703,22 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         }
     }
     let has_mem = st.has_modrm && st.modrm >> 6 != 3;
-    if flags & (F_CMP8 | F_CMP32) != 0 && out.op_count > 0 {
+    if flags & (F_CMP8 | F_CMP32 | F_VPCMP | F_VPCOM) != 0 && out.op_count > 0 {
         let last = out.op_count as usize - 1;
         if let Operand::Imm(v) = out.operands[last] {
-            let lim = if flags & F_CMP8 != 0 { 8 } else { 32 };
+            let lim = if flags & F_CMP32 != 0 { 32 } else { 8 };
+            // EVEX: capstone aliases masked compares by imm & 0x1f
+            let v = if st.vex == VEX_EVEX && flags & F_CMP32 != 0 && (st.evex_aaa != 0 || (st.evex_b && has_mem)) {
+                v & 0x1F
+            } else {
+                v
+            };
             if (v as u64) < lim {
-                out.mnem = e.alias + v as u16;
-                out.op_count -= 1;
+                let a = t.aliases[e.alias as usize + v as usize];
+                if a != 0 {
+                    out.mnem = a;
+                    out.op_count -= 1;
+                }
             }
         }
     }
@@ -647,7 +742,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 pp = P_REPNE;
             } else if flags & F_BND != 0 {
                 pp = P_BND;
-            } else if flags & F_XA != 0 && xacq == 0xF2 && has_mem {
+            } else if flags & F_XA != 0 && xacq != 0 && has_mem {
                 pp = P_XACQ;
             }
         }
@@ -658,11 +753,16 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 pp = P_REPE;
             } else if flags & F_REPZ != 0 {
                 pp = P_REPZ;
-            } else if flags & F_XA != 0 && xacq == 0xF3 && has_mem {
+            } else if flags & F_XA != 0 && xacq != 0 && has_mem {
                 pp = P_XREL;
             }
         }
         _ => {}
+    }
+    // a repeat prefix that differs from the (consumed) mandatory F2/F3 is printed
+    // (capstone: only for movss, whose id is in its repne-capable list)
+    if pp == P_NONE && map == MAP_0F && (op == 0x10 || op == 0x11) && lockrep == 0xF2 && mand == 0xF3 {
+        pp = P_REPNE;
     }
     if segp == 0x3E && flags & F_NOTRACK != 0 {
         pp = if pp == P_BND { P_BND_NOTRACK } else { P_NOTRACK };
@@ -779,7 +879,7 @@ fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
             _ => MemSize::Qword,
         },
         K_Z => {
-            if st.has66 {
+            if st.mosz == 2 || st.z16 {
                 MemSize::Word
             } else {
                 MemSize::Dword
@@ -1039,6 +1139,8 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 let mut num = ((modrm >> 3) & 7) | rexr;
                 if is_vec_class(s.cls) {
                     num |= st.evex_rr;
+                } else if st.evex_rr != 0 && s.cls != C_K {
+                    return false;
                 }
                 let r = reg_for(st, s.cls, num);
                 if r == 0 {
@@ -1086,13 +1188,16 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     None => return false,
                 };
                 st.is4 = b;
-                let num = if m64 { b >> 4 } else { (b >> 4) & 7 };
+                // capstone does not mask the is4 register to 3 bits in 32-bit mode
+                let num = b >> 4;
                 Operand::Reg(Reg(reg_for(st, s.cls, num)))
             }
             S_FIXED => Operand::Reg(Reg(s.cls)),
             S_ACC => {
                 let size = if s.cls == C_A {
-                    st.asz
+                    if m64 { st.asz } else { 4 }
+                } else if s.cls == C_N {
+                    if m64 { 8 } else { 4 }
                 } else if s.cls == C_Z && st.osz == 8 {
                     4
                 } else {
@@ -1200,7 +1305,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     // call rel16 and 64-bit mode forms are sign-extended.
                     match st.le(2) {
                         Some(v) => {
-                            if !m64 && e.flags & F_RELQ != 0 {
+                            if !m64 && e.flags & F_RELQ != 0 && st.asz != 2 {
                                 v as i64
                             } else {
                                 v as u16 as i16 as i64

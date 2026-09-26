@@ -6,7 +6,7 @@ Usage (run with the bench venv python, which has capstone):
   disasm_diff.py cmp  [--out DIR] [--only NAME] [--show N]   build & run examples/disasm_diff.rs
   disasm_diff.py probe MODE HEX...                           print capstone's decoding
 
-Corpus/reference files are written to DIR (default /tmp/rsvol-disasm) as NAME.ref, one line per
+Corpus/reference files are written to DIR (default testdata/scratch/disasm/ref) as NAME.ref, one line per
 unique instruction:  count<TAB>mode<TAB>addr_hex<TAB>window_hex<TAB>size<TAB>mnemonic<TAB>op_str
 `window_hex` holds the bytes available to the decoder at that position (<= 15); size 0 means
 capstone rejected the bytes (mnemonic/op_str empty).  Corpora:
@@ -28,9 +28,9 @@ from multiprocessing import Pool
 import capstone
 
 MODES = {32: capstone.CS_MODE_32, 64: capstone.CS_MODE_64}
-DEFAULT_OUT = "/tmp/rsvol-disasm"
+DEFAULT_OUT = "/home/user/rs-vol/testdata/scratch/disasm/ref"  # on disk: /tmp is RAM-backed
 DEFAULT_PE = [
-    "/tmp/claude-1000/-home-user-rs-vol/c12d8bb7-14a2-4f12-b8c0-878249a94793/scratchpad/pe",
+    "/home/user/rs-vol/testdata/scratch/disasm/pe",
 ]
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -188,31 +188,33 @@ def write_ref(path, entries):
 
 # ----------------------------------------------------------------------------- corpora
 
-def gather_real(pe_dirs, quick):
+def gather_real(pe_dirs, quick, lib_seed=1234, real_mb=48, only_files=None):
     jobs = {32: [], 64: []}
     budget = {32: 0, 64: 0}
-    limit = (4 << 20) if quick else (48 << 20)
+    limit = (4 << 20) if quick else (real_mb << 20)
     files = []
     for d in pe_dirs:
         for root, _, names in os.walk(d):
             for nm in sorted(names):
                 if nm.endswith(".dmp"):
                     files.append(os.path.join(root, nm))
-    for lib in ("/usr/lib", "/usr/lib32"):
+    for lib in (() if only_files else ("/usr/lib", "/usr/lib32")):
         try:
             names = sorted(os.listdir(lib))
         except OSError:
             continue
-        rnd = random.Random(1234)
+        rnd = random.Random(lib_seed)
         rnd.shuffle(names)
         for nm in names:
             if ".so" in nm:
                 files.append(os.path.join(lib, nm))
+    if only_files:
+        files = list(only_files)
     for p in files:
         try:
             if os.path.islink(p) or not os.path.isfile(p):
                 continue
-            if os.path.getsize(p) > (64 << 20):
+            if os.path.getsize(p) > (64 << 20) and not only_files:
                 continue
             with open(p, "rb") as f:
                 data = f.read()
@@ -230,11 +232,14 @@ def gather_real(pe_dirs, quick):
     return jobs
 
 
-def gen_sweep_windows(bits, rnd):
-    """Targeted opcode-space windows (first instruction only)."""
+def gen_sweep_windows(bits, rnd, small_tail=False):
+    """Targeted opcode-space windows (first instruction only). With small_tail the bytes after
+    the opcode are biased towards small values (predicate immediates, short displacements)."""
     W = []
 
     def tail(n=15):
+        if small_tail:
+            return bytes(rnd.getrandbits(5) if rnd.getrandbits(1) else rnd.getrandbits(8) for _ in range(n))
         return bytes(rnd.getrandbits(8) for _ in range(n))
 
     def add(prefix, rest):
@@ -347,6 +352,14 @@ def main_gen(argv):
     pe_dirs = []
     quick = False
     only = None
+    seed = 20240601
+    jobs = min(8, os.cpu_count() or 1)
+    rand_mb = 16
+    lib_seed = 1234
+    real_mb = 48
+    no_pe = False
+    small_tail = False
+    only_files = None
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -358,21 +371,37 @@ def main_gen(argv):
             quick = True
         elif a == "--only":
             only = argv[i + 1].split(","); i += 1
+        elif a == "--seed":
+            seed = int(argv[i + 1]); i += 1
+        elif a == "--jobs":
+            jobs = int(argv[i + 1]); i += 1
+        elif a == "--rand-mb":
+            rand_mb = int(argv[i + 1]); i += 1
+        elif a == "--lib-seed":
+            lib_seed = int(argv[i + 1]); i += 1
+        elif a == "--real-mb":
+            real_mb = int(argv[i + 1]); i += 1
+        elif a == "--no-pe":
+            no_pe = True
+        elif a == "--small-tail":
+            small_tail = True
+        elif a == "--files":
+            only_files = argv[i + 1].split(","); i += 1
         i += 1
-    if not pe_dirs:
+    if not pe_dirs and not no_pe:
         pe_dirs = [d for d in DEFAULT_PE if os.path.isdir(d)]
     os.makedirs(out, exist_ok=True)
-    rnd = random.Random(20240601)
-    with Pool(os.cpu_count()) as pool:
+    rnd = random.Random(seed)
+    with Pool(jobs) as pool:
         if only is None or "real" in only:
-            jobs = gather_real(pe_dirs, quick)
+            jobs = gather_real(pe_dirs, quick, lib_seed, real_mb, only_files)
             for bits in (64, 32):
                 print(f"real{bits}: {len(jobs[bits])} chunks", file=sys.stderr)
                 tot = merge(pool.imap_unordered(sweep, jobs[bits], chunksize=1))
                 ents = sorted(tot.values(), key=lambda e: -e[0])
                 write_ref(os.path.join(out, f"real{bits}.ref"), ents)
         if only is None or "rand" in only:
-            size = (1 << 20) if quick else (16 << 20)
+            size = (1 << 20) if quick else (rand_mb << 20)
             for bits in (64, 32):
                 jobs = []
                 for i in range(0, size, 1 << 16):
@@ -383,7 +412,7 @@ def main_gen(argv):
                 write_ref(os.path.join(out, f"rand{bits}.ref"), ents)
         if only is None or "sweep" in only:
             for bits in (64, 32):
-                W = gen_sweep_windows(bits, rnd)
+                W = gen_sweep_windows(bits, rnd, small_tail)
                 W = list(dict.fromkeys(W))
                 if quick:
                     W = W[::16]

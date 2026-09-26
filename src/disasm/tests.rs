@@ -49,3 +49,50 @@ fn disasm_never_panics_on_random_bytes() {
         }
     }
 }
+
+/// Differential check against capstone reference corpora produced by
+/// `bench/scripts/disasm_diff.py gen` (skipped when testdata/scratch/disasm/ref is absent).
+/// Only the first lines of each corpus are checked here to keep `cargo test` fast; run
+/// `examples/disasm_diff cmp testdata/scratch/disasm/ref` for the full comparison.
+#[test]
+fn disasm_matches_capstone_corpora() {
+    use std::io::BufRead;
+    let dir = std::path::Path::new("/home/user/rs-vol/testdata/scratch/disasm/ref");
+    if !dir.is_dir() {
+        eprintln!("disasm corpora not found in {dir:?}; skipping");
+        return;
+    }
+    let unhex = |s: &str| -> Vec<u8> {
+        (0..s.len() / 2).filter_map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()).collect()
+    };
+    let mut bad = Vec::new();
+    for name in ["real64", "real32", "rand64", "rand32", "sweep64", "sweep32"] {
+        let Ok(f) = std::fs::File::open(dir.join(format!("{name}.ref"))) else { continue };
+        let mut insn = Insn::default();
+        for line in std::io::BufReader::new(f).lines().take(100_000) {
+            let Ok(line) = line else { break };
+            let p: Vec<&str> = line.split('\t').collect();
+            if p.len() < 7 {
+                continue;
+            }
+            let mode = if p[1] == "64" { Mode::X86_64 } else { Mode::X86_32 };
+            let addr = u64::from_str_radix(p[2], 16).unwrap_or(0);
+            let win = unhex(p[3]);
+            let esize: u8 = p[4].parse().unwrap_or(0);
+            let ok = x86::decode_into(&win, addr, mode, &mut insn);
+            let got = if ok { (insn.size, insn.mnemonic(), insn.op_str()) } else { (0, String::new(), String::new()) };
+            let same = got.0 == esize && (esize == 0 || (got.1 == p[5] && got.2 == p[6]));
+            if !same && bad.len() < 20 {
+                bad.push(format!("{name} {}: exp {esize}:{} {} got {}:{} {}", p[3], p[5], p[6], got.0, got.1, got.2));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "mismatches vs capstone:\n{}", bad.join("\n"));
+}
+
+#[test]
+fn disasm_spec_tables_build() {
+    // Spec errors panic in debug builds (tables::build); make sure the tables compile.
+    let insn = decode(&[0x90], 0, Mode::X86_64).expect("nop");
+    assert_eq!(insn.mnemonic(), "nop");
+}
