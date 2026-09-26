@@ -104,13 +104,173 @@ impl Partial {
     }
 }
 
+/// Slack the fast loop needs on both sides: every element moves exactly 64 bytes (the longest
+/// short literal is 60 bytes, the longest copy 64).
+const SLOP: usize = 64;
+
+/// Per-tag decode entry: `len | offset_base << 8`. Literals get a pseudo offset of 64 (never
+/// "overlapping", and "before the output start" only while op < 64, which sends the first
+/// elements of a block through the checked path); literals with a length field (tags 60..63)
+/// and copy-4 elements get len 0: the fast loop leaves them to the checked loop.
+static TAG_TABLE: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut tag = 0usize;
+    while tag < 256 {
+        t[tag] = match tag & 3 {
+            0 => {
+                let len = (tag >> 2) + 1;
+                if len > 60 { 0 } else { (len | (SLOP << 8)) as u32 }
+            }
+            1 => ((4 + ((tag >> 2) & 7)) | ((tag >> 5) << 16)) as u32,
+            2 => ((tag >> 2) + 1) as u32,
+            // copy-4 (only in blocks > 64 KiB): the checked loop
+            _ => 0,
+        };
+        tag += 1;
+    }
+    t
+};
+
+/// Bits of the 4 bytes after the tag that hold (the low part of) the copy offset, by tag type.
+const OFFSET_MASK: [u32; 4] = [0, 0xff, 0xffff, 0xffff_ffff];
+
+/// 64-byte move by value (all loads before all stores): equals a forward byte copy of the
+/// first `len` bytes whenever `len <= dst - src`.
+#[inline(always)]
+unsafe fn move64(s: *const u8, d: *mut u8) {
+    // SAFETY: caller guarantees 64 readable bytes at s and 64 writable bytes at d
+    unsafe {
+        let a = (s as *const [u8; 32]).read_unaligned();
+        let b = (s.add(32) as *const [u8; 32]).read_unaligned();
+        (d as *mut [u8; 32]).write_unaligned(a);
+        (d.add(32) as *mut [u8; 32]).write_unaligned(b);
+    }
+}
+
+/// `PATTERN[off][i] = i % off`: pshufb masks replicating an `off`-byte period over 16 bytes.
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+static PATTERN: [[[u8; 16]; 4]; 16] = {
+    let mut t = [[[0u8; 16]; 4]; 16];
+    let mut off = 1;
+    while off < 16 {
+        let mut k = 0;
+        while k < 64 {
+            t[off][k / 16][k % 16] = (k % off) as u8;
+            k += 1;
+        }
+        off += 1;
+    }
+    t
+};
+
+/// Write 64 bytes at `d` continuing the `off`-periodic pattern that ends at `d` (LZ77 copy
+/// semantics for an overlapping match, `1 <= off`, plus slop up to 64 bytes).
+#[inline(always)]
+unsafe fn pattern64(d: *mut u8, off: usize) {
+    // SAFETY (whole body): caller guarantees `off` valid bytes before d and 64 writable
+    // bytes at d.
+    unsafe {
+        if off < 16 {
+            #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+            {
+                use std::arch::x86_64::*;
+                // the 16 bytes at d - off: only the first `off` (valid) ones are selected
+                let v = _mm_loadu_si128(d.sub(off) as *const __m128i);
+                let m = &PATTERN[off];
+                for k in 0..4 {
+                    let p = _mm_shuffle_epi8(v, _mm_loadu_si128(m[k].as_ptr() as *const __m128i));
+                    _mm_storeu_si128(d.add(16 * k) as *mut __m128i, p);
+                }
+            }
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
+            {
+                for i in 0..64 {
+                    *d.add(i) = *d.add(i).sub(off);
+                }
+            }
+        } else {
+            // off >= 16: each 16-byte chunk only reads bytes already final
+            for k in 0..4 {
+                let v = (d.add(16 * k).sub(off) as *const [u8; 16]).read_unaligned();
+                (d.add(16 * k) as *mut [u8; 16]).write_unaligned(v);
+            }
+        }
+    }
+}
+
+/// The unchecked-width inner loop: runs while the input has `1 + SLOP` bytes after the tag
+/// and the output `SLOP` bytes of room, and stops (at an element boundary, without consuming
+/// it) on anything unusual: long literals, bad offsets, the end of the slack, `op >= limit`.
+/// Every element it does decode is valid, so errors are reported by the checked loop.
+#[inline(never)]
+fn decode_fast(src: &[u8], out: &mut [u8], ip: &mut usize, op: &mut usize, limit: usize) {
+    let n = src.len();
+    if n < 1 + SLOP || out.len() < SLOP || limit == 0 {
+        return;
+    }
+    let ip_end = n - (1 + SLOP); // ip <= ip_end
+    let op_end = (out.len() - SLOP).min(limit - 1); // op <= op_end
+    let sp = src.as_ptr();
+    let dp = out.as_mut_ptr();
+    let (mut i, mut o) = (*ip, *op);
+    while i <= ip_end && o <= op_end {
+        // SAFETY: i + 1 + SLOP <= n, so the tag, the 4 bytes after it and a 64-byte literal
+        // are readable; o + SLOP <= out.len(), so 64 bytes are writable at o; copies read
+        // 64 bytes at o - off >= 0 (checked below), which ends before o + SLOP.
+        unsafe {
+            let tag = *sp.add(i) as usize;
+            let ty = tag & 3;
+            let next = (sp.add(i + 1) as *const u32).read_unaligned().to_le();
+            let e = *TAG_TABLE.get_unchecked(tag) as usize;
+            let len = e & 0xff;
+            let off = (next & *OFFSET_MASK.get_unchecked(ty)) as usize + (e >> 8);
+            let adv = std::hint::select_unpredictable(ty == 0, (tag >> 2) + 2, ty + 1);
+            if len.wrapping_sub(1) >= off || off.wrapping_sub(1) >= o {
+                // long literal / copy-4 (len 0), overlapping copy, offset 0 / before the
+                // output start, or a short literal while o < 64
+                if len == 0 {
+                    break;
+                }
+                if ty == 0 {
+                    move64(sp.add(i + 1), dp.add(o));
+                } else {
+                    if off == 0 || off > o {
+                        break;
+                    }
+                    pattern64(dp.add(o), off);
+                }
+            } else {
+                let s = std::hint::select_unpredictable(ty == 0, sp.add(i + 1), dp.add(o - off) as *const u8);
+                let d = dp.add(o);
+                let a = (s as *const [u8; 32]).read_unaligned();
+                (d as *mut [u8; 32]).write_unaligned(a);
+                if len > 32 {
+                    let b = (s.add(32) as *const [u8; 32]).read_unaligned();
+                    (d.add(32) as *mut [u8; 32]).write_unaligned(b);
+                }
+            }
+            i += adv;
+            o += len;
+        }
+    }
+    *ip = i;
+    *op = o;
+}
+
 /// Continue decoding `src` into `dst` (which holds the `st.op` bytes produced so far) until
 /// at least `want` bytes are available (`want >= ulen`: decode and validate the whole block).
 ///
-/// Fast paths (like libsnappy): short literals and copies are done with fixed 16-byte
-/// unaligned moves when both buffers have slack, instead of variable-length memcpy calls.
-/// Every fast path is guarded by explicit bounds checks; the slow path handles buffer ends.
+/// Structure (like libsnappy's): [`decode_fast`] handles the bulk with fixed 64-byte moves
+/// and a table-driven, mostly branch-free element decode while both buffers have slack; the
+/// checked loop below takes one element at a time near the buffer ends and for rare
+/// elements, and is the only place errors are detected.
 pub fn decompress_continue(src: &[u8], dst: &mut [u8], st: &mut Partial, want: usize) -> Result<(), SnappyError> {
+    continue_impl::<true>(src, dst, st, want)
+}
+
+/// `FAST = false` is the checked loop alone (the differential oracle of the tests).
+#[inline(always)]
+fn continue_impl<const FAST: bool>(src: &[u8], dst: &mut [u8], st: &mut Partial, want: usize) -> Result<(), SnappyError> {
     let ulen = st.ulen;
     if dst.len() < ulen || st.op > ulen {
         return Err(SnappyError::OutputTooSmall);
@@ -119,9 +279,15 @@ pub fn decompress_continue(src: &[u8], dst: &mut [u8], st: &mut Partial, want: u
     let limit = if want >= ulen { usize::MAX } else { want };
     let (mut ip, mut op) = (st.ip, st.op);
     let n = src.len();
-    let sp = src.as_ptr();
-    let dp = out.as_mut_ptr();
-    while ip < n && op < limit {
+    loop {
+        if FAST {
+            decode_fast(src, out, &mut ip, &mut op, limit);
+        }
+        if !(ip < n && op < limit) {
+            break;
+        }
+        let sp = src.as_ptr();
+        let dp = out.as_mut_ptr();
         // SAFETY: ip < n
         let tag = unsafe { *sp.add(ip) };
         ip += 1;
@@ -553,6 +719,96 @@ mod tests {
         let mut bad = s.clone();
         bad[4] = b'X'; // stream identifier
         assert_eq!(decompress_framed(&bad), Err(SnappyError::BadFrame));
+    }
+
+    /// Decode with and without the fast loop (whole block, and resumed in random steps):
+    /// identical results, errors included.
+    fn check_fast_vs_checked(c: &[u8], x: &mut u64) {
+        let run = |fast: bool, steps: &[usize]| -> (Result<(), SnappyError>, Vec<u8>, Partial) {
+            let Ok(mut st) = Partial::start(c) else { return (Err(SnappyError::BadHeader), Vec::new(), Partial::default()) };
+            let mut out = vec![0x5au8; st.ulen.min(1 << 20)];
+            if out.len() < st.ulen {
+                return (Err(SnappyError::OutputTooSmall), Vec::new(), st);
+            }
+            for &w in steps {
+                let r = if fast { continue_impl::<true>(c, &mut out, &mut st, w) } else { continue_impl::<false>(c, &mut out, &mut st, w) };
+                if r.is_err() {
+                    return (r, Vec::new(), st);
+                }
+            }
+            // only the decoded prefix is meaningful (the fast loop leaves slop behind it)
+            out.truncate(st.op);
+            (Ok(()), out, st)
+        };
+        let mut steps = Vec::new();
+        for _ in 0..4 {
+            *x ^= *x << 13;
+            *x ^= *x >> 7;
+            *x ^= *x << 17;
+            steps.push((*x % 70000) as usize);
+        }
+        steps.sort();
+        steps.push(usize::MAX);
+        for s in [&[usize::MAX][..], &steps] {
+            let a = run(true, s);
+            let b = run(false, s);
+            assert_eq!(a.0, b.0);
+            assert_eq!(a.2, b.2);
+            assert!(a.1 == b.1, "outputs differ");
+        }
+    }
+
+    #[test]
+    fn fast_loop_matches_checked_loop() {
+        use crate::codecs::testdata::{fixture, gen_data};
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut seed = 99u64;
+        // valid streams with every offset class (short periods, long runs, long literals)
+        let mut inputs: Vec<Vec<u8>> = Vec::new();
+        for name in ["small", "block64k", "large"] {
+            inputs.push(fixture(&format!("snappy_{name}.bin")));
+        }
+        for n in [70usize, 200, 5000, 65536, 150_000] {
+            let mut d = gen_data(n as u64, n);
+            for p in 1..20usize {
+                let at = (next() as usize) % d.len();
+                let run = ((next() % 200) as usize).min(d.len() - at);
+                for k in 0..run {
+                    d[at + k] = (k % p) as u8;
+                }
+            }
+            inputs.push(compress(&d));
+        }
+        for c in inputs {
+            check_fast_vs_checked(&c, &mut seed);
+            // corrupted copies: flipped bytes, truncations
+            for _ in 0..200 {
+                let mut m = c.clone();
+                let k = 1 + (next() % 4) as usize;
+                for _ in 0..k {
+                    let at = 1 + (next() as usize) % (m.len() - 1);
+                    m[at] ^= 1 << (next() % 8);
+                }
+                if next() % 4 == 0 {
+                    m.truncate(1 + (next() as usize) % m.len());
+                }
+                check_fast_vs_checked(&m, &mut seed);
+            }
+        }
+        // long garbage after a plausible preamble
+        for _ in 0..3000 {
+            let len = 70 + (next() % 400) as usize;
+            let mut buf: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            buf[0] = 0xff;
+            buf[1] = 0x07; // ulen 1023
+            check_fast_vs_checked(&buf, &mut seed);
+        }
     }
 
     #[test]
