@@ -28,8 +28,39 @@ pub const BYTE_FREQ: [u32; 256] = [
 
 /// Estimated probability (parts per 2^20) that a random memory byte is in `s`.
 pub fn set_freq(s: &ByteSet) -> u64 {
-    s.iter().map(|b| BYTE_FREQ[b as usize] as u64).sum()
+    // 32 table lookups, one per byte of the 256-bit set
+    let mut t = 0u64;
+    for (w, &word) in s.0.iter().enumerate() {
+        for k in 0..8 {
+            t += FREQ_BY_MASK[w * 8 + k][(word >> (8 * k)) as u8 as usize] as u64;
+        }
+    }
+    t
 }
+
+/// `FREQ_BY_MASK[g][m]`: summed `BYTE_FREQ` of the bytes `8 g + i` for the bits `i` set
+/// in `m` (byte group `g` of a 256-bit set).
+static FREQ_BY_MASK: [[u32; 256]; 32] = {
+    let mut t = [[0u32; 256]; 32];
+    let mut g = 0;
+    while g < 32 {
+        let mut m = 0;
+        while m < 256 {
+            let mut sum = 0u32;
+            let mut i = 0;
+            while i < 8 {
+                if m >> i & 1 != 0 {
+                    sum += BYTE_FREQ[g * 8 + i];
+                }
+                i += 1;
+            }
+            t[g][m] = sum;
+            m += 1;
+        }
+        g += 1;
+    }
+    t
+};
 
 const MAX_POSITIONS: usize = 32;
 
@@ -324,9 +355,17 @@ impl SeqFinder {
             return Some(SeqFinder { kind: Kind::Set(ByteSetFinder::new(&seq[0].to_bools())), s1: SetDesc::new(&seq[0]), s2: SetDesc::new(&seq[0]), seq });
         }
         // Two rarest positions.
-        let mut idx: Vec<usize> = (0..seq.len()).collect();
-        idx.sort_by_key(|&i| (set_freq(&seq[i]), i));
-        let (i1, i2) = (idx[0], idx[1]);
+        let (mut i1, mut i2) = (usize::MAX, usize::MAX);
+        let (mut f1, mut f2) = (u64::MAX, u64::MAX);
+        for (i, s) in seq.iter().enumerate() {
+            let f = set_freq(s);
+            if f < f1 {
+                (i2, f2) = (i1, f1);
+                (i1, f1) = (i, f);
+            } else if f < f2 {
+                (i2, f2) = (i, f);
+            }
+        }
         Some(SeqFinder { kind: Kind::Pair { i1, i2 }, s1: SetDesc::new(&seq[i1]), s2: SetDesc::new(&seq[i2]), seq })
     }
 
