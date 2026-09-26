@@ -18,9 +18,9 @@ use crate::error::{Error, Result};
 use crate::objects::Obj;
 use crate::renderers::Value;
 
-/// Attached-device chains longer than this are treated as a (smeared) cycle: python would loop
-/// forever, we stop with an error.
-pub const MAX_ATTACHED_DEVICES: usize = 1024;
+/// Device chains longer than this are treated as smear: we stop with an error (python would
+/// keep walking distinct addresses).
+pub const MAX_ATTACHED_DEVICES: usize = 1 << 16;
 
 /// Named executive object helpers on [`Obj`].
 pub trait ObjectsExt {
@@ -45,14 +45,52 @@ pub trait ObjectsExt {
     fn mutant_name(&self) -> Result<String> {
         self.object_header_name()
     }
-    /// python `DEVICE_OBJECT.get_attached_devices()`: follows `AttachedDevice` pointers while
-    /// non-null. A trailing `Err` marks where python would have raised.
+    /// python `DEVICE_OBJECT.get_attached_devices()`: the `AttachedDevice` chain. Like python,
+    /// the walk is NOT stopped by a NULL pointer (python's `while device:` is always true for a
+    /// struct): the object at the pointer value (address 0 for NULL) is yielded too, and the
+    /// walk ends when a pointer cannot be read (caught, like python) or an address repeats. A
+    /// trailing `Err` is a non-address error python would raise.
     fn get_attached_devices(&self) -> Vec<Result<Obj>>;
+    /// python `DRIVER_OBJECT.get_devices()`: `DeviceObject`, then the `NextDevice` chain, with
+    /// the same python semantics as [`get_attached_devices`](Self::get_attached_devices).
+    fn get_devices(&self) -> Vec<Result<Obj>>;
     /// python `FILE_OBJECT.file_name_with_device()`: `\Device\<name>` + `FileName`, or
     /// `Value::Unreadable` when neither part could be read.
     fn file_name_with_device(&self) -> Result<Value>;
     /// python `FILE_OBJECT.access_string()` ("RWDrwd", `-` for unset flags).
     fn access_string(&self) -> Result<String>;
+}
+
+/// python's device-chain generators (`get_attached_devices` / `get_devices`): start at
+/// `obj.<first>` and follow `<next>`; InvalidAddressException ends the walk silently, a
+/// repeated address ends it too.
+fn walk_device_chain(obj: &Obj, first: &str, next: &str) -> Vec<Result<Obj>> {
+    let mut out = Vec::new();
+    let mut device = match obj.m(first).and_then(|p| p.deref()) {
+        Ok(d) => d,
+        Err(e) if e.is_invalid_address() => return out,
+        Err(e) => return vec![Err(e)],
+    };
+    let mut seen = crate::util::FxHashSet::default();
+    loop {
+        if !seen.insert(device.addr) {
+            break;
+        }
+        if out.len() >= MAX_ATTACHED_DEVICES {
+            out.push(Err(Error::msg("device chain too long (smear)")));
+            break;
+        }
+        out.push(Ok(device));
+        device = match device.m(next).and_then(|p| p.deref()) {
+            Ok(d) => d,
+            Err(e) if e.is_invalid_address() => break,
+            Err(e) => {
+                out.push(Err(e));
+                break;
+            }
+        };
+    }
+    out
 }
 
 /// python's `ValueError` from `OBJECT_HEADER.NameInfo`.
@@ -66,41 +104,11 @@ impl ObjectsExt for Obj {
     }
 
     fn get_attached_devices(&self) -> Vec<Result<Obj>> {
-        let mut out = Vec::new();
-        let mut device = match self.m("AttachedDevice") {
-            Ok(d) => d,
-            Err(e) => return vec![Err(e)],
-        };
-        loop {
-            match device.u64() {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    out.push(Err(e));
-                    break;
-                }
-            }
-            if out.len() >= MAX_ATTACHED_DEVICES {
-                out.push(Err(Error::msg("AttachedDevice chain too long (cycle)")));
-                break;
-            }
-            let d = match device.deref() {
-                Ok(d) => d,
-                Err(e) => {
-                    out.push(Err(e));
-                    break;
-                }
-            };
-            out.push(Ok(d));
-            device = match d.m("AttachedDevice") {
-                Ok(n) => n,
-                Err(e) => {
-                    out.push(Err(e));
-                    break;
-                }
-            };
-        }
-        out
+        walk_device_chain(self, "AttachedDevice", "AttachedDevice")
+    }
+
+    fn get_devices(&self) -> Vec<Result<Obj>> {
+        walk_device_chain(self, "DeviceObject", "NextDevice")
     }
 
     fn file_name_with_device(&self) -> Result<Value> {

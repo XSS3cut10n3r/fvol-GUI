@@ -156,7 +156,7 @@ mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
 
-## Linux (`use crate::symbols::linux::LinuxExt`)
+## Linux (`use crate::symbols::linux::prelude::*` - LinuxExt, FsExt, CapsExt, NetExt, ...)
 
 `let k = ctx.linux_kernel()?;` → `&LinuxKernel`, derefs to the kernel `Module` (offset =
 `aslr_shift`). Fields: `layer` (`&IntelLayer` named "layer_name": `Intel32e` from the VMCOREINFO
@@ -183,6 +183,26 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `vmlinux = linux.LinuxUtilities.get_module_from_volobj_type(ctx, obj)` | `crate::symbols::linux::vmlinux_of(&obj)?` |
 | `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump}` |
 | `LinuxUtilities.virtual_to_physical_address(a)` | `crate::symbols::linux::virtual_to_physical_address(a)` |
+| `pslist.list_tasks` into a Vec (for `par_map` per-task work) | `pslist::collect_tasks(k, &filter, threads)` → `(Vec<Obj>, Option<Error>)` (trailing python raise) |
+| `task.get_process_memory_sections(heap_only)` | same name → `Result<Vec<(start, size)>>` |
+| `task.is_being_ptraced / is_ptracing / get_ptrace_tracer_tid() / get_ptrace_tracee_tids() / get_ptrace_tracee_flags()` | same names (`PT_FLAGS` python Flag semantics) |
+| `vma.get_name(context, task)` | `vma.vma_get_name(&task)?` → `Option<String>` (`symbols::linux::utilities::vma_get_name`) |
+| `vma.get_malicious_pages(proclayer)` / `is_suspicious(proclayer)` | same names (`Option<LayerRef>`); `IntelLayer::is_dirty(addr)` / `page_size_at(addr)` = python `is_dirty` / `_translate` size |
+| `LinuxUtilities.path_for_file(ctx, task, filp, files_only)` | `crate::symbols::linux::utilities::path_for_file(&task, &filp, files_only)?` (d_path, memoized) |
+| `LinuxUtilities.do_get_path / get_path_mnt / _get_new_sock_pipe_path` | `utilities::{do_get_path, get_path_mnt, get_new_sock_pipe_path}` |
+| `LinuxUtilities.files_descriptors_for_process(ctx, table, task, files_only)` | `utilities::files_descriptors_for_process(&task, files_only)` → `Vec<Result<(fd, filp, path)>>` |
+| `LinuxUtilities.walk_internal_list(...)` / `convert_fourcc_code(c)` | `utilities::{walk_internal_list, convert_fourcc_code}` |
+| `fs_struct.get_root_dentry() / get_root_mnt()`, `files_struct.get_fds() / get_max_fds()` | `FsExt` same names |
+| `qstr.name_as_str()`, `dentry.path() / is_root() / is_subdir() / d_ancestor() / get_subdirs()` | `FsExt`: `name_as_str`, `dentry_path`, `is_root`, `is_subdir`, `d_ancestor`, `get_subdirs` |
+| `inode.is_dir/is_reg/.. / get_inode_type() / get_*_time() / get_file_mode() / get_pages() / get_contents()` | `FsExt` same names (times → `Value`); `dentry.get_inode()` via `LinuxExt::get_inode` (dispatch) |
+| `super_block.major / minor / uuid / get_type() / get_flags_access() / get_flags_opts()` | `FsExt`: `major()`, `minor()`, `uuid()`, `sb_get_type()`, `get_flags_access()`, `get_flags_opts()` |
+| `mount.*` / `vfsmount.*` (get_mnt_sb/root/flags/parent/mountpoint, has_parent, get_vfsmnt_*/get_dentry_*, is_shared/slave/unbindable, get_devname, get_dominating_id, next_peer, is_equal) | `FsExt` same names (dispatch on the struct name) |
+| `mnt_namespace.get_inode() / get_mount_points()` | `FsExt::get_mnt_ns_inode()` / `get_mount_points()` |
+| `address_space.i_pages`, `page.is_valid() / to_paddr() / get_content() / get_flags_list()` | `FsExt`: `i_pages()`, `page_is_valid()`, `to_paddr()`, `page_get_content()`, `get_flags_list()` |
+| `IDStorage.choose_id_storage(ctx, "kernel").get_entries(root)` / `PageCache(...).get_cached_pages()` | `symbols::linux::idstorage::{IdStorage::choose(vmlinux)?.get_entries(&root), PageCache::new(vmlinux, mapping)?.get_cached_pages()}` |
+| `idr.get_entries()` / `rb_root.get_nodes()` / `scatterlist.for_each_sg() / get_content()` | `idstorage::{idr_get_entries, rb_get_nodes, sg_for_each, sg_get_content}` |
+| `kernel_cap_t/kernel_cap_struct.get_capabilities() / get_kernel_cap_full() / enumerate_capabilities() / has_capability()` | `CapsExt` same names; `caps::CAPABILITIES` |
+| network extensions (`net_device`, `in_device`, `inet6_dev`, `*_ifaddr`, `socket`/`sock`/`*_sock`) | `NetExt` (`symbols::linux::network`): python names; `net_get_inode`, `sock_get_state`, `sock_get_type`, `unix_get_name` where names clash; `inet_ntop4/6`, `convert_ipv4/6`, constants |
 
 ## Mac (`use crate::symbols::mac::MacExt`)
 
@@ -295,6 +315,33 @@ generate_pool_scan_each(ctx, k, k.table, &cons, |h| {
 
 The ignored test `context::bench::object_scans_via_core_api` rebuilds symlinkscan, mutantscan
 and driverscan this way and diffs them against python's output.
+
+### Kernel objects, threads, callbacks (`crate::plugins::windows::*`, package W1)
+
+Streaming `*_each(ctx, k, |obj| { ..; Ok(true) })` variants return python's mid-iteration
+error after the objects before it; collected variants return `Vec<Result<..>>` with a trailing
+`Err`.
+
+| python | rust |
+|---|---|
+| `ssdt.SSDT.build_module_collection(ctx, kernel)` | `ssdt::build_module_collection(k)?` → `ModuleCollection` |
+| `collection.get_module_symbols_by_absolute_location(addr)` | `coll.module_symbols(addr)` → `Vec<(module name, Vec<symbol>)>` (symbols without `table!`); `coll.contains(addr)` = non-empty |
+| `context.modules.free_module_name(prefix)` / `os.path.splitext(p)[0]` | `ssdt::free_module_name(&existing, prefix)?` / `ssdt::splitext_root(p)` |
+| `DriverScan.scan_drivers(ctx, kernel)` / `get_names_for_driver(d)` | `driverscan::scan_drivers_each(ctx, k, f)` / `scan_drivers` / `get_names_for_driver(&d)?` |
+| `driver.get_devices()` / `device.get_attached_devices()` | `d.get_devices()` / `dev.get_attached_devices()` (`ObjectsExt`; python semantics: a NULL pointer yields the object at 0, the walk ends on an unreadable pointer) |
+| `driverirp.MAJOR_FUNCTIONS` | `driverirp::MAJOR_FUNCTIONS`, `driverirp::IRP_MJ_SHUTDOWN` |
+| `Handles.handles(ctx, kernel, handle_table)` (`_make_handle_array`, `_get_item`) | `handles::HandleWalker::new(k)?.handles(&proc.m("ObjectTable")?)` → `Vec<Result<HandleItem { header, handle_value, granted_access }>>` |
+| `Handles._generator`'s per-handle naming (File / Process / Thread / Key / NameInfo) | `handles::handle_object_info(&item, &type_map, cookie)?` → `Option<(type, name Value)>` |
+| `FileScan.scan_files` / `MutantScan.scan_mutants` / `SymlinkScan.scan_symlinks` / `ModScan.scan_modules` | `filescan::scan_files_each` / `mutantscan::scan_mutants_each` / `symlinkscan::scan_symlinks_each` / `modscan::scan_modules` |
+| `Modules._generator` (dump / base / name handling) | `modules::generate(ctx, cfg, out, &mut \|\| entries)` + `modules::columns()` |
+| `BigPools.list_big_pools(ctx, kernel, tags, show_free)` | `bigpools::list_big_pools_each(ctx, k, tags, show_free, f)` |
+| `ThrdScan.scan_threads` / `gather_thread_info(ethread, vads_cache)` | `thrdscan::scan_threads(_each)` / `thrdscan::gather_thread_info(&t, Some(&mut cache))?` → `Option<ThreadInfo>`; many threads: `thrdscan::thread_rows(threads, out)` (parallel VAD walks) |
+| `Threads.list_threads(ctx, kernel, proc)` / `list_process_threads` | `threads::list_threads(k, &proc)` / `threads::list_process_threads(k)` |
+| `orphan_kernel_threads.Threads.list_orphan_kernel_threads` | `orphan_kernel_threads::list_orphan_kernel_threads(ctx, k)` |
+| `KPCRs.list_kpcrs(ctx, kernel)` / `Timers.list_timers(ctx, kernel)` | `kpcrs::list_kpcrs(k)` → `Vec<Result<(kpcr, prcb)>>` / `timers::list_timers_each(k, f)` |
+| `Callbacks.create_callback_symbol_table / scan / list_notify_routines / list_registry_callbacks / list_bugcheck(_reason)_callbacks` | same names in `callbacks` → `Vec<Result<CallbackEntry { kind, address, detail }>>` |
+| `UnloadedModules.create_unloadedmodules_table / list_unloadedmodules` | same names in `unloadedmodules` |
+| `DebugRegisters._get_debug_info(ethread)` | `debugregisters::get_debug_info(&t)?` |
 
 ## Plugins & output
 

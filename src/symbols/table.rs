@@ -813,10 +813,11 @@ impl SymbolTable {
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
         let idx = self.by_addr.get_or_init(|| {
+            let _t = crate::util::trace::span("symbol address index");
             let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
             let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (rd64(self.sym_rec(i), 8) & mask, i)).collect();
-            // sort by address (cheap integer sort), then order each run of equal addresses by
-            // name: the same order as python's sorted((address, name))
+            // sort by address (cheap integer keys), then order equal-address runs by name like
+            // python's (address, name) tuples (names are unique: the result is deterministic)
             v.sort_unstable_by_key(|e| e.0);
             let mut i = 0;
             while i < v.len() {

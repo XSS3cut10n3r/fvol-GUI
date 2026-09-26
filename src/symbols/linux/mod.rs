@@ -23,6 +23,9 @@
 //!   * [`caps`]: [`CapsExt`] - `kernel_cap_struct` / `kernel_cap_t` capability sets.
 //!   * [`idstorage`]: `IDStorage` (XArray / radix tree), `PageCache`, `IDR`, `rb_root`,
 //!     `scatterlist`.
+//!   * [`network`]: [`NetExt`] - `net`, `net_device`, `in_device`, `inet6_dev`, `in_ifaddr`,
+//!     `inet6_ifaddr` and the socket classes (+ python's network constants / address
+//!     formatting).
 //!   * [`utilities`]: python `LinuxUtilities` - `path_for_file` (d_path), `do_get_path`,
 //!     `get_path_mnt`, `files_descriptors_for_process`, `walk_internal_list`,
 //!     `vm_area_struct.get_name`.
@@ -48,6 +51,7 @@ pub mod kallsyms;
 pub mod module;
 pub mod module_extract;
 pub mod modules;
+pub mod network;
 pub mod search;
 pub mod timespec;
 pub mod utilities;
@@ -56,6 +60,7 @@ pub mod vmcoreinfo;
 pub use caps::CapsExt;
 pub use ext::{HListIter, LinuxExt, ListIter};
 pub use fs::FsExt;
+pub use network::NetExt;
 
 /// Every Linux extension trait (`use crate::symbols::linux::prelude::*`).
 pub mod prelude {
@@ -63,6 +68,7 @@ pub mod prelude {
     pub use super::ext::LinuxExt;
     pub use super::fs::FsExt;
     pub use super::module::ModuleExt;
+    pub use super::network::NetExt;
 }
 
 use crate::error::{Error, Result};
