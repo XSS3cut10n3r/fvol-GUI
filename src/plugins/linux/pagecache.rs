@@ -126,7 +126,11 @@ fn walk_dentry(seen: &mut FxHashSet<u64>, root: Obj, parent_dir: &str, f: &mut d
 pub fn get_inodes(k: &LinuxKernel, follow_symlinks: bool, f: &mut dyn FnMut(InodeInternal) -> Result<bool>) -> Result<()> {
     let mut seen_inodes = FxHashSet::default();
     let mut seen_dentries = FxHashSet::default();
-    for sb in crate::plugins::linux::mountinfo::get_superblocks(k) {
+    let sbs = {
+        let _s = crate::util::trace::span("pagecache: get_superblocks");
+        crate::plugins::linux::mountinfo::get_superblocks(k)
+    };
+    for sb in sbs {
         let (superblock, mountpoint) = sb?;
         let mountpoint: Arc<str> = mountpoint.into();
         let parent_dir = if &*mountpoint == "/" { "" } else { &*mountpoint };
@@ -297,8 +301,15 @@ impl Plugin for Files {
             }
             return Ok(());
         }
-        let (inodes, tail) = collect_inodes(k, true);
-        let rows = par_rows(&inodes, |ii| if type_ok(ii)? { inode_user_row(ii, ps).map(Some) } else { Ok(None) });
+        let (inodes, tail) = {
+            let _s = crate::util::trace::span("pagecache: get_inodes walk");
+            collect_inodes(k, true)
+        };
+        let rows = {
+            let _s = crate::util::trace::span("pagecache: to_user rows");
+            par_rows(&inodes, |ii| if type_ok(ii)? { inode_user_row(ii, ps).map(Some) } else { Ok(None) })
+        };
+        let _s = crate::util::trace::span("pagecache: render");
         for r in rows {
             if let Some(row) = r? {
                 out.row(0, row)?;
@@ -657,7 +668,10 @@ fn recover_fs(ctx: &Context, k: &LinuxKernel, ps: u64, format: &str, tmpfs_only:
     // tarfile.open(...) -> GzipFile header mtime; then `mtime = time.time()`
     let mtime = py_time();
     let uuid_as_prefix = k.table.user_type("super_block").is_some_and(|u| k.table.member(u, "s_uuid").is_some());
+    let walk_span = crate::util::trace::span("recoverfs: get_inodes walk");
     let (inodes, tail) = collect_inodes(k, false);
+    drop(walk_span);
+    let prep_span = crate::util::trace::span("recoverfs: prep (page lists, rows)");
     // superblock types (python `superblock.get_type()`, evaluated per inode; same result for
     // every inode of a superblock), used to skip work python never reaches
     let mut sb_types: crate::util::FxHashMap<u64, Option<Option<String>>> = Default::default();
@@ -694,6 +708,8 @@ fn recover_fs(ctx: &Context, k: &LinuxKernel, ps: u64, format: &str, tmpfs_only:
         format!("{dir}/tmp_rsvol_recoverfs_{}.vol3", std::process::id())
     };
     let tmp_file = std::fs::File::create(&tmp_path)?;
+    drop(prep_span);
+    let tar_span = crate::util::trace::span("recoverfs: tar + compress");
     let result = (|| -> Result<()> {
         let comp = open_compressor(format, tmp_file, mtime as u32)?;
         let mut tar = crate::util::pytar::PyTarWriter::new(comp, mtime);
@@ -787,6 +803,7 @@ fn recover_fs(ctx: &Context, k: &LinuxKernel, ps: u64, format: &str, tmpfs_only:
         comp.finish()?;
         Ok(())
     })();
+    drop(tar_span);
     if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e);
@@ -798,4 +815,28 @@ fn recover_fs(ctx: &Context, k: &LinuxKernel, ps: u64, format: &str, tmpfs_only:
     };
     std::fs::rename(&tmp_path, &final_path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_symlink_dest;
+
+    #[test]
+    fn symlink_dest_like_python_purepath() {
+        // expected values from python 3.14 pathlib (RecoverFs._tar_add_lnk)
+        let cases = [
+            ("/sys/kernel/security/evm", "/integrity/evm/evm", "../../../integrity/evm/evm"),
+            ("/a", "/b", "b"),
+            ("/a/b/c", "/", "../.."),
+            ("/a/b", "/c/./d/", "../c/d"),
+            ("/a/b", "///c", "../c"),
+            ("/a//b/c", "/d/../e", "../../d/../e"),
+            ("/", "/", "."),
+            ("/a/b", "rel/x", "rel/x"),
+        ];
+        for (src, dst, exp) in cases {
+            assert_eq!(relative_symlink_dest(src, dst).unwrap(), exp, "{src} -> {dst}");
+        }
+        assert!(relative_symlink_dest("/x", "//y").is_err());
+    }
 }
