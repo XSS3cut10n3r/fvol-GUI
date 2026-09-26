@@ -134,26 +134,33 @@ impl<'a> Msf<'a> {
         let root = msf.stream_from_pages(stream_info_size, root_pages)?;
 
         let num_streams = root.u32(0)? as u64;
+        // Python locates the directory arrays through the root layer's address mask, so a
+        // corrupt directory whose arrays run past `mask + 1` wraps around and is read forever
+        // (billions of streams). A directory is only meaningful while it does not wrap: refuse
+        // those instead of looping / exhausting memory.
+        let span = root.mask + 1;
+        let wrap_err = || PErr::Other("corrupt MSF stream directory (wraps around)".into());
         let mut current_offset = (num_streams + 1) * 4;
-        let mut streams = Vec::new();
+        if current_offset > span {
+            return Err(wrap_err());
+        }
+        let mut streams = Vec::with_capacity(num_streams.min(root.bytes().len() as u64 / 4) as usize);
         for stream in 0..num_streams {
-            let size = root.u32(root.m(4 + 4 * stream))?;
+            let size = root.u32(4 + 4 * stream)?;
             let list_size = ceil_div(size as i64, page_size) as u64;
             if list_size == 0 || size == 0xFFFF_FFFF {
                 streams.push(None);
                 continue;
             }
-            // Every page number must be readable from the root stream (array elements are
-            // located through the root layer's address mask, like python).
-            if current_offset.saturating_add(list_size.saturating_mul(4)) <= root.mask + 1 {
-                // no wrap-around possible: one bounds check for the whole list
-                root.read(current_offset, list_size * 4)?;
+            let end = current_offset + list_size * 4;
+            if end > span {
+                return Err(wrap_err());
             }
-            let mut pages = Vec::with_capacity(list_size.min(1 << 20) as usize);
-            for j in 0..list_size {
-                pages.push(root.u32(root.m(current_offset + 4 * j))?);
-            }
-            current_offset += list_size * 4;
+            // every page number must be readable from the root stream
+            let bytes = root.read(current_offset, list_size * 4)?;
+            let pages =
+                bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            current_offset = end;
             streams.push(Some(StreamDesc { size: size as u64, pages }));
         }
         msf.streams = streams;
@@ -222,9 +229,10 @@ impl<'a> Msf<'a> {
                 mask,
             });
         }
-        // Refuse absurd virtual sizes (pages may repeat, so a tiny file can describe a
-        // gigantic stream); python would take forever on such input anyway.
-        let limit = flen.saturating_mul(2).saturating_add(64 << 20).min(u32::MAX as u64);
+        // In a well-formed MSF every stream page is a distinct page of the file, so no stream
+        // is larger than the file. Refuse more (repeated pages let a tiny file describe a
+        // gigantic stream; python would crawl through it, we would just burn memory).
+        let limit = flen.saturating_add(ps).min(u32::MAX as u64);
         if total > limit {
             return Err(PErr::Other(format!("MSF stream too large ({total} bytes)")));
         }

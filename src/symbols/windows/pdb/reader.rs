@@ -536,7 +536,30 @@ struct Entry {
 }
 const NO_SOFT: u32 = u32::MAX;
 
+/// Resource limits for adversarial inputs. Python's converter is quadratic when many
+/// definitions share one field list and emits `O(depth^2)` bytes for deep type chains; real
+/// PDBs stay orders of magnitude below these bounds (ntkrnlmp: 856 KB TPI, ~25k fields,
+/// ~0.4 MB of rendered types).
+struct Limits {
+    /// max structure fields / enumeration constants in total
+    items: usize,
+    /// max bytes of rendered member types
+    rendered: usize,
+}
+
+impl Limits {
+    fn for_tpi(size: u64) -> Limits {
+        let size = size as usize;
+        Limits { items: size / 4 + (1 << 16), rendered: (64 << 20) + size.saturating_mul(4) }
+    }
+}
+
+fn too_big(what: &str) -> PErr {
+    PErr::Other(format!("PDB type data too large to convert ({what}); corrupt or hostile input"))
+}
+
 struct Conv<'x, 'a> {
+    limits: Limits,
     s: &'x Stream<'a>,
     types: &'x [Ty],
     subs: &'x [Sub],
@@ -818,6 +841,9 @@ impl<'x, 'a> Conv<'x, 'a> {
         let start = self.rendered.buf.len();
         let mut soft = None;
         self.render(index, TYPE_DEPTH, 0, &mut soft)?;
+        if self.rendered.buf.len() > self.limits.rendered {
+            return Err(too_big("rendered member types"));
+        }
         let id = self.entries.len() as u32;
         let soft = match soft {
             Some(e) => {
@@ -853,6 +879,9 @@ impl<'x, 'a> Conv<'x, 'a> {
             }
             let ft = self.u32m(sub.obj + 2)?;
             let entry = self.member_type(ft)?;
+            if self.fields.len() >= self.limits.items {
+                return Err(too_big("structure fields"));
+            }
             self.fields.push(Field { name: sub.name.unwrap_or(Name::EMPTY), offset: sub.ext, entry });
         }
         Ok((start, self.fields.len() as u32))
@@ -946,6 +975,9 @@ impl<'x, 'a> Conv<'x, 'a> {
                         let sub = self.subs[k as usize];
                         if sub.h != H::Enumerate {
                             return Err(PErr::Other("AttributeError: enumerate has no value".into()));
+                        }
+                        if self.consts.len() >= self.limits.items {
+                            return Err(too_big("enumeration constants"));
                         }
                         self.consts.push((sub.name.unwrap_or(Name::EMPTY), sub.ext));
                     }
@@ -1259,6 +1291,7 @@ fn types_and_output(
         }
     }
     let mut conv = Conv {
+        limits: Limits::for_tpi(tpi.size),
         s: tpi,
         types: &types,
         subs: &subs,

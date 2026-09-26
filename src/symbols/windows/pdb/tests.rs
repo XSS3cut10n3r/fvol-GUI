@@ -55,6 +55,75 @@ fn garbage_never_panics() {
     }
 }
 
+const SYNTH: &[u8] = include_bytes!("testdata/synth.pdb");
+
+/// A synthetic PDB (testdata/mksynth.py) covering OMAP, pascal leaves/symbols, extended
+/// numeric leaves, forward-referenced arrays, pointer32/pointer64 bases, renamed anonymous
+/// tags, the LF_UNION size quirk, IPI naming, name_strip...: byte-identical to python.
+#[test]
+fn synthetic_matches_python() {
+    let ours = pdb_to_isf_bytes(SYNTH, None, "X").unwrap();
+    let golden = include_bytes!("testdata/synth.py.json");
+    if normalize(&ours) != normalize(golden) {
+        let (o, g) = (String::from_utf8_lossy(&ours), String::from_utf8_lossy(golden));
+        let line = o.lines().zip(g.lines()).position(|(a, b)| a != b && !a.contains("datetime"));
+        panic!("differs from python at line {line:?}");
+    }
+    // pdbutil-style naming
+    let named = pdb_to_isf_bytes(SYNTH, Some("synth.pdb"), "X").unwrap();
+    assert!(std::str::from_utf8(&named).unwrap().contains("\"database\": \"synth.pdb\""));
+}
+
+/// Inputs on which python raises must fail here too.
+#[test]
+fn synthetic_error_parity() {
+    let cases: [(&str, &[u8]); 7] = [
+        // stream directory claiming 0xfd000008 streams: python wraps around the directory
+        // forever; we refuse it (this input used to exhaust memory)
+        ("dir_wrap", include_bytes!("testdata/err_dir_wrap.pdb")),
+        ("zero_elem", include_bytes!("testdata/err_zero_elem.pdb")),
+        ("ptrmix", include_bytes!("testdata/err_ptrmix.pdb")),
+        ("unhandled", include_bytes!("testdata/err_unhandled.pdb")),
+        ("quad_enum", include_bytes!("testdata/err_quad_enum.pdb")),
+        ("strip_idx", include_bytes!("testdata/err_strip_idx.pdb")),
+        ("omap_high", include_bytes!("testdata/err_omap_high.pdb")),
+    ];
+    for (name, pdb) in cases {
+        assert!(pdb_to_isf_bytes(pdb, None, "X").is_err(), "{name} should fail like python");
+    }
+}
+
+/// Mutations of the synthetic PDB (small, so most mutations land in parsed structures)
+/// must never panic.
+#[test]
+fn synthetic_mutations_never_panic() {
+    let mut rng = 0x243f_6a88_85a3_08d3u64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    const INTERESTING: [u8; 10] = [0, 1, 0x7f, 0x80, 0xff, 0x10, 0x15, 0xf1, 0x03, 0x12];
+    let iters: usize = std::env::var("RSVOL_MUT_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(3000);
+    for _it in 0..iters {
+        let mut m = SYNTH.to_vec();
+        for _ in 0..1 + next() % 8 {
+            let pos = (next() % m.len() as u64) as usize;
+            m[pos] = if next() % 2 == 0 { INTERESTING[(next() % 10) as usize] } else { next() as u8 };
+        }
+        if next() % 16 == 0 {
+            m.truncate((next() % m.len() as u64) as usize);
+        }
+        // RSVOL_MUT_TRACE=<file>: keep the input being converted (to reproduce a crash / OOM)
+        if let Some(path) = std::env::var_os("RSVOL_MUT_TRACE") {
+            eprintln!("mutation {_it}");
+            std::fs::write(path, &m).unwrap();
+        }
+        let _ = pdb_to_isf_bytes(&m, None, "X");
+    }
+}
+
 #[test]
 fn ntkrnlmp_if_present() {
     let Some(pdb) = home_file(NT_PDB) else { return };
@@ -134,6 +203,98 @@ fn fuzz_mutations() {
         }
     }
     eprintln!("fuzz: {ok} ok, {err} errors");
+}
+
+/// Batch comparison: every `RSVOL_PDB_DIR/<name>/<GUIDage>/<name>.pdb` is converted
+/// (`pdbconv.py -f` semantics) and compared byte for byte with
+/// `RSVOL_REF_DIR/<name>.<GUIDage>.f.json`; a missing reference means python failed, in
+/// which case the conversion must fail too.
+#[test]
+#[ignore]
+fn compare_dir() {
+    let dir = std::path::PathBuf::from(std::env::var("RSVOL_PDB_DIR").expect("RSVOL_PDB_DIR"));
+    let refs = std::path::PathBuf::from(std::env::var("RSVOL_REF_DIR").expect("RSVOL_REF_DIR"));
+    let mut bad = 0;
+    let mut entries = Vec::new();
+    for n in std::fs::read_dir(&dir).unwrap() {
+        let n = n.unwrap().path();
+        for g in std::fs::read_dir(&n).unwrap() {
+            let g = g.unwrap().path();
+            let name = n.file_name().unwrap().to_string_lossy().to_string();
+            entries.push((name.clone(), g.file_name().unwrap().to_string_lossy().to_string(), g.join(&name)));
+        }
+    }
+    entries.sort();
+    for (name, guid, pdb_path) in entries {
+        let pdb = std::fs::read(&pdb_path).unwrap();
+        let stem = name.trim_end_matches(".pdb");
+        let reference = std::fs::read(refs.join(format!("{stem}.{guid}.f.json"))).ok();
+        let t = std::time::Instant::now();
+        let ours = pdb_to_isf_bytes(&pdb, None, "X");
+        let dt = t.elapsed();
+        let verdict = match (&ours, &reference) {
+            (Ok(o), Some(r)) if normalize(o) == normalize(r) => "IDENTICAL".to_string(),
+            (Ok(_), Some(_)) => {
+                bad += 1;
+                "DIFFERENT".to_string()
+            }
+            (Err(e), None) => format!("both fail ({e})"),
+            (Ok(_), None) => {
+                bad += 1;
+                "python failed, ours succeeded".to_string()
+            }
+            (Err(e), Some(_)) => {
+                bad += 1;
+                format!("OURS FAILED: {e}")
+            }
+        };
+        eprintln!("{name:<16} {guid:<34} {:>9} bytes {dt:>12?}  {verdict}", pdb.len());
+        if let (Ok(o), Ok(dirout)) = (&ours, std::env::var("RSVOL_OUT_DIR")) {
+            std::fs::write(std::path::Path::new(&dirout).join(format!("{stem}.{guid}.json")), o).unwrap();
+        }
+    }
+    assert_eq!(bad, 0);
+}
+
+/// Downloads every `name<TAB>GUID<TAB>age` line of `RSVOL_DL_LIST` into
+/// `RSVOL_DL_DIR/<name>/<GUID><age>/<name>` with [`download_pdb`].
+#[test]
+#[ignore]
+fn download_list() {
+    let list = std::fs::read_to_string(std::env::var("RSVOL_DL_LIST").expect("RSVOL_DL_LIST")).unwrap();
+    let dir = std::path::PathBuf::from(std::env::var("RSVOL_DL_DIR").expect("RSVOL_DL_DIR"));
+    for line in list.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 3 {
+            continue;
+        }
+        let (name, guid, age) = (f[0], f[1], f[2].parse::<u32>().unwrap());
+        let out = dir.join(name).join(format!("{guid}{age}")).join(name);
+        if out.exists() {
+            continue;
+        }
+        let t = std::time::Instant::now();
+        match download_pdb(name, guid, age, false) {
+            Ok(data) => {
+                std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+                std::fs::write(&out, &data).unwrap();
+                eprintln!("ok   {name} {guid} {age}: {} bytes in {:?}", data.len(), t.elapsed());
+            }
+            Err(e) => eprintln!("FAIL {name} {guid} {age}: {e}"),
+        }
+    }
+}
+
+/// `download_and_convert` end to end into `RSVOL_DL_DIR`.
+#[test]
+#[ignore]
+fn download_and_convert_ntkrnlmp() {
+    let dir = std::path::PathBuf::from(std::env::var("RSVOL_DL_DIR").expect("RSVOL_DL_DIR"));
+    let t = std::time::Instant::now();
+    let p = download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, &dir, false).unwrap();
+    eprintln!("{} in {:?}", p.display(), t.elapsed());
+    assert!(p.ends_with("windows/ntkrnlmp.pdb/8E3373D6124E747F0E72EF8E02E676B3-1.json"));
+    assert!(download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, &dir, true).is_err());
 }
 
 /// Machine calibration for the benchmark numbers (raw sort / write throughput).
