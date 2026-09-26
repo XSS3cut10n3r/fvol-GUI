@@ -45,25 +45,29 @@ impl Plugin for SuspendedThreads {
         let k = ctx.windows_kernel()?;
         let mut vads_cache: FxHashMap<u64, Vec<Range>> = FxHashMap::default();
         let mut proc_modules: Option<CollectedModules> = None;
-        for thread in list_process_threads(k) {
-            let thread = thread?;
-            let r = (|| -> Result<Option<(crate::objects::Obj, u64, String, u64, u64, u64)>> {
-                let tcb = thread.m("Tcb")?;
-                if tcb.m("SuspendCount")?.int()? == 0 {
-                    return Ok(None);
-                }
-                if tcb.m("State")?.int()? == 4 {
-                    return Ok(None);
-                }
-                let owner = thread.owning_process()?;
-                let cid = thread.m("Cid")?;
-                let pid = cid.m("UniqueProcess")?.u64()?;
-                let name = array_to_string(&owner.m("ImageFileName")?, None)?;
-                let tid = cid.m("UniqueThread")?.u64()?;
-                let start = thread.m("StartAddress")?.u64()?;
-                let win32 = thread.m("Win32StartAddress")?.u64()?;
-                Ok(Some((owner, pid, name, tid, start, win32)))
-            })();
+        let threads = list_process_threads(k);
+        // python's per-thread try block; independent reads, done in parallel
+        let pre = |thread: &crate::objects::Obj| -> Result<Option<(crate::objects::Obj, u64, String, u64, u64, u64)>> {
+            let tcb = thread.m("Tcb")?;
+            if tcb.m("SuspendCount")?.int()? == 0 {
+                return Ok(None);
+            }
+            if tcb.m("State")?.int()? == 4 {
+                return Ok(None);
+            }
+            let owner = thread.owning_process()?;
+            let cid = thread.m("Cid")?;
+            let pid = cid.m("UniqueProcess")?.u64()?;
+            let name = array_to_string(&owner.m("ImageFileName")?, None)?;
+            let tid = cid.m("UniqueThread")?.u64()?;
+            let start = thread.m("StartAddress")?.u64()?;
+            let win32 = thread.m("Win32StartAddress")?.u64()?;
+            Ok(Some((owner, pid, name, tid, start, win32)))
+        };
+        let pres = crate::util::par::par_map(threads.len(), |i| threads[i].as_ref().ok().map(pre));
+        for (thread, r) in threads.into_iter().zip(pres) {
+            thread?;
+            let r = r.unwrap_or(Ok(None));
             let (owner, pid, name, tid, start, win32) = match r {
                 Ok(Some(v)) => v,
                 Ok(None) => continue,

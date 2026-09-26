@@ -68,9 +68,13 @@ impl Plugin for DebugRegisters {
         let k = ctx.windows_kernel()?;
         let mut vads_cache: FxHashMap<u64, Vec<Range>> = FxHashMap::default();
         let mut proc_modules: Option<CollectedModules> = None;
-        for thread in list_process_threads(k) {
+        let threads = list_process_threads(k);
+        // the per-thread trap frame reads are independent (and touch cold kernel stacks): do
+        // them in parallel, consume in python's order
+        let infos = crate::util::par::par_map(threads.len(), |i| threads[i].as_ref().ok().map(get_debug_info));
+        for (thread, info) in threads.into_iter().zip(infos) {
             let thread = thread?;
-            let Some((owner, dr7, drs)) = get_debug_info(&thread)? else { continue };
+            let Some((owner, dr7, drs)) = info.unwrap_or(Ok(None))? else { continue };
             if vads_for_process_cache(&mut vads_cache, &owner)?.is_none() {
                 continue;
             }

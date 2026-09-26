@@ -46,6 +46,7 @@ pub fn list_threads(k: &WinKernel, proc: &Obj) -> Vec<Result<Obj>> {
 /// process of `PsList.list_processes` (python reads its pid filter from the root config, which
 /// is never set, so all processes). A trailing `Err` = python raised there.
 pub fn list_process_threads(k: &WinKernel) -> Vec<Result<Obj>> {
+    let _t = crate::util::trace::span("list_process_threads");
     let procs = list_processes(k, &|_| Ok(false));
     // each process' list is independent: walk them in parallel, keep python's order
     let per = crate::util::par::par_map(procs.len(), |i| match &procs[i] {
