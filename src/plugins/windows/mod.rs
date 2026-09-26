@@ -18,6 +18,7 @@ pub mod psscan;
 pub mod pstree;
 pub mod sessions;
 pub mod sids;
+pub mod statistics;
 pub mod vadinfo;
 pub mod vadwalk;
 pub mod virtmap;
@@ -38,6 +39,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&psscan::PsScan);
     v.push(&pstree::PsTree);
     v.push(&sessions::Sessions);
+    v.push(&statistics::Statistics);
     v.push(&vadinfo::VadInfo);
     v.push(&vadwalk::VadWalk);
     v.push(&virtmap::VirtMap);
