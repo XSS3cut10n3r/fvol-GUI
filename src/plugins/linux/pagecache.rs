@@ -172,44 +172,373 @@ fn walk_dentry(w: &WalkFields, seen: &mut FxHashSet<u64>, root: Obj, parent_dir:
 /// python `Files.get_inodes(context, kernel, follow_symlinks)`: streams every cached inode
 /// (superblock roots, then their dentry trees) to `f` in python's order; `f` returns false
 /// to stop. `Err` where python raises.
+///
+/// The dentry trees are read in parallel (all directories of a tree level at once, see
+/// [`DentryForest`]) and then replayed in python's depth-first order with python's `seen`
+/// sets. A dentry graph that is not a forest (a dentry reached twice, a child equal to its
+/// parent: smear / corruption) would make python's `seen` set change the walk, so it falls
+/// back to the sequential walk ([`get_inodes_seq`]).
 pub fn get_inodes(k: &LinuxKernel, follow_symlinks: bool, f: &mut dyn FnMut(InodeInternal) -> Result<bool>) -> Result<()> {
     let w = WalkFields::new(k.table)?;
-    let mut seen_inodes = FxHashSet::default();
-    let mut seen_dentries = FxHashSet::default();
     let sbs = {
         let _s = crate::util::trace::span("pagecache: get_superblocks");
         crate::plugins::linux::mountinfo::get_superblocks(k)
     };
+    // superblock roots with python's per-superblock checks (the seen_inodes dedupe is replayed)
+    let mut roots: Vec<Result<Option<SbRoot>>> = Vec::new();
     for sb in sbs {
-        let (superblock, mountpoint) = sb?;
-        let mountpoint: Arc<str> = mountpoint.into();
-        let parent_dir = if &*mountpoint == "/" { "" } else { &*mountpoint };
-        let root_dentry_ptr = superblock.m("s_root")?;
-        if root_dentry_ptr.u64()? == 0 {
+        let r = sb.and_then(|(superblock, mountpoint)| sb_root(&w, superblock, mountpoint));
+        let stop = r.is_err();
+        roots.push(r);
+        if stop {
+            break;
+        }
+    }
+    let forest = {
+        let _s = crate::util::trace::span("pagecache: parallel dentry listing");
+        let starts: Vec<Obj> = roots.iter().filter_map(|r| r.as_ref().ok().and_then(|o| o.as_ref())).map(|r| r.root_dentry).collect();
+        DentryForest::build(&w, &starts, follow_symlinks)
+    };
+    // RSVOL_PAGECACHE_SEQ=1 forces the sequential walk (cross-checks the parallel one)
+    let forest = forest.filter(|_| std::env::var_os("RSVOL_PAGECACHE_SEQ").is_none());
+    let Some(forest) = forest else {
+        return get_inodes_seq(&w, roots, follow_symlinks, f);
+    };
+    let _s = crate::util::trace::span("pagecache: replay");
+    let mut seen_inodes = FxHashSet::default();
+    let mut tree = 0usize;
+    for r in roots {
+        let Some(root) = r? else { continue };
+        let this_tree = tree;
+        tree += 1;
+        if !root.mapping_ok {
             continue;
         }
-        let root_dentry = root_dentry_ptr.deref()?;
-        if !root_dentry.is_root()? {
+        if !seen_inodes.insert(root.root_inode_ptr) {
             continue;
         }
-        let root_inode_ptr = root_dentry.f(&w.d_inode);
-        if !ptr_ok(&root_inode_ptr)? {
-            continue;
-        }
-        let root_inode = root_inode_ptr.deref()?;
-        if !w.inode_valid(&root_inode)? {
-            continue;
-        }
-        if !ptr_ok(&root_inode.f(&w.i_mapping))? {
-            continue;
-        }
-        if !seen_inodes.insert(root_inode_ptr.u64()?) {
-            continue;
-        }
-        if !f(InodeInternal { superblock, mountpoint: mountpoint.clone(), inode: root_inode, path: mountpoint.to_string() })? {
+        if !f(InodeInternal { superblock: root.superblock, mountpoint: root.mountpoint.clone(), inode: root.root_inode, path: root.mountpoint.to_string() })? {
             return Ok(());
         }
-        let cont = walk_dentry(&w, &mut seen_dentries, root_dentry, parent_dir, &mut |file_path, _file_dentry, file_inode_ptr, file_inode| {
+        let cont = forest.replay(this_tree, &root.parent_dir, &mut |c: &ChildInfo, path: String| {
+            // python re-checks `d_inode` readable + `is_valid()` here: same memory, same result
+            if !*c.mapping_ok.as_ref().map_err(CloneErr::clone_err)? {
+                return Ok(true);
+            }
+            if !seen_inodes.insert(c.inode_ptr) {
+                return Ok(true);
+            }
+            let path = if follow_symlinks {
+                // `_follow_symlink`: `inode.is_link` reads i_mode
+                match &c.mode {
+                    Err(e) => return Err(e.clone_err()),
+                    Ok(m) if m & S_IFMT == S_IFLNK => match &c.symlink {
+                        Some(Ok(Some(dest))) => format!("{path} -> {dest}"),
+                        Some(Err(e)) => return Err(e.clone_err()),
+                        _ => path,
+                    },
+                    Ok(_) => path,
+                }
+            } else {
+                path
+            };
+            f(InodeInternal { superblock: root.superblock, mountpoint: root.mountpoint.clone(), inode: c.inode, path })
+        })?;
+        if !cont {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// A superblock root that passed python's checks (`s_root`, `is_root()`, readable + valid
+/// root inode).
+struct SbRoot {
+    superblock: Obj,
+    mountpoint: Arc<str>,
+    parent_dir: String,
+    root_dentry: Obj,
+    root_inode_ptr: u64,
+    root_inode: Obj,
+    /// `root_inode.i_mapping and root_inode.i_mapping.is_readable()`
+    mapping_ok: bool,
+}
+
+/// python's per-superblock root checks in `get_inodes` (`Ok(None)` = python `continue`).
+fn sb_root(w: &WalkFields, superblock: Obj, mountpoint: String) -> Result<Option<SbRoot>> {
+    let mountpoint: Arc<str> = mountpoint.into();
+    let parent_dir = if &*mountpoint == "/" { String::new() } else { mountpoint.to_string() };
+    let root_dentry_ptr = superblock.m("s_root")?;
+    if root_dentry_ptr.u64()? == 0 {
+        return Ok(None);
+    }
+    let root_dentry = root_dentry_ptr.deref()?;
+    if !root_dentry.is_root()? {
+        return Ok(None);
+    }
+    let root_inode_ptr = root_dentry.f(&w.d_inode);
+    if !ptr_ok(&root_inode_ptr)? {
+        return Ok(None);
+    }
+    let root_inode = root_inode_ptr.deref()?;
+    if !w.inode_valid(&root_inode)? {
+        return Ok(None);
+    }
+    let mapping_ok = ptr_ok(&root_inode.f(&w.i_mapping))?;
+    Ok(Some(SbRoot { superblock, mountpoint, parent_dir, root_dentry, root_inode_ptr: root_inode_ptr.u64()?, root_inode, mapping_ok }))
+}
+
+/// Cloning an [`Error`] computed once and surfaced where python raises.
+trait CloneErr {
+    fn clone_err(&self) -> Error;
+}
+
+impl CloneErr for Error {
+    fn clone_err(&self) -> Error {
+        match self {
+            Error::InvalidAddress { addr } => Error::InvalidAddress { addr: *addr },
+            Error::Swapped { addr } => Error::Swapped { addr: *addr },
+            Error::Symbol(s) => Error::Symbol(s.clone()),
+            Error::Unsatisfied(s) => Error::Unsatisfied(s.clone()),
+            Error::Layer(s) => Error::Layer(s.clone()),
+            Error::Io(e) => Error::Msg(e.to_string()),
+            Error::Msg(s) => Error::Msg(s.clone()),
+        }
+    }
+}
+
+/// One child of a directory as python's `_walk_dentry` + `get_inodes` would process it,
+/// computed ahead of time (reads have no side effects; errors are kept and surfaced only
+/// where python raises).
+struct ChildInfo {
+    dentry: Obj,
+    /// python `continue`s before the yield (no readable/valid inode, NULL name pointer)
+    skip: bool,
+    name: String,
+    inode_ptr: u64,
+    inode: Obj,
+    /// `inode.i_mode` (python reads it for `is_dir` after the consumer ran)
+    mode: Result<i128>,
+    /// `get_inodes`: `file_inode.i_mapping and file_inode.i_mapping.is_readable()`
+    mapping_ok: Result<bool>,
+    /// `_follow_symlink`'s target (only computed when following symlinks and it is a link)
+    symlink: Option<Result<Option<String>>>,
+    /// index of this child's [`DirNode`] when it is a directory
+    dir: Option<usize>,
+}
+
+impl ChildInfo {
+    fn skipped(dentry: Obj) -> ChildInfo {
+        ChildInfo { dentry, skip: true, name: String::new(), inode_ptr: 0, inode: dentry, mode: Ok(0), mapping_ok: Ok(false), symlink: None, dir: None }
+    }
+}
+
+/// A directory's children in list order; `err` = python raised after these children (while
+/// listing the directory or processing the next child).
+struct DirNode {
+    children: Vec<ChildInfo>,
+    err: Option<Error>,
+}
+
+/// Every superblock's dentry tree, listed in parallel: the first `starts.len()` nodes are
+/// the roots, in order.
+struct DentryForest {
+    dirs: Vec<DirNode>,
+}
+
+impl DentryForest {
+    /// Lists all directories reachable from `starts` on all cores: every directory is a work
+    /// item on a shared queue served by long-lived workers (dentry trees are lopsided, e.g.
+    /// `/usr` or `/sys` hold most dentries; the workers keep their page-translation caches
+    /// warm). `None` when a dentry is reached twice or equals its parent: python's `seen` set
+    /// would then change the walk.
+    fn build(w: &WalkFields, starts: &[Obj], follow_symlinks: bool) -> Option<DentryForest> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Condvar, Mutex};
+        const SHARDS: usize = 64;
+        struct Queue {
+            tasks: Vec<(usize, Obj)>,
+            busy: usize,
+        }
+        let queue = Mutex::new(Queue { tasks: starts.iter().enumerate().map(|(i, d)| (i, *d)).rev().collect(), busy: 0 });
+        let cv = Condvar::new();
+        let next_id = AtomicUsize::new(starts.len());
+        let abort = AtomicBool::new(false);
+        let seen: Vec<Mutex<FxHashSet<u64>>> = (0..SHARDS).map(|_| Mutex::new(FxHashSet::default())).collect();
+        let first_seen = |a: u64| seen[((a >> 6) as usize ^ (a >> 17) as usize) % SHARDS].lock().unwrap().insert(a);
+        let worker = || -> Vec<(usize, Obj, Vec<ChildInfo>, Option<Error>)> {
+            let mut done = Vec::new();
+            loop {
+                let (id, dentry) = {
+                    let mut q = queue.lock().unwrap();
+                    loop {
+                        if abort.load(Ordering::Relaxed) {
+                            return done;
+                        }
+                        if let Some(t) = q.tasks.pop() {
+                            q.busy += 1;
+                            break t;
+                        }
+                        if q.busy == 0 {
+                            cv.notify_all();
+                            return done;
+                        }
+                        q = cv.wait(q).unwrap();
+                    }
+                };
+                let (mut children, err) = list_dir(w, dentry, follow_symlinks);
+                let mut new_tasks = Vec::new();
+                for c in &mut children {
+                    if c.dentry.addr == dentry.addr || !first_seen(c.dentry.addr) {
+                        abort.store(true, Ordering::Relaxed);
+                    }
+                    if !c.skip && matches!(c.mode, Ok(m) if m & S_IFMT == S_IFDIR) {
+                        let nid = next_id.fetch_add(1, Ordering::Relaxed);
+                        c.dir = Some(nid);
+                        new_tasks.push((nid, c.dentry));
+                    }
+                }
+                done.push((id, dentry, children, err));
+                let k = new_tasks.len();
+                let mut q = queue.lock().unwrap();
+                q.busy -= 1;
+                // depth-first-ish: newest subdirectories first keeps the queue short
+                q.tasks.extend(new_tasks.into_iter().rev());
+                let finished = q.tasks.is_empty() && q.busy == 0;
+                drop(q);
+                if finished || abort.load(Ordering::Relaxed) {
+                    cv.notify_all();
+                } else {
+                    for _ in 0..k {
+                        cv.notify_one();
+                    }
+                }
+            }
+        };
+        let threads = crate::util::par::threads().max(1);
+        let parts: Vec<Vec<(usize, Obj, Vec<ChildInfo>, Option<Error>)>> = if threads == 1 {
+            vec![worker()]
+        } else {
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = (0..threads).map(|_| sc.spawn(&worker)).collect();
+                hs.into_iter().map(|h| h.join().expect("dentry listing worker panicked")).collect()
+            })
+        };
+        if abort.load(Ordering::Relaxed) {
+            return None;
+        }
+        let n = next_id.load(Ordering::Relaxed);
+        let mut slots: Vec<Option<DirNode>> = (0..n).map(|_| None).collect();
+        for (id, _dentry, children, err) in parts.into_iter().flatten() {
+            slots[id] = Some(DirNode { children, err });
+        }
+        let dirs: Option<Vec<DirNode>> = slots.into_iter().collect();
+        Some(DentryForest { dirs: dirs? })
+    }
+
+    /// Replays tree `root` (an index into `starts`) in python's depth-first order: calls
+    /// `f(child, file_path)` for every child python yields (the consumer), descends into
+    /// directories after it; `Ok(false)` when `f` asked to stop, `Err` where python raises.
+    fn replay(&self, root: usize, parent_dir: &str, f: &mut dyn FnMut(&ChildInfo, String) -> Result<bool>) -> Result<bool> {
+        let mut stack: Vec<(usize, usize, String)> = vec![(root, 0, parent_dir.to_string())];
+        while let Some(top) = stack.last_mut() {
+            let node = &self.dirs[top.0];
+            if top.1 >= node.children.len() {
+                if let Some(e) = &node.err {
+                    return Err(e.clone_err());
+                }
+                stack.pop();
+                continue;
+            }
+            let c = &node.children[top.1];
+            top.1 += 1;
+            if c.skip {
+                continue;
+            }
+            let mut path = String::with_capacity(top.2.len() + 1 + c.name.len());
+            path.push_str(&top.2);
+            path.push('/');
+            path.push_str(&c.name);
+            let dir_path = c.dir.map(|d| (d, path.clone()));
+            if !f(c, path)? {
+                return Ok(false);
+            }
+            // python: `if inode.is_dir:` after the consumer
+            if let Err(e) = &c.mode {
+                return Err(e.clone_err());
+            }
+            if let Some((d, p)) = dir_path {
+                stack.push((d, 0, p));
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Lists one directory like python's `_walk_dentry` loop body (minus the `seen` set, which
+/// the forest checks): `(children, error)`.
+fn list_dir(w: &WalkFields, dir: Obj, follow_symlinks: bool) -> (Vec<ChildInfo>, Option<Error>) {
+    let mut out = Vec::new();
+    for next in dir.get_subdirs() {
+        let dentry = match next {
+            Ok(d) => d,
+            Err(e) => return (out, Some(e)),
+        };
+        match child_info(w, dentry, follow_symlinks) {
+            Ok(c) => out.push(c),
+            Err(e) => {
+                // python raised while processing this child (after adding it to `seen`)
+                out.push(ChildInfo::skipped(dentry));
+                return (out, Some(e));
+            }
+        }
+    }
+    (out, None)
+}
+
+/// python's per-child steps of `_walk_dentry` (up to the yield) plus what `get_inodes` reads.
+fn child_info(w: &WalkFields, dentry: Obj, follow_symlinks: bool) -> Result<ChildInfo> {
+    let inode_ptr = dentry.f(&w.d_inode);
+    if !ptr_ok(&inode_ptr)? {
+        return Ok(ChildInfo::skipped(dentry));
+    }
+    let inode = inode_ptr.deref()?;
+    if !w.inode_valid(&inode)? {
+        return Ok(ChildInfo::skipped(dentry));
+    }
+    let d_name = dentry.f(&w.d_name);
+    if d_name.f(&w.q_name).u64()? == 0 {
+        return Ok(ChildInfo::skipped(dentry));
+    }
+    let name = d_name.name_as_str()?;
+    let mode = inode.f(&w.i_mode).int();
+    let mapping_ok = ptr_ok(&inode.f(&w.i_mapping));
+    let symlink = match &mode {
+        Ok(m) if follow_symlinks && m & S_IFMT == S_IFLNK => Some(symlink_dest(&inode_ptr)),
+        _ => None,
+    };
+    Ok(ChildInfo { dentry, skip: false, name, inode_ptr: inode_ptr.u64()?, inode, mode, mapping_ok, symlink, dir: None })
+}
+
+/// The sequential [`get_inodes`] (exact python semantics for any dentry graph), used when the
+/// parallel listing finds a dentry twice.
+fn get_inodes_seq(w: &WalkFields, roots: Vec<Result<Option<SbRoot>>>, follow_symlinks: bool, f: &mut dyn FnMut(InodeInternal) -> Result<bool>) -> Result<()> {
+    let mut seen_inodes = FxHashSet::default();
+    let mut seen_dentries = FxHashSet::default();
+    for r in roots {
+        let Some(root) = r? else { continue };
+        if !root.mapping_ok {
+            continue;
+        }
+        if !seen_inodes.insert(root.root_inode_ptr) {
+            continue;
+        }
+        if !f(InodeInternal { superblock: root.superblock, mountpoint: root.mountpoint.clone(), inode: root.root_inode, path: root.mountpoint.to_string() })? {
+            return Ok(());
+        }
+        let superblock = root.superblock;
+        let mountpoint = root.mountpoint.clone();
+        let cont = walk_dentry(w, &mut seen_dentries, root.root_dentry, &root.parent_dir, &mut |file_path, _file_dentry, file_inode_ptr, file_inode| {
             // python re-checks `d_inode` readable + `is_valid()` here: same memory, same result
             if !ptr_ok(&file_inode.f(&w.i_mapping))? {
                 return Ok(true);
