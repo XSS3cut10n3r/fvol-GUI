@@ -2929,6 +2929,88 @@ mod tests {
         println!("{n}/{} took the fused path", files.len());
     }
 
+    /// The fields simdjson's On-Demand walk reads in bench/refbench/isf_json_bench.cc, summed
+    /// the same way (a like-for-like parser comparison: nothing is built).
+    fn isf_walk<'a, P: Pull<'a>>(p: &mut P) -> Result<u64> {
+        fn desc<'a, P: Pull<'a>>(p: &mut P) -> Result<u64> {
+            let mut h = 0u64;
+            p.object(|p, k| {
+                match k.as_ref() {
+                    "kind" | "name" => h += p.str()?.len() as u64,
+                    "count" | "bit_position" | "bit_length" => h = h.wrapping_add(p.int()? as u64),
+                    "subtype" | "type" => h = h.wrapping_add(desc(p)?),
+                    _ => p.skip()?,
+                }
+                Ok(())
+            })?;
+            Ok(h)
+        }
+        let mut h = 0u64;
+        p.object(|p, sec| {
+            match sec.as_ref() {
+                "user_types" => p.object(|p, name| {
+                    h += name.len() as u64;
+                    p.object(|p, mk| {
+                        match mk.as_ref() {
+                            "fields" => p.object(|p, fname| {
+                                h += fname.len() as u64;
+                                p.object(|p, ak| {
+                                    match ak.as_ref() {
+                                        "offset" => h = h.wrapping_add(p.int()? as u64),
+                                        "type" => h = h.wrapping_add(desc(p)?),
+                                        "anonymous" => h += p.bool()? as u64,
+                                        _ => p.skip()?,
+                                    }
+                                    Ok(())
+                                })
+                            })?,
+                            "kind" => h += p.str()?.len() as u64,
+                            "size" => h = h.wrapping_add(p.int()? as u64),
+                            _ => p.skip()?,
+                        }
+                        Ok(())
+                    })
+                })?,
+                "symbols" => p.object(|p, name| {
+                    h += name.len() as u64;
+                    p.object(|p, ak| {
+                        match ak.as_ref() {
+                            "address" => h = h.wrapping_add(p.int()? as u64),
+                            "type" => h = h.wrapping_add(desc(p)?),
+                            "constant_data" => h += p.str()?.len() as u64,
+                            _ => p.skip()?,
+                        }
+                        Ok(())
+                    })
+                })?,
+                "enums" => p.object(|p, name| {
+                    h += name.len() as u64;
+                    p.object(|p, ak| {
+                        match ak.as_ref() {
+                            "base" => h += p.str()?.len() as u64,
+                            "constants" => p.object(|p, c| {
+                                h = h.wrapping_add(c.len() as u64).wrapping_add(p.int()? as u64);
+                                Ok(())
+                            })?,
+                            _ => p.skip()?,
+                        }
+                        Ok(())
+                    })
+                })?,
+                "base_types" => p.object(|p, name| {
+                    h += name.len() as u64;
+                    p.object(|p, k| {
+                        h += k.len() as u64;
+                        p.skip()
+                    })
+                })?,
+                _ => p.skip()?,
+            }
+            Ok(())
+        })?;
+        Ok(h)
+    }
+
     /// `RSVOL_BENCH_JSON=path cargo test --release isf_parse_bench -- --ignored --nocapture`
     /// (compare with bench/refbench/isf_json_bench.sh: simdjson, yyjson, python json).
     #[test]
@@ -2971,6 +3053,15 @@ mod tests {
             drop(build_from(parsed, data.len(), &BuildOptions::default()).unwrap());
         }));
         row("build_blob (fused builder)", best(&mut || drop(build_blob(&data, &BuildOptions::default()).unwrap())));
+        row("build_blob_serial (fused builder, 1 thread)", best(&mut || drop(build_blob_serial(&data, &BuildOptions::default()).unwrap())));
+        // the same field walk as simdjson's On-Demand ISF walk in isf_json_bench.cc
+        let mut h = 0u64;
+        row("ISF walk like isf_json_bench (stage 1 + walk, 1 thread)", best(&mut || {
+            let idx = Index::build_with(&data, false).unwrap();
+            h = isf_walk(&mut idx.walker(&data)).unwrap();
+        }));
+        row("ISF walk like isf_json_bench (walk only)", best(&mut || h = isf_walk(&mut idx1.walker(&data)).unwrap()));
+        println!("  (walk checksum {h})");
         assert_eq!(build_blob(&data, &BuildOptions::default()).unwrap(), build_blob_ref(&data, &BuildOptions::default()).unwrap());
     }
 }
