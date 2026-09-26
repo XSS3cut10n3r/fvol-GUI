@@ -90,6 +90,11 @@ fn find_version_info(layer: LayerRef, filename: &str) -> Result<Option<(u16, u16
         return Err(Error::invalid(offset.wrapping_sub(PREAMBLE_MAX_DISTANCE)));
     }
     let data = layer.read_vec(offset - PREAMBLE_MAX_DISTANCE, PREAMBLE_MAX_DISTANCE as usize)?;
+    parse_fixed_file_info(&data).map(Some)
+}
+
+/// The (FV1, FV2, FV3, FV4) python's `find_version_info` unpacks from the preamble `data`.
+fn parse_fixed_file_info(data: &[u8]) -> Result<(u16, u16, u16, u16)> {
     let sig = b"\xbd\x04\xef\xfe";
     let verinfo_offset = match data.windows(4).position(|w| w == sig) {
         Some(i) => i + 4,
@@ -99,7 +104,7 @@ fn find_version_info(layer: LayerRef, filename: &str) -> Result<Option<(u16, u16
     let h = |i: usize| u16::from_le_bytes([s[i], s[i + 1]]);
     // "<IHHHHHHHH": struct_version, FV2, FV1, FV4, FV3, PV2, PV1, PV4, PV3
     let (fv2, fv1, fv4, fv3) = (h(4), h(6), h(8), h(10));
-    Ok(Some((fv1, fv2, fv3, fv4)))
+    Ok((fv1, fv2, fv3, fv4))
 }
 
 /// python `NetScan.determine_tcpip_version(context, kernel_module_name)`: the netscan ISF
@@ -354,13 +359,21 @@ pub fn timeline_event(r: &[Value], absent: &str) -> Option<TimelineEvent> {
 /// python `NetScan._generator(show_corrupt_results)`.
 fn rows(ctx: &Context, show_corrupt: bool, out: &mut dyn FnMut(Vec<Value>) -> Result<()>) -> Result<()> {
     let k = ctx.windows_kernel()?;
-    let t = create_netscan_symbol_table(ctx, k)?;
+    let t = {
+        let _t = crate::util::trace::span("netscan: symbol table");
+        create_netscan_symbol_table(ctx, k)?
+    };
     let mut objs = Vec::new();
-    let tail = scan_each(ctx, k, t, |o| {
-        objs.push(o);
-        Ok(true)
-    })
-    .err();
+    let tail = {
+        let _t = crate::util::trace::span("netscan: scan");
+        scan_each(ctx, k, t, |o| {
+            objs.push(o);
+            Ok(true)
+        })
+        .err()
+    };
+    crate::util::trace::note(|| format!("netscan: {} objects", objs.len()));
+    let _t = crate::util::trace::span("netscan: rows");
     emit_rows(&objs, tail, show_corrupt, false, out)
 }
 
@@ -386,5 +399,53 @@ impl Plugin for NetScan {
             Ok(())
         });
         Some(r.map(|_| ev))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::GlobalOptions;
+
+    #[test]
+    fn fixed_file_info() {
+        // after the signature python unpacks "<IHHHHHHHH": struct_version, FV2, FV1, FV4, FV3, ...
+        let mut data = vec![0u8; 0x500];
+        let at = 0x100;
+        data[at..at + 4].copy_from_slice(b"\xbd\x04\xef\xfe");
+        let fields: [u16; 10] = [0, 1, 3, 6, 19935, 9600, 3, 6, 19935, 9600];
+        for (i, v) in fields.iter().enumerate() {
+            data[at + 4 + 2 * i..at + 6 + 2 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        // dwStrucVersion = 0x00010000, FileVersionMS = (6 << 16) | 3, LS = (9600 << 16) | 19935
+        assert_eq!(parse_fixed_file_info(&data).unwrap(), (6, 3, 9600, 19935));
+        // python quirk: no signature -> data.find() + 4 == 3, unpack from offset 3
+        let mut data = vec![0u8; 0x500];
+        data[3 + 8..3 + 10].copy_from_slice(&7u16.to_le_bytes());
+        assert_eq!(parse_fixed_file_info(&data).unwrap(), (0, 0, 0, 7));
+        // signature too close to the end: struct.error
+        let mut data = vec![0u8; 0x500];
+        data[0x4f0..0x4f4].copy_from_slice(b"\xbd\x04\xef\xfe");
+        assert!(parse_fixed_file_info(&data).is_err());
+    }
+
+    /// `RSVOL_BENCH_IMG=... cargo test --profile fast net_timelines -- --ignored --nocapture`:
+    /// print netscan's and netstat's timeline events (python `generate_timeline`), to diff
+    /// against python's timeliner descriptions.
+    #[test]
+    #[ignore]
+    fn net_timelines() {
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), output_dir: ".".into(), ..Default::default() }).unwrap();
+        let cfg = Config::default();
+        for (name, p) in [("NetScan", &NetScan as &dyn Plugin), ("NetStat", &crate::plugins::windows::netstat::NetStat)] {
+            for e in p.timeline(&ctx, &cfg).unwrap().unwrap() {
+                let t = match e.time {
+                    Value::DateTime(d) => crate::util::time::fmt_quick(&d),
+                    _ => "?".into(),
+                };
+                println!("TL\t{name}\t{}\t{t}", e.description);
+            }
+        }
     }
 }
