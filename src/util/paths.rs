@@ -67,12 +67,13 @@ pub fn vol3_cache_dir(cache_path: Option<&str>) -> PathBuf {
 /// Lower-case hex of `b` (cache key material in text files).
 pub fn hex(b: &[u8]) -> String {
     const D: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(b.len() * 2);
-    for &x in b {
-        s.push(D[(x >> 4) as usize] as char);
-        s.push(D[(x & 15) as usize] as char);
+    // (no per-character capacity checks: this runs over every cache key of a warm run)
+    let mut v = vec![0u8; b.len() * 2];
+    for (o, &x) in v.chunks_exact_mut(2).zip(b) {
+        o[0] = D[(x >> 4) as usize];
+        o[1] = D[(x & 15) as usize];
     }
-    s
+    String::from_utf8(v).unwrap_or_default()
 }
 
 /// Write `data` to `path` atomically (temp file + rename), creating parent directories.
@@ -190,6 +191,15 @@ pub fn resource_error(url: &str, e: crate::error::Error) -> crate::error::Error 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hex_is_lower_case_pairs() {
+        assert_eq!(hex(b""), "");
+        assert_eq!(hex(&[0, 1, 0x7f, 0x80, 0xab, 0xff]), "00017f80abff");
+        let all: Vec<u8> = (0..=255).collect();
+        let want: String = all.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex(&all), want);
+    }
+
     #[test]
     fn urlopen_error_text() {
         let e = std::fs::read("/nonexistent/rsvol/strings.txt").unwrap_err();

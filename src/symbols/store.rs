@@ -1460,13 +1460,37 @@ fn stamps_hold(hex: &str) -> bool {
     true
 }
 
+/// Hex (either case) to bytes; `None` for an odd length or a non-hex digit. On the warm path
+/// (the `isfchoice` stamps, ~4 KB per run), so table-driven: ~10x fewer instructions than
+/// `char::to_digit` per nibble.
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    let h = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    const NIB: [u8; 256] = {
+        let mut t = [0xffu8; 256];
+        let mut i = 0;
+        while i < 10 {
+            t[b'0' as usize + i] = i as u8;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < 6 {
+            t[b'a' as usize + i] = 10 + i as u8;
+            t[b'A' as usize + i] = 10 + i as u8;
+            i += 1;
+        }
+        t
+    };
     let b = s.as_bytes();
     if b.len() % 2 != 0 {
         return None;
     }
-    b.chunks(2).map(|p| Some(h(p[0])? << 4 | h(p[1])?)).collect()
+    let mut out = Vec::with_capacity(b.len() / 2);
+    let mut bad = 0u8;
+    for p in b.chunks_exact(2) {
+        let (h, l) = (NIB[p[0] as usize], NIB[p[1] as usize]);
+        bad |= h | l;
+        out.push(h << 4 | l);
+    }
+    (bad & 0x80 == 0).then_some(out)
 }
 
 /// (size, mtime) of a file as 24 bytes (all ones when it cannot be stat'ed).
@@ -2190,6 +2214,26 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unhex_accepts_exactly_hex_pairs() {
+        let old = |s: &str| -> Option<Vec<u8>> {
+            let h = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+            let b = s.as_bytes();
+            if b.len() % 2 != 0 {
+                return None;
+            }
+            b.chunks(2).map(|p| Some(h(p[0])? << 4 | h(p[1])?)).collect()
+        };
+        let all: String = (0..=255u8).map(|b| format!("{b:02x}{b:02X}")).collect();
+        for s in ["", "0", "00", "0g", "g0", "ff", "FF", "fF", "123", "  ", "0x", "é0", &all, "zz", "7f80", "a:"] {
+            assert_eq!(unhex(s), old(s), "{s:?}");
+        }
+        for b in 0..=255u8 {
+            let s = format!("{}0", b as char);
+            assert_eq!(unhex(&s), old(&s), "{s:?}");
+        }
+    }
 
     /// Lookup cost of shipped ISFs with this machine's search path:
     ///   cargo test --release isf_lookup_timing -- --ignored --nocapture

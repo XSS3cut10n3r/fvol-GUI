@@ -356,14 +356,21 @@ pub fn unsatisfied_described(reqs: &[(&str, UnsatKind, &str)]) -> crate::error::
     crate::error::Error::Unsatisfied(lines.join("\n"))
 }
 
-/// Every registered plugin, sorted by name.
-pub fn all() -> Vec<&'static dyn Plugin> {
-    let mut v: Vec<&'static dyn Plugin> = Vec::new();
+/// Every registered plugin, in registration order (not sorted, see [`all`]).
+pub fn registered() -> Vec<&'static dyn Plugin> {
+    let mut v: Vec<&'static dyn Plugin> = Vec::with_capacity(256);
     generic::register(&mut v);
     windows::register(&mut v);
     linux::register(&mut v);
     mac::register(&mut v);
-    // Sorted by name. Every run pays for this, so compare cached keys: the first 16 name bytes
+    v
+}
+
+/// Every registered plugin, sorted by name.
+pub fn all() -> Vec<&'static dyn Plugin> {
+    let mut v = registered();
+    // Sorted by name (help, the web UI and the timeliner pay for this; a CLI run does not, see
+    // `cli::main`). Compare cached keys: the first 16 name bytes
     // as a big-endian integer (orders like the bytes), the full name only on a tie. ~4x fewer
     // instructions than comparing the (long, shared-prefix) names through `name()` calls.
     let prefix = |s: &str| -> u128 {

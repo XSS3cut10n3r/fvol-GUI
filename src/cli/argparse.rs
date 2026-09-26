@@ -281,6 +281,26 @@ struct OptTuple {
     explicit_arg: Option<String>,
 }
 
+/// `needle in hay` (python) = `hay.contains(needle)`, for the ~250 short plugin names every run
+/// checks: a first-byte scan plus a compare is several times cheaper than setting up std's
+/// two-way searcher for each name.
+fn contains(hay: &str, needle: &str) -> bool {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    let Some((&first, rest)) = n.split_first() else { return true };
+    if n.len() > h.len() {
+        return false;
+    }
+    let last_start = h.len() - n.len();
+    let mut i = 0;
+    while i <= last_start {
+        if h[i] == first && &h[i + 1..i + n.len()] == rest {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn looks_negative(s: &str) -> bool {
     // ^-\.?\d
     let mut it = s.chars();
@@ -703,9 +723,14 @@ impl Parser {
         let parser_name = it.next().unwrap_or_default();
         let arg_strings: Vec<String> = it.collect();
         ns.set(a.dest, PyVal::Str(parser_name.clone()));
-        let matched: Vec<&str> = self.sub_names.iter().copied().filter(|n| n.contains(parser_name.as_str())).collect();
+        // `sub_names` may be in registration order (the CLI skips sorting the plugin list, it
+        // costs more than the whole argument parsing): python's order, sorted, only matters
+        // for the messages
+        let mut matched: Vec<&str> = self.sub_names.iter().copied().filter(|n| contains(n, &parser_name)).collect();
+        matched.sort_unstable();
         if matched.is_empty() {
-            let names: Vec<&str> = self.sub_names.to_vec();
+            let mut names: Vec<&str> = self.sub_names.to_vec();
+            names.sort_unstable();
             return Err(Fail::Arg(ArgError::new(
                 Some(a),
                 format!("invalid choice {parser_name} (choose from {})", names.join(", ")),
@@ -939,5 +964,19 @@ impl Parser {
             )));
         }
         Ok(extras)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn contains_matches_str_contains() {
+        let hays = ["", "a", "windows.pslist.PsList", "windows.psscan.PsScan", "linux.pslist.PsList", "aaab", "é.x"];
+        let needles = ["", "a", "ab", "aab", "pslist", "PsList", "windows.pslist.PsList", "windows.pslist.PsListX", "s.P", "é", "x", "b"];
+        for h in hays {
+            for n in needles {
+                assert_eq!(super::contains(h, n), h.contains(n), "{h:?} {n:?}");
+            }
+        }
     }
 }
