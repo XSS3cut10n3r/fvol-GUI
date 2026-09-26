@@ -8,7 +8,6 @@ use super::{Insn, Mem, MemSize, Mode, Operand, Reg, MAX_OPS};
 // operand print flags (Insn::ofmt)
 pub(crate) const OF_SIGNED: u8 = 1; // immediate printed signed
 pub(crate) const OF_MOFFS: u8 = 2; // memory displacement printed unsigned (moffs)
-pub(crate) const OF_NOSEG: u8 = 4; // (unused)
 
 // printed prefix ids (see format::PREFIX_STR)
 pub(crate) const P_NONE: u8 = 0;
@@ -58,6 +57,8 @@ struct St<'a> {
     osz: u8,
     asz: u8,
     seg: u8, // segment register id or 0
+    disp8n: u8, // EVEX compressed disp8 scale
+    vsib: u8,   // VSIB index register class (0 = normal SIB)
 }
 
 impl St<'_> {
@@ -179,6 +180,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         osz: 4,
         asz: if m64 { if has67 { 4 } else { 8 } } else if has67 { 2 } else { 4 },
         seg: seg_reg(segp),
+        disp8n: 1,
+        vsib: 0,
     };
 
     // ------------------------------------------------------------------ opcode / vector prefixes
@@ -457,6 +460,7 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             flags: F_MODRM,
             mnem: 0,
             alias: 0,
+            dn: 0,
         };
         st.osz = osz_def;
         if !operands(&mut st, &e, out, addr, mode, 0) {
@@ -497,17 +501,78 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         osz_def
     };
 
-    // EVEX validity checks
-    if st.vex == VEX_EVEX {
-        if flags & F_NOEVK != 0 && st.evex_aaa != 0 {
-            return false;
-        }
-        if flags & F_KNOTZERO != 0 && st.evex_aaa == 0 {
-            return false;
-        }
-    }
     if flags & F_NOVVVV != 0 && st.vvvv != 0 && st.vex != VEX_NONE {
         return false;
+    }
+
+    // EVEX decorations / validity
+    let mut deco = 0u8;
+    let mut sae = 0u8;
+    let mut bcst_elem = 0u8;
+    if st.vex == VEX_EVEX {
+        let reg_form = st.pos < n && d[st.pos] >> 6 == 3;
+        if st.evex_aaa != 0 {
+            if flags & F_NOEVK != 0 {
+                return false;
+            }
+        } else if flags & F_KNOTZERO != 0 {
+            return false;
+        }
+        let zok = flags & F_EVZ != 0;
+        if st.evex_z && !zok && flags & F_NOZ != 0 {
+            return false;
+        }
+        if flags & F_EVK != 0 && (st.evex_aaa != 0 || (st.evex_z && zok)) {
+            deco = 0x80 | if st.evex_z && zok { 0x40 } else { 0 };
+        }
+        deco |= st.evex_aaa;
+        if st.evex_b {
+            if reg_form {
+                if flags & F_ER != 0 {
+                    sae = 1 + st.l;
+                    st.l = 2;
+                } else if flags & F_SAE != 0 {
+                    sae = 5;
+                    st.l = 2;
+                } else if flags & F_NOBR != 0 {
+                    return false;
+                }
+            } else if flags & F_BCST_D != 0 {
+                bcst_elem = 4;
+            } else if flags & F_BCST_Q != 0 {
+                bcst_elem = 8;
+            } else if flags & F_BCST_W != 0 {
+                bcst_elem = 2;
+            } else if flags & F_BCST_QB != 0 {
+                bcst_elem = 0x88; // qword count, byte keyword, unscaled disp8
+            } else if flags & F_NOBM != 0 {
+                return false;
+            }
+        }
+        // compressed disp8 scale
+        st.disp8n = if e.dn != 0 {
+            e.dn
+        } else if bcst_elem == 0x88 {
+            1
+        } else if bcst_elem != 0 {
+            bcst_elem
+        } else {
+            let mut nn = 1;
+            for o in &e.ops[..e.nops as usize] {
+                if matches!(o.src, S_RM | S_MEM | S_VSIB) {
+                    nn = memsize_for(&st, o.cls, o.mk).bytes().max(1);
+                    break;
+                }
+            }
+            nn
+        };
+    }
+    for o in &e.ops[..e.nops as usize] {
+        if o.src == S_VSIB {
+            st.vsib = o.cls;
+        } else if o.src == S_KMASK {
+            deco &= 0x7F;
+        }
     }
 
     if lockrep == 0xF0 && flags & F_LOCK == 0 {
@@ -518,6 +583,22 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
 
     if !operands(&mut st, e, out, addr, mode, op) {
         return false;
+    }
+    out.evex = deco;
+    out.sae = sae;
+    if bcst_elem != 0 {
+        let vl: u8 = if st.l >= 2 { 64 } else { 16 << st.l };
+        for k in 0..out.op_count as usize {
+            if let Operand::Mem(ref mut m) = out.operands[k] {
+                m.bcst = vl / (bcst_elem & 0x0F);
+                m.size = match bcst_elem {
+                    2 => MemSize::Word,
+                    4 => MemSize::Dword,
+                    0x88 => MemSize::Byte,
+                    _ => MemSize::Qword,
+                };
+            }
+        }
     }
     let has_mem = st.has_modrm && st.modrm >> 6 != 3;
     if flags & (F_CMP8 | F_CMP32) != 0 && out.op_count > 0 {
@@ -624,6 +705,8 @@ pub(crate) const OF_REL: u8 = 8;
 pub(crate) const OF_REL16: u8 = 16;
 pub(crate) const OF_BCST: u8 = 32;
 pub(crate) const OF_FARSEP: u8 = 64; // printed after ':' instead of ", "
+pub(crate) const OF_RC: u8 = 128; // EVEX rounding slot (printed only when active)
+pub(crate) const OF_KMASK: u8 = 4; // standalone {kN}
 
 #[inline]
 fn gpr_by_size(n: u8, size: u8, rex: bool) -> u8 {
@@ -840,10 +923,13 @@ fn parse_mem(st: &mut St) -> Option<Mem> {
             m.base = Reg(b);
             m.index = Reg(x);
             match md {
-                1 => m.disp = st.byte()? as i8 as i64,
+                1 => m.disp = st.byte()? as i8 as i64 * st.disp8n as i64,
                 2 => m.disp = st.le(2)? as u16 as i16 as i64,
                 _ => {}
             }
+        }
+        if st.vsib != 0 {
+            return None;
         }
         return Some(m);
     }
@@ -861,7 +947,13 @@ fn parse_mem(st: &mut St) -> Option<Mem> {
         let scale = 1u8 << (sib >> 6);
         let idx = ((sib >> 3) & 7) | rx;
         let bs = sib & 7;
-        if idx != 4 {
+        if st.vsib != 0 {
+            let r = reg_for(st, st.vsib, idx | st.evex_vp);
+            if r == 0 {
+                return None;
+            }
+            m.index = Reg(r);
+        } else if idx != 4 {
             m.index = Reg(base_of(st, idx));
         } else {
             // LLVM prints riz for SIB forms that did not need a SIB byte (capstone never
@@ -877,6 +969,8 @@ fn parse_mem(st: &mut St) -> Option<Mem> {
         } else {
             m.base = Reg(base_of(st, bs | rb));
         }
+    } else if st.vsib != 0 {
+        return None;
     } else if rm == 5 && md == 0 {
         if st.m64 {
             m.base = Reg(if st.asz == 8 { RIP } else { EIP });
@@ -887,7 +981,7 @@ fn parse_mem(st: &mut St) -> Option<Mem> {
         m.base = Reg(base_of(st, rm | rb));
     }
     match md {
-        1 => m.disp = st.byte()? as i8 as i64,
+        1 => m.disp = st.byte()? as i8 as i64 * st.disp8n as i64,
         2 => m.disp = st.le(4)? as u32 as i32 as i64,
         _ => {}
     }
@@ -936,9 +1030,9 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 }
                 Operand::Reg(Reg(r))
             }
-            S_RM | S_MEM | S_RMREG => {
+            S_RM | S_MEM | S_RMREG | S_VSIB => {
                 if is_reg {
-                    if s.src == S_MEM {
+                    if s.src == S_MEM || s.src == S_VSIB {
                         return false;
                     }
                     let mut num = (modrm & 7) | rexb;
@@ -984,6 +1078,14 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 Operand::Reg(Reg(gpr(0, size, false)))
             }
             S_CONST1 => Operand::Imm(1),
+            S_RC => {
+                out.ofmt[k] |= OF_RC;
+                Operand::None
+            }
+            S_KMASK => {
+                out.ofmt[k] |= OF_KMASK;
+                Operand::None
+            }
             S_IMM => {
                 let (v, signed) = match s.cls {
                     I_U8 => match st.byte() {

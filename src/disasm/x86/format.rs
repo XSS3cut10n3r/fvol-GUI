@@ -1,6 +1,6 @@
 //! capstone 5 Intel-syntax text formatting (X86IntelInstPrinter semantics).
 
-use super::decode::{OF_FARSEP, OF_MOFFS, OF_SIGNED};
+use super::decode::{OF_FARSEP, OF_KMASK, OF_MOFFS, OF_RC, OF_SIGNED};
 use super::{Insn, Mem, MemSize, Mode, Operand};
 
 pub(crate) static PREFIX_STR: [&str; 13] = [
@@ -160,13 +160,32 @@ fn write_mem(out: &mut String, m: &Mem, mode: Mode, moffs: bool) {
 static SAE_STR: [&str; 6] = ["", "{rn-sae}", "{rd-sae}", "{ru-sae}", "{rz-sae}", "{sae}"];
 
 pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
+    let mut first = true;
     for k in 0..insn.op_count as usize {
-        if k > 0 {
-            if insn.ofmt[k] & OF_FARSEP != 0 {
+        let f = insn.ofmt[k];
+        if f & OF_RC != 0 {
+            if insn.sae != 0 {
+                if !first {
+                    out.push_str(", ");
+                }
+                out.push_str(SAE_STR[insn.sae as usize % 6]);
+                first = false;
+            }
+            continue;
+        }
+        if !first {
+            if f & OF_FARSEP != 0 {
                 out.push(':');
             } else {
                 out.push_str(", ");
             }
+        }
+        first = false;
+        if f & OF_KMASK != 0 {
+            out.push_str("{k");
+            push_dec(out, (insn.evex & 7) as u64);
+            out.push('}');
+            continue;
         }
         match insn.operands[k] {
             Operand::Reg(r) => out.push_str(r.name()),
@@ -188,9 +207,5 @@ pub(crate) fn write_op_str(insn: &Insn, out: &mut String) {
                 out.push_str(" {z}");
             }
         }
-    }
-    if insn.sae != 0 {
-        out.push_str(", ");
-        out.push_str(SAE_STR[insn.sae as usize % 6]);
     }
 }

@@ -67,6 +67,8 @@ pub(crate) const S_CONST1: u8 = 15; // literal 1
 pub(crate) const S_ACC: u8 = 16; // accumulator of size cls (al/ax/eax/rax)
 pub(crate) const S_STRRBX: u8 = 17; // [rbx + al]  (xlat; unused by capstone printing)
 pub(crate) const S_RC: u8 = 18; // EVEX rounding control / sae operand
+pub(crate) const S_KMASK: u8 = 19; // standalone {kN} operand
+pub(crate) const S_VSIB: u8 = 20; // VSIB memory operand (cls = index vector class)
 
 // register classes
 pub(crate) const C_B: u8 = 1;
@@ -138,45 +140,51 @@ pub(crate) struct OpSpec {
 }
 
 // ---------------------------------------------------------------------------------------- flags
-pub(crate) const F_MODRM: u32 = 1 << 0;
-pub(crate) const F_LOCK: u32 = 1 << 1; // LOCK allowed (with memory operand)
-pub(crate) const F_REP: u32 = 1 << 2; // F3 -> "rep", F2 -> "repne"
-pub(crate) const F_REPE: u32 = 1 << 3; // F3 -> "repe", F2 -> "repne"
-pub(crate) const F_BND: u32 = 1 << 4; // F2 -> "bnd"
-pub(crate) const F_REPZ: u32 = 1 << 5; // F3 -> "repz"
-pub(crate) const F_NOTRACK: u32 = 1 << 6; // 3E -> "notrack"
-pub(crate) const F_XA: u32 = 1 << 7; // F2/F3 -> "xacquire"/"xrelease" even without lock
-pub(crate) const F_D64: u32 = 1 << 8; // default 64-bit operand size in long mode
-pub(crate) const F_F64: u32 = 1 << 9; // forced 64-bit operand size in long mode
-pub(crate) const F_IMMU: u32 = 1 << 10; // print immediates unsigned (masked to operand size)
-pub(crate) const F_NOVVVV: u32 = 1 << 11; // VEX/EVEX vvvv must be 1111
-pub(crate) const F_EVK: u32 = 1 << 12; // EVEX: opmask decoration on first operand
-pub(crate) const F_EVZ: u32 = 1 << 13; // EVEX: zeroing allowed
-pub(crate) const F_BCST_D: u32 = 1 << 14; // EVEX.b on memory -> {1toN} dword elements
-pub(crate) const F_BCST_Q: u32 = 1 << 15; // EVEX.b on memory -> {1toN} qword elements
-pub(crate) const F_ER: u32 = 1 << 16; // EVEX.b on register form -> {rn-sae} rounding
-pub(crate) const F_SAE: u32 = 1 << 17; // EVEX.b on register form -> {sae}
-pub(crate) const F_3DN: u32 = 1 << 18;
-pub(crate) const F_NOSEG: u32 = 1 << 19; // segment prefix not printed
-pub(crate) const F_MODRM_MEMONLY: u32 = 1 << 20; // (internal)
-pub(crate) const F_RELQ: u32 = 1 << 21; // capstone rel16/rel32 quirks for jmp/jcc (see decode)
-pub(crate) const F_NOREXW_O: u32 = 1 << 22;
-pub(crate) const F_BCST_W: u32 = 1 << 23; // {1toN} word elements
-pub(crate) const F_KNOTZERO: u32 = 1 << 24; // EVEX: aaa must not be 0
-pub(crate) const F_NOEVK: u32 = 1 << 25; // EVEX: aaa must be 0
-pub(crate) const F_REGFORM: u32 = 1 << 26; // ModRM.mod ignored: rm is always a register
-pub(crate) const F_CMP8: u32 = 1 << 27; // imm < 8 selects a cmpXXps alias (imm dropped)
-pub(crate) const F_CMP32: u32 = 1 << 28; // imm < 32 selects a vcmpXXps alias
-pub(crate) const F_REPF3: u32 = 1 << 29; // F3 -> "rep", F2 -> nothing (capstone movsd quirk)
-pub(crate) const F_INVALID: u32 = 1 << 30; // explicit "INVALID" override entry
-pub(crate) const F_Z66: u32 = 1 << 31; // accumulator/operand size: 16 with 66 else 32 (REX.W ignored)
+pub(crate) const F_MODRM: u64 = 1 << 0;
+pub(crate) const F_LOCK: u64 = 1 << 1; // LOCK allowed (with memory operand)
+pub(crate) const F_REP: u64 = 1 << 2; // F3 -> "rep", F2 -> "repne"
+pub(crate) const F_REPE: u64 = 1 << 3; // F3 -> "repe", F2 -> "repne"
+pub(crate) const F_BND: u64 = 1 << 4; // F2 -> "bnd"
+pub(crate) const F_REPZ: u64 = 1 << 5; // F3 -> "repz"
+pub(crate) const F_NOTRACK: u64 = 1 << 6; // 3E -> "notrack"
+pub(crate) const F_XA: u64 = 1 << 7; // F2/F3 -> "xacquire"/"xrelease" even without lock
+pub(crate) const F_D64: u64 = 1 << 8; // default 64-bit operand size in long mode
+pub(crate) const F_F64: u64 = 1 << 9; // forced 64-bit operand size in long mode
+pub(crate) const F_IMMU: u64 = 1 << 10; // print immediates unsigned (masked to operand size)
+pub(crate) const F_NOVVVV: u64 = 1 << 11; // VEX/EVEX vvvv must be 1111
+pub(crate) const F_EVK: u64 = 1 << 12; // EVEX: opmask decoration on first operand
+pub(crate) const F_EVZ: u64 = 1 << 13; // EVEX: zeroing allowed
+pub(crate) const F_BCST_D: u64 = 1 << 14; // EVEX.b on memory -> {1toN} dword elements
+pub(crate) const F_BCST_Q: u64 = 1 << 15; // EVEX.b on memory -> {1toN} qword elements
+pub(crate) const F_ER: u64 = 1 << 16; // EVEX.b on register form -> {rn-sae} rounding
+pub(crate) const F_SAE: u64 = 1 << 17; // EVEX.b on register form -> {sae}
+pub(crate) const F_3DN: u64 = 1 << 18;
+pub(crate) const F_NOSEG: u64 = 1 << 19; // segment prefix not printed
+pub(crate) const F_MODRM_MEMONLY: u64 = 1 << 20; // (internal)
+pub(crate) const F_RELQ: u64 = 1 << 21; // capstone rel16/rel32 quirks for jmp/jcc (see decode)
+pub(crate) const F_NOREXW_O: u64 = 1 << 22;
+pub(crate) const F_BCST_W: u64 = 1 << 23; // {1toN} word elements
+pub(crate) const F_KNOTZERO: u64 = 1 << 24; // EVEX: aaa must not be 0
+pub(crate) const F_NOEVK: u64 = 1 << 25; // EVEX: aaa must be 0
+pub(crate) const F_REGFORM: u64 = 1 << 26; // ModRM.mod ignored: rm is always a register
+pub(crate) const F_CMP8: u64 = 1 << 27; // imm < 8 selects a cmpXXps alias (imm dropped)
+pub(crate) const F_CMP32: u64 = 1 << 28; // imm < 32 selects a vcmpXXps alias
+pub(crate) const F_REPF3: u64 = 1 << 29; // F3 -> "rep", F2 -> nothing (capstone movsd quirk)
+pub(crate) const F_INVALID: u64 = 1 << 30; // explicit "INVALID" override entry
+pub(crate) const F_Z66: u64 = 1 << 31; // accumulator/operand size: 16 with 66 else 32 (REX.W ignored)
+pub(crate) const F_NOZ: u64 = 1 << 32; // EVEX.z must be 0
+pub(crate) const F_NOBR: u64 = 1 << 33; // EVEX.b must be 0 (register form)
+pub(crate) const F_NOBM: u64 = 1 << 34; // EVEX.b must be 0 (memory form)
+pub(crate) const F_BCST_QB: u64 = 1 << 35; // {1toN} by qword, printed "byte ptr", disp8 unscaled
 
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Entry {
     pub mnem: u16,
     pub nops: u8,
     pub ops: [OpSpec; MAX_OPS],
-    pub flags: u32,
+    pub flags: u64,
+    /// EVEX disp8 scale override (0 = memory operand size)
+    pub dn: u8,
     /// First alias mnemonic id (cmpXXps style predicates), 0 if none.
     pub alias: u16,
 }
@@ -417,6 +425,7 @@ fn parse_op(tok: &str) -> Result<OpSpec, String> {
     match tok {
         "1" => return Ok(OpSpec { src: S_CONST1, cls: 0, mk: 0 }),
         "rc" => return Ok(OpSpec { src: S_RC, cls: 0, mk: 0 }),
+        "kmask" => return Ok(OpSpec { src: S_KMASK, cls: 0, mk: 0 }),
         "eAX" => return Ok(OpSpec { src: S_ACC, cls: C_V, mk: 0 }),
         "zAX" => return Ok(OpSpec { src: S_ACC, cls: C_Z, mk: 0 }),
         "far" => return Ok(OpSpec { src: S_FARPTR, cls: 0, mk: 0 }),
@@ -441,6 +450,7 @@ fn parse_op(tok: &str) -> Result<OpSpec, String> {
             "a" => S_MOFFS,
             "S" => S_STRSRC,
             "D" => S_STRDST,
+            "Vs" => S_VSIB,
             _ => return Err(bad()),
         };
         let cls = match src {
@@ -482,7 +492,7 @@ fn parse_op(tok: &str) -> Result<OpSpec, String> {
     Ok(OpSpec { src: S_FIXED, cls: r.0, mk: 0 })
 }
 
-fn parse_flag(tok: &str) -> Result<u32, String> {
+fn parse_flag(tok: &str) -> Result<u64, String> {
     Ok(match tok {
         "lock" => F_LOCK,
         "rep" => F_REP,
@@ -497,6 +507,11 @@ fn parse_flag(tok: &str) -> Result<u32, String> {
         "novvvv" => F_NOVVVV,
         "k" => F_EVK,
         "kz" => F_EVK | F_EVZ,
+        "z" => F_EVZ,
+        "noz" => F_NOZ,
+        "nobr" => F_NOBR,
+        "nobm" => F_NOBM,
+        "bqb" => F_BCST_QB,
         "bd" => F_BCST_D,
         "bq" => F_BCST_Q,
         "bw" => F_BCST_W,
@@ -599,9 +614,13 @@ impl Builder {
             }
         }
         for t in flags_s.split_whitespace() {
+            if let Some(n) = t.strip_prefix('n').and_then(|x| x.parse::<u8>().ok()) {
+                e.dn = n;
+                continue;
+            }
             e.flags |= parse_flag(t)?;
         }
-        if uses_modrm_sel || e.ops.iter().any(|o| matches!(o.src, S_REG | S_RM | S_MEM | S_RMREG)) {
+        if uses_modrm_sel || e.ops.iter().any(|o| matches!(o.src, S_REG | S_RM | S_MEM | S_RMREG | S_VSIB)) {
             e.flags |= F_MODRM;
         }
         if map == MAP_3DN {
