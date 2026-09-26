@@ -72,6 +72,17 @@ pub(crate) fn bench_rule(name: &str) -> Vec<(Vec<u8>, Modifiers)> {
             (b"powershell" as &[u8], Modifiers { base64: Some(None), base64wide: Some(None), ..m() }),
             (b"IEX (New-Object", Modifiers { base64: Some(None), ..m() }),
         ],
+        "mixed" => {
+            // Hex / regex strings are marked with a \x01HEX: / \x01RE: prefix.
+            let mut v = text[..14].to_vec();
+            v.push((b"\x01HEX:{ 4D 5A 90 00 03 00 00 00 04 00 }", m()));
+            v.push((b"\x01HEX:{ 55 8B EC 83 EC ?? 53 56 57 }", m()));
+            v.push((b"\x01HEX:{ 6A 40 68 00 30 00 00 6A 14 8D 91 }", m()));
+            v.push((b"\x01HEX:{ E8 ?? ?? ?? ?? 83 C4 04 [0-4] 85 C0 74 }", m()));
+            v.push((b"\x01RE:https?://[a-z0-9.-]{4,40}\\.(com|net|org)", m()));
+            v.push((b"\x01RE:cmd\\.exe /c [^\\x00]{5,50}", Modifiers { nocase: true, ..m() }));
+            v
+        }
         "patho" => vec![
             (b"\x00\x00\x00\x00" as &[u8], m()),
             (b"\xff\xff", Modifiers { ascii: true, wide: true, ..m() }),
@@ -99,9 +110,32 @@ pub(crate) fn bench_rule(name: &str) -> Vec<(Vec<u8>, Modifiers)> {
     v.into_iter().map(|(t, mo)| (t.to_vec(), mo)).collect()
 }
 
+/// Kind of a benchmark string: text, or hex / regex source behind a marker prefix.
+fn bench_kind(t: &[u8]) -> StringKind {
+    if let Some(r) = t.strip_prefix(b"\x01HEX:") {
+        StringKind::Hex(String::from_utf8_lossy(r).into_owned())
+    } else if let Some(r) = t.strip_prefix(b"\x01RE:") {
+        StringKind::Regex { src: r.to_vec(), nocase: false, dotall: false }
+    } else {
+        StringKind::Text(t.to_vec())
+    }
+}
+
 pub(crate) fn rule_source(strings: &[(Vec<u8>, Modifiers)]) -> String {
     let mut s = String::from("rule bench {\n  strings:\n");
     for (i, (t, mo)) in strings.iter().enumerate() {
+        match bench_kind(t) {
+            StringKind::Hex(h) => {
+                s += &format!("    $s{i} = {h}\n");
+                continue;
+            }
+            StringKind::Regex { src, .. } => {
+                let r = String::from_utf8_lossy(&src).replace('/', "\\/");
+                s += &format!("    $s{i} = /{r}/{}\n", if mo.nocase { " nocase" } else { "" });
+                continue;
+            }
+            StringKind::Text(_) => {}
+        }
         let mut lit = String::new();
         for &b in t {
             if b.is_ascii_alphanumeric() || b" .:/-()!_,".contains(&b) {
@@ -156,7 +190,7 @@ fn yara_scan_bench() {
         .enumerate()
         .map(|(i, (t, mo))| StringDef {
             id: format!("$s{i}"),
-            kind: StringKind::Text(t.clone()),
+            kind: bench_kind(t),
             mods: mo.clone(),
             fixed_offset: None,
         })
