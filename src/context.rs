@@ -347,6 +347,108 @@ mod bench {
     use crate::layers::LayerExt;
     use crate::layers::scan::{BytesScanner, scan};
 
+    /// A physical layer that corrupts ~`rate`% of pages (deterministically) to simulate smear.
+    struct Smear {
+        inner: Arc<dyn Layer>,
+        rate: u64,
+    }
+    impl Smear {
+        fn corrupt(&self, page: u64) -> Option<u64> {
+            let h = crate::util::fxhash::hash_u64(page ^ 0x5eed);
+            if h % 100 < self.rate { Some(h) } else { None }
+        }
+    }
+    impl Layer for Smear {
+        fn name(&self) -> &str {
+            "smear"
+        }
+        fn max_address(&self) -> u64 {
+            self.inner.max_address()
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            self.inner.read(addr, buf)?;
+            for (i, b) in buf.iter_mut().enumerate() {
+                let a = addr + i as u64;
+                if let Some(h) = self.corrupt(a >> 12) {
+                    *b ^= (crate::util::fxhash::hash_u64(h ^ a) & 0xff) as u8;
+                }
+            }
+            Ok(())
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            self.inner.is_valid(addr, len)
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(crate::layers::Mapping) -> bool) {
+            self.inner.mapping(addr, len, f)
+        }
+        fn lower(&self) -> Option<&Arc<dyn Layer>> {
+            Some(&self.inner)
+        }
+    }
+
+    /// `cargo test --release smear_robustness -- --ignored --nocapture`: walk processes, VADs,
+    /// modules, strings, tokens over a physical layer with corrupted pages -- errors are fine,
+    /// panics are not.
+    #[test]
+    #[ignore]
+    fn smear_robustness() {
+        use crate::symbols::windows::prelude::*;
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let (phys, _) = ctx.physical_arc().unwrap();
+        for rate in [1u64, 5, 20, 50] {
+            let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate });
+            let vl = IntelLayer::new("layer_name", smear, k.dtb, k.layer.mode(), PteFlavor::Windows).with_kernel_virtual_offset(Some(k.base));
+            let vl: &'static IntelLayer = Box::leak(Box::new(vl));
+            let kk = WinKernel { module: Module::new(vl, k.table, k.base), layer: vl, vlayer: vl, phys: k.phys, table: k.table, base: k.base, dtb: k.dtb, pdb_name: String::new(), guid: String::new(), age: 0 };
+            let (mut procs, mut vads, mut mods, mut errs) = (0, 0, 0, 0);
+            for p in crate::plugins::windows::pslist::list_processes(&kk, &|_| Ok(false)) {
+                let Ok(p) = p else {
+                    errs += 1;
+                    continue;
+                };
+                procs += 1;
+                let _ = p.is_valid();
+                let _ = p.image_file_name();
+                let _ = p.get_create_time();
+                let _ = p.get_session_id();
+                let _ = p.get_handle_count();
+                let _ = p.environment_variables();
+                if let Ok(t) = p.m("Token").and_then(|t| t.fast_ref_dereference()).and_then(|t| t.cast("_TOKEN")) {
+                    let _ = t.get_sids();
+                    let _ = t.privileges();
+                }
+                if let Ok(root) = p.get_vad_root() {
+                    for v in root.traverse() {
+                        match v {
+                            Ok(v) => {
+                                vads += 1;
+                                let _ = (v.get_start(), v.get_end(), v.get_file_name(), v.get_commit_charge(), v.get_parent());
+                            }
+                            Err(_) => errs += 1,
+                        }
+                    }
+                }
+                for m in p.load_order_modules() {
+                    match m {
+                        Ok(m) => {
+                            mods += 1;
+                            let _ = m.m("FullDllName").and_then(|n| n.get_string());
+                        }
+                        Err(_) => errs += 1,
+                    }
+                }
+            }
+            for m in crate::plugins::windows::modules::list_modules(&kk) {
+                if let Ok(m) = m {
+                    let _ = m.m("BaseDllName").and_then(|n| n.get_string());
+                }
+            }
+            println!("smear {rate}%: {procs} procs, {vads} vads, {mods} modules, {errs} errors, no panic");
+        }
+    }
+
     /// API proof against python: windows.dlllist.DllList's default output rebuilt from the
     /// core extension API (get_peb / load_order_modules / UNICODE_STRING / get_load_count on
     /// process layers), rendered by the real quick renderer and diffed with the reference.
