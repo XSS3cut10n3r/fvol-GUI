@@ -385,10 +385,11 @@ mod bench {
     struct Smear {
         inner: Arc<dyn Layer>,
         rate: u64,
+        seed: u64,
     }
     impl Smear {
         fn corrupt(&self, page: u64) -> Option<u64> {
-            let h = crate::util::fxhash::hash_u64(page ^ 0x5eed);
+            let h = crate::util::fxhash::hash_u64(page ^ self.seed);
             if h % 100 < self.rate { Some(h) } else { None }
         }
     }
@@ -432,7 +433,7 @@ mod bench {
         let k = ctx.windows_kernel().unwrap();
         let (phys, _) = ctx.physical_arc().unwrap();
         for rate in [1u64, 5, 20, 50] {
-            let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate });
+            let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate, seed: 0x5eed });
             let vl = IntelLayer::new("layer_name", smear, k.dtb, k.layer.mode(), PteFlavor::Windows).with_kernel_virtual_offset(Some(k.base));
             let vl: &'static IntelLayer = Box::leak(Box::new(vl));
             let kk = WinKernel { module: Module::new(vl, k.table, k.base), layer: vl, vlayer: vl, phys: k.phys, table: k.table, base: k.base, dtb: k.dtb, pdb_name: String::new(), guid: String::new(), age: 0 };
@@ -480,6 +481,84 @@ mod bench {
                 }
             }
             println!("smear {rate}%: {procs} procs, {vads} vads, {mods} modules, {errs} errors, no panic");
+        }
+    }
+
+    /// The Mac walkers and class helpers on a corrupted physical layer: every list method,
+    /// process layers, map entries, fileglob types and vnode paths must never panic.
+    #[test]
+    #[ignore]
+    fn smear_robustness_mac() {
+        use crate::automagic::mac::MacKernel;
+        use crate::symbols::mac::{MAX_ELEMENTS, MacExt};
+        let img = "/home/user/rs-vol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp".to_string();
+        let ctx = Context::new(GlobalOptions {
+            file: Some(img),
+            symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let k = ctx.mac_kernel().unwrap();
+        let (phys, _) = ctx.physical_arc().unwrap();
+        for (rate, seed) in [0u64, 1, 2, 5, 10, 20, 50].into_iter().flat_map(|r| (1..=6u64).map(move |s| (r, s * 0x9e37_79b9))) {
+            let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate, seed });
+            let vl = IntelLayer::new("layer_name", smear, k.dtb, k.layer.mode(), PteFlavor::Generic)
+                .with_os("mac")
+                .with_kernel_virtual_offset(Some(k.kaslr_shift));
+            let vl: &'static IntelLayer = Box::leak(Box::new(vl));
+            let kk = MacKernel {
+                module: Module::new(vl, k.table, k.kaslr_shift),
+                layer: vl,
+                vlayer: vl,
+                phys: k.phys,
+                table: k.table,
+                kaslr_shift: k.kaslr_shift,
+                dtb: k.dtb,
+                banner: k.banner.clone(),
+                isf: k.isf.clone(),
+            };
+            let (mut procs, mut entries, mut files, mut errs) = (0, 0, 0, 0);
+            for method in crate::plugins::mac::pslist::PSLIST_METHODS {
+                for p in crate::plugins::mac::pslist::list_tasks(&kk, method, &|_| Ok(false)) {
+                    let Ok(p) = p else {
+                        errs += 1;
+                        continue;
+                    };
+                    procs += 1;
+                    let _ = p.m("p_comm").and_then(|c| crate::objects::util::array_to_string(&c, None));
+                    let Ok(task) = p.get_task() else { continue };
+                    let _ = task.m("map");
+                    let _ = p.add_process_layer();
+                    for e in p.get_map_iter().into_iter().take(64) {
+                        match e {
+                            Ok(e) => {
+                                entries += 1;
+                                let _ = (e.get_perms(), e.get_range_alias(), e.get_special_path(), e.get_offset());
+                                if let Ok(o) = e.get_object() {
+                                    let _ = o.get_map_object();
+                                }
+                            }
+                            Err(_) => errs += 1,
+                        }
+                    }
+                    // proc.p_fd.fd_ofiles[0..=fd_lastfile]: fileglob types and vnode paths
+                    let Ok(fd) = p.m("p_fd").and_then(|f| f.deref()) else { continue };
+                    let n = fd.m("fd_lastfile").and_then(|n| n.int()).unwrap_or(0).clamp(0, 64) as u64;
+                    let Ok(first) = fd.m("fd_ofiles").and_then(|f| f.deref()) else { continue };
+                    let arr = first.cast_array(n + 1, first.ty);
+                    for fp in arr.elements() {
+                        let Ok(f) = fp.deref() else { continue };
+                        let Ok(fg) = f.m("f_fglob").and_then(|g| g.deref()) else { continue };
+                        files += 1;
+                        let _ = fg.get_fg_type();
+                        if let Ok(v) = fg.m("fg_data").and_then(|d| d.deref()).and_then(|d| d.cast("vnode")) {
+                            let _ = v.full_path();
+                        }
+                    }
+                }
+            }
+            let _ = kk.object_from_symbol("allproc").map(|a| a.walk_list_head("le_next", MAX_ELEMENTS));
+            println!("mac smear {rate}% seed {seed:#x}: {procs} procs, {entries} map entries, {files} files, {errs} errors, no panic");
         }
     }
 
