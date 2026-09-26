@@ -649,20 +649,56 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
     // the build is parallel: start the pool's workers while this thread decompresses
     crate::util::pool::warm();
     let json = match take_kept(loc, &url) {
-        Some(j) => std::borrow::Cow::Owned(j),
+        Some(j) => JsonSrc::Bytes(std::borrow::Cow::Owned(j)),
         None => {
             let _t = crate::util::trace::span("isf read+decompress");
-            loc.read()?
+            json_for_build(loc)?
         }
     };
     let blob = build_remember(&url, cf, json, opts, true)?;
     SymbolTable::from_blob(Blob::Shared(blob), name, &url)
 }
 
+/// ISF JSON to build a table from: bytes (decompressed, embedded, kept by the identifier
+/// index), or a plain `.json` file mapped in place.
+enum JsonSrc {
+    Bytes(std::borrow::Cow<'static, [u8]>),
+    Mapped(crate::util::mmap::MapWindow),
+}
+
+impl std::ops::Deref for JsonSrc {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            JsonSrc::Bytes(b) => b,
+            JsonSrc::Mapped(m) => m.as_slice(),
+        }
+    }
+}
+
+/// The JSON of `loc` for a build. A plain `.json` file (a dwarf2json kernel ISF is 50-100 MB)
+/// is mapped, pre-faulted, from the page cache: reading it first faults in and zeroes a fresh
+/// buffer of that size, then copies (28-40 ms for the 46 / 64 MB jammy / noble ISFs vs 7-10 ms
+/// to map; the parse from the mapping is a little slower, net 4-9 ms per cold kernel load).
+fn json_for_build(loc: &IsfLocation) -> Result<JsonSrc> {
+    if let IsfLocation::File(p) = loc
+        && p.as_os_str().as_encoded_bytes().ends_with(b".json")
+    {
+        let f = std::fs::File::open(p)?;
+        let len = f.metadata()?.len() as usize;
+        if len > 0
+            && let Ok(m) = crate::util::mmap::MapWindow::new(&f, 0, len, true)
+        {
+            return Ok(JsonSrc::Mapped(m));
+        }
+    }
+    Ok(JsonSrc::Bytes(loc.read()?))
+}
+
 /// Build the blob of an ISF's JSON, remember it in-process ([`BUILT`]) and write its cache
 /// file in the background (overlapping the plugin run; joined before exit), where the JSON is
 /// freed too.
-fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: std::borrow::Cow<'static, [u8]>, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
+fn build_remember(url: &str, cf: Option<(PathBuf, Vec<u8>)>, json: JsonSrc, opts: &BuildOptions, parallel: bool) -> Result<std::sync::Arc<Vec<u8>>> {
     let blob = {
         let _t = crate::util::trace::span("isf parse+build");
         let b = if parallel { build_blob(&json, opts) } else { super::isf::build_blob_serial(&json, opts) };
@@ -719,7 +755,7 @@ fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool)
             let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
             if !known {
                 let _t = crate::util::trace::span("isf speculative build (identifier index, banner hint)");
-                let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+                let _ = build_remember(&url, cf, JsonSrc::Bytes(std::borrow::Cow::Owned(json)), &BuildOptions::default(), false);
             }
         }
         return;
@@ -733,7 +769,7 @@ fn speculate(loc: &IsfLocation, identifier: &[u8], json: Vec<u8>, decoded: bool)
         let known = cf.as_ref().is_some_and(|(_, key)| BUILT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|b| b.0 == *key));
         if !known {
             let _t = crate::util::trace::span("isf speculative build (identifier index)");
-            let _ = build_remember(&url, cf, std::borrow::Cow::Owned(json), &BuildOptions::default(), false);
+            let _ = build_remember(&url, cf, JsonSrc::Bytes(std::borrow::Cow::Owned(json)), &BuildOptions::default(), false);
         }
         return;
     }
