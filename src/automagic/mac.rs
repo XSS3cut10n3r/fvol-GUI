@@ -84,6 +84,9 @@ pub struct MacAutomagic {
 pub fn init(ctx: &Context) -> Result<MacKernel> {
     let _t = span("mac kernel init (total)");
     let (phys_arc, phys) = ctx.physical_arc()?;
+    if !crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), "MacIntelStacker") {
+        return Err(Error::Unsatisfied("MacIntelStacker disabled by --stackers".into()));
+    }
     let image = ctx.image_path()?;
     let fp = symbol_path_fingerprint();
     let am = match cache_load(&image, &fp) {
@@ -131,16 +134,42 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
         ));
     }
     let scanner = BannerScanner::new(banners.iter().map(|(b, _)| b.as_slice()).collect());
+    let abort = |e: Error| Error::Unsatisfied(format!("Mac automagic failed (exception during stacking: {e})"));
+    // Phase 1: stop the scan at the first hit (the scanning threads are joined) and validate it
+    // alone -- validating while all threads fault in and scan 16 MiB windows is many times
+    // slower (memory bus + mmap lock contention), and the first hit is almost always the kernel.
+    // The scan runs in growing batches (see `scan_each_progressive`): banners sit early in
+    // physical memory, so most of a fixed look-ahead wave would be wasted bandwidth.
+    let first = {
+        let _t = span("mac: banner scan (first hit)");
+        let mut first = None;
+        scan_each_progressive(phys.as_ref(), &scanner, |h| h.0, |h| {
+            first = Some(h);
+            false
+        });
+        first
+    };
+    let Some((off, idx)) = first else {
+        return Err(Error::Unsatisfied("No suitable mac banner could be matched".into()));
+    };
+    {
+        let _t = span("mac: banner validation");
+        let (banner, loc) = &banners[idx as usize];
+        if let Some(a) = try_banner(phys, banner, loc, off).map_err(abort)? {
+            return Ok(a);
+        }
+    }
+    // Phase 2 (first hit rejected): python's loop over the remaining hits, validated inline.
     let mut result: Option<Result<MacAutomagic>> = None;
     {
-        let _t = span("mac: banner scan + validation");
-        let t0 = std::time::Instant::now();
-        scan_each(phys.as_ref(), &scanner, None, |(off, idx)| {
-            if crate::util::trace::enabled() {
-                eprintln!("[trace] mac: banner hit at {off:#x} after {:.3}ms", t0.elapsed().as_secs_f64() * 1e3);
+        let _t = span("mac: banner scan + validation (remaining hits)");
+        let mut skip = 1usize;
+        scan_each_progressive(phys.as_ref(), &scanner, |h| h.0, |(off, idx)| {
+            if skip > 0 {
+                skip -= 1;
+                return true;
             }
             let (banner, loc) = &banners[idx as usize];
-            let _t = span("mac: banner validation");
             match try_banner(phys, banner, loc, off) {
                 Ok(Some(a)) => {
                     result = Some(Ok(a));
@@ -157,7 +186,7 @@ pub fn run(phys: &Arc<dyn Layer>) -> Result<MacAutomagic> {
     }
     match result {
         Some(Ok(a)) => Ok(a),
-        Some(Err(e)) => Err(Error::Unsatisfied(format!("Mac automagic failed (exception during stacking: {e})"))),
+        Some(Err(e)) => Err(abort(e)),
         None => Err(Error::Unsatisfied("No suitable mac banner could be matched".into())),
     }
 }
@@ -228,7 +257,7 @@ pub fn find_aslr(phys: &dyn Layer, table: TableRef, compare_banner: &[u8], compa
     // python `_scan_generator`: every Darwin banner in the layer (regex), first valid wins
     let mut result: Result<u64> = Ok(0);
     let scanner = FnScanner::new(|data: &[u8], off: u64, hits: &mut Vec<u64>| darwin_scan(data, off, DEFAULT_CHUNK_SIZE, hits));
-    scan_each(phys, &scanner, None, |offset| {
+    scan_each_progressive(phys, &scanner, |h| *h, |offset| {
         let banner = match phys.read_vec(offset, 128) {
             Ok(b) => b,
             Err(e) => {
@@ -258,6 +287,64 @@ pub fn find_aslr(phys: &dyn Layer, table: TableRef, compare_banner: &[u8], compa
 // ---------------------------------------------------------------------------------------------
 // Scanners
 // ---------------------------------------------------------------------------------------------
+
+/// [`scan_each`] over the whole layer (python default sections and chunking, hits in python
+/// order, `f` returns false to stop) for scans that usually stop at an early hit, like banner
+/// scans: the chunks are scanned in growing batches (1, 2, 4, ... up to 4x the thread count)
+/// instead of with `scan_each`'s fixed look-ahead of 2x threads 16 MiB chunks. A banner in
+/// chunk 4 then costs ~7 chunks of work in 3 short rounds rather than a memory-bandwidth-bound
+/// wave of ~40 chunks; a full scan pays a handful of batch barriers (a few percent).
+///
+/// Each batch is scanned with a section starting exactly at its first chunk, so the batch's
+/// chunks are python's chunks; the section ends where python's last chunk of the batch ends,
+/// which makes the layer produce one extra overlap-sized tail chunk whose hits (offset >= last
+/// chunk start + chunk_size) belong to the next batch and are dropped via `offset_of`.
+pub fn scan_each_progressive<S, F, O>(layer: &dyn Layer, scanner: &S, offset_of: O, mut f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+    O: Fn(&S::Hit) -> u64,
+{
+    let cs = scanner.chunk_size();
+    let chunks = crate::layers::scan::chunk_layout(layer, cs, scanner.overlap(), None);
+    let n = chunks.len();
+    if n == 0 {
+        return;
+    }
+    // python default section: (min_address, max_address - min_address)
+    let section_end = layer.max_address();
+    let max_batch = crate::util::par::threads() * 4;
+    let (mut i0, mut batch) = (0usize, 1usize);
+    while i0 < n {
+        let i1 = (i0 + batch).min(n);
+        let start = chunks[i0].0;
+        let (end, limit) = if i1 == n {
+            (section_end, u64::MAX)
+        } else {
+            let (ls, ll) = chunks[i1 - 1];
+            (ls.saturating_add(ll), ls.saturating_add(cs))
+        };
+        let mut stopped = false;
+        if end > start {
+            scan_each(layer, scanner, Some(&[(start, end - start)]), |h| {
+                if offset_of(&h) >= limit {
+                    return true;
+                }
+                if f(h) {
+                    true
+                } else {
+                    stopped = true;
+                    false
+                }
+            });
+        }
+        if stopped {
+            return;
+        }
+        i0 = i1;
+        batch = (batch * 2).min(max_batch);
+    }
+}
 
 /// python `MultiStringScanner(banners)` semantics (leftmost-longest, non-overlapping, only
 /// hits starting before `chunk_size`), accelerated for banner sets: every banner shares a long
@@ -492,7 +579,7 @@ mod tests {
     #[ignore]
     fn mac_scan_bench() {
         let Some(img) = std::env::var_os("RSVOL_MAC_IMAGE") else { return };
-        let phys: Arc<dyn Layer> = crate::automagic::stack_physical(std::path::Path::new(&img)).unwrap();
+        let phys: Arc<dyn Layer> = crate::automagic::stack_physical(std::path::Path::new(&img), None).unwrap().0;
         let sp = symbols::SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
         let banners = symbols::store::identifier_index(&sp).dictionary("mac");
         let pats: Vec<&[u8]> = banners.iter().map(|(b, _)| b.as_slice()).collect();
@@ -512,6 +599,165 @@ mod tests {
             let hits3 = crate::layers::scan::scan(phys.as_ref(), &sc, None);
             let s = t.elapsed().as_secs_f64();
             eprintln!("[{round}] Darwin regex scanner:          {} hits, {:.3}s, {:.2} GB/s", hits3.len(), s, gb / s);
+        }
+    }
+
+    /// Per-chunk cost breakdown (page faults vs memmem), single thread.
+    #[test]
+    #[ignore]
+    fn mac_chunk_bench() {
+        let Some(img) = std::env::var_os("RSVOL_MAC_IMAGE") else { return };
+        let fl = crate::layers::FileLayer::open(std::path::Path::new(&img)).unwrap();
+        let file = std::fs::File::open(&img).unwrap();
+        let prefix = b"Darwin Kernel Version 1";
+        let cs = 16usize << 20;
+        let time = |name: &str, f: &mut dyn FnMut() -> usize| {
+            let t = std::time::Instant::now();
+            let n = f();
+            eprintln!("{name}: {:.3}ms ({n})", t.elapsed().as_secs_f64() * 1e3);
+        };
+        let count = |d: &[u8]| {
+            let mut n = 0;
+            let mut p = 0;
+            while let Some(i) = find(&d[p..], prefix) {
+                n += 1;
+                p += i + 1;
+            }
+            n
+        };
+        // global mapping, first touch (faults) then again (hot)
+        let base = 0x10_0000_0000usize.min(fl.len() as usize - 5 * cs) & !0xfff;
+        let base = base.min(1 << 30);
+        time("global mmap 16MiB first touch + memmem", &mut || count(&fl.data()[base..base + cs]));
+        time("global mmap 16MiB hot memmem", &mut || count(&fl.data()[base..base + cs]));
+        time("MapWindow(populate=false) 16MiB map+memmem+unmap", &mut || {
+            let w = crate::util::mmap::MapWindow::new(&file, (base + cs) as u64, cs, false).unwrap();
+            count(w.as_slice())
+        });
+        time("MapWindow(populate=true) 16MiB map+memmem+unmap", &mut || {
+            let w = crate::util::mmap::MapWindow::new(&file, (base + 2 * cs) as u64, cs, true).unwrap();
+            count(w.as_slice())
+        });
+        time("MapWindow(populate=true) map only", &mut || {
+            let w = crate::util::mmap::MapWindow::new(&file, (base + 3 * cs) as u64, cs, true).unwrap();
+            w.as_slice().len()
+        });
+        let mut buf = vec![0u8; cs];
+        time("pread 16MiB + memmem", &mut || {
+            use std::os::unix::fs::FileExt;
+            file.read_exact_at(&mut buf, (base + 4 * cs) as u64).unwrap();
+            count(&buf)
+        });
+        time("hot buffer memchr(D) count", &mut || buf.iter().filter(|&&b| b == b'D').count());
+    }
+
+    /// A flat data layer (no lower layer).
+    struct Buf(Vec<u8>);
+    impl Layer for Buf {
+        fn name(&self) -> &str {
+            "buf"
+        }
+        fn max_address(&self) -> u64 {
+            self.0.len() as u64 - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            let a = addr as usize;
+            match self.0.get(a..a + buf.len()) {
+                Some(s) => {
+                    buf.copy_from_slice(s);
+                    Ok(())
+                }
+                None => Err(Error::invalid(addr)),
+            }
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            addr + len <= self.0.len() as u64
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(crate::layers::Mapping) -> bool) {
+            f(crate::layers::Mapping { offset: addr, len, mapped: addr });
+        }
+    }
+
+    /// A segmented layer over `lower`: runs (offset, len, mapped).
+    struct Seg {
+        lower: Arc<dyn Layer>,
+        runs: Vec<(u64, u64, u64)>,
+        max: u64,
+    }
+    impl Layer for Seg {
+        fn name(&self) -> &str {
+            "seg"
+        }
+        fn max_address(&self) -> u64 {
+            self.max
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            for &(o, l, m) in &self.runs {
+                if addr >= o && addr + buf.len() as u64 <= o + l {
+                    return self.lower.read(m + (addr - o), buf);
+                }
+            }
+            Err(Error::invalid(addr))
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            self.runs.iter().any(|&(o, l, _)| addr >= o && addr + len <= o + l)
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(crate::layers::Mapping) -> bool) {
+            let end = addr + len;
+            for &(o, l, m) in &self.runs {
+                let (s, e) = (o.max(addr), (o + l).min(end));
+                if s < e && !f(crate::layers::Mapping { offset: s, len: e - s, mapped: m + (s - o) }) {
+                    return;
+                }
+            }
+        }
+        fn lower(&self) -> Option<&Arc<dyn Layer>> {
+            Some(&self.lower)
+        }
+    }
+
+    #[test]
+    fn progressive_scan_matches_scan_each() {
+        // needle occurrences everywhere, incl. across chunk boundaries and in overlaps
+        let mut data = vec![b'.'; 40_000];
+        let needle = b"NEEDLE";
+        let mut p = 3usize;
+        while p + needle.len() < data.len() {
+            data[p..p + needle.len()].copy_from_slice(needle);
+            p += 97 + (p % 13);
+        }
+        for &(chunk, overlap) in &[(256u64, 16u64), (1000, 100), (4096, 4096), (333, 7)] {
+            let sc = FnScanner::new(move |d: &[u8], off: u64, hits: &mut Vec<u64>| {
+                let mut pos = 0;
+                while let Some(i) = find(&d[pos..], needle) {
+                    let at = pos + i;
+                    if at as u64 >= chunk {
+                        break;
+                    }
+                    hits.push(off + at as u64);
+                    pos = at + 1;
+                }
+            })
+            .with_chunking(chunk, overlap);
+            let flat: Arc<dyn Layer> = Arc::new(Buf(data.clone()));
+            let seg = Seg { lower: flat.clone(), runs: vec![(0, 5000, 100), (5000, 3000, 9000), (9000, 20_000, 12_000)], max: 28_999 };
+            for layer in [flat.as_ref(), &seg as &dyn Layer] {
+                let want = crate::layers::scan::scan(layer, &sc, None);
+                let mut got = Vec::new();
+                scan_each_progressive(layer, &sc, |h| *h, |h| {
+                    got.push(h);
+                    true
+                });
+                assert_eq!(got, want, "chunk {chunk} overlap {overlap} layer {}", layer.name());
+                assert!(!want.is_empty());
+                // early stop after k hits
+                let mut first = Vec::new();
+                scan_each_progressive(layer, &sc, |h| *h, |h| {
+                    first.push(h);
+                    first.len() < 5
+                });
+                assert_eq!(first, want[..5]);
+            }
         }
     }
 
