@@ -196,7 +196,7 @@ pub fn remote_identifiers(url: &str) -> Result<Vec<(String, Vec<u8>, String)>> {
 fn embedded_stamp(data: &[u8]) -> u64 {
     static EXE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     let exe = EXE.get_or_init(|| {
-        let (s, m) = paths::file_stamp(&std::env::current_exe().ok()?)?;
+        let (s, m) = paths::file_stamp(paths::current_exe()?)?;
         let mut h = FxHasher::default();
         h.write_u64(s);
         h.write_u64(m as u64);
@@ -246,7 +246,7 @@ impl SymbolPath {
             let p = if p.is_absolute() { p } else { std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p) };
             roots.push(Root::Dir(p));
         }
-        if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe) = paths::current_exe() {
             if let Some(dir) = exe.parent() {
                 let s = dir.join("symbols");
                 if s.is_dir() {
@@ -409,7 +409,7 @@ pub fn python_install() -> Option<PathBuf> {
         }
         return None;
     }
-    let exe = std::env::current_exe().ok()?;
+    let exe = paths::current_exe()?;
     let mut dir = exe.parent();
     for _ in 0..10 {
         let d = dir?;

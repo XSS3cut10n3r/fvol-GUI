@@ -45,7 +45,7 @@ pub mod cache {
     use std::hash::Hasher;
 
     fn file_for(image: &Path, kind: &str) -> Option<std::path::PathBuf> {
-        let canon = std::fs::canonicalize(image).ok()?;
+        let canon = paths::canonicalize(image).ok()?;
         let (size, mtime) = paths::file_stamp(&canon)?;
         let mut h = FxHasher::default();
         h.write(canon.to_string_lossy().as_bytes());
