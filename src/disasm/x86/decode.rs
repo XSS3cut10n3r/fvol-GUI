@@ -657,6 +657,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         for k in 0..out.op_count as usize {
             if let Operand::Mem(ref mut m) = out.operands[k] {
                 m.bcst = vl / (bcst_elem & 0x0F);
+                if flags & F_BCST_HALF != 0 {
+                    m.bcst /= 2;
+                }
                 m.size = match bcst_elem {
                     2 => MemSize::Word,
                     4 => MemSize::Dword,
@@ -834,7 +837,7 @@ fn memsize_for(st: &St, cls: u8, mk: u8) -> MemSize {
             _ => MemSize::Qword,
         },
         K_Z => {
-            if st.has66 {
+            if st.mosz == 2 {
                 MemSize::Word
             } else {
                 MemSize::Dword
@@ -1148,7 +1151,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
             S_FIXED => Operand::Reg(Reg(s.cls)),
             S_ACC => {
                 let size = if s.cls == C_A {
-                    st.asz
+                    if m64 { st.asz } else { 4 }
                 } else if s.cls == C_Z && st.osz == 8 {
                     4
                 } else {
@@ -1256,7 +1259,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                     // call rel16 and 64-bit mode forms are sign-extended.
                     match st.le(2) {
                         Some(v) => {
-                            if !m64 && e.flags & F_RELQ != 0 {
+                            if !m64 && e.flags & F_RELQ != 0 && st.asz != 2 {
                                 v as i64
                             } else {
                                 v as u16 as i16 as i64

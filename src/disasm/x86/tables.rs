@@ -178,6 +178,7 @@ pub(crate) const F_NOBR: u64 = 1 << 33; // EVEX.b must be 0 (register form)
 pub(crate) const F_NOBM: u64 = 1 << 34; // EVEX.b must be 0 (memory form)
 pub(crate) const F_BCST_QB: u64 = 1 << 35; // {1toN} by qword, printed "byte ptr", disp8 unscaled
 pub(crate) const F_NOPFX: u64 = 1 << 36; // (computed) entry has no mandatory-prefix constraint
+pub(crate) const F_BCST_HALF: u64 = 1 << 37; // {1toN}: N = vector bytes / (2 * element size)
 
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Entry {
@@ -534,6 +535,7 @@ fn parse_flag(tok: &str) -> Result<u64, String> {
         "nobr" => F_NOBR,
         "nobm" => F_NOBM,
         "bqb" => F_BCST_QB,
+        "bh" => F_BCST_HALF,
         "bd" => F_BCST_D,
         "bq" => F_BCST_Q,
         "bw" => F_BCST_W,
@@ -670,7 +672,11 @@ impl Builder {
         }
         let idx = self.entries.len() as u16;
         self.entries.push(e);
-        let spec: u32 = (0..NSEL).map(|k| if sel[k] != full(k) { 1 + (8 - sel[k].count_ones()) } else { 0 }).sum();
+        let mut spec: u32 = (0..NSEL).map(|k| if sel[k] != full(k) { 1 + (8 - sel[k].count_ones()) } else { 0 }).sum();
+        if mn == "INVALID" {
+            // explicit invalidity overrides always win
+            spec += 1000;
+        }
         for op in lo..=hi {
             self.raws[map * 256 + op as usize].push(Raw { sel, spec, entry: idx, line: ln });
         }

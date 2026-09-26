@@ -109,7 +109,8 @@ pub(crate) const SPEC: &str = r#"
 0f 1c 66 m : nop m:v/z
 0f 1d m : nop m:v/z
 0f 1e m : nop m:v/z
-0f 1f : nop m:v ; lock
+0f 1f o32|o64 : nop m:v ; lock
+0f 1f o16 : nop m:v
 # ------------------------------------------------------------------ 0F 20-2F
 0f 20 : mov R:n, r:c ; regform
 0f 21 : mov R:n, r:dr ; regform
@@ -370,6 +371,7 @@ pub(crate) const SPEC: &str = r#"
 0f ae np @e8 : lfence
 0f ae np @f0 : mfence
 0f ae np @f8 : sfence
+0f ae f3|f2 p66 w0 : INVALID
 0f ae 66 m /6 : clwb M:/b
 0f ae 66 m /7 : clflushopt M:/b
 0f ae 66 r /6 : tpause R:d

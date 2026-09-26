@@ -282,6 +282,10 @@ def evex_flags(enc, bits, mm, pp, W, L, op, r, form, base_nov, base_ops):
             if mems and mems[0][2]:
                 kw = mems[0][1]
                 flags.append({"d": "bd", "q": "bq", "w": "bw", "b": "bqb"}.get(kw, "b?"))
+                esz = {"d": 4, "q": 8, "w": 2}.get(kw)
+                vl = 16 << min(L, 2)
+                if esz and mems[0][2] * esz * 2 == vl:
+                    flags.append("bh")
     return flags
 
 
@@ -348,7 +352,7 @@ def class_entries(forms):
         return t, tuple(sorted(f for f in fl if not f.startswith("rcpos")))
 
     rset = lambda F: set(f for f in F[2] if not f.startswith("rcpos")) - {"er", "sae", "nobr"}
-    if R and M and R[0] == M[0] and rset(R) == set(M[2]) - {"bd", "bq", "bw", "bqb", "nobm"}:
+    if R and M and R[0] == M[0] and rset(R) == set(M[2]) - {"bd", "bq", "bw", "bqb", "bh", "nobm"}:
         c = combine(R[1], M[1])
         if c is not None:
             t = ops_tokens(c, "rm")
@@ -515,6 +519,9 @@ def emit(table):
                 fl = list(flags)
                 if mn in ("vcmpps", "vcmppd", "vcmpss", "vcmpsd"):
                     fl.append("cmp32")
+                if k == "xop" and mm == 10:
+                    # XOP map 0xA (bextr / lwpins / lwpval) takes a 32-bit immediate
+                    toks = tuple("i:d" if t == "i:b" else t for t in toks)
                 if mn in ("vpermil2ps", "vpermil2pd"):
                     # the imm8 is the low nibble of the is4 byte (no extra byte)
                     toks = tuple("i:lo4" if t == "i:b" else t for t in toks)
