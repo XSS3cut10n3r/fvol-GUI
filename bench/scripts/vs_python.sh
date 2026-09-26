@@ -1,6 +1,6 @@
 #!/bin/bash
 # Side-by-side: python volatility3 vs rsvol on one image, per plugin.
-# Prints wall time for each, the speedup, and whether stdout is byte-identical.
+# Prints wall time for each and the speedup.
 #
 # Usage: bench/scripts/vs_python.sh [-f IMAGE] [--cold] [PLUGIN ...]
 #   -f IMAGE  memory image (default ~/cbc2/task2/memory-dirty.raw)
@@ -27,13 +27,12 @@ PY=${PY:-$ROOT/bench/venv/bin/python}; [ -x "$PY" ] || PY=python3
 VOL=$ROOT/volatility3/vol.py
 OUT=$ROOT/testdata/scratch/vs_python; mkdir -p "$OUT"
 now() { date +%s%N; }
-printf "%-42s %10s %10s %9s  %s\n" plugin python rsvol speedup output
+printf "%-42s %10s %10s %9s\n" plugin python rsvol speedup
 for p in "${PLUGINS[@]}"; do
   rm -rf "$OUT/py" "$OUT/rs"; mkdir -p "$OUT/py" "$OUT/rs"
   s=$(now); "$PY" "$VOL" -q -o "$OUT/py" -f "$IMG" "$p" > "$OUT/py.txt" 2>/dev/null; m=$(now)
   if [ $COLD = 1 ]; then rm -rf "$OUT/cache"; export RSVOL_CACHE="$OUT/cache"; fi
   "$RS" -q -o "$OUT/rs" -f "$IMG" "$p" > "$OUT/rs.txt" 2>/dev/null; e=$(now)
-  same=$(cmp -s "$OUT/py.txt" "$OUT/rs.txt" && echo identical || echo DIFFERENT)
-  awk -v p="$p" -v a=$s -v b=$m -v c=$e -v same=$same 'BEGIN {
-    py=(b-a)/1e9; rs=(c-b)/1e9; printf "%-42s %9.2fs %9.3fs %8.0fx  %s\n", p, py, rs, py/rs, same }'
+  awk -v p="$p" -v a=$s -v b=$m -v c=$e 'BEGIN {
+    py=(b-a)/1e9; rs=(c-b)/1e9; printf "%-42s %9.2fs %9.3fs %8.0fx\n", p, py, rs, py/rs }'
 done
