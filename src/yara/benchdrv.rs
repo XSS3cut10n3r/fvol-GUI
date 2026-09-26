@@ -295,6 +295,32 @@ fn yara_scaling_probe() {
         }
         println!("{name:<16} {}  | GB/s {}", per_call.join("  "), scaling.join("  "));
     }
+    // Shared-Regex contention: T threads calling `search` on 64-byte strings (scratch
+    // space comes from the regex's pool on every call).
+    if std::env::var("RSVOL_BENCH_REGEX_CASES").is_ok() {
+        let re = Regex::new(br"https?://[a-zA-Z0-9./?=_%:-]+", 0).expect("regex");
+        let calls = 200_000usize;
+        let mut row = Vec::new();
+        for threads in [1usize, 2, 4, 8, 16] {
+            let (best, _) = secs_best(3, || {
+                std::thread::scope(|s| {
+                    for t in 0..threads {
+                        let re = &re;
+                        s.spawn(move || {
+                            let mut acc = 0usize;
+                            for i in 0..calls {
+                                let off = ((i * 64 + t * 4096) % (hay.len() - 64)) & !63;
+                                acc += re.search(&hay[off..off + 64], 0).is_some() as usize;
+                            }
+                            black_box(acc)
+                        });
+                    }
+                });
+            });
+            row.push(format!("{threads}T {:.1}", (threads * calls) as f64 / 1e6 / best));
+        }
+        println!("regex search() on 64-byte strings, Mcalls/s: {}", row.join("  "));
+    }
 }
 
 /// Where YARA scan time goes (developer probe, ignored test):

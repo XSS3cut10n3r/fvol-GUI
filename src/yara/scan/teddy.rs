@@ -372,14 +372,23 @@ impl Teddy {
         {
             if has_avx2() && !force_scalar() {
                 let mut cands = [0u64; CAND_CAP];
+                // No window byte >= 0x80 (high-nibble entries 8..15 all empty): `vpshufb`
+                // on the raw byte gives the low-nibble entry for ASCII bytes and 0 for the
+                // others, which the high-nibble lookup rejects anyway: skip the mask.
+                let ascii = (0..self.m).all(|j| self.hi[j][8..].iter().all(|&x| x == 0));
                 loop {
                     // SAFETY: AVX2 availability checked at runtime.
                     let (next, k) = unsafe {
-                        match self.m {
-                            1 => core_avx2::<1, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
-                            2 => core_avx2::<2, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
-                            3 => core_avx2::<3, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
-                            _ => core_avx2::<4, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                        let (lo, hi) = (&self.lo, &self.hi);
+                        match (self.m, ascii) {
+                            (1, false) => core_avx2::<1, DIFF, false>(lo, hi, live, hay, q, to, &mut cands),
+                            (2, false) => core_avx2::<2, DIFF, false>(lo, hi, live, hay, q, to, &mut cands),
+                            (3, false) => core_avx2::<3, DIFF, false>(lo, hi, live, hay, q, to, &mut cands),
+                            (_, false) => core_avx2::<4, DIFF, false>(lo, hi, live, hay, q, to, &mut cands),
+                            (1, true) => core_avx2::<1, DIFF, true>(lo, hi, live, hay, q, to, &mut cands),
+                            (2, true) => core_avx2::<2, DIFF, true>(lo, hi, live, hay, q, to, &mut cands),
+                            (3, true) => core_avx2::<3, DIFF, true>(lo, hi, live, hay, q, to, &mut cands),
+                            (_, true) => core_avx2::<4, DIFF, true>(lo, hi, live, hay, q, to, &mut cands),
                         }
                     };
                     for &c in &cands[..k.min(CAND_CAP)] {
@@ -424,7 +433,7 @@ const CAND_CAP: usize = 256;
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline(never)]
-unsafe fn core_avx2<const M: usize, const DIFF: bool>(
+unsafe fn core_avx2<const M: usize, const DIFF: bool, const ASCII: bool>(
     lo_t: &[[u8; 16]; MAX_WINDOW],
     hi_t: &[[u8; 16]; MAX_WINDOW],
     live: u8,
@@ -460,14 +469,14 @@ unsafe fn core_avx2<const M: usize, const DIFF: bool>(
     let classify = |p: usize| -> __m256i {
         let v = load(p);
         let mut acc = _mm256_and_si256(
-            _mm256_shuffle_epi8(lo[0], _mm256_and_si256(v, nib)),
+            _mm256_shuffle_epi8(lo[0], if ASCII { v } else { _mm256_and_si256(v, nib) }),
             _mm256_shuffle_epi8(hi[0], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
         );
         let mut j = 1;
         while j < M {
             let v = load(p + j);
             let r = _mm256_and_si256(
-                _mm256_shuffle_epi8(lo[j], _mm256_and_si256(v, nib)),
+                _mm256_shuffle_epi8(lo[j], if ASCII { v } else { _mm256_and_si256(v, nib) }),
                 _mm256_shuffle_epi8(hi[j], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
             );
             acc = _mm256_and_si256(acc, r);
@@ -480,6 +489,10 @@ unsafe fn core_avx2<const M: usize, const DIFF: bool>(
     // Loads touch [q, q + 64 + M - 1).
     let extra = M - 1 + DIFF as usize;
     while q + 64 <= to && q + 64 + extra <= n && k + 64 <= CAND_CAP {
+        if q + 4096 < n {
+            // SAFETY: in bounds (see memchr's block loops for why one page ahead).
+            unsafe { _mm_prefetch::<_MM_HINT_T0>(ptr.add(q + 4096) as *const i8) };
+        }
         let a = classify(q);
         let b = classify(q + 32);
         let ma = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, zero)) as u32) as u64;

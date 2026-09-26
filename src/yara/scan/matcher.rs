@@ -636,9 +636,18 @@ impl Matcher {
     /// Scan `data`. On return `out.len() == strings.len()` and `out[i]` holds the
     /// matches of string `i`, sorted by offset, one per offset, capped at
     /// [`MAX_STRING_MATCHES`].
+    ///
+    /// Uses a per-thread [`Scratch`] (kept between calls: repeated scans of small
+    /// buffers, e.g. one per VAD, do not rebuild the hex/regex scan state each time).
     pub fn scan(&self, data: &[u8], out: &mut Vec<Vec<Match>>) {
-        let mut sc = Scratch::new();
-        self.scan_with(&mut sc, data, out);
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::new());
+        }
+        SCRATCH.with(|cell| match cell.try_borrow_mut() {
+            Ok(mut sc) => self.scan_with(&mut sc, data, out),
+            // re-entered (a scan from inside a scan): private scratch
+            Err(_) => self.scan_with(&mut Scratch::new(), data, out),
+        })
     }
 
     /// [`Matcher::scan`] with caller-owned scratch space (no allocation per call once
