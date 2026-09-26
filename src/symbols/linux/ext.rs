@@ -145,8 +145,10 @@ pub trait LinuxExt {
     fn hlist_to_list(&self, symbol_type: &str, member: &str) -> HListIter;
 
     // ---- dispatching
-    /// python `is_valid()` of `task_struct`, `vm_area_struct` and `inode` (python exceptions ->
-    /// false; use [`LinuxExt::vma_is_valid`] to keep them). Other types: `true` (not ported yet).
+    /// python `is_valid()` of `task_struct`, `vm_area_struct`, `inode`, `vfsmount`, `page` and
+    /// `module` (python exceptions -> false; use [`LinuxExt::vma_is_valid`],
+    /// `FsExt::page_is_valid` or `module::module_is_valid_checked` to keep them). Pointers are
+    /// followed like python. Other types: `true`.
     fn is_valid(&self) -> bool;
 
     // ---- task_struct
@@ -347,6 +349,7 @@ impl LinuxExt for Obj {
             Some("vm_area_struct") => self.vma_is_valid().unwrap_or(false),
             Some("vfsmount") => vfsmount_is_valid(self).unwrap_or(false),
             Some("page") => super::fs::FsExt::page_is_valid(self).unwrap_or(false),
+            Some("module") => super::module::module_is_valid(self),
             _ => true,
         }
     }
