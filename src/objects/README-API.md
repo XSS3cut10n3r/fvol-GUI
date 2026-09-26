@@ -361,6 +361,10 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
 * Errors: return `Err(e)`; python's "skip this row on InvalidAddressException" is
   `match row() { Err(e) if e.is_invalid_address() => continue, ... }`.
+  An `Error::Msg` / `Error::Symbol` whose text starts with a python builtin exception name
+  (`"AttributeError: ..."`, `"ValueError: ..."`, `"TypeError: ..."`, `"KeyError"`, ... see
+  `cli::python_builtin_exception`) is reported like python's uncaught exception (traceback on
+  stderr, no `"\n\n"` on stdout); other errors get python's `process_exceptions` block.
 
 ## Performance notes
 
