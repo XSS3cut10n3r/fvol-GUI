@@ -282,14 +282,15 @@ impl Blob {
     }
 }
 
-/// Append-only store of runtime-created type nodes, readable without locks.
-struct RuntimeNodes {
+/// Append-only store of type nodes interned by value, readable without locks (runtime-created
+/// types; a lazy table's ISF nodes).
+pub(crate) struct RuntimeNodes {
     segs: [AtomicPtr<Ty>; 24],
     len: Mutex<(usize, crate::util::FxHashMap<Ty, u32>)>,
 }
 
 impl RuntimeNodes {
-    fn new() -> RuntimeNodes {
+    pub(crate) fn new() -> RuntimeNodes {
         RuntimeNodes { segs: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())), len: Mutex::new((0, Default::default())) }
     }
     #[inline]
@@ -299,7 +300,7 @@ impl RuntimeNodes {
         let k = (usize::BITS - 1 - q.leading_zeros()) as usize;
         (k, i - 64 * ((1 << k) - 1))
     }
-    fn get(&self, i: usize) -> Option<Ty> {
+    pub(crate) fn get(&self, i: usize) -> Option<Ty> {
         let (k, j) = Self::locate(i);
         let p = self.segs.get(k)?.load(Ordering::Acquire);
         if p.is_null() {
@@ -308,19 +309,30 @@ impl RuntimeNodes {
         // entries below the published length are initialised before the pointer is shared
         Some(unsafe { *p.add(j) })
     }
-    fn intern(&self, t: Ty) -> u32 {
-        let mut g = self.len.lock().unwrap();
+    pub(crate) fn intern(&self, t: Ty) -> u32 {
+        let mut g = self.len.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&i) = g.1.get(&t) {
             return i;
         }
+        Self::push(&mut g, &self.segs, t)
+    }
+
+    /// A new node holding `Ty::Unresolved(itself)` (never shared by value: one per descriptor).
+    pub(crate) fn push_holder(&self) -> u32 {
+        let mut g = self.len.lock().unwrap_or_else(|e| e.into_inner());
+        let i = g.0 as u32;
+        Self::push(&mut g, &self.segs, Ty::Unresolved(TypeIdx(i)))
+    }
+
+    fn push(g: &mut (usize, crate::util::FxHashMap<Ty, u32>), segs: &[AtomicPtr<Ty>; 24], t: Ty) -> u32 {
         let i = g.0;
         let (k, j) = Self::locate(i);
-        let mut p = self.segs[k].load(Ordering::Acquire);
+        let mut p = segs[k].load(Ordering::Acquire);
         if p.is_null() {
             let seg: Box<[Ty]> = vec![Ty::Void; 64 << k].into_boxed_slice();
             p = Box::into_raw(seg) as *mut Ty;
             unsafe { *p.add(j) = t };
-            self.segs[k].store(p, Ordering::Release);
+            segs[k].store(p, Ordering::Release);
         } else {
             unsafe { *p.add(j) = t };
         }
@@ -376,6 +388,9 @@ pub struct SymbolTable {
     exact_linear: AtomicU32,
     /// per user type: 0 = not yet validated, 1 = valid, 2 = corrupt (see `validate_type`)
     checked: Box<[AtomicU8]>,
+    /// A lazy table ([`super::lazy`]): user types, symbols and type nodes come from here; the
+    /// blob holds only the natives, enums and metadata.
+    lazy: Option<std::sync::Arc<super::lazy::LazyCore>>,
 }
 
 // ----- raw little-endian readers -----
@@ -459,7 +474,20 @@ impl SymbolTable {
             by_addr: OnceLock::new(),
             exact_linear: AtomicU32::new(0),
             checked,
+            lazy: None,
         })
+    }
+
+    /// A table over a lazy core (see [`super::lazy`]).
+    pub(crate) fn from_lazy(core: std::sync::Arc<super::lazy::LazyCore>, name: &str, url: &str) -> Result<SymbolTable> {
+        let mut t = Self::from_blob(Blob::Shared(core.skeleton.clone()), name, url)?;
+        t.lazy = Some(core);
+        Ok(t)
+    }
+
+    /// Whether user types and symbols are resolved on demand (a lazy table).
+    pub fn is_lazy(&self) -> bool {
+        self.lazy.is_some()
     }
 
     /// Check user type `ut`'s member range, hash slots and member name ranges (what `member()`
@@ -589,6 +617,9 @@ impl SymbolTable {
         if i.0 & TypeIdx::RUNTIME != 0 {
             return self.runtime.get((i.0 & !TypeIdx::RUNTIME) as usize).unwrap_or(Ty::Void);
         }
+        if let Some(l) = &self.lazy {
+            return l.node(i);
+        }
         let n = self.sec(sec::NODES);
         let o = i.0 as usize * NODE_SZ;
         if o + NODE_SZ > n.len() {
@@ -604,6 +635,9 @@ impl SymbolTable {
 
     /// Name recorded for an unresolved reference.
     pub fn unresolved_name(&self, i: TypeIdx) -> &str {
+        if let Some(l) = &self.lazy {
+            return l.unresolved_name(i);
+        }
         let n = self.sec(sec::NODES);
         let o = i.0 as usize * NODE_SZ;
         if o + NODE_SZ > n.len() {
@@ -620,19 +654,32 @@ impl SymbolTable {
     }
     /// Number of user types.
     pub fn user_type_count(&self) -> usize {
+        if let Some(l) = &self.lazy {
+            return l.user_type_count();
+        }
         self.sec(sec::UTYPES).len() / UTYPE_SZ
     }
     /// Name of user type `i`.
     pub fn user_type_name(&self, i: u32) -> &str {
+        if let Some(l) = &self.lazy {
+            return l.user_type_name(i);
+        }
         self.rec_str(self.utype_rec(i))
     }
     /// Size of user type `i`.
     pub fn user_type_size(&self, i: u32) -> u64 {
+        if let Some(l) = &self.lazy {
+            return l.user(i).map_or(0, |u| u.size as u64);
+        }
         rd32(self.utype_rec(i), 12) as u64
     }
     /// struct / union / class.
     pub fn user_type_kind(&self, i: u32) -> UserKind {
-        match rd32(self.utype_rec(i), 8) {
+        let kind = match &self.lazy {
+            Some(l) => l.user(i).map_or(0, |u| u.kind),
+            None => rd32(self.utype_rec(i), 8),
+        };
+        match kind {
             1 => UserKind::Union,
             2 => UserKind::Class,
             _ => UserKind::Struct,
@@ -641,11 +688,17 @@ impl SymbolTable {
     /// Index of a user type by name.
     #[inline]
     pub fn user_type(&self, name: &str) -> Option<u32> {
+        if let Some(l) = &self.lazy {
+            return l.user_type(name);
+        }
         self.lookup(sec::H_UTYPES, sec::UTYPES, UTYPE_SZ, name)
     }
     /// Look up a member of user type `ut` (hashed; ~20ns).
     #[inline]
     pub fn member(&self, ut: u32, name: &str) -> Option<Member<'_>> {
+        if let Some(l) = &self.lazy {
+            return l.user(ut)?.member(name).map(|(name, offset, ty)| Member { name, offset, ty });
+        }
         let b = self.b();
         let (uo, ul) = self.secs[sec::UTYPES];
         let ut = ut as usize;
@@ -700,16 +753,21 @@ impl SymbolTable {
     }
     /// All members of user type `ut` in ISF order.
     pub fn members(&self, ut: u32) -> impl Iterator<Item = Member<'_>> + '_ {
-        let r = self.utype_rec(ut);
+        let lazy = self.lazy.as_ref().and_then(|l| l.user(ut)).map(|u| u.members().map(|(name, offset, ty)| Member { name, offset, ty }));
+        let blob = if self.lazy.is_some() {
+            0..0
+        } else {
+            let r = self.utype_rec(ut);
+            let n = (self.sec(sec::MEMBERS).len() / MEMBER_SZ) as u64;
+            // clamped to the section: a corrupt count must not become a 4-billion-step loop
+            let mstart = (rd32(r, 16) as u64).min(n);
+            mstart..(mstart + rd32(r, 20) as u64).min(n)
+        };
         let ms = self.sec(sec::MEMBERS);
-        // clamped to the section: a corrupt count must not become a 4-billion-step loop
-        let n = (ms.len() / MEMBER_SZ) as u64;
-        let mstart = (rd32(r, 16) as u64).min(n);
-        let mend = (mstart + rd32(r, 20) as u64).min(n);
-        (mstart..mend).map(move |mi| {
+        lazy.into_iter().flatten().chain(blob.map(move |mi| {
             let rec = ms.get(mi as usize * MEMBER_SZ..(mi as usize + 1) * MEMBER_SZ).unwrap_or(&ZERO_REC);
             Member { name: self.rec_str(rec), offset: rd64(rec, 8), ty: ty_decode(&rec[16..32]) }
-        })
+        }))
     }
     /// Iterate user type names (ISF order).
     pub fn user_type_names(&self) -> impl Iterator<Item = &str> + '_ {
@@ -799,9 +857,20 @@ impl SymbolTable {
         s.get(i as usize * SYMBOL_SZ..(i as usize + 1) * SYMBOL_SZ).unwrap_or(&ZERO_REC)
     }
     pub fn symbol_count(&self) -> usize {
+        if let Some(l) = &self.lazy {
+            return l.symbol_count();
+        }
         self.sec(sec::SYMBOLS).len() / SYMBOL_SZ
     }
     fn sym_at(&self, i: u32) -> Symbol<'_> {
+        if let Some(l) = &self.lazy {
+            let (address, ty, constant_data) = match l.sym(i) {
+                Some(r) => (r.address, (r.ty != u32::MAX).then(|| self.node(TypeIdx(r.ty))), r.cdata.as_deref()),
+                None => (0, None, None),
+            };
+            let address = if self.symbol_mask != 0 { address & self.symbol_mask } else { address };
+            return Symbol { name: l.symbol_name(i), address, ty, constant_data };
+        }
         let r = self.sym_rec(i);
         let mut address = rd64(r, 8);
         if self.symbol_mask != 0 {
@@ -822,16 +891,49 @@ impl SymbolTable {
             constant_data: cdata,
         }
     }
+    /// The name of symbol `i` (as [`Symbol::name`]).
+    #[inline]
+    fn sym_str(&self, i: u32) -> &str {
+        match &self.lazy {
+            Some(l) => l.symbol_name(i),
+            None => self.rec_str(self.sym_rec(i)),
+        }
+    }
     /// python `get_symbol(name)`.
     pub fn get_symbol(&self, name: &str) -> Result<Symbol<'_>> {
-        match self.lookup(sec::H_SYMBOLS, sec::SYMBOLS, SYMBOL_SZ, name) {
+        match self.symbol_index(name) {
             Some(i) => Ok(self.sym_at(i)),
             None => Err(Error::Symbol(format!("Unknown symbol: {name}"))),
         }
     }
     /// python `has_symbol(name)`.
     pub fn has_symbol(&self, name: &str) -> bool {
-        self.lookup(sec::H_SYMBOLS, sec::SYMBOLS, SYMBOL_SZ, name).is_some()
+        self.symbol_index(name).is_some()
+    }
+    #[inline]
+    fn symbol_index(&self, name: &str) -> Option<u32> {
+        match &self.lazy {
+            Some(l) => l.find_symbol(name),
+            None => self.lookup(sec::H_SYMBOLS, sec::SYMBOLS, SYMBOL_SZ, name),
+        }
+    }
+    /// The unmasked address of symbol `i` without decoding its record.
+    #[inline]
+    fn sym_addr(&self, i: u32) -> u64 {
+        match &self.lazy {
+            Some(l) => l.addrs().get(i as usize).copied().unwrap_or(0),
+            None => rd64(self.sym_rec(i), 8),
+        }
+    }
+    /// (raw name bytes, unmasked address) of symbol `i` without decoding its record.
+    #[inline]
+    fn sym_name_addr(&self, i: u32) -> (&[u8], u64) {
+        if let Some(l) = &self.lazy {
+            return (l.symbol_name(i).as_bytes(), l.addrs().get(i as usize).copied().unwrap_or(0));
+        }
+        let r = self.sym_rec(i);
+        let (o, l) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
+        (self.sec(sec::STRINGS).get(o..o.saturating_add(l)).unwrap_or(&[]), rd64(r, 8))
     }
     /// All symbols in ISF order.
     pub fn symbols(&self) -> impl Iterator<Item = Symbol<'_>> + '_ {
@@ -842,10 +944,12 @@ impl SymbolTable {
     /// validation, no type decoding).
     pub fn symbol_names_addrs(&self) -> impl Iterator<Item = (&[u8], u64)> + '_ {
         let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
-        let pool = self.sec(sec::STRINGS);
-        self.sec(sec::SYMBOLS).chunks_exact(SYMBOL_SZ).map(move |r| {
-            let (o, l) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
-            (pool.get(o..o.saturating_add(l)).unwrap_or(&[]), rd64(r, 8) & mask)
+        if let Some(l) = &self.lazy {
+            l.addrs(); // all addresses in one parallel pass first
+        }
+        (0..self.symbol_count() as u32).map(move |i| {
+            let (n, a) = self.sym_name_addr(i);
+            (n, a & mask)
         })
     }
     /// `symbols_at(offset, 0)` (python `get_symbols_by_location(offset)`: the names of the
@@ -860,8 +964,10 @@ impl SymbolTable {
 
     fn symbols_at_linear(&self, offset: u64) -> Vec<&str> {
         let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
-        let recs = self.sec(sec::SYMBOLS);
-        let mut v: Vec<&str> = recs.chunks_exact(SYMBOL_SZ).filter(|r| rd64(r, 8) & mask == offset).map(|r| self.rec_str(r)).collect();
+        let mut v: Vec<&str> = match &self.lazy {
+            Some(l) => l.addrs().iter().enumerate().filter(|(_, a)| **a & mask == offset).map(|(i, _)| l.symbol_name(i as u32)).collect(),
+            None => self.sec(sec::SYMBOLS).chunks_exact(SYMBOL_SZ).filter(|r| rd64(r, 8) & mask == offset).map(|r| self.rec_str(r)).collect(),
+        };
         v.sort_unstable();
         v
     }
@@ -882,15 +988,15 @@ impl SymbolTable {
         wanted.sort_unstable();
         let (lo, hi) = (wanted[0].0, wanted[wanted.len() - 1].0);
         let mut out: Vec<Vec<&str>> = vec![Vec::new(); offsets.len()];
-        for r in self.sec(sec::SYMBOLS).chunks_exact(SYMBOL_SZ) {
-            let a = rd64(r, 8) & mask;
+        for i in 0..self.symbol_count() as u32 {
+            let a = self.sym_addr(i) & mask;
             if a < lo || a > hi {
                 continue;
             }
-            let mut i = wanted.partition_point(|e| e.0 < a);
-            while i < wanted.len() && wanted[i].0 == a {
-                out[wanted[i].1].push(self.rec_str(r));
-                i += 1;
+            let mut k = wanted.partition_point(|e| e.0 < a);
+            while k < wanted.len() && wanted[k].0 == a {
+                out[wanted[k].1].push(self.sym_str(i));
+                k += 1;
             }
         }
         for v in &mut out {
@@ -911,7 +1017,10 @@ impl SymbolTable {
         let idx = self.by_addr.get_or_init(|| {
             let _t = crate::util::trace::span("symbol address index");
             let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
-            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (rd64(self.sym_rec(i), 8) & mask, i)).collect();
+            if let Some(l) = &self.lazy {
+                l.addrs();
+            }
+            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (self.sym_addr(i) & mask, i)).collect();
             // sort by address (cheap integer keys, stable LSD radix sort: ~5x faster than a
             // comparison sort on a 300k-symbol kernel), then order equal-address runs by name
             // like python's (address, name) tuples (names are unique: the result is
@@ -925,12 +1034,7 @@ impl SymbolTable {
                 }
                 if j - i > 1 {
                     // compare the raw name bytes (== str order; no UTF-8 validation per compare)
-                    let pool = self.sec(sec::STRINGS);
-                    let name = |k: u32| -> &[u8] {
-                        let r = self.sym_rec(k);
-                        let (o, l) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
-                        pool.get(o..o.saturating_add(l)).unwrap_or(&[])
-                    };
+                    let name = |k: u32| -> &[u8] { self.sym_name_addr(k).0 };
                     let mut run: Vec<(&[u8], u32)> = v[i..j].iter().map(|e| (name(e.1), e.1)).collect();
                     run.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     for (k, e) in run.into_iter().enumerate() {
@@ -943,7 +1047,7 @@ impl SymbolTable {
         });
         let start = idx.partition_point(|e| e.0 < offset);
         let end_addr = offset.saturating_add(size);
-        idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| self.sym_at(e.1).name).collect()
+        idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| self.sym_str(e.1)).collect()
     }
 
     // ------------------------------------------------------------------ types by name

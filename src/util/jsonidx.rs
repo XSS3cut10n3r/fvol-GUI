@@ -415,6 +415,36 @@ mod x86 {
     }
 
     #[target_feature(enable = "avx2,pclmulqdq,popcnt,bmi1")]
+    pub(super) unsafe fn shallow_range_avx2(buf: &[u8], start: usize, end: usize, depth: Option<i64>) -> Option<(i64, Shallow)> {
+        let q = _mm256_set1_epi8(b'"' as i8);
+        let bsl = _mm256_set1_epi8(b'\\' as i8);
+        let ob = _mm256_set1_epi8(b'{' as i8);
+        let os = _mm256_set1_epi8(b'[' as i8);
+        let cb = _mm256_set1_epi8(b'}' as i8);
+        let cs = _mm256_set1_epi8(b']' as i8);
+        let ones = _mm_set1_epi8(-1);
+        let masks = |b: &[u8; 64]| -> (u64, u64, u64, u64) {
+            // SAFETY: 64 readable bytes; AVX2 detected by the caller
+            unsafe {
+                let m = |v: __m256i| -> (u32, u32, u32, u32) {
+                    (
+                        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, q)) as u32,
+                        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, bsl)) as u32,
+                        _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, ob), _mm256_cmpeq_epi8(v, os))) as u32,
+                        _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, cb), _mm256_cmpeq_epi8(v, cs))) as u32,
+                    )
+                };
+                let a = m(_mm256_loadu_si256(b.as_ptr() as *const __m256i));
+                let c = m(_mm256_loadu_si256(b.as_ptr().add(32) as *const __m256i));
+                let j = |x: u32, y: u32| x as u64 | (y as u64) << 32;
+                (j(a.0, c.0), j(a.1, c.1), j(a.2, c.2), j(a.3, c.3))
+            }
+        };
+        let pxor = |x: u64| -> u64 { _mm_cvtsi128_si64(_mm_clmulepi64_si128(_mm_set_epi64x(0, x as i64), ones, 0)) as u64 };
+        shallow_range_with(buf, start, end, depth, masks, pxor)
+    }
+
+    #[target_feature(enable = "avx2,pclmulqdq,popcnt,bmi1")]
     pub(super) unsafe fn depth_marks_avx2(buf: &[u8], cands: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
         let q = _mm256_set1_epi8(b'"' as i8);
         let bsl = _mm256_set1_epi8(b'\\' as i8);
@@ -640,9 +670,35 @@ impl Index {
         self.pos
     }
 
+    /// Serial stage 1 of the byte ranges `ranges` of `buf` only (sorted, disjoint), as one index
+    /// with positions relative to `buf`. Each range must start outside any string (e.g. at a
+    /// structural character) and is checked like a whole document (control characters in and
+    /// the end of strings). For a document whose big values are indexed separately (see
+    /// [`shallow`]).
+    pub fn build_ranges(buf: &[u8], ranges: &[(usize, usize)]) -> Result<Index> {
+        if buf.len() >= u32::MAX as usize - 64 {
+            return Err(Error::msg("JSON document too large"));
+        }
+        let mut pos = Vec::new();
+        let mut esc = Vec::new();
+        let mut utf8 = true;
+        for &(a, b) in ranges {
+            let st = index_range(buf, a, b, &mut pos, &mut esc);
+            if st.bad {
+                return Err(Error::msg("JSON parse error: invalid control character in string"));
+            }
+            if st.prev_in_string != 0 {
+                return Err(Error::msg("JSON parse error: unterminated string"));
+            }
+            utf8 &= std::str::from_utf8(&buf[a..b]).is_ok();
+        }
+        let chunks = vec![Chunk { start: 0, end: buf.len() as u32, first: 0, len: pos.len() as u32, depth: 0 }];
+        Ok(Index { pos, esc, chunks, utf8 })
+    }
+
     /// A walker over the whole document.
     pub fn walker<'d, 'a>(&'d self, buf: &'a [u8]) -> Walker<'d, 'a> {
-        Walker { buf, pos: &self.pos, esc: &self.esc, i: 0, utf8: self.utf8, depth: 0 }
+        Walker { buf, pos: &self.pos, esc: &self.esc, i: 0, utf8: self.utf8, depth: 0, base: 0 }
     }
 
     /// The top two levels of a document shaped `{"key": value, ...}`, found on all cores
@@ -700,6 +756,191 @@ impl Index {
         }
         crate::util::pool::map(n, walk).into_iter().flatten().collect()
     }
+}
+
+/// The depth <= 2 structure of a JSON document (see [`shallow`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Shallow {
+    /// opening quotes of the strings at depth 1 (the root object's keys and string values)
+    pub d1: Vec<u32>,
+    /// every container value of the root: its `{` / `[` (opening depth 2) and the `}` / `]`
+    /// closing it
+    pub containers: Vec<(u32, u32)>,
+    /// opening quotes of the strings at depth 2 whose previous non-whitespace byte is `{` or
+    /// `,` (the member keys of the root's object values; what [`Index::top_events`] reports as
+    /// [`Ev::Key2`]), in order
+    pub keys: Vec<u32>,
+}
+
+/// One pass finding the depth <= 2 structure of a big document ([`Shallow`]) without
+/// indexing it: SIMD string / bracket masks 64 bytes at a time on all cores (chunks split at
+/// newlines, like the parallel stage 1: a first pass gets each chunk's depth change, a second
+/// one reports the events of the blocks that reach depth 2 or less). `None` when a bracket
+/// closes below depth 0, the brackets do not balance, a chunk (a line boundary) or the document
+/// ends inside a string, or a depth-1 value is not closed before the next opens. Nothing else
+/// is checked: the caller indexes and parses every byte (see `symbols::lazy`).
+pub fn shallow(buf: &[u8]) -> Option<Shallow> {
+    if buf.len() >= u32::MAX as usize - 64 {
+        return None;
+    }
+    let threads = if buf.len() >= PAR_MIN { crate::util::par::threads() } else { 1 };
+    let mut bounds = vec![0usize];
+    if threads > 1 {
+        let target = CHUNK.max(buf.len() / (threads * 2)).max(64 << 10);
+        let mut at = target;
+        while at < buf.len() {
+            match memchr_nl(&buf[at..(at + (64 << 10)).min(buf.len())]) {
+                Some(k) if at + k + 1 < buf.len() => {
+                    bounds.push(at + k + 1);
+                    at = at + k + 1 + target;
+                }
+                _ => break,
+            }
+        }
+    }
+    bounds.push(buf.len());
+    let n = bounds.len() - 1;
+    let run = |c: usize, depth: Option<i64>| shallow_range(buf, bounds[c], bounds[c + 1], depth);
+    // pass 1: each chunk's depth change (chunks start outside strings: checked by the end state)
+    let deltas: Vec<Option<(i64, Shallow)>> = if n > 1 { crate::util::pool::map(n, |c| run(c, None)) } else { vec![Some((0, Shallow::default()))] };
+    let mut starts = Vec::with_capacity(n);
+    let mut d = 0i64;
+    for x in &deltas {
+        starts.push(d);
+        d += x.as_ref()?.0;
+    }
+    if d != 0 {
+        return None;
+    }
+    // pass 2: the events
+    let parts: Vec<Option<(i64, Shallow)>> = if n > 1 { crate::util::pool::map(n, |c| run(c, Some(starts[c]))) } else { vec![run(0, Some(0))] };
+    let mut out = Shallow::default();
+    let mut opens: Vec<u32> = Vec::new();
+    let mut closes: Vec<u32> = Vec::new();
+    let mut total = 0i64;
+    for p in parts {
+        let (dd, s) = p?;
+        total += dd;
+        out.d1.extend(s.d1);
+        out.keys.extend(s.keys);
+        for (o, c) in s.containers {
+            if o != u32::MAX {
+                opens.push(o);
+            }
+            if c != u32::MAX {
+                closes.push(c);
+            }
+        }
+    }
+    // balanced, and opens and closes alternate
+    if total != 0 || opens.len() != closes.len() || opens.iter().zip(&closes).any(|(o, c)| o >= c) || opens.iter().skip(1).zip(&closes).any(|(o, c)| o <= c) {
+        return None;
+    }
+    out.containers = opens.into_iter().zip(closes).collect();
+    Some(out)
+}
+
+/// [`shallow`] over `buf[start..end]` (starting outside strings): with `depth = None` only the
+/// depth change (None if the range ends inside a string), else the events of the range
+/// starting at that depth (containers as `(open, u32::MAX)` / `(u32::MAX, close)` halves).
+fn shallow_range(buf: &[u8], start: usize, end: usize, depth: Option<i64>) -> Option<(i64, Shallow)> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("pclmulqdq") {
+            // SAFETY: the features were detected at run time
+            return unsafe { x86::shallow_range_avx2(buf, start, end, depth) };
+        }
+    }
+    shallow_range_with(buf, start, end, depth, |blk| qbo_scalar(blk), prefix_xor_portable)
+}
+
+/// The previous non-whitespace byte before `p` is `{` or `,` (a member key, see [`Shallow::keys`]).
+#[inline]
+fn after_open_or_comma(buf: &[u8], p: usize) -> bool {
+    let mut k = p;
+    while k > 0 {
+        k -= 1;
+        match buf[k] {
+            b' ' | b'\t' | b'\n' | b'\r' => {}
+            b'{' | b',' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The [`shallow_range`] loop over any mask source.
+#[inline(always)]
+fn shallow_range_with(buf: &[u8], start: usize, end: usize, depth: Option<i64>, masks: impl Fn(&[u8; 64]) -> (u64, u64, u64, u64), pxor: impl Fn(u64) -> u64) -> Option<(i64, Shallow)> {
+    let mut out = Shallow::default();
+    let (mut prev_escaped, mut prev_in) = (0u64, 0u64);
+    let mut d = depth.unwrap_or(0);
+    let mut blk = [b' '; 64];
+    let mut i = start;
+    while i < end {
+        let b: &[u8; 64] = if end - i >= 64 {
+            buf[i..i + 64].try_into().unwrap()
+        } else {
+            let n = end - i;
+            blk[..n].copy_from_slice(&buf[i..end]);
+            blk[n..].fill(b' ');
+            &blk
+        };
+        let (q, bs, o, c) = masks(b);
+        let escaped = if bs == 0 && prev_escaped == 0 {
+            0
+        } else {
+            const EVEN: u64 = 0x5555_5555_5555_5555;
+            let bs = bs & !prev_escaped;
+            let follows = (bs << 1) | prev_escaped;
+            let odd_starts = bs & !EVEN & !follows;
+            let (seq_even, ovf) = odd_starts.overflowing_add(bs);
+            prev_escaped = ovf as u64;
+            (EVEN ^ (seq_even << 1)) & follows
+        };
+        let qu = q & !escaped;
+        let in_string = pxor(qu) ^ prev_in;
+        prev_in = ((in_string as i64) >> 63) as u64;
+        let outside = !in_string;
+        let (op, cl) = (o & outside, c & outside);
+        let ccl = cl.count_ones() as i64;
+        if depth.is_some() && d - ccl <= 2 {
+            // exact depths inside the block
+            let opening = qu & in_string;
+            let mut ev = op | cl | opening;
+            let mut dd = d;
+            while ev != 0 {
+                let t = ev.trailing_zeros();
+                let bit = 1u64 << t;
+                let at = (i + t as usize) as u32;
+                if op & bit != 0 {
+                    if dd == 1 {
+                        out.containers.push((at, u32::MAX));
+                    }
+                    dd += 1;
+                } else if cl & bit != 0 {
+                    dd -= 1;
+                    if dd < 0 {
+                        return None;
+                    }
+                    if dd == 1 {
+                        out.containers.push((u32::MAX, at));
+                    }
+                } else if dd == 1 {
+                    out.d1.push(at);
+                } else if dd == 2 && after_open_or_comma(buf, at as usize) {
+                    out.keys.push(at);
+                }
+                ev &= ev - 1;
+            }
+        }
+        d += op.count_ones() as i64 - ccl;
+        i += 64;
+    }
+    if prev_in != 0 || prev_escaped != 0 {
+        return None;
+    }
+    Some((d - depth.unwrap_or(0), out))
 }
 
 /// See [`Index::top_events`].
@@ -939,6 +1180,9 @@ pub struct Walker<'d, 'a> {
     i: usize,
     utf8: bool,
     depth: u32,
+    /// position of `buf` in the whole document (a walker over part of it, see
+    /// [`Walker::with_base`])
+    base: usize,
 }
 
 /// Bytes that may directly follow a scalar (whitespace, structural, quote) or end the input.
@@ -960,6 +1204,22 @@ impl<'d, 'a> Walker<'d, 'a> {
     #[inline(always)]
     pub fn seek(&mut self, i: usize) {
         self.i = i;
+    }
+    /// The walker of an index over `doc[base..]` (a part of a bigger document): positions stay
+    /// relative to that part, [`Walker::abs_pos`] adds `base`.
+    pub fn with_base(mut self, base: usize) -> Self {
+        self.base = base;
+        self
+    }
+    /// Position of the current entry in the whole document (see [`Walker::with_base`]).
+    #[inline(always)]
+    pub fn abs_pos(&self) -> usize {
+        self.base + self.pos_of(self.i)
+    }
+    /// Number of entries.
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.pos.len()
     }
     /// Byte position of entry `i` (`buf.len()` past the end).
     #[inline(always)]
@@ -1278,6 +1538,33 @@ impl<'d, 'a> Pull<'a> for Walker<'d, 'a> {
             _ => return Err(self.err(if self.i >= self.pos.len() { "unexpected end of input" } else { "unexpected character" })),
         })
     }
+}
+
+/// The value of the string whose opening quote is at `open` in `buf`, decoded as
+/// [`Walker::string_at`] decodes it (escapes; invalid UTF-8 replaced), for a string that stage 1
+/// already accepted. `None` if it has no closing quote or a bad escape.
+pub fn string_value(buf: &[u8], open: usize) -> Option<Cow<'_, str>> {
+    let s = buf.get(open + 1..)?;
+    let mut i = 0;
+    let mut esc = false;
+    loop {
+        match *s.get(i)? {
+            b'"' => break,
+            b'\\' => {
+                esc = true;
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let body = &s[..i];
+    if esc {
+        return unescape(body).ok().map(Cow::Owned);
+    }
+    Some(match std::str::from_utf8(body) {
+        Ok(t) => Cow::Borrowed(t),
+        Err(_) => Cow::Owned(String::from_utf8_lossy(body).into_owned()),
+    })
 }
 
 /// Decode a JSON string body with escapes (same results as `json::Parser::str`).

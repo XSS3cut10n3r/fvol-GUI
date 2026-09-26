@@ -9,6 +9,7 @@
 
 pub mod embedded;
 pub mod isf;
+pub(crate) mod lazy;
 pub mod linux;
 pub mod mac;
 pub mod pycache;

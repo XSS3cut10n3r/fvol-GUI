@@ -210,42 +210,28 @@ fn read_note_data(layer: &dyn Layer, off: u64, len: u64) -> Result<Option<Vec<u8
 /// offset, table)` for each valid VMCOREINFO note in python order until `f` returns false.
 /// `Err` where python's generator raises (which aborts the caller's iteration).
 pub fn search_vmcoreinfo_elf_note(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
-    search_with(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), f)
+    search_with(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), false, f)
 }
 
 /// [`search_vmcoreinfo_elf_note`] with the magic's full-layer scan answered by the per-image
 /// scan cache on repeated runs (the vmcoreinfo plugin; the automagic's searches are covered by
 /// the automagic cache). The notes are parsed from the layer every time.
 pub fn search_vmcoreinfo_elf_note_cached(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
-    search_with(layer, &FastBytesScanner::cached(VMCOREINFO_MAGIC_ALIGNED), f)
+    search_with(layer, &FastBytesScanner::cached(VMCOREINFO_MAGIC_ALIGNED), false, f)
 }
 
-fn search_with(layer: &dyn Layer, scanner: &FastBytesScanner, mut f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
-    let mask = layer.address_mask();
-    let rd32 = |addr: u64| -> Result<u32> {
-        let mut b = [0u8; 4];
-        layer.read(addr & mask, &mut b)?;
-        Ok(u32::from_le_bytes(b))
-    };
+/// [`search_vmcoreinfo_elf_note`] for a caller that stops at an early note (the VMCOREINFO
+/// stacker stops at the first note that stacks): the layer is scanned in growing batches of
+/// chunks (at most one per core), in python's hit order, so the scan reads little past that
+/// note instead of the whole layer.
+pub fn search_vmcoreinfo_elf_note_early(layer: &dyn Layer, f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
+    search_with(layer, &FastBytesScanner::new(VMCOREINFO_MAGIC_ALIGNED), true, f)
+}
+
+fn search_with(layer: &dyn Layer, scanner: &FastBytesScanner, early: bool, mut f: impl FnMut(u64, &VmCoreInfo) -> bool) -> Result<()> {
     let mut err = None;
-    scan_each(layer, scanner, None, |magic_off| {
-        let r = (|| -> Result<Option<(u64, VmCoreInfo)>> {
-            let note = magic_off.wrapping_sub(ELF_NOTE_SIZE);
-            if rd32(note)? as usize != VMCOREINFO_MAGIC.len() || rd32(note.wrapping_add(8))? != 0 {
-                return Ok(None);
-            }
-            let descsz = rd32(note.wrapping_add(4))?;
-            if descsz == 0 {
-                return Ok(None);
-            }
-            let data_off = magic_off.wrapping_add(VMCOREINFO_MAGIC_ALIGNED.len() as u64);
-            let Some(data) = read_note_data(layer, data_off, descsz as u64)? else { return Ok(None) };
-            if !data.starts_with(OSRELEASE_TAG) {
-                return Ok(None);
-            }
-            Ok(data_to_dict(&data)?.map(|t| (note & mask, t)))
-        })();
-        match r {
+    let on_hit = |magic_off: u64| -> bool {
+        match note_at(layer, magic_off) {
             Ok(Some((off, t))) => f(off, &t),
             Ok(None) => true,
             Err(e) => {
@@ -253,11 +239,42 @@ fn search_with(layer: &dyn Layer, scanner: &FastBytesScanner, mut f: impl FnMut(
                 false
             }
         }
-    });
+    };
+    if early {
+        crate::layers::scan::scan_each_progressive_max(layer, scanner, crate::util::par::threads(), |h| *h, on_hit);
+    } else {
+        scan_each(layer, scanner, None, on_hit);
+    }
     match err {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// The note of a `VMCOREINFO_MAGIC_ALIGNED` hit at `magic_off`, as python's search judges it:
+/// `Some((note offset, table))` for a valid note, `None` to go on, `Err` where python's
+/// generator raises.
+pub fn note_at(layer: &dyn Layer, magic_off: u64) -> Result<Option<(u64, VmCoreInfo)>> {
+    let mask = layer.address_mask();
+    let rd32 = |addr: u64| -> Result<u32> {
+        let mut b = [0u8; 4];
+        layer.read(addr & mask, &mut b)?;
+        Ok(u32::from_le_bytes(b))
+    };
+    let note = magic_off.wrapping_sub(ELF_NOTE_SIZE);
+    if rd32(note)? as usize != VMCOREINFO_MAGIC.len() || rd32(note.wrapping_add(8))? != 0 {
+        return Ok(None);
+    }
+    let descsz = rd32(note.wrapping_add(4))?;
+    if descsz == 0 {
+        return Ok(None);
+    }
+    let data_off = magic_off.wrapping_add(VMCOREINFO_MAGIC_ALIGNED.len() as u64);
+    let Some(data) = read_note_data(layer, data_off, descsz as u64)? else { return Ok(None) };
+    if !data.starts_with(OSRELEASE_TAG) {
+        return Ok(None);
+    }
+    Ok(data_to_dict(&data)?.map(|t| (note & mask, t)))
 }
 
 #[cfg(test)]

@@ -74,6 +74,8 @@ pub fn main() -> i32 {
     if argv.get(1).map(String::as_str) == Some("serve") {
         return crate::web::main(&argv[2..]);
     }
+    // one run, then exit: big ISFs load lazily, their blobs are written after the output
+    crate::symbols::store::set_lazy_tables(true);
     let plugins = crate::plugins::all();
     let mut out = RawStdout::new();
     let mut err = std::io::stderr();

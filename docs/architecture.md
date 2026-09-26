@@ -80,6 +80,31 @@ The first conversion is also fast. The JSON parser builds a structural index in 
 simdjson: it finds every quote and structural character 64 bytes at a time with AVX2 and
 carry-less multiplication, on several threads, and then walks the index instead of the text.
 
+The first run does not wait for that conversion. A plugin touches a few dozen of a kernel's
+10,000 to 15,000 types and 200,000 to 300,000 symbols, so a big ISF (1 MB of JSON or more) loads
+as a *lazy table*: one SIMD pass finds the root object's structure and the member keys of its
+`user_types`, `enums` and `symbols` sections, and every member is then parsed and checked exactly
+as the full builder parses it, range by range, each range through a small structural index of
+its own bytes that stays in the CPU cache. Nothing is resolved or written yet: the natives, enums
+and metadata go into a small blob of the full format, and a type or symbol is resolved by the
+full builder's own resolver the first time a plugin asks for it. The table API is the same, and a
+unit test compares every type, member, symbol and enum of a lazy table with the full table for
+every ISF on the test machine. A document the full builder would not accept, or would treat
+specially (repeated names, for python's dictionary semantics), is not taken lazily. For the
+64 MB Ubuntu 24.04 kernel ISF, the lazy index takes about 13 ms instead of the full build's
+47 ms on a 20-thread desktop CPU; on the 32-vCPU benchmark VM a first `linux.pslist` went from
+0.51 s to 0.11 s, faster than vol-rs with a warm cache (see
+[bench/vm/BENCHMARKS.md](../bench/vm/BENCHMARKS.md)).
+
+The full binary table of a lazy table is built after the plugin's output is complete: `main`
+flushes the output and then hands each such ISF to a helper process, this executable started in
+a hidden mode, in its own session, with no inherited file descriptors and at idle CPU priority.
+The run exits at once. The helper takes a lock so that concurrent runs build a blob once,
+rereads the ISF, checks that the file did not change, and writes the blob atomically; the next
+run maps it. Building the blob on a thread of the run itself would add the build, 50 ms for
+that kernel, to every first run. `RSVOL_DEFERRED_ISFB=thread` does that instead, and `=off`
+writes no blob at all.
+
 To find the right ISF for a Linux or macOS kernel, volatility3 compares the kernel banner in
 memory with the banner stored in every ISF on the search path. rsvol keeps an identifier index
 of those banners, updated only for files whose size or modification time changed. When python
@@ -89,7 +114,12 @@ than a row older than three days, append new files) and reads only the files tha
 read. python resolves a banner to the last matching row, so its choice among ISFs sharing a
 banner depends on the history of its database; replaying it gives the same choice. When the
 index has to read new files, a quick scan of the image for the kernel version tells it which
-kernel table to build first, on another thread. For Windows, the kernel table named by the first
+kernel table to build first, on another thread; a big ISF under a `linux/` or `mac/` directory
+is then indexed lazily right away and its identifier read from that index, one pass over the
+JSON instead of two. When the index is seeded from python's cache,
+the likely kernel ISF, the only one or the only one of the image's kernel release, is loaded
+while the image is searched for its VMCOREINFO notes; one scan of the image finds both the
+kernel version and the notes. For Windows, the kernel table named by the first
 candidate is loaded while the full KDBG scan is still running. A speculative table is used only
 if it turns out to be the final answer.
 
@@ -215,6 +245,7 @@ The design rule is to know the hardware and do the minimum work. The techniques,
 | SIMD                          | AVX2 pattern search, AVX2 and PCLMULQDQ JSON indexing, AES-NI and VAES, SHA-NI, selected at run time. |
 | Caching                       | Symbol tables, the identifier index, automagic results and raw scan hits. |
 | Speculation                   | Likely kernel symbol tables are built while the scans that confirm them run. |
+| Laziness                      | A first run resolves only the types and symbols it uses; the full symbol table is built by a detached helper after the output. |
 | Fixed per-run cost            | A static-pie binary without dynamic loading, a C `main` that skips most of the Rust runtime setup, a lazy `Context`, and cache writes on background threads that finish after the output. A warm `windows.pslist.PsList` takes about 3 ms. |
 | Allocation-free inner loops   | Precomputed member offsets, compact 8-byte rows in the timeliner merge, table-driven cell formatting. |
 

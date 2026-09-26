@@ -58,6 +58,9 @@ Where an rsvol column is not the fastest number of its row:
   converting the 3.3 MB `.json.xz` kernel ISF (64 MB of JSON), so it loses to vol-rs *warm* (0.12-0.53 s)
   on the plugins that are cheap once the symbols are loaded; it beats vol-rs cold (2.0-3.2 s; banners 0.4 s, RecoverFs 87 s) on all 59,
   and rsvol steady / warm are the fastest on all 59 (see Checks).
+  **Since then** a first run loads big ISFs lazily and writes their binary tables in a detached
+  helper after the output: rsvol cold now beats vol-rs warm on all 59 Linux plugins (total
+  34.19 s -> 10.83 s, median 517 -> 110 ms; see [First runs with lazy symbol tables](#first-runs-with-lazy-symbol-tables-rsvol-cold-rerun)).
 
 ## Windows summary
 
@@ -110,6 +113,122 @@ xz decode 34 ms, parse + build 16 ms; the cache file is written by a background 
 exit; `RSVOL_TRACE=1`); vol-rs's cold start parses its 4 MB plain-JSON symbol file; python's rebuilds
 its identifier cache. Python's warm best is 1.20 s here vs 1.00 s in run 1 (run 1's three warm runs
 spread from 1.00 to 1.21 s, run 2's from 1.203 to 1.206 s).
+
+## First runs with lazy symbol tables (rsvol cold, rerun)
+
+2026-09-26, same VM, images and vol-rs binary as above. **before** = rsvol main `342a0c6`, **after** =
+the lazy-symbol-table branch (`718b5e9`), both built on the VM with rustc 1.98.1. Every run is
+`vol -q -o <fresh dir> -f IMG [-s ~/rsvol-bench/isf] PLUGIN` with rsvol's whole cache directory deleted
+before the run (a first-ever run; python's identifier cache present, as for the cold column above),
+best of 5, the two builds interleaved; rsvol's detached blob helper is waited for between runs
+(untimed). vol-rs warm / cold are the numbers of the per-plugin tables above (same binary and VM).
+
+What changed: a first run no longer builds the 64 MB kernel ISF's binary table before the plugin
+runs. It indexes the JSON (~33 ms on this VM for the noble ISF, vs ~150 ms for the full build),
+resolves only the types and symbols the plugin touches, and hands the full table to a detached
+helper process after the output; the kernel ISF is decompressed while the image is scanned, and
+the VMCOREINFO note search stops at the deciding note (see docs/architecture.md, Symbols).
+
+| Linux (59 plugins) | rsvol cold before | rsvol cold after | rsvol warm | vol-rs warm | vol-rs cold |
+|---|---:|---:|---:|---:|---:|
+| total wall (sum of per-plugin best) | 34.19 s | 10.83 s | 4.24 s | 105.23 s | 217.20 s |
+| median plugin wall | 517 ms | 110 ms | | 311 ms | 2.23 s |
+| geometric mean plugin wall | 533 ms | 127 ms | | 288 ms | 2.34 s |
+| rsvol cold faster than vol-rs warm on | 11/59 | **59/59** | | | |
+
+The closest row is `linux.pagecache.InodePages`: 106.9 ms cold vs vol-rs warm 124.5 ms. All 59
+plugins printed the same output before and after (sha256 of stdout minus the banner, every run).
+
+Where the blob of a lazily loaded table is written, measured (cold run, best of 7):
+
+| | noble `linux.pslist` | `windows.pslist` |
+|---|---:|---:|
+| detached helper after the output (the default) | 130.8 ms | 46.5 ms |
+| no blob at all (`RSVOL_DEFERRED_ISFB=off`) | 132.9 ms | 45.3 ms |
+| a thread of the run, joined before exit (`=thread`) | 278.7 ms | 68.9 ms |
+| full table before the plugin (`RSVOL_LAZY_ISF=0`) | 369.2 ms | 61.3 ms |
+
+Cache states (coldbench.py modes, best of 5): cold = empty cache; newimg = symbol tables warm,
+automagic and scan caches empty (a new image); symcold = automagic warm, symbol tables empty;
+warm = everything cached.
+
+| case | before: cold | newimg | symcold | warm | after: cold | newimg | symcold | warm | vol-rs cold | vol-rs warm |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `windows.pslist` | 62.4 ms | 6.1 ms | 58.4 ms | 3.6 ms | 49.5 ms | 6.3 ms | 46.5 ms | 3.7 ms | 551 ms | 83.8 ms |
+| `windows.info` | 61.6 ms | 5.3 ms | 59.8 ms | 2.7 ms | 49.0 ms | 5.1 ms | 44.2 ms | 2.4 ms | 556 ms | 80.7 ms |
+| `windows.netscan` | 135 ms | 87.1 ms | 58.5 ms | 5.8 ms | 128 ms | 85.4 ms | 49.8 ms | 6.0 ms | 2.60 s | 2.21 s |
+| `windows.handles` | 107 ms | 61.8 ms | 109 ms | 60.6 ms | 102 ms | 59.4 ms | 105 ms | 55.6 ms | 1.09 s | 620 ms |
+| `linux.pslist` | 512 ms | 45.5 ms | 236 ms | 4.8 ms | 126 ms | 20.6 ms | 108 ms | 4.7 ms | 2.04 s | 132 ms |
+| `linux.psscan` | 615 ms | 183 ms | 235 ms | 31.3 ms | 268 ms | 146 ms | 132 ms | 20.0 ms | 2.30 s | 473 ms |
+| `linux.kallsyms` | 572 ms | 128 ms | 290 ms | 88.8 ms | 206 ms | 98.8 ms | 182 ms | 84.5 ms | 2.90 s | 968 ms |
+| `linux.lsof` | 508 ms | 50.5 ms | 235 ms | 12.3 ms | 132 ms | 27.8 ms | 113 ms | 13.8 ms | 2.16 s | 183 ms |
+
+(This table is the `5846095` build; the per-plugin run above is `718b5e9`, which also reads the
+kernel ISF's identifier from its lazy table and drops a 64 MB memset: `linux.pslist` cold 126 ->
+107 ms.)
+
+Per plugin (Linux):
+
+|---|---:|---:|---:|---:|---:|
+| banners.Banners | 125.0 ms | 125.2 ms | 2.3 ms | 394.6 ms | 397.6 ms |
+| linux.bash.Bash | 515.6 ms | 115.7 ms | 10.3 ms | 209.4 ms | 2.21 s |
+| linux.boottime.Boottime | 517.0 ms | 109.0 ms | 3.7 ms | 132.0 ms | 2.09 s |
+| linux.capabilities.Capabilities | 511.0 ms | 109.7 ms | 6.5 ms | 130.3 ms | 2.07 s |
+| linux.check_afinfo.Check_afinfo | 529.0 ms | 105.4 ms | 5.5 ms | 322.1 ms | 2.26 s |
+| linux.check_creds.Check_creds | 507.6 ms | 104.0 ms | 3.6 ms | 129.3 ms | 2.09 s |
+| linux.check_idt.Check_idt | 534.4 ms | 107.7 ms | 12.3 ms | 313.0 ms | 2.31 s |
+| linux.check_modules.Check_modules | 535.7 ms | 106.2 ms | 3.7 ms | 126.1 ms | 2.08 s |
+| linux.check_syscall.Check_syscall | 513.7 ms | 122.8 ms | 10.5 ms | 494.3 ms | 2.43 s |
+| linux.ebpf.EBPF | 502.0 ms | 107.0 ms | 2.9 ms | 136.6 ms | 2.04 s |
+| linux.elfs.Elfs | 529.0 ms | 119.0 ms | 16.7 ms | 278.5 ms | 2.28 s |
+| linux.envars.Envars | 509.4 ms | 107.1 ms | 7.1 ms | 135.1 ms | 2.08 s |
+| linux.graphics.fbdev.Fbdev | 508.8 ms | 103.6 ms | 2.4 ms | 123.3 ms | 2.11 s |
+| linux.hidden_modules.Hidden_modules | 517.5 ms | 107.5 ms | 7.9 ms | 588.7 ms | 2.51 s |
+| linux.iomem.IOMem | 512.3 ms | 103.1 ms | 2.7 ms | 123.3 ms | 2.07 s |
+| linux.ip.Addr | 525.8 ms | 106.7 ms | 2.8 ms | 124.9 ms | 2.06 s |
+| linux.ip.Link | 510.7 ms | 102.8 ms | 2.7 ms | 125.2 ms | 2.06 s |
+| linux.kallsyms.Kallsyms | 586.6 ms | 199.3 ms | 94.9 ms | 1.17 s | 3.17 s |
+| linux.keyboard_notifiers.Keyboard_notifiers | 516.2 ms | 106.1 ms | 9.1 ms | 318.4 ms | 2.25 s |
+| linux.kmsg.Kmsg | 509.2 ms | 109.0 ms | 4.3 ms | 135.1 ms | 2.08 s |
+| linux.kthreads.Kthreads | 511.4 ms | 135.0 ms | 33.4 ms | 328.5 ms | 2.26 s |
+| linux.library_list.LibraryList | 525.5 ms | 123.5 ms | 17.6 ms | 270.7 ms | 2.21 s |
+| linux.lsmod.Lsmod | 511.3 ms | 107.0 ms | 3.9 ms | 129.3 ms | 2.11 s |
+| linux.lsof.Lsof | 517.0 ms | 114.9 ms | 12.6 ms | 178.8 ms | 2.14 s |
+| linux.malfind.Malfind | 516.2 ms | 116.1 ms | 14.4 ms | 431.2 ms | 2.38 s |
+| linux.malware.check_afinfo.Check_afinfo | 516.7 ms | 106.2 ms | 5.4 ms | 313.1 ms | 2.26 s |
+| linux.malware.check_creds.Check_creds | 515.7 ms | 108.1 ms | 3.8 ms | 130.9 ms | 2.03 s |
+| linux.malware.check_idt.Check_idt | 526.3 ms | 111.0 ms | 11.7 ms | 312.9 ms | 2.31 s |
+| linux.malware.check_modules.Check_modules | 531.4 ms | 104.9 ms | 4.0 ms | 126.4 ms | 2.19 s |
+| linux.malware.check_syscall.Check_syscall | 522.7 ms | 127.5 ms | 10.8 ms | 512.3 ms | 2.53 s |
+| linux.malware.hidden_modules.Hidden_modules | 515.0 ms | 110.6 ms | 8.2 ms | 584.6 ms | 2.50 s |
+| linux.malware.keyboard_notifiers.Keyboard_notifiers | 525.8 ms | 110.2 ms | 9.7 ms | 314.6 ms | 2.27 s |
+| linux.malware.malfind.Malfind | 518.5 ms | 113.2 ms | 14.1 ms | 416.4 ms | 2.50 s |
+| linux.malware.modxview.Modxview | 517.1 ms | 109.7 ms | 9.0 ms | 567.7 ms | 2.50 s |
+| linux.malware.netfilter.Netfilter | 517.0 ms | 110.3 ms | 12.2 ms | 310.5 ms | 2.23 s |
+| linux.malware.process_spoofing.ProcessSpoofing | 526.0 ms | 106.0 ms | 7.4 ms | 135.8 ms | 2.08 s |
+| linux.malware.tty_check.Tty_Check | 521.2 ms | 113.3 ms | 12.2 ms | 311.1 ms | 2.27 s |
+| linux.modxview.Modxview | 524.7 ms | 108.0 ms | 9.2 ms | 579.9 ms | 2.48 s |
+| linux.mountinfo.MountInfo | 513.5 ms | 112.8 ms | 13.2 ms | 151.1 ms | 2.06 s |
+| linux.netfilter.Netfilter | 529.6 ms | 111.0 ms | 12.2 ms | 322.5 ms | 2.28 s |
+| linux.pagecache.Files | 559.8 ms | 182.2 ms | 81.0 ms | 1.01 s | 2.95 s |
+| linux.pagecache.InodePages | 516.4 ms | 106.9 ms | 2.3 ms | 124.5 ms | 2.13 s |
+| linux.pidhashtable.PIDHashTable | 534.4 ms | 115.6 ms | 8.3 ms | 136.4 ms | 2.06 s |
+| linux.proc.Maps | 523.2 ms | 117.5 ms | 16.6 ms | 449.4 ms | 2.40 s |
+| linux.psaux.PsAux | 524.6 ms | 107.1 ms | 7.1 ms | 132.0 ms | 2.08 s |
+| linux.pslist.PsList | 515.2 ms | 106.7 ms | 4.7 ms | 131.5 ms | 2.08 s |
+| linux.psscan.PsScan | 632.2 ms | 251.1 ms | 20.4 ms | 486.2 ms | 2.39 s |
+| linux.pstree.PsTree | 515.7 ms | 108.1 ms | 4.8 ms | 130.6 ms | 2.10 s |
+| linux.ptrace.Ptrace | 510.5 ms | 109.1 ms | 5.9 ms | 138.2 ms | 2.10 s |
+| linux.sockscan.Sockscan | 615.8 ms | 221.1 ms | 10.1 ms | 425.0 ms | 2.22 s |
+| linux.sockstat.Sockstat | 514.4 ms | 111.2 ms | 12.1 ms | 182.6 ms | 2.09 s |
+| linux.tracing.ftrace.CheckFtrace | 512.2 ms | 110.1 ms | 11.7 ms | 314.6 ms | 2.26 s |
+| linux.tracing.perf_events.PerfEvents | 506.2 ms | 106.4 ms | 4.4 ms | 130.0 ms | 2.18 s |
+| linux.tracing.tracepoints.CheckTracepoints | 522.3 ms | 115.4 ms | 12.2 ms | 331.7 ms | 2.27 s |
+| linux.tty_check.tty_check | 538.5 ms | 112.2 ms | 12.5 ms | 313.7 ms | 2.23 s |
+| linux.vmcoreinfo.VMCoreInfo | 617.8 ms | 229.3 ms | 2.7 ms | 1.21 s | 3.05 s |
+| linux.pagecache.RecoverFs | 3.94 s | 3.57 s | 3.44 s | 85.86 s | 86.71 s |
+| linux.pscallstack.PsCallStack | 524.2 ms | 116.6 ms | 17.9 ms | 534.6 ms | 2.51 s |
+| timeliner.Timeliner | 653.3 ms | 394.9 ms | 123.2 ms | 1.24 s | 3.13 s |
 
 ## Windows per-plugin
 
