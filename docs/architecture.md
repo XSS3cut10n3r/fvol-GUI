@@ -147,6 +147,11 @@ match, `finish`. The scan cache stores only the prescan output, the raw byte pos
 and per layer configuration. A repeated scan replays those positions through `finish`, so all of
 python's validation still runs, in python's order.
 
+vmscan's checks read a few hundred bytes of each page whose first four bytes are a VMCS revision
+id (about 1,900 pages on the 5 GiB test image). Those bytes are a pure function of the image, so
+they are cached with the matches as fixed-size records; a warm vmscan maps one cache file, runs the
+checks on the records and reads no image page.
+
 A full scan that misses the cache also records a family of well-known patterns in the same sweep:
 every built-in pool tag, the MFT and MBR signatures and the VMCS page signatures. The next
 scanning plugin of that family is then answered from the cache even though it never ran before.
