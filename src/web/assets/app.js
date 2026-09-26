@@ -1,6 +1,6 @@
 // Bootstrap: load plugins and session, start the event stream, wire global shortcuts.
 
-import { store, api, on, emit, el, startEvents, prefs, fmtBytes, fmtTime, toast, closeMenu } from './core.js';
+import { store, api, on, emit, el, startEvents, prefs, fmtBytes, fmtTime, toast, closeMenu, TOKEN, setToken, modal } from './core.js';
 import { openTab, activate, cycleTab, nthTab, closeTab, activeView, Overview, renderRunList, restoreTabs, closeSessionTabs, helpDialog, memoryPrompt, openImageDialog, openCompare, refreshTabs } from './views.js';
 import { initTree, loadProcs, resetTree, renderTree } from './procs.js';
 import { openPalette, paletteOpen } from './palette.js';
@@ -92,10 +92,25 @@ function shortcuts() {
   });
 }
 
+/** No (valid) token: ask for it. The token is printed by `vol serve` (in the URL it prints). */
+function lockScreen(wrong) {
+  const inp = el('input.input', { type: 'password', autocomplete: 'off', spellcheck: false, placeholder: 'access token', 'aria-label': 'Access token' });
+  const go = () => { if (inp.value.trim()) { setToken(inp.value.trim()); location.reload(); } };
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  const box = el('div.dialog.login-box', { 'aria-label': 'Access token needed' },
+    el('div.card-h', {}, el('h3', { text: 'rsvol · locked' })),
+    el('div.card-b.openbox', {},
+      el('p.prose.flush', { text: 'This server gives access to a memory image. Open the URL printed by vol serve (it carries the token), or paste the token here.' }),
+      wrong ? el('p.bad', { role: 'alert', text: 'The saved token is not valid for this server (it changes every time vol serve starts).' }) : null,
+      el('div.row', {}, inp, el('button.btn.primary', { type: 'button', text: 'Unlock', on: { click: go } }))));
+  document.body.append(el('div.scrim'), box);
+  inp.focus();
+}
+
 /** Deep links: #proc/4, #run/12, #plugin/windows.pslist.PsList, #hex/kernel/0xfffff800..., #palette/malfind, #compare/3/5, #help. */
 async function route() {
   const h = decodeURIComponent(location.hash.slice(1));
-  if (!h) return;
+  if (!h || h.startsWith('token=')) return;
   const [kind, ...rest] = h.split('/');
   try {
     if (kind === 'proc' && rest[0]) emit('nav', { kind: 'proc', pid: +rest[0] });
@@ -123,6 +138,7 @@ async function main() {
   railResize();
   shortcuts();
   initTree();
+  if (!TOKEN) { lockScreen(false); return; }
   try {
     const [plugins, session, runs] = await Promise.all([api('plugins'), api('session'), api('runs')]);
     store.plugins = plugins;
@@ -130,6 +146,7 @@ async function main() {
     store.session = session;
     for (const r of runs) store.runs.set(r.id, r);
   } catch (e) {
+    if (e.status === 401) { lockScreen(true); return; }
     document.getElementById('panes').append(el('div.empty-state', {}, el('h2', { text: 'Can\'t reach the rsvol server' }), e.message));
     return;
   }

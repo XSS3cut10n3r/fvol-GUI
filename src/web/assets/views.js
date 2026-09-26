@@ -1,7 +1,7 @@
 // Workspace: tabs, the overview (landing), plugin result tabs, compare view, run history and
 // the dialogs (open image, shortcuts).
 
-import { store, api, on, emit, el, clear, copy, menu, modal, runPlugin, whenDone, sessionRuns, shortName, pluginOs, fmtCount, fmtMs, fmtBytes, fmtAgo, parseTime, fmtTime, prefs, toast, rememberDuration, expectedDuration, finished, debounce, int0 } from './core.js';
+import { store, api, on, emit, el, clear, copy, menu, modal, runPlugin, whenDone, sessionRuns, shortName, pluginOs, fmtCount, fmtMs, fmtBytes, fmtAgo, parseTime, fmtTime, prefs, toast, rememberDuration, expectedDuration, finished, debounce, int0, download } from './core.js';
 import { QUICK, blurb } from './catalog.js';
 import { ResultPanel, captureTime } from './result.js';
 import { ProcessTab, errCard, selectPid, procByPid, firstPlugin } from './procs.js';
@@ -165,15 +165,17 @@ class RunTab {
     this.renderHead();
     clear(this.errBox);
     if (r.error && (r.status === 'failed' || (r.status === 'cancelled' && r.error.kind !== 'cancelled'))) this.errBox.append(errCard(r.error));
+    if (r.evicted) this.errBox.append(errCard({ kind: 'cancelled', title: 'This result was dropped from memory', message: 'Newer results needed the memory (--max-memory). Nothing was lost on disk: run it again to see it (it only takes as long as the plugin).', hints: [], detail: '' }));
+    if (r.truncated) this.errBox.append(errCard({ kind: 'cancelled', title: `Showing the first ${fmtCount(r.stored)} of ${fmtCount(r.rows)} rows`, message: 'This result is larger than the memory vol serve sets aside for results (--max-memory). The remaining rows were counted but not kept.', hints: ['Narrow the run with the plugin\'s options (for example --pid), or', 'export the complete output straight to disk with Export → “vol -r csv” (it re-runs the plugin and streams everything).'], detail: '' }));
     const running = r.status === 'running' || r.status === 'queued';
     this.progress.hidden = !running;
     this.filesBox.hidden = !r.files || !r.files.length;
     if (r.files && r.files.length) {
       clear(this.filesBox);
       this.filesBox.append(el('span.label', { text: `${r.files.length} file${r.files.length > 1 ? 's' : ''} written` }));
-      for (const f of r.files.slice(0, 12)) this.filesBox.append(el('a', { href: `/api/runs/${r.id}/files/${encodeURIComponent(f.name)}`, download: f.name, title: fmtBytes(f.size), text: f.name }));
+      for (const f of r.files.slice(0, 12)) this.filesBox.append(el('button.linkbtn', { type: 'button', title: `${fmtBytes(f.size)} — download`, text: f.name, on: { click: () => download(`/api/runs/${r.id}/files/${encodeURIComponent(f.name)}`) } }));
       if (r.files.length > 12) this.filesBox.append(el('span.muted', { text: `+${r.files.length - 12} more` }));
-      if (r.files.length > 1) this.filesBox.append(el('a', { href: `/api/runs/${r.id}/files.zip`, download: '', text: 'download all (.zip)' }));
+      if (r.files.length > 1) this.filesBox.append(el('button.linkbtn', { type: 'button', text: 'download all (.zip)', on: { click: () => download(`/api/runs/${r.id}/files.zip`) } }));
     }
     refreshTabs();
   }

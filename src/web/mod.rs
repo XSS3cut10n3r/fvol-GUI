@@ -46,12 +46,13 @@ pub struct App {
     pub hub: Arc<Hub>,
     next_session: AtomicU64,
     pub auth_failures: AtomicU64,
+    pub tickets: security::Tickets,
     pub export_seq: AtomicU64,
     pub started: Instant,
 }
 
 impl App {
-    pub fn new(token: String, port: u16, hosts: security::HostPolicy, opts: SessionOpts, max_parallel: usize) -> Result<Arc<App>, String> {
+    pub fn new(token: String, port: u16, hosts: security::HostPolicy, opts: SessionOpts, max_parallel: usize, budget: u64) -> Result<Arc<App>, String> {
         let plugins = crate::plugins::all();
         let hub = Arc::new(Hub::default());
         let session = Arc::new(Session::new(1, &opts).map_err(|e| e.to_string())?);
@@ -63,10 +64,11 @@ impl App {
             plugins,
             session: RwLock::new(session.clone()),
             base_opts: Mutex::new(opts),
-            runs: Arc::new(Runs::new(hub.clone(), max_parallel)),
+            runs: Arc::new(Runs::new(hub.clone(), max_parallel, budget)),
             hub,
             next_session: AtomicU64::new(2),
             auth_failures: AtomicU64::new(0),
+            tickets: security::Tickets::default(),
             export_seq: AtomicU64::new(1),
             started: Instant::now(),
         });
@@ -97,7 +99,7 @@ impl App {
 
 const USAGE: &str = "usage: vol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
                  [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
-                 [--workers N] [--parallel N]
+                 [--max-conns N] [--parallel N] [--max-memory SIZE]
 
 Serve the rsvol web UI (a local, token-protected web app for analysing a memory image).
 
@@ -118,9 +120,28 @@ options:
   --cache-path PATH     change the default cache path
   --token TOKEN         use this access token instead of a random one (at least 16 chars)
   --allow-host NAME     also accept requests addressed to NAME (e.g. a reverse proxy name)
-  --workers N           HTTP worker threads (default 48)
+  --max-conns N         concurrent HTTP connections (default 512)
   --parallel N          plugins that may run at the same time (default 3)
+  --max-memory SIZE     memory for stored results, all runs together (default 3G); rows past
+                        it are counted but not kept (exports via `vol -r` stay complete)
 ";
+
+/// "4G", "512M", "1.5g", "100000000" -> bytes
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim().to_ascii_lowercase();
+    let (num, mult) = match s.chars().last()? {
+        'k' => (&s[..s.len() - 1], 1u64 << 10),
+        'm' => (&s[..s.len() - 1], 1 << 20),
+        'g' => (&s[..s.len() - 1], 1 << 30),
+        't' => (&s[..s.len() - 1], 1 << 40),
+        _ => (&s[..], 1),
+    };
+    let v: f64 = num.trim_end_matches(['i', 'b']).parse().ok()?;
+    if !(v.is_finite() && v > 0.0) {
+        return None;
+    }
+    Some((v * mult as f64) as u64)
+}
 
 fn human_size(n: u64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -145,8 +166,9 @@ pub fn main(args: &[String]) -> i32 {
     let mut cache: Option<String> = None;
     let mut token: Option<String> = None;
     let mut allow: Vec<String> = Vec::new();
-    let mut workers = 48usize;
+    let mut max_conns = 512usize;
     let mut parallel = 3usize;
+    let mut budget: u64 = 3 << 30;
     let mut i = 0;
     let fail = |m: &str| -> i32 {
         eprint!("{USAGE}");
@@ -193,8 +215,12 @@ pub fn main(args: &[String]) -> i32 {
                 Some(h) => allow.push(h.to_ascii_lowercase()),
                 None => return fail("--allow-host needs a value"),
             },
-            "--workers" => workers = val(&mut i).and_then(|v| v.parse().ok()).unwrap_or(workers).clamp(4, 512),
+            "--max-conns" | "--workers" => max_conns = val(&mut i).and_then(|v| v.parse().ok()).unwrap_or(max_conns).clamp(8, 4096),
             "--parallel" => parallel = val(&mut i).and_then(|v| v.parse().ok()).unwrap_or(parallel).clamp(1, 64),
+            "--max-memory" => match val(&mut i).as_deref().and_then(parse_size) {
+                Some(b) => budget = b.max(16 << 20),
+                None => return fail("--max-memory needs a size like 2G or 512M"),
+            },
             _ => return fail(&format!("unrecognized argument {a}")),
         }
         i += 1;
@@ -259,7 +285,7 @@ pub fn main(args: &[String]) -> i32 {
     let symbol_dirs: Vec<String> = symbol_dirs.iter().map(|d| crate::cli::abspath(d, &cwd.to_string_lossy())).collect();
     let opts = SessionOpts { image: image.clone(), symbol_dirs, out_root: out_root.clone(), offline, remote_isf_url: remote, cache_path: cache };
     let hosts = security::HostPolicy { port, wildcard: ip.is_unspecified(), bind: if ip.is_unspecified() { None } else { Some(ip) }, names: allow };
-    let app = match App::new(token.clone(), port, hosts, opts, parallel) {
+    let app = match App::new(token.clone(), port, hosts, opts, parallel, budget) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("vol serve: {e}");
@@ -279,13 +305,15 @@ pub fn main(args: &[String]) -> i32 {
         None => println!("  image   (none yet: open one from the UI)"),
     }
     println!("  output  {}", out_root.display());
-    println!("  open    http://{shown_host}:{port}/?token={token}");
+    // the token travels in the URL fragment: browsers never send fragments to servers (no logs,
+    // no Referer), and the page moves it into this origin's localStorage and off the URL
+    println!("  open    http://{shown_host}:{port}/#token={token}");
     if !ip.is_loopback() {
         println!("WARNING: listening on {host}: the evidence is reachable from the network over unencrypted HTTP.");
     }
     println!("Anyone with this URL can read the image. Press Ctrl+C to stop.");
     use std::io::Write;
     let _ = std::io::stdout().flush();
-    server::serve(app, listener, workers);
+    server::serve(app, listener, max_conns);
     0
 }

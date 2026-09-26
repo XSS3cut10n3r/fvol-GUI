@@ -1,6 +1,24 @@
 // Shared plumbing: API calls, the live event stream, the client store, DOM helpers.
 
-export const TOKEN = document.querySelector('meta[name="rsvol-token"]').content;
+/** The access token: from the startup URL's fragment (#token=...) into this origin's
+ * localStorage (origin-scoped, so other ports on 127.0.0.1 can't read it), then off the URL.
+ * Never a cookie: cookies are not port-isolated. */
+function initToken() {
+  const m = /(?:^#|&)token=([^&]+)/.exec(location.hash);
+  if (m) {
+    const t = decodeURIComponent(m[1]);
+    try { localStorage.setItem('rsvol.token', t); } catch (e) { /* storage blocked: keep it for this page only */ }
+    const rest = location.hash.replace(/(^#|&)token=[^&]+/, '').replace(/^#&/, '#');
+    history.replaceState(null, '', location.pathname + location.search + (rest.length > 1 ? rest : ''));
+    return t;
+  }
+  try { return localStorage.getItem('rsvol.token') || ''; } catch (e) { return ''; }
+}
+export let TOKEN = initToken();
+export function setToken(t) {
+  TOKEN = t;
+  try { localStorage.setItem('rsvol.token', t); } catch (e) { /* ignore */ }
+}
 export const VERSION = document.querySelector('meta[name="rsvol-version"]').content;
 
 export class ApiError extends Error {
@@ -153,6 +171,18 @@ export async function allRows(id, max = 200000) {
 }
 
 export const cellText = c => (c === null ? '-' : c === 0 ? 'N/A' : c);
+
+/** Download an API URL: plain links can't send the token header, so ask for a single-use,
+ * 60-second ticket bound to exactly this URL first. */
+export async function download(path) {
+  try {
+    const { url } = await api('ticket', { method: 'POST', body: { path } });
+    const a = el('a', { href: url, download: '' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+  } catch (e) { toast('Download failed: ' + e.message, 'bad'); }
+}
 
 // ------------------------------------------------------------------ DOM helpers
 /** el('div.cls#id', {attrs, on: {click}}, ...children). Text children are text nodes. */

@@ -1,7 +1,7 @@
 // A result panel: toolbar + virtual table + row detail drawer + (optional) timeline strip.
 // Used for plugin tabs, process pivots and the compare view.
 
-import { store, api, on, emit, el, clear, copy, menu, cellText, fmtCount, fmtMs, fmtTime, parseTime, toast, shortName, prefs, expectedDuration } from './core.js';
+import { store, api, on, emit, el, clear, copy, menu, cellText, fmtCount, fmtMs, fmtTime, parseTime, toast, shortName, prefs, expectedDuration, download } from './core.js';
 import { VirtualTable } from './table.js';
 
 /** Where to look at a Hex value: physical, kernel or a process address space. */
@@ -96,7 +96,7 @@ export class ResultPanel {
 
   exportMenu(anchor) {
     const t = this.table;
-    const dl = (url) => { const a = el('a', { href: url, download: '' }); document.body.append(a); a.click(); a.remove(); };
+    const dl = url => download(url);
     const r = this.run;
     const cli = () => {
       const s = store.session;

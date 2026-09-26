@@ -23,7 +23,7 @@ case $cmd in
     stop
     nohup /home/user/rs-vol/bench/scripts/limit.sh -m 6G "$BIN" serve -f "$img" --port "$port" \
       --token "testtoken-$name-0123456789" -o "$dir/out" "$@" > "$dir/serve.log" 2>&1 &
-    for _ in $(seq 1 100); do
+    for _ in $(seq 1 6000); do   # limit.sh may wait for a free slot
       pid=$(volpid)
       if [ -n "$pid" ] && curl -s -o /dev/null "http://127.0.0.1:$port/favicon.svg"; then
         echo "started $name on $port (pid $pid)"; exit 0

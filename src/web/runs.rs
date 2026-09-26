@@ -4,7 +4,7 @@
 
 use super::jsonw::W;
 use super::session::Session;
-use super::table::{K_ABSENT, K_NA, K_TEXT, MAX_TEXT, Table, View};
+use super::table::{K_ABSENT, K_DEC, K_HEX, K_NA, K_TEXT, MAX_TEXT, Table, View};
 use crate::error::{Error, Result};
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -90,10 +90,19 @@ pub struct RunData {
     pub seq: u64,
     /// the worker thread is still inside the plugin (a cancelled run may still be unwinding)
     pub busy: bool,
+    /// the table was dropped to make room for newer results (memory budget)
+    pub evicted: bool,
 }
 
 pub struct Run {
     pub id: u64,
+    /// bytes of table storage used by all runs, and the budget for them
+    pub used: Arc<AtomicU64>,
+    pub budget: u64,
+    /// the registry (to evict other runs' tables when memory runs out)
+    pub registry: std::sync::Weak<Runs>,
+    /// epoch ms of the last time the browser looked at this run's rows
+    pub last_access: AtomicU64,
     pub session: Arc<Session>,
     pub plugin: &'static dyn Plugin,
     pub cfg: Config,
@@ -108,6 +117,13 @@ pub struct Run {
     pub data: RwLock<RunData>,
     pub views: Mutex<Vec<(u64, String, Arc<View>)>>,
     pub next_view: AtomicU64,
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        let b = self.data.get_mut().map(|d| d.table.bytes()).unwrap_or(0);
+        self.used.fetch_sub(b as u64, Ordering::Relaxed);
+    }
 }
 
 impl Run {
@@ -136,6 +152,7 @@ impl Run {
         w.ku("rows", d.produced);
         w.ku("stored", d.table.rows() as u64);
         w.kb("truncated", d.truncated);
+        w.kb("evicted", d.evicted);
         w.ku("created", self.created_ms);
         let el = match (d.status, d.started) {
             (Status::Running, Some(s)) => s.elapsed().as_millis() as u64,
@@ -214,11 +231,27 @@ impl WebSink<'_> {
         if n == 0 {
             return;
         }
+        let add = self.batch.bytes() as u64;
+        // memory budget: one run may use half of it; past that its rows are counted, not kept.
+        // Before giving up, drop the tables of the least recently viewed finished runs (they can
+        // be re-run in moments; the event stream tells the browser).
+        let (mine, truncated) = {
+            let d = self.run.read();
+            (d.table.bytes() as u64, d.truncated)
+        };
+        let fits_run = !truncated && mine + add <= self.run.budget / 2;
+        if fits_run
+            && self.run.used.load(Ordering::Relaxed) + add > self.run.budget
+            && let Some(reg) = self.run.registry.upgrade()
+        {
+            reg.evict(add, self.run.id);
+        }
         {
             let mut d = self.run.write();
-            if d.table.text.len() + self.batch.text.len() > MAX_TEXT {
+            if !fits_run || d.table.text.len() + self.batch.text.len() > MAX_TEXT || self.run.used.load(Ordering::Relaxed) + add > self.run.budget {
                 d.truncated = true;
             } else {
+                self.run.used.fetch_add(add, Ordering::Relaxed);
                 d.table.append(&self.batch);
             }
             d.produced += n;
@@ -254,15 +287,16 @@ impl RowSink for WebSink<'_> {
         let d = depth.min(self.depth_len);
         self.depth_len = d + 1;
         for (i, v) in values.iter().enumerate() {
-            let k = match v {
-                Value::NotApplicable => K_NA,
-                v if v.is_absent() => K_ABSENT,
-                v => {
-                    crate::renderers::text::render_cell(&mut self.batch.text, self.types[i], v, false);
-                    K_TEXT
+            match (self.types[i], v) {
+                (_, Value::NotApplicable) => self.batch.push_cell(K_NA),
+                (_, v) if v.is_absent() => self.batch.push_cell(K_ABSENT),
+                (ColType::Int, Value::Int(x)) if i64::try_from(*x).is_ok() => self.batch.push_num(K_DEC, *x as i64 as u64),
+                (ColType::Hex, Value::Int(x)) if (0..=u64::MAX as i128).contains(x) => self.batch.push_num(K_HEX, *x as u64),
+                (ty, v) => {
+                    crate::renderers::text::render_cell(&mut self.batch.text, ty, v, false);
+                    self.batch.push_cell(K_TEXT);
                 }
-            };
-            self.batch.push_cell(k);
+            }
         }
         self.batch.depth.push(d.min(u16::MAX as usize) as u16);
         if self.batch.rows() >= 4096 || self.last_flush.elapsed() >= Duration::from_millis(40) {
@@ -399,11 +433,22 @@ pub struct Runs {
     sched: Mutex<(usize, VecDeque<Arc<Run>>)>,
     pub max_parallel: usize,
     pub hub: Arc<Hub>,
+    /// table storage in use / allowed (bytes)
+    pub used: Arc<AtomicU64>,
+    pub budget: u64,
 }
 
 impl Runs {
-    pub fn new(hub: Arc<Hub>, max_parallel: usize) -> Runs {
-        Runs { list: Mutex::new(Vec::new()), next_id: AtomicU64::new(1), sched: Mutex::new((0, VecDeque::new())), max_parallel: max_parallel.max(1), hub }
+    pub fn new(hub: Arc<Hub>, max_parallel: usize, budget: u64) -> Runs {
+        Runs {
+            list: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+            sched: Mutex::new((0, VecDeque::new())),
+            max_parallel: max_parallel.max(1),
+            hub,
+            used: Arc::new(AtomicU64::new(0)),
+            budget,
+        }
     }
 
     pub fn get(&self, id: u64) -> Option<Arc<Run>> {
@@ -422,18 +467,54 @@ impl Runs {
             .find(|r| {
                 r.session.id == session && r.key == key && {
                     let d = r.read();
-                    matches!(d.status, Status::Done | Status::Running | Status::Queued) && !d.truncated
+                    matches!(d.status, Status::Done | Status::Running | Status::Queued) && !d.truncated && !d.evicted
                 }
             })
             .cloned()
     }
 
-    pub fn create(&self, session: Arc<Session>, plugin: &'static dyn Plugin, cfg: Config, args: Vec<String>, key: String, origin: &str) -> Arc<Run> {
+    /// Free at least `need` bytes of table storage by dropping the tables of finished runs,
+    /// least recently viewed first (never `except`, never running ones).
+    pub fn evict(&self, need: u64, except: u64) {
+        let mut cands: Vec<(u64, Arc<Run>)> = self
+            .all()
+            .into_iter()
+            .filter(|r| r.id != except)
+            .filter(|r| r.data.try_read().map(|d| d.status.finished() && !d.busy && d.table.rows() > 0).unwrap_or(false))
+            .map(|r| (r.last_access.load(Ordering::Relaxed).max(r.created_ms), r))
+            .collect();
+        cands.sort_by_key(|c| c.0);
+        for (_, r) in cands {
+            if self.used.load(Ordering::Relaxed) + need <= self.budget {
+                break;
+            }
+            let Ok(mut d) = r.data.try_write() else { continue };
+            let b = d.table.bytes() as u64;
+            d.table = Table::new(d.table.ncols);
+            d.evicted = true;
+            d.seq = self.hub.bump();
+            drop(d);
+            self.used.fetch_sub(b, Ordering::Relaxed);
+            r.views.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+    }
+
+    pub fn create(self: &Arc<Self>, session: Arc<Session>, plugin: &'static dyn Plugin, cfg: Config, args: Vec<String>, key: String, origin: &str) -> Arc<Run> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let short: String = plugin.name().chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '_' }).collect();
-        let out_dir = session.out_root.join(format!("run-{id:04}-{short}"));
+        // run ids restart with the server but output directories persist: never reuse one
+        let mut out_dir = session.out_root.join(format!("run-{id:04}-{short}"));
+        let mut k = 2;
+        while std::fs::symlink_metadata(&out_dir).is_ok() {
+            out_dir = session.out_root.join(format!("run-{id:04}-{short}-{k}"));
+            k += 1;
+        }
         let run = Arc::new(Run {
             id,
+            used: self.used.clone(),
+            budget: self.budget,
+            registry: Arc::downgrade(self),
+            last_access: AtomicU64::new(0),
             session,
             plugin,
             cfg,
@@ -456,6 +537,7 @@ impl Runs {
                 files: Vec::new(),
                 seq: 0,
                 busy: false,
+                evicted: false,
             }),
             views: Mutex::new(Vec::new()),
             next_view: AtomicU64::new(1),

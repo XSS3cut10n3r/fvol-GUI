@@ -3,9 +3,11 @@
 //!
 //! A table stores every cell as the exact text the CLI's quick renderer prints (so what the
 //! analyst sees is what `vol` prints), concatenated into one byte arena with a u32 end offset
-//! and a kind byte per cell: ~1.1 bytes of overhead per cell, no per-cell allocation. The
-//! browser never holds more than the visible window; sorting and filtering millions of rows
-//! happens here (parallel for big tables).
+//! and a kind byte per cell: 5 bytes of overhead per cell, no per-cell allocation. Int and Hex
+//! cells (most of a typical table) are stored as their 8-byte value instead of text and
+//! formatted on demand, which halves memory for address-heavy output and makes numeric
+//! sorting/filtering a plain integer compare. The browser never holds more than the visible
+//! window; sorting and filtering millions of rows happens here (parallel for big tables).
 
 use super::jsonw;
 use crate::renderers::ColType;
@@ -18,6 +20,50 @@ pub const K_TEXT: u8 = 0;
 pub const K_ABSENT: u8 = 1;
 /// NotApplicable: rendered "N/A"
 pub const K_NA: u8 = 2;
+/// an Int column value, stored as 8 bytes (i64 LE), rendered in decimal
+pub const K_DEC: u8 = 3;
+/// a Hex column value, stored as 8 bytes (u64 LE), rendered "0x..." (lower case)
+pub const K_HEX: u8 = 4;
+
+/// Scratch space for formatting a numeric cell.
+#[derive(Default)]
+pub struct NumBuf(pub [u8; 24]);
+
+fn fmt_dec(v: i64, b: &mut NumBuf) -> &[u8] {
+    let mut i = b.0.len();
+    let neg = v < 0;
+    let mut u = v.unsigned_abs();
+    loop {
+        i -= 1;
+        b.0[i] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if neg {
+        i -= 1;
+        b.0[i] = b'-';
+    }
+    &b.0[i..]
+}
+
+fn fmt_hex(mut u: u64, b: &mut NumBuf) -> &[u8] {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    let mut i = b.0.len();
+    loop {
+        i -= 1;
+        b.0[i] = H[(u & 15) as usize];
+        u >>= 4;
+        if u == 0 {
+            break;
+        }
+    }
+    i -= 2;
+    b.0[i] = b'0';
+    b.0[i + 1] = b'x';
+    &b.0[i..]
+}
 
 /// Most bytes of cell text one run may keep (the rest of its rows are counted, not stored).
 pub const MAX_TEXT: usize = 1 << 31;
@@ -49,13 +95,44 @@ impl Table {
     pub fn kind(&self, r: usize, c: usize) -> u8 {
         self.kinds[r * self.ncols + c]
     }
-    /// Text as printed by the CLI ("-" / "N/A" for absent values).
-    pub fn display(&self, r: usize, c: usize) -> &[u8] {
+    /// A present cell (text or number), i.e. not "-" / "N/A".
+    #[inline]
+    pub fn present(&self, r: usize, c: usize) -> bool {
+        !matches!(self.kind(r, c), K_ABSENT | K_NA)
+    }
+    /// The value of a numeric (K_DEC / K_HEX) cell.
+    #[inline]
+    pub fn value(&self, r: usize, c: usize) -> Option<i128> {
+        let k = self.kind(r, c);
+        if k != K_DEC && k != K_HEX {
+            return None;
+        }
+        let s = self.cell(r, c);
+        let v = u64::from_le_bytes(s.try_into().ok()?);
+        Some(if k == K_DEC { v as i64 as i128 } else { v as i128 })
+    }
+    /// Text as printed by the CLI ("-" / "N/A" for absent values, numbers formatted).
+    #[inline]
+    pub fn text<'a>(&'a self, r: usize, c: usize, buf: &'a mut NumBuf) -> &'a [u8] {
         match self.kind(r, c) {
             K_ABSENT => b"-",
             K_NA => b"N/A",
+            K_DEC => match self.value(r, c) {
+                Some(v) => fmt_dec(v as i64, buf),
+                None => b"",
+            },
+            K_HEX => match self.value(r, c) {
+                Some(v) => fmt_hex(v as u64, buf),
+                None => b"",
+            },
             _ => self.cell(r, c),
         }
+    }
+    /// Push a numeric cell (`kind` K_DEC or K_HEX).
+    #[inline]
+    pub fn push_num(&mut self, kind: u8, v: u64) {
+        self.text.extend_from_slice(&v.to_le_bytes());
+        self.push_cell(kind);
     }
     /// Append a batch built with the same column count.
     pub fn append(&mut self, b: &Table) {
@@ -177,7 +254,9 @@ pub enum Filter {
     /// numeric (int0 / hex) comparison; falls back to text comparison for text columns
     Cmp(Op, i128),
     TextCmp(Op, Vec<u8>),
-    Regex(crate::yara::regex::Regex),
+    /// python `re` pattern, case-insensitive (compiled per worker thread: the engine's scratch
+    /// pool is a mutex, which 20 threads filtering millions of cells would fight over)
+    Regex(String),
     /// only absent cells ("-" / "N/A")
     Absent,
     /// only present cells
@@ -200,7 +279,7 @@ impl Filter {
         if e.len() >= 2 && e.starts_with('/') && e.ends_with('/') {
             let pat = &e[1..e.len() - 1];
             return crate::yara::regex::Regex::new_str(pat, crate::yara::regex::Flags::I)
-                .map(Filter::Regex)
+                .map(|_| Filter::Regex(pat.to_string()))
                 .map_err(|x| format!("invalid regular expression: {x}"));
         }
         for (p, op) in [(">=", Op::Ge), ("<=", Op::Le), (">", Op::Gt), ("<", Op::Lt)] {
@@ -223,22 +302,23 @@ impl Filter {
     }
 
     fn test(&self, t: &Table, r: usize, c: usize, ty: ColType) -> bool {
-        let k = t.kind(r, c);
+        let present = t.present(r, c);
         match self {
-            Filter::Absent => return k != K_TEXT,
-            Filter::Present => return k == K_TEXT,
+            Filter::Absent => return !present,
+            Filter::Present => return present,
             _ => {}
         }
-        let s = t.display(r, c);
+        let mut nb = NumBuf::default();
+        let s = t.text(r, c, &mut nb);
         match self {
             Filter::Contains(n) => contains_ci(s, n),
             Filter::NotContains(n) => !contains_ci(s, n),
             Filter::Exact(n) => s.eq_ignore_ascii_case(n),
             Filter::Cmp(op, v) => {
-                if k != K_TEXT {
+                if !present {
                     return false;
                 }
-                match num_key(ty, s) {
+                match t.value(r, c).or_else(|| num_key(ty, s)) {
                     Some(x) => match op {
                         Op::Lt => x < *v,
                         Op::Le => x <= *v,
@@ -249,7 +329,7 @@ impl Filter {
                 }
             }
             Filter::TextCmp(op, v) => {
-                if k != K_TEXT {
+                if !present {
                     return false;
                 }
                 let o = cmp_text(s, v);
@@ -260,10 +340,20 @@ impl Filter {
                     Op::Ge => o != Ordering::Less,
                 }
             }
-            Filter::Regex(re) => re.is_match(s),
+            Filter::Regex(p) => REGEX.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.as_ref().is_none_or(|(q, _)| q != p) {
+                    *cache = crate::yara::regex::Regex::new_str(p, crate::yara::regex::Flags::I).ok().map(|re| (p.clone(), re));
+                }
+                cache.as_ref().is_some_and(|(_, re)| re.is_match(s))
+            }),
             Filter::Absent | Filter::Present => unreachable!(),
         }
     }
+}
+
+thread_local! {
+    static REGEX: std::cell::RefCell<Option<(String, crate::yara::regex::Regex)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A compare ("diff") against another run: rows whose key columns do (not) appear there.
@@ -282,7 +372,8 @@ pub fn row_key(t: &Table, r: usize, keys: &[usize]) -> Vec<u8> {
             k.push(0x1f);
         }
         if c < t.ncols {
-            k.extend(t.display(r, c).iter().map(|b| b.to_ascii_lowercase()));
+            let mut nb = NumBuf::default();
+            k.extend(t.text(r, c, &mut nb).iter().map(|b| b.to_ascii_lowercase()));
         }
     }
     k
@@ -357,11 +448,9 @@ fn row_matches(t: &Table, types: &[ColType], spec: &ViewSpec, r: usize) -> (bool
         }
     }
     if !spec.q.is_empty() {
-        let hit = if spec.visible.is_empty() {
-            (0..t.ncols).any(|c| contains_ci(t.display(r, c), &spec.q))
-        } else {
-            spec.visible.iter().any(|&c| c < t.ncols && contains_ci(t.display(r, c), &spec.q))
-        };
+        let mut nb = NumBuf::default();
+        let mut hit_col = |c: usize| c < t.ncols && contains_ci(t.text(r, c, &mut nb), &spec.q);
+        let hit = if spec.visible.is_empty() { (0..t.ncols).any(&mut hit_col) } else { spec.visible.iter().any(|&c| hit_col(c)) };
         if !hit {
             return (false, false);
         }
@@ -448,72 +537,138 @@ pub fn build_view(t: &Table, types: &[ColType], spec: &ViewSpec) -> View {
 
 /// Stable multi-column sort. Numeric columns sort by value, text case-insensitively; absent
 /// values always sort last.
+///
+/// Every sort column is first reduced to a dense 32-bit rank per row (numbers by value, text
+/// by an MSD string sort), then up to three ranks plus the row position are packed into one
+/// u128 per row and sorted as plain integers (the position makes it stable).
 fn sort_rows(t: &Table, types: &[ColType], sort: &[(usize, bool)], rows: &mut Vec<u32>, marks: &mut Vec<u8>) {
-    // precompute keys for the primary column
-    enum Key {
-        Num(Vec<Option<i128>>),
-        Text(Vec<u64>),
-    }
-    let keys: Vec<Key> = sort
-        .iter()
-        .map(|&(c, _)| {
+    const ABSENT: u32 = u32::MAX;
+    let n = rows.len();
+    let keys: Vec<Vec<u32>> = crate::util::par::par_map(sort.len(), |si| {
+            let (c, desc) = sort[si];
             let ty = types.get(c).copied().unwrap_or(ColType::Str);
-            if is_numeric(ty) {
-                Key::Num(rows.iter().map(|&r| if t.kind(r as usize, c) == K_TEXT { num_key(ty, t.cell(r as usize, c)) } else { None }).collect())
-            } else {
-                // 8-byte lower-cased big-endian prefix; ties fall back to the full compare
-                Key::Text(
-                    rows.iter()
-                        .map(|&r| {
-                            let s = t.display(r as usize, c);
-                            let mut k = [0u8; 8];
-                            for (i, b) in s.iter().take(8).enumerate() {
-                                k[i] = b.to_ascii_lowercase();
-                            }
-                            u64::from_be_bytes(k)
-                        })
-                        .collect(),
-                )
-            }
-        })
-        .collect();
-    let mut idx: Vec<u32> = (0..rows.len() as u32).collect();
-    idx.sort_by(|&a, &b| {
-        for (k, &(c, desc)) in keys.iter().zip(sort) {
-            let o = match k {
-                Key::Num(v) => match (v[a as usize], v[b as usize]) {
-                    (Some(x), Some(y)) => {
-                        let o = x.cmp(&y);
-                        if desc { o.reverse() } else { o }
-                    }
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                },
-                Key::Text(v) => {
-                    let (ra, rb) = (rows[a as usize] as usize, rows[b as usize] as usize);
-                    let (aa, ab) = (t.kind(ra, c) != K_TEXT, t.kind(rb, c) != K_TEXT);
-                    match (aa, ab) {
-                        (false, true) => Ordering::Less,
-                        (true, false) => Ordering::Greater,
-                        (true, true) => Ordering::Equal,
-                        _ => {
-                            let o = v[a as usize].cmp(&v[b as usize]).then_with(|| cmp_text(t.cell(ra, c), t.cell(rb, c)));
-                            if desc { o.reverse() } else { o }
-                        }
+            let (mut k, distinct) = if is_numeric(ty) {
+                let mut vals: Vec<(u128, u32)> = Vec::with_capacity(n);
+                for (i, &r) in rows.iter().enumerate() {
+                    let r = r as usize;
+                    let v = match t.kind(r, c) {
+                        K_DEC | K_HEX => t.value(r, c),
+                        K_TEXT => num_key(ty, t.cell(r, c)),
+                        _ => None,
+                    };
+                    // bias so that unsigned order == signed order
+                    if let Some(v) = v {
+                        vals.push(((v as u128) ^ (1u128 << 127), i as u32));
                     }
                 }
+                vals.sort_unstable();
+                let mut k = vec![ABSENT; n];
+                let mut cur = 0u32;
+                for (j, &(v, i)) in vals.iter().enumerate() {
+                    if j > 0 && v != vals[j - 1].0 {
+                        cur += 1;
+                    }
+                    k[i as usize] = cur;
+                }
+                (k, if vals.is_empty() { 0 } else { cur + 1 })
+            } else {
+                text_ranks(t, c, rows)
             };
-            if o != Ordering::Equal {
-                return o;
+            if desc {
+                for x in k.iter_mut() {
+                    if *x != ABSENT {
+                        *x = distinct - 1 - *x;
+                    }
+                }
             }
-        }
-        Ordering::Equal
-    });
+            k
+        });
+    let idx: Vec<u32> = if keys.len() <= 3 {
+        let mut packed: Vec<u128> = (0..n)
+            .map(|i| {
+                let mut p: u128 = 0;
+                for (j, k) in keys.iter().enumerate() {
+                    p |= (k[i] as u128) << (96 - 32 * j);
+                }
+                p | i as u128
+            })
+            .collect();
+        packed.sort_unstable();
+        packed.into_iter().map(|p| p as u32).collect()
+    } else {
+        let mut idx: Vec<u32> = (0..n as u32).collect();
+        idx.sort_unstable_by(|&a, &b| {
+            for k in &keys {
+                let o = k[a as usize].cmp(&k[b as usize]);
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+            a.cmp(&b)
+        });
+        idx
+    };
     let r2: Vec<u32> = idx.iter().map(|&i| rows[i as usize]).collect();
     let m2: Vec<u8> = idx.iter().map(|&i| marks[i as usize]).collect();
     *rows = r2;
     *marks = m2;
+}
+
+/// Dense rank of every row's text in column `c` (ASCII case-insensitive order) and the number
+/// of distinct values; absent cells get `u32::MAX`.
+///
+/// MSD string sort on 16-byte chunks: each pass is an integer sort of (chunk, length class),
+/// and only runs that are equal so far and continue are refined by the next chunk. Shared
+/// prefixes (paths!) and duplicate values (process names) cost a few integer passes instead of
+/// long byte-by-byte comparisons.
+fn text_ranks(t: &Table, c: usize, rows: &[u32]) -> (Vec<u32>, u32) {
+    let n = rows.len();
+    let mut order: Vec<u32> = (0..n as u32).filter(|&i| t.present(rows[i as usize] as usize, c)).collect();
+    let m = order.len();
+    let mut boundary = vec![false; m];
+    // key of the 16-byte chunk at `depth`: (lower-cased big-endian chunk, length class)
+    // length class: bytes left in this chunk (0..=16), 17 = the string continues
+    let key = |i: u32, depth: usize| -> (u128, u8) {
+        let mut nb = NumBuf::default();
+        let s = t.text(rows[i as usize] as usize, c, &mut nb);
+        let rest = s.get(depth..).unwrap_or(&[]);
+        let mut k = [0u8; 16];
+        for (j, b) in rest.iter().take(16).enumerate() {
+            k[j] = b.to_ascii_lowercase();
+        }
+        (u128::from_be_bytes(k), if rest.len() > 16 { 17 } else { rest.len() as u8 })
+    };
+    let mut jobs: Vec<(usize, usize, usize)> = vec![(0, m, 0)];
+    let mut keys: Vec<((u128, u8), u32)> = Vec::new();
+    while let Some((s, e, depth)) = jobs.pop() {
+        keys.clear();
+        keys.extend(order[s..e].iter().map(|&i| (key(i, depth), i)));
+        keys.sort_unstable();
+        let mut a = 0;
+        while a < keys.len() {
+            let mut b = a + 1;
+            while b < keys.len() && keys[b].0 == keys[a].0 {
+                b += 1;
+            }
+            boundary[s + a] = true;
+            if keys[a].0.1 == 17 && b - a > 1 {
+                jobs.push((s + a, s + b, depth + 16));
+            }
+            a = b;
+        }
+        for (k, (_, i)) in keys.iter().enumerate() {
+            order[s + k] = *i;
+        }
+    }
+    let mut rank = vec![u32::MAX; n];
+    let mut cur: u32 = 0;
+    for (k, &i) in order.iter().enumerate() {
+        if k > 0 && boundary[k] {
+            cur += 1;
+        }
+        rank[i as usize] = cur;
+    }
+    (rank, if order.is_empty() { 0 } else { cur + 1 })
 }
 
 // ------------------------------------------------------------------------------------------
@@ -599,11 +754,18 @@ pub fn row_json(out: &mut Vec<u8>, t: &Table, r: usize, mark: u8) {
     out.extend_from_slice(r.to_string().as_bytes());
     out.push(b',');
     out.extend_from_slice((t.depth[r] as u32 * 4 + mark as u32).to_string().as_bytes());
+    let mut nb = NumBuf::default();
     for c in 0..t.ncols {
         out.push(b',');
         match t.kind(r, c) {
             K_ABSENT => out.extend_from_slice(b"null"),
             K_NA => out.push(b'0'),
+            K_DEC | K_HEX => {
+                // numbers go out as strings: JS numbers can't hold 64-bit addresses
+                out.push(b'"');
+                out.extend_from_slice(t.text(r, c, &mut nb));
+                out.push(b'"');
+            }
             _ => jsonw::bytes_str(out, t.cell(r, c)),
         }
     }
@@ -631,6 +793,7 @@ pub fn csv_field(out: &mut Vec<u8>, s: &[u8], sep: u8) {
 pub fn cell_json(out: &mut Vec<u8>, t: &Table, r: usize, c: usize, ty: ColType) {
     match t.kind(r, c) {
         K_ABSENT | K_NA => out.extend_from_slice(b"null"),
+        K_DEC | K_HEX => out.extend_from_slice(t.value(r, c).unwrap_or(0).to_string().as_bytes()),
         _ => {
             let s = t.cell(r, c);
             if is_numeric(ty) && ty != ColType::Float {
@@ -720,6 +883,75 @@ mod tests {
         assert_eq!(parse_cli_time(b"1970-01-01 00:00:00.000000 UTC"), Some(0.0));
         assert_eq!(parse_cli_time(b"2026-09-14 02:53:44.500000 UTC"), Some(1_789_354_424.5));
         assert_eq!(parse_cli_time(b"garbage"), None);
+    }
+
+    #[test]
+    fn compact_numbers_render_like_the_cli() {
+        use crate::renderers::Value;
+        let mut t = Table::new(1);
+        let hexes: [u64; 6] = [0, 1, 0xff, 0xffff_8000_0000_0010, u64::MAX, 0x1000];
+        let decs: [i64; 6] = [0, 7, -5, i64::MIN, i64::MAX, 1_000_000];
+        for v in hexes {
+            t.push_num(K_HEX, v);
+            t.depth.push(0);
+        }
+        for v in decs {
+            t.push_num(K_DEC, v as u64);
+            t.depth.push(0);
+        }
+        for (r, v) in hexes.iter().map(|&v| (ColType::Hex, v as i128)).chain(decs.iter().map(|&v| (ColType::Int, v as i128))).enumerate() {
+            let mut want = Vec::new();
+            crate::renderers::text::render_cell(&mut want, v.0, &Value::Int(v.1), false);
+            let mut nb = NumBuf::default();
+            assert_eq!(t.text(r, 0, &mut nb), want.as_slice(), "row {r}");
+            assert_eq!(t.value(r, 0), Some(v.1));
+        }
+    }
+
+    /// `cargo test --profile fast table_bench -- --ignored --nocapture`: views over 2M rows.
+    #[test]
+    #[ignore]
+    fn table_bench() {
+        let n = 2_000_000usize;
+        let t0 = std::time::Instant::now();
+        let mut t = Table::new(5);
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        let names = ["svchost.exe", "explorer.exe", "cmd.exe", "powershell.exe", "lsass.exe", "chrome.exe"];
+        for i in 0..n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            t.push_num(K_DEC, (x % 9000) as u64);
+            t.push_num(K_HEX, 0xffff_8000_0000_0000 | (x & 0xffff_ffff_fff0));
+            t.text.extend_from_slice(names[(x % 6) as usize].as_bytes());
+            t.push_cell(K_TEXT);
+            t.text.extend_from_slice(format!("\\Device\\HarddiskVolume3\\Windows\\System32\\file{i}.dll").as_bytes());
+            t.push_cell(K_TEXT);
+            t.text.extend_from_slice(format!("2026-09-14 02:{:02}:{:02}.000000 UTC", (x >> 8) % 60, x % 60).as_bytes());
+            t.push_cell(K_TEXT);
+            t.depth.push(0);
+        }
+        let types = [ColType::Int, ColType::Hex, ColType::Str, ColType::Str, ColType::DateTime];
+        println!("build {n} rows: {:?}, {} MiB ({:.1} B/row)", t0.elapsed(), t.bytes() >> 20, t.bytes() as f64 / n as f64);
+        let time = |name: &str, spec: ViewSpec| {
+            let s = std::time::Instant::now();
+            let v = build_view(&t, &types, &spec);
+            println!("{name:<34} {:>8.1} ms  -> {} rows", s.elapsed().as_secs_f64() * 1e3, v.total);
+            v
+        };
+        time("global text filter 'powershell'", ViewSpec { q: b"powershell".to_vec(), ..Default::default() });
+        time("column filter file1234", ViewSpec { filters: vec![(3, Filter::parse("file1234", ColType::Str).unwrap())], ..Default::default() });
+        time("numeric filter PID >= 0x1000", ViewSpec { filters: vec![(0, Filter::parse(">=0x1000", ColType::Int).unwrap())], ..Default::default() });
+        time("regex /^(cmd|lsass)/", ViewSpec { filters: vec![(2, Filter::parse("/^(cmd|lsass)/", ColType::Str).unwrap())], ..Default::default() });
+        time("sort by hex desc", ViewSpec { sort: vec![(1, true)], ..Default::default() });
+        time("sort by name then time", ViewSpec { sort: vec![(2, false), (4, false)], ..Default::default() });
+        let v = time("sort by path (text)", ViewSpec { sort: vec![(3, false)], ..Default::default() });
+        let s = std::time::Instant::now();
+        let mut out = Vec::new();
+        for i in 1_000_000..1_000_256 {
+            row_json(&mut out, &t, v.row(i), 0);
+        }
+        println!("{:<34} {:>8.3} ms  ({} bytes)", "serialize a 256-row window", s.elapsed().as_secs_f64() * 1e3, out.len());
     }
 
     #[test]

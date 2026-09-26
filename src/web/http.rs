@@ -21,7 +21,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { max_head: 16 * 1024, max_headers: 64, max_body: 1 << 20, request_time: std::time::Duration::from_secs(20) }
+        Limits { max_head: 16 * 1024, max_headers: 64, max_body: 1 << 20, request_time: std::time::Duration::from_secs(10) }
     }
 }
 
@@ -57,22 +57,6 @@ impl Request {
     }
     pub fn param(&self, name: &str) -> Option<&str> {
         self.query.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
-    }
-    /// A cookie value by name (first match).
-    pub fn cookie(&self, name: &str) -> Option<&str> {
-        for (n, v) in &self.headers {
-            if n != "cookie" {
-                continue;
-            }
-            for part in v.split(';') {
-                if let Some((k, val)) = part.trim().split_once('=')
-                    && k.trim() == name
-                {
-                    return Some(val.trim().trim_matches('"'));
-                }
-            }
-        }
-        None
     }
 }
 
@@ -268,7 +252,18 @@ pub fn content_length(req: &Request, lim: &Limits) -> Result<usize, HttpError> {
     Ok(len)
 }
 
-impl<S: Read> Conn<S> {
+/// Lets the reader bound each socket read by the time left for the whole request.
+pub trait ReadTimeout {
+    fn set_timeout(&self, _d: Option<std::time::Duration>) {}
+}
+impl ReadTimeout for std::net::TcpStream {
+    fn set_timeout(&self, d: Option<std::time::Duration>) {
+        let _ = self.set_read_timeout(d);
+    }
+}
+impl<T> ReadTimeout for std::io::Cursor<T> {}
+
+impl<S: Read + ReadTimeout> Conn<S> {
     pub fn new(stream: S) -> Conn<S> {
         Conn { stream, buf: vec![0; 32 * 1024], start: 0, end: 0 }
     }
@@ -330,6 +325,11 @@ impl<S: Read> Conn<S> {
             if late(&started) {
                 return Err(HttpError::Timeout);
             }
+            // a hard wall-clock deadline, not just a per-read one: a client dripping a byte
+            // every few seconds can't hold a worker past `request_time`
+            if let Some(t) = started {
+                self.stream.set_timeout(Some(lim.request_time.saturating_sub(t.elapsed()).max(std::time::Duration::from_millis(1))));
+            }
             match self.fill(lim.max_head + 4) {
                 Ok(0) => return Err(if had == 0 { HttpError::Closed } else { HttpError::Bad("truncated request") }),
                 Ok(_) => {
@@ -351,6 +351,9 @@ impl<S: Read> Conn<S> {
         while body.len() < len {
             if late(&started) {
                 return Err(HttpError::Timeout);
+            }
+            if let Some(t) = started {
+                self.stream.set_timeout(Some(lim.request_time.saturating_sub(t.elapsed()).max(std::time::Duration::from_millis(1))));
             }
             if self.start == self.end {
                 match self.fill(usize::MAX) {

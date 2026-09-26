@@ -4,7 +4,6 @@
 use super::http::{Body, Request, Response};
 
 pub const INDEX_HTML: &str = include_str!("assets/index.html");
-pub const LOGIN_HTML: &str = include_str!("assets/login.html");
 
 pub struct Asset {
     pub name: &'static str,

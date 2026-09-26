@@ -104,10 +104,11 @@ fn test_app() -> Arc<App> {
         plugins,
         session: std::sync::RwLock::new(session),
         base_opts: std::sync::Mutex::new(opts),
-        runs: Arc::new(Runs::new(hub.clone(), 2)),
+        runs: Arc::new(Runs::new(hub.clone(), 2, 1 << 30)),
         hub,
         next_session: std::sync::atomic::AtomicU64::new(2),
         auth_failures: std::sync::atomic::AtomicU64::new(0),
+        tickets: super::security::Tickets::default(),
         export_seq: std::sync::atomic::AtomicU64::new(1),
         started: std::time::Instant::now(),
     })
@@ -285,38 +286,44 @@ fn api_requires_token_host_and_same_origin() {
     assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, AUTH, ("sec-fetch-site", "cross-site")], "").0, 403);
     assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, AUTH, ("origin", "http://evil.example")], "").0, 403);
     assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, AUTH, ("origin", "http://127.0.0.1:8765"), ("sec-fetch-site", "same-origin")], "").0, 200);
-    // the cookie works for GET, not for state changes
+    // cookies are never credentials (they are not port-isolated)
     let cookie = format!("rsvol_8765={TOK}");
-    assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, ("cookie", &cookie)], "").0, 200);
+    assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, ("cookie", &cookie)], "").0, 401);
     let body = r#"{"plugin":"test.fake.Fake"}"#;
-    assert_eq!(call(&app, "POST", "/api/runs", &[HOST, ("cookie", &cookie)], body).0, 403);
-    // another port's cookie is not ours
-    assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, ("cookie", &format!("rsvol_8766={TOK}"))], "").0, 401);
+    assert_eq!(call(&app, "POST", "/api/runs", &[HOST, ("cookie", &cookie)], body).0, 401);
+    // the token is not accepted in the query string either
+    assert_eq!(call(&app, "GET", &format!("/api/plugins?token={TOK}"), &[HOST], "").0, 401);
+    // deeply nested JSON is refused before parsing
+    let deep = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
+    assert_eq!(call(&app, "POST", "/api/runs", &[HOST, AUTH], &deep).0, 400);
     // no CORS preflight support
     assert_eq!(call(&app, "OPTIONS", "/api/runs", &[HOST], "").0, 401);
     assert_eq!(call(&app, "OPTIONS", "/", &[HOST], "").0, 405);
 }
 
 #[test]
-fn login_flow_and_static_assets() {
+fn page_download_tickets_and_static_assets() {
     let app = test_app();
-    // no cookie: login page, not the app (the app page embeds the token)
-    let (st, body, _) = call(&app, "GET", "/", &[HOST], "");
+    // the page holds no secret and sets no cookie
+    let (st, body, r) = call(&app, "GET", "/", &[HOST], "");
     assert_eq!(st, 200);
     assert!(!body.contains(TOK));
-    // startup URL: sets an HttpOnly SameSite=Strict cookie and redirects the token away
-    let (st, _, r) = call(&app, "GET", &format!("/?token={TOK}"), &[HOST], "");
-    assert_eq!(st, 303);
-    let sc = r.headers.iter().find(|(n, _)| *n == "set-cookie").unwrap().1.clone();
-    assert!(sc.contains("HttpOnly") && sc.contains("SameSite=Strict") && sc.starts_with("rsvol_8765="));
-    assert_eq!(call(&app, "GET", "/?token=wrong", &[HOST], "").0, 401);
-    // with the cookie: the app, token embedded
-    let (st, body, _) = call(&app, "GET", "/", &[HOST, ("cookie", &format!("rsvol_8765={TOK}"))], "");
-    assert_eq!(st, 200);
-    assert!(body.contains(TOK));
-    // form login
-    assert_eq!(call(&app, "POST", "/login", &[HOST], &format!("token={TOK}")).0, 303);
-    assert_eq!(call(&app, "POST", "/login", &[HOST, ("origin", "http://evil.example")], &format!("token={TOK}")).0, 403);
+    assert!(!r.headers.iter().any(|(n, _)| *n == "set-cookie"));
+    // download tickets: single use, bound to one exact URL, issued only with the token
+    let target = "/api/plugins?x=1";
+    assert_eq!(call(&app, "POST", "/api/ticket", &[HOST], &format!(r#"{{"path":"{target}"}}"#)).0, 401);
+    let (st, text, _) = call(&app, "POST", "/api/ticket", &[HOST, AUTH], &format!(r#"{{"path":"{target}"}}"#));
+    assert_eq!(st, 200, "{text}");
+    let url = match j(&text).get("url") {
+        Some(Json::Str(u)) => u.clone(),
+        _ => panic!("{text}"),
+    };
+    let t = url.rsplit_once("ticket=").unwrap().1.to_string();
+    assert_eq!(call(&app, "GET", &format!("/api/plugins?x=2&ticket={t}"), &[HOST], "").0, 401); // other URL
+    assert_eq!(call(&app, "POST", &url, &[HOST], "").0, 401); // GET only
+    assert_eq!(call(&app, "GET", &url, &[HOST], "").0, 200);
+    assert_eq!(call(&app, "GET", &url, &[HOST], "").0, 401); // used up
+    assert_eq!(call(&app, "POST", "/api/ticket", &[HOST, AUTH], r#"{"path":"/etc/passwd"}"#).0, 422);
     // assets are public, ETag'd
     let (st, _, r) = call(&app, "GET", "/assets/app.css", &[HOST], "");
     assert_eq!(st, 200);
@@ -386,10 +393,16 @@ fn run_streams_rows_views_and_files() {
         assert_eq!(d.status, Status::Done);
         assert_eq!(d.table.rows(), 50);
         // cells hold exactly what the quick renderer prints
-        assert_eq!(d.table.display(1, 2), b"0xffff800000000010");
-        assert_eq!(d.table.display(0, 3), b"N/A");
-        assert_eq!(d.table.display(5, 2), b"-");
-        assert_eq!(d.table.display(1, 3), b"2023-11-14 22:14:20.000000 UTC");
+        let txt = |r, c| {
+            let mut nb = super::table::NumBuf::default();
+            d.table.text(r, c, &mut nb).to_vec()
+        };
+        assert_eq!(txt(1, 2), b"0xffff800000000010");
+        assert_eq!(d.table.kind(1, 2), super::table::K_HEX);
+        assert_eq!(d.table.kind(1, 0), super::table::K_DEC);
+        assert_eq!(txt(0, 3), b"N/A");
+        assert_eq!(txt(5, 2), b"-");
+        assert_eq!(txt(1, 3), b"2023-11-14 22:14:20.000000 UTC");
         assert_eq!(d.files, vec![("dumped.bin".to_string(), 8)]);
     }
     // window of rows
@@ -506,4 +519,64 @@ fn exports_csv_json_md() {
     assert_eq!(jl.lines().count(), 4);
     let md = get("md");
     assert!(md.starts_with("| PID | Name | When |\n|---|---|---|\n"));
+}
+
+#[test]
+fn memory_budget_caps_runs_and_evicts_least_recently_viewed() {
+    let app = test_app();
+    // a registry with a 64 KiB budget (32 KiB per run)
+    let runs = Arc::new(Runs::new(app.hub.clone(), 2, 64 << 10));
+    let session = app.session();
+    let start = |n: i128| {
+        let (cfg, argv) = api::parse_config(&FAKE, Some(&j(&format!(r#"{{"count":{n}}}"#)))).unwrap();
+        let r = runs.create(session.clone(), &FAKE, cfg, argv, format!("k{n}"), "user");
+        runs.submit(r.clone());
+        for _ in 0..500 {
+            if r.read().status.finished() && !r.read().busy {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        r
+    };
+    let a = start(400);
+    let b = start(401);
+    assert!(!a.read().truncated && !b.read().truncated);
+    b.last_access.store(runs::now_ms(), std::sync::atomic::Ordering::Relaxed); // b was looked at
+    let c = start(402);
+    // a (least recently viewed) made room for c
+    assert!(a.read().evicted, "a should have been evicted");
+    assert!(!b.read().evicted);
+    assert_eq!(c.read().table.rows(), 402);
+    // one run can't take more than half the budget
+    let big = start(5000);
+    assert!(big.read().truncated);
+    assert_eq!(big.read().produced, 5000);
+    assert!(big.read().table.bytes() <= 32 << 10);
+    assert!(runs.used.load(std::sync::atomic::Ordering::Relaxed) <= 64 << 10);
+}
+
+#[test]
+fn slow_clients_hit_a_hard_deadline() {
+    /// yields one byte per read, 20 ms apart: never finishes a request
+    struct Drip(usize);
+    impl std::io::Read for Drip {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(20));
+            let src = b"GET / HTTP/1.1\r\nHost: x\r\nX: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            if self.0 >= src.len() {
+                b[0] = b'a';
+            } else {
+                b[0] = src[self.0];
+            }
+            self.0 += 1;
+            Ok(1)
+        }
+    }
+    impl http::ReadTimeout for Drip {}
+    let lim = Limits { request_time: Duration::from_millis(200), ..Limits::default() };
+    let t = std::time::Instant::now();
+    let e = Conn::new(Drip(0)).read_request(&lim).unwrap_err();
+    assert_eq!(e, HttpError::Timeout);
+    assert!(t.elapsed() < Duration::from_millis(600), "{:?}", t.elapsed());
 }

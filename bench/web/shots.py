@@ -46,7 +46,9 @@ STEPS = []
 
 
 def login(hash_=""):
-    c.goto(f"{BASE}/?token={TOKEN}{hash_}", 1.0)
+    c.goto(f"{BASE}/?r={time.time()}#token={TOKEN}", 1.0)
+    if hash_:
+        c.eval(f"location.hash = {json.dumps(hash_.lstrip('#'))}")
     c.wait("document.querySelector('.tab')", 20)
 
 

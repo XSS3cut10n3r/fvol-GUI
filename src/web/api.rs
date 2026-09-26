@@ -1,8 +1,9 @@
 //! Request routing and the JSON API.
 //!
-//! Every `/api/` request needs the access token (`X-Vol-Token` header; the HttpOnly SameSite
-//! cookie is accepted for GET downloads only), a Host header naming this server, and must not
-//! be a cross-site browser request. Nothing here executes anything taken from a request:
+//! Every `/api/` request needs the access token in the `X-Vol-Token` header (downloads, which
+//! a plain link can't give a header, use single-use 60-second tickets bound to one URL), a Host
+//! header naming this server, and must not be a cross-site browser request. No cookies: they
+//! are not port-isolated, so every other service on 127.0.0.1 would receive them. Nothing here executes anything taken from a request:
 //! plugin names are looked up in the registry, options are validated against the plugin's
 //! declared requirements, file downloads are matched against a fresh directory listing.
 
@@ -11,7 +12,7 @@ use super::assets;
 use super::http::{Body, Method, Request, Response};
 use super::jsonw::W;
 use super::runs::{Run, Status, coltype_name, list_files};
-use super::security::{self, Auth};
+use super::security;
 use super::table::{self, CmpSpec, Filter, ViewSpec};
 use crate::cli::json::{self, Json};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind};
@@ -20,6 +21,26 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+
+/// Long-lived streams (event stream, row streams) are capped so they can't take every
+/// connection; a slot is released when the stream ends.
+pub struct StreamSlot;
+static STREAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_STREAMS: usize = 64;
+impl StreamSlot {
+    fn take() -> Option<StreamSlot> {
+        if STREAMS.fetch_add(1, Ordering::Relaxed) >= MAX_STREAMS {
+            STREAMS.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(StreamSlot)
+    }
+}
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        STREAMS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 fn err(status: u16, msg: &str) -> Response {
     let mut w = W::new();
@@ -62,8 +83,12 @@ pub fn handle(app: &Arc<App>, req: &Request) -> Response {
     };
     let path = req.path.as_str();
     match (req.method, path) {
-        (Method::Get | Method::Head, "/") => index(app, req),
-        (Method::Post, "/login") => login(app, req),
+        // the page itself holds no secret: the token lives in the browser (URL fragment ->
+        // localStorage of this exact origin) and goes out in a header on every API call
+        (Method::Get | Method::Head, "/") => {
+            let html = assets::INDEX_HTML.replace("{{VERSION}}", crate::VERSION_BANNER);
+            Response::new(200).header("cache-control", "no-store").bytes("text/html; charset=utf-8", html.into_bytes())
+        }
         (Method::Get | Method::Head, "/favicon.svg") | (Method::Get | Method::Head, "/favicon.ico") => {
             assets::get("favicon.svg").map(|a| assets::respond(a, req)).unwrap_or_else(|| Response::text(404, "not found"))
         }
@@ -74,17 +99,14 @@ pub fn handle(app: &Arc<App>, req: &Request) -> Response {
             if security::cross_site(req, &host) {
                 return err(403, "cross-site requests are refused");
             }
-            let auth = security::authenticate(req, &app.token, app.port);
-            if auth == Auth::None {
+            let ok = security::authenticate(req, &app.token) || (matches!(req.method, Method::Get | Method::Head) && app.tickets.redeem(req));
+            if !ok {
                 // slow down guessing
                 let n = app.auth_failures.fetch_add(1, Ordering::Relaxed);
                 if n > 20 {
                     std::thread::sleep(Duration::from_millis(250));
                 }
-                return err(401, "missing or wrong access token (see the URL printed by `vol serve`)");
-            }
-            if security::needs_header(req) && auth != Auth::Header {
-                return err(403, "this request needs the X-Vol-Token header");
+                return err(401, "missing or wrong access token (open the URL printed by `vol serve`)");
             }
             api(app, req, &p["/api/".len()..])
         }
@@ -93,58 +115,41 @@ pub fn handle(app: &Arc<App>, req: &Request) -> Response {
     }
 }
 
-fn index(app: &Arc<App>, req: &Request) -> Response {
-    let cookie = security::cookie_name(app.port);
-    // ?token=... from the startup URL: set the cookie and strip the token from the address bar
-    if let Some(t) = req.param("token") {
-        if security::ct_eq(t.as_bytes(), app.token.as_bytes()) {
-            return Response::new(303)
-                .header("location", "/")
-                .header("set-cookie", format!("{cookie}={}; Path=/; HttpOnly; SameSite=Strict", app.token))
-                .header("cache-control", "no-store");
+/// Reject JSON nested deeper than `max` (the parser recurses per level).
+fn json_too_deep(text: &str, max: usize) -> bool {
+    let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+    for b in text.bytes() {
+        if in_str {
+            match (esc, b) {
+                (true, _) => esc = false,
+                (false, b'\\') => esc = true,
+                (false, b'"') => in_str = false,
+                _ => {}
+            }
+            continue;
         }
-        app.auth_failures.fetch_add(1, Ordering::Relaxed);
-        return login_page(true);
-    }
-    match req.cookie(&cookie) {
-        Some(c) if security::ct_eq(c.as_bytes(), app.token.as_bytes()) => {
-            let html = assets::INDEX_HTML.replace("{{TOKEN}}", &app.token).replace("{{VERSION}}", crate::VERSION_BANNER);
-            Response::new(200).header("cache-control", "no-store").bytes("text/html; charset=utf-8", html.into_bytes())
+        match b {
+            b'"' => in_str = true,
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > max {
+                    return true;
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
         }
-        _ => login_page(false),
     }
-}
-
-fn login_page(failed: bool) -> Response {
-    let html = assets::LOGIN_HTML.replace("{{FAILED}}", if failed { "<p class=\"bad\" role=\"alert\">That token is not valid for this server.</p>" } else { "" });
-    Response::new(if failed { 401 } else { 200 }).header("cache-control", "no-store").bytes("text/html; charset=utf-8", html.into_bytes())
-}
-
-fn login(app: &Arc<App>, req: &Request) -> Response {
-    let body = String::from_utf8_lossy(&req.body);
-    let form = super::http::parse_query(&body).unwrap_or_default();
-    let t = form.iter().find(|(k, _)| k == "token").map(|(_, v)| v.trim().to_string()).unwrap_or_default();
-    // same-origin form posts only
-    if let Some(o) = req.header("origin")
-        && o != format!("http://{}", req.header("host").unwrap_or(""))
-    {
-        return Response::text(403, "cross-site login refused");
-    }
-    if security::ct_eq(t.as_bytes(), app.token.as_bytes()) {
-        return Response::new(303)
-            .header("location", "/")
-            .header("set-cookie", format!("{}={}; Path=/; HttpOnly; SameSite=Strict", security::cookie_name(app.port), app.token))
-            .header("cache-control", "no-store");
-    }
-    app.auth_failures.fetch_add(1, Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(300));
-    login_page(true)
+    false
 }
 
 fn body_json(req: &Request) -> Result<Json, Response> {
     let text = std::str::from_utf8(&req.body).map_err(|_| err(400, "request body is not UTF-8"))?;
     if text.trim().is_empty() {
         return Ok(Json::Obj(Vec::new()));
+    }
+    if json_too_deep(text, 32) {
+        return Err(err(400, "JSON nested too deeply"));
     }
     json::parse(text).map_err(|e| err(400, &format!("invalid JSON: {}", e.0)))
 }
@@ -160,6 +165,7 @@ fn api(app: &Arc<App>, req: &Request, rest: &str) -> Response {
             ok(w)
         }
         (["session"], _, Method::Post) => open_session(app, req),
+        (["ticket"], _, Method::Post) => ticket(app, req),
         (["plugins"], true, _) => Response::json(200, app.plugins_json.clone()),
         (["events"], true, _) => events(app),
         (["stats"], true, _) => stats(app),
@@ -420,7 +426,9 @@ pub fn parse_config(plugin: &dyn Plugin, args: Option<&Json>) -> Result<(Config,
             ReqKind::Uri => {
                 let s = v.as_str().ok_or_else(|| format!("argument {flag}: expected a path or URL"))?;
                 let has_scheme = s.find(':').is_some_and(|i| i > 1 && s[..i].bytes().all(|c| c.is_ascii_alphanumeric() || b"+-.".contains(&c)));
-                if has_scheme {
+                if has_scheme && !s.to_ascii_lowercase().starts_with("file:") {
+                    return Err(format!("argument {flag}: remote URLs are disabled in vol serve (the server would fetch them); download the file and give its local path"));
+                } else if has_scheme {
                     ConfigValue::Str(s.to_string())
                 } else {
                     let p = cwd.join(s);
@@ -600,6 +608,10 @@ fn make_view(app: &Arc<App>, run: &Arc<Run>, req: &Request) -> Response {
         Err(r) => return r,
     };
     let t0 = Instant::now();
+    run.last_access.store(super::runs::now_ms(), Ordering::Relaxed);
+    if run.read().evicted {
+        return err(410, "this result was dropped from memory to make room for newer ones; run it again");
+    }
     let types = run.read().types.clone();
     let spec = match parse_spec(&j, run, &types, app) {
         Ok(s) => s,
@@ -640,6 +652,10 @@ fn find_view(run: &Run, vid: u64) -> Option<Arc<table::View>> {
 }
 
 fn rows(run: &Arc<Run>, req: &Request) -> Response {
+    run.last_access.store(super::runs::now_ms(), Ordering::Relaxed);
+    if run.read().evicted {
+        return err(410, "this result was dropped from memory to make room for newer ones; run it again");
+    }
     let vid = qint(req, "view").unwrap_or(0).max(0) as u64;
     let from = qint(req, "from").unwrap_or(0).max(0) as usize;
     let count = qint(req, "count").unwrap_or(200).clamp(0, 5000) as usize;
@@ -685,9 +701,11 @@ fn rows(run: &Arc<Run>, req: &Request) -> Response {
 fn stream_rows(app: &Arc<App>, run: Arc<Run>, req: &Request) -> Response {
     let mut sent = qint(req, "from").unwrap_or(0).max(0) as usize;
     let hub = app.hub.clone();
+    let Some(slot) = StreamSlot::take() else { return err(503, "too many open streams") };
     Response::new(200).header("cache-control", "no-store").stream(
         "application/x-ndjson; charset=utf-8",
         Box::new(move |w: &mut dyn Write| {
+            let _slot = slot;
             let mut cols_sent = false;
             let mut seen = 0u64;
             loop {
@@ -874,7 +892,8 @@ fn export(run: &Arc<Run>, req: &Request) -> Response {
                             if k > 0 {
                                 out.push(sep);
                             }
-                            table::csv_field(&mut out, t.display(r, c), sep);
+                            let mut nb = table::NumBuf::default();
+                            table::csv_field(&mut out, t.text(r, c, &mut nb), sep);
                         }
                         out.extend_from_slice(b"\r\n");
                     }
@@ -914,7 +933,8 @@ fn export(run: &Arc<Run>, req: &Request) -> Response {
                                     out.extend_from_slice("\u{2003}".as_bytes());
                                 }
                             }
-                            md_cell(&mut out, t.display(r, c));
+                            let mut nb = table::NumBuf::default();
+                            md_cell(&mut out, t.text(r, c, &mut nb));
                             out.extend_from_slice(b" |");
                         }
                         out.push(b'\n');
@@ -1093,9 +1113,11 @@ fn fs_list(req: &Request) -> Response {
 /// they change (throttled to ~12 updates/s), heartbeats every 15 s.
 fn events(app: &Arc<App>) -> Response {
     let app = app.clone();
+    let Some(slot) = StreamSlot::take() else { return err(503, "too many open streams") };
     Response::new(200).header("cache-control", "no-store").stream(
         "application/x-ndjson; charset=utf-8",
         Box::new(move |w: &mut dyn Write| {
+            let _slot = slot;
             let mut last_session: Vec<u8> = Vec::new();
             let mut sent_seq: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
             let mut seen = 0u64;
@@ -1152,4 +1174,26 @@ fn events(app: &Arc<App>) -> Response {
             }
         }),
     )
+}
+
+/// A single-use, 60-second ticket for one GET URL (downloads: a plain link can't carry the
+/// token header).
+fn ticket(app: &Arc<App>, req: &Request) -> Response {
+    let j = match body_json(req) {
+        Ok(j) => j,
+        Err(r) => return r,
+    };
+    let Some(path) = j.get("path").and_then(|p| p.as_str()) else { return err(422, "\"path\" is required") };
+    if !path.starts_with("/api/") || path.contains("ticket=") || path.contains('#') || path.len() > 2048 {
+        return err(422, "bad path");
+    }
+    match app.tickets.issue(path) {
+        Some(t) => {
+            let sep = if path.contains('?') { '&' } else { '?' };
+            let mut w = W::new();
+            w.obj().ks("url", &format!("{path}{sep}ticket={t}")).end_obj();
+            ok(w)
+        }
+        None => err(503, "too many pending downloads"),
+    }
 }

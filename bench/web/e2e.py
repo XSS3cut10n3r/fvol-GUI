@@ -125,15 +125,22 @@ def main():
     check("DNS-rebinding Host -> 421", st == 421)
     st, _ = w.req("GET", "/api/plugins", headers={"Sec-Fetch-Site": "cross-site"})
     check("cross-site fetch -> 403", st == 403)
-    st, _ = w.req("POST", "/api/runs", {"plugin": "windows.pslist.PsList"}, headers={"X-Vol-Token": None, "Cookie": f"rsvol_18765={w.token}"})
-    check("cookie-only POST -> 403", st == 403)
+    st, _ = w.req("GET", "/api/plugins", headers={"X-Vol-Token": None, "Cookie": f"rsvol_18765={w.token}"})
+    check("a cookie is never a credential", st == 401)
     st, raw, r = w.req("GET", "/", headers={"X-Vol-Token": None}, raw=True)
-    check("index without cookie: login page, no token leak", st == 200 and w.token.encode() not in raw)
-    st, raw, r = w.req("GET", f"/?token={w.token}", headers={"X-Vol-Token": None}, raw=True)
-    check("startup URL sets HttpOnly SameSite=Strict cookie", st == 303 and "HttpOnly" in (r.getheader("set-cookie") or "") and "SameSite=Strict" in (r.getheader("set-cookie") or ""))
+    check("page holds no token and sets no cookie", st == 200 and w.token.encode() not in raw and not r.getheader("set-cookie"))
+    st, j = w.req("POST", "/api/ticket", {"path": "/api/plugins"})
+    tk = j["url"] if st == 200 else ""
+    st1, _ = w.req("GET", tk, headers={"X-Vol-Token": None})
+    st2, _ = w.req("GET", tk, headers={"X-Vol-Token": None})
+    check("download ticket: works once, then refused", st1 == 200 and st2 == 401)
+    st, j = w.req("POST", "/api/runs", {"plugin": "windows.strings.Strings", "args": {"strings_file": "http://127.0.0.1:9/x"}})
+    check("remote URI options refused (no SSRF)", st in (404, 422))
+    st, _ = w.req("GET", "/api/plugins", host="127.0.0.1:+18765")
+    check("Host with a decorated port refused", st == 421)
     st, raw, r = w.req("GET", "/assets/app.js", raw=True)
-    check("CSP-free asset served", st == 200 and r.getheader("x-content-type-options") == "nosniff")
-    st, raw, r = w.req("GET", "/", headers={"X-Vol-Token": None, "Cookie": f"rsvol_18765={w.token}"}, raw=True)
+    check("assets served with nosniff", st == 200 and r.getheader("x-content-type-options") == "nosniff")
+    st, raw, r = w.req("GET", "/", headers={"X-Vol-Token": None}, raw=True)
     csp = r.getheader("content-security-policy") or ""
     check("app page has strict CSP", st == 200 and "script-src 'self'" in csp and "unsafe" not in csp)
     st, j = w.req("POST", "/api/runs", {"plugin": "windows.pslist.PsList", "args": {"pid": ["010"]}})
@@ -171,7 +178,9 @@ def main():
     ref = {f: hashlib.sha256(open(os.path.join(d, f), "rb").read()).hexdigest() for f in os.listdir(d)}
     got = {}
     for f in files:
-        st, raw, _ = w.req("GET", f"/api/runs/{rid}/files/{f['name']}", raw=True)
+        # the way the browser does it: a ticket, then a plain GET without the header
+        st, j = w.req("POST", "/api/ticket", {"path": f"/api/runs/{rid}/files/{f['name']}"})
+        st, raw, _ = w.req("GET", j["url"], headers={"X-Vol-Token": None}, raw=True)
         got[f["name"]] = hashlib.sha256(raw).hexdigest()
     check(f"dumped files identical to the CLI's ({len(ref)} files)", ref and got == ref, f"{got} vs {ref}")
     st, raw, _ = w.req("GET", f"/api/runs/{rid}/files/..%2f..%2fetc%2fpasswd", raw=True)

@@ -43,6 +43,7 @@ export class VirtualTable {
     this.lastViewAt = 0;
 
     this.root = el('div.vt', { tabindex: 0, role: 'grid', 'aria-label': opts.label || 'Results', 'aria-multiselectable': 'false' });
+    this.root._vt = this; // handle for tests / debugging
     this.scroll = el('div.vt-scroll');
     this.head = el('div.vt-head', { role: 'rowgroup' });
     this.spacer = el('div.vt-spacer', { role: 'rowgroup' });
@@ -127,8 +128,12 @@ export class VirtualTable {
     if (!this.built) return;
     const gen = ++this.gen;
     this.lastViewAt = Date.now();
+    // big views take a moment: show it after 120 ms
+    const busyT = setTimeout(() => { if (gen === this.gen) this.root.classList.add('busy'); }, 120);
     try {
       const r = await api(`runs/${this.runId}/view`, { method: 'POST', body: this.spec() });
+      clearTimeout(busyT);
+      this.root.classList.remove('busy');
       if (gen !== this.gen) return;
       this.error = '';
       this.view = r.view;
@@ -142,6 +147,8 @@ export class VirtualTable {
       this.layout();
       this.schedule();
     } catch (e) {
+      clearTimeout(busyT);
+      this.root.classList.remove('busy');
       if (gen !== this.gen) return;
       this.error = e.message;
       this.markFilterErrors(e.message);
@@ -173,6 +180,7 @@ export class VirtualTable {
     }).catch(e => {
       this.inflight.delete(p);
       if (e.name === 'AbortError') return;
+      if (e.status === 410 && /dropped from memory/.test(e.message)) { this.error = e.message; this.renderFoot(); return; }
       if (e.status === 410) { this.buildView(); return; }
       this.error = e.message;
       this.renderFoot();
