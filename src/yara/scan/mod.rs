@@ -13,7 +13,17 @@
 //!   `base64wide`, `private`;
 //! * hex / regex strings go through [`re_string::ReString`].
 
+pub mod literal;
+mod matcher;
 pub mod re_string;
+pub mod teddy;
+
+#[cfg(test)]
+mod bench;
+#[cfg(test)]
+mod tests;
+
+pub use matcher::{Matcher, Scratch};
 
 /// A string declaration as parsed from rule source.
 #[derive(Clone, Debug)]
@@ -75,32 +85,3 @@ pub const MAX_STRING_MATCHES: usize = 1_000_000;
 /// Maximum bytes of matched data reported per match (YR_MAX_MATCH_DATA).
 pub const MAX_MATCH_DATA: usize = 512;
 
-/// Compiled matcher for a list of strings (all strings of all rules, global index).
-pub struct Matcher {
-    defs: Vec<StringDef>,
-}
-
-impl Matcher {
-    /// Compile. Errors mirror yara compile errors for invalid hex / regex / modifier
-    /// combinations (message text is informative only).
-    pub fn new(strings: &[StringDef]) -> Result<Matcher, String> {
-        Ok(Matcher { defs: strings.to_vec() })
-    }
-
-    pub fn len(&self) -> usize {
-        self.defs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
-    }
-
-    /// Scan `data`. On return `out.len() == strings.len()` and `out[i]` holds the
-    /// matches of string `i`, sorted by offset, one per offset, capped at
-    /// [`MAX_STRING_MATCHES`].
-    pub fn scan(&self, data: &[u8], out: &mut Vec<Vec<Match>>) {
-        let _ = data;
-        out.clear();
-        out.resize(self.defs.len(), Vec::new());
-    }
-}

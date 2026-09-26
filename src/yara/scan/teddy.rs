@@ -36,14 +36,6 @@ pub struct Teddy {
     members: Vec<u32>,
 }
 
-fn set_freq(s: &ByteSet) -> f64 {
-    let mut f = 0u64;
-    for b in s.iter() {
-        f += BYTE_FREQ[b as usize] as u64;
-    }
-    f as f64 / (1u64 << 20) as f64
-}
-
 /// Nibble projection of a bucket position: (low nibbles, high nibbles) as bitmasks.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Nib {
@@ -309,8 +301,7 @@ impl Teddy {
                 }
                 acc
             };
-            // SAFETY: plain AVX2 ops.
-            let mut mask = unsafe { !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(acc, zero)) as u32) };
+            let mut mask = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(acc, zero)) as u32);
             if mask != 0 {
                 // SAFETY: 32-byte buffer.
                 unsafe { _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, acc) };
