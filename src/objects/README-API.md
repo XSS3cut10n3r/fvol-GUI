@@ -365,6 +365,19 @@ pages mapped at several virtual addresses are searched once) and `stream_window`
 `RsdsScanner` and the pool header scanner implement them; a plain `scan` still works (mapped
 chunks, slower).
 
+**Scan cache** (`crate::layers::scancache`): a two-phase scanner that also implements
+`cache_query()` has its raw `prescan` matches cached per image (`~/.cache/rsvol/scan/`); repeat
+scans of the same layer / sections / chunking replay them through `finish` in python order
+without reading the layer, so put every python-side check in `finish` (it runs on every run).
+Describe the prescan exactly: `CacheQuery::Greedy { patterns, limit, cap }` (python
+`MultiStringScanner`; delegate to the inner `MultiStringScanner::cache_query()`),
+`CacheQuery::Every { needle, limit }` (python `BytesScanner`), or `CacheQuery::Opaque { key }`
+(the prescan output as is; `key` = name + version + every parameter). Literal queries are
+answered from per-literal atoms, and a full-layer miss also records well-known literals (pool
+tags, MFT / MBR signatures, vmscan page starts) in the same sweep, so the next scanner of that
+family is warm too. Never implement it for scanners of user-supplied patterns (yara/regex).
+`RSVOL_NO_SCAN_CACHE=1` disables the cache, `--clear-cache` wipes it.
+
 ### Pool scanning (`crate::plugins::windows::poolscanner`, `crate::symbols::windows::pool`)
 
 | python | rust |

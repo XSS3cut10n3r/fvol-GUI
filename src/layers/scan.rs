@@ -81,6 +81,13 @@ pub trait Scanner: Sync {
     fn prescan_piece(&self, _data: &[u8], _base: u64, _from: usize, limit: usize, _out: &mut Vec<(u64, u32)>) -> usize {
         limit
     }
+    /// Two-phase scanners: what their `prescan` computes, for the per-image scan cache
+    /// ([`super::scancache`]): a full scan then records it, and later scans of the same layer,
+    /// sections and chunking replay the cached matches through `finish` without reading the
+    /// layer. `None` (the default) = never cached.
+    fn cache_query(&self) -> Option<super::scancache::CacheQuery<'_>> {
+        None
+    }
 }
 
 /// Where a chunk's bytes come from.
@@ -820,7 +827,16 @@ pub fn scan<S: Scanner>(layer: &dyn Layer, scanner: &S, sections: Option<&[(u64,
 /// Streaming scan: `f` receives hits in python order on the calling thread; return `false`
 /// to stop (remaining chunks are abandoned). Work items are scanned in parallel with bounded
 /// look-ahead, so stopping early wastes little work.
-pub fn scan_each<S, F>(layer: &dyn Layer, scanner: &S, sections: Option<&[(u64, u64)]>, mut f: F)
+pub fn scan_each<S, F>(layer: &dyn Layer, scanner: &S, sections: Option<&[(u64, u64)]>, f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+{
+    scan_sections(layer, scanner, sections, true, f)
+}
+
+/// [`scan_each`]; `cache` = whether the scan cache may answer / record it.
+fn scan_sections<S, F>(layer: &dyn Layer, scanner: &S, sections: Option<&[(u64, u64)]>, cache: bool, f: F)
 where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
@@ -829,10 +845,26 @@ where
         Some(s) => coalesce_sections(layer, s),
         None => coalesce_sections(layer, &default_sections(layer)),
     };
+    if cache
+        && let Some(q) = scanner.cache_query()
+        && let Some(session) = super::scancache::Session::new(layer, &secs, sections.is_none(), scanner.chunk_size(), scanner.overlap())
+    {
+        return super::scancache::scan_each(&session, layer, scanner, q, &secs, f);
+    }
+    execute(layer, scanner, &secs, f)
+}
+
+/// Run python's chunk list of the (coalesced) sections `secs` of `layer` through `scanner` on
+/// all cores; `f` gets the hits in python order and returns false to stop.
+pub(crate) fn execute<S, F>(layer: &dyn Layer, scanner: &S, secs: &[(u64, u64)], mut f: F)
+where
+    S: Scanner,
+    F: FnMut(S::Hit) -> bool,
+{
     let deps = if layer.lower().is_some() { layer.dependencies() } else { Vec::new() };
     let chunks = {
         let _t = crate::util::trace::span("scan: build chunks");
-        build_chunks(layer, &deps, scanner.chunk_size(), scanner.overlap(), &secs)
+        build_chunks(layer, &deps, scanner.chunk_size(), scanner.overlap(), secs)
     };
     if chunks.is_empty() {
         return;
@@ -927,7 +959,8 @@ where
         };
         let mut stopped = false;
         if end > start {
-            scan_each(layer, scanner, Some(&[(start, end - start)]), |h| {
+            // per-batch sections: nothing worth caching (these scans stop early)
+            scan_sections(layer, scanner, Some(&[(start, end - start)]), false, |h| {
                 if offset_of(&h) >= limit {
                     return true;
                 }
@@ -1038,6 +1071,12 @@ impl Scanner for BytesScanner {
     }
     fn stream_window(&self) -> Option<usize> {
         if self.needle.is_empty() { None } else { Some(self.needle.len()) }
+    }
+    fn cache_query(&self) -> Option<super::scancache::CacheQuery<'_>> {
+        if self.needle.is_empty() {
+            return None;
+        }
+        Some(super::scancache::CacheQuery::Every { needle: &self.needle, limit: self.chunk_size })
     }
     fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
         // occurrences may overlap: every start in [from, limit) is independent
@@ -1283,6 +1322,85 @@ impl MultiStringScanner {
         &self.patterns[idx]
     }
 
+    /// All patterns, in index order.
+    pub fn patterns(&self) -> &[Vec<u8>] {
+        &self.patterns
+    }
+
+    /// Every occurrence of every pattern (overlapping ones too, unlike [`Self::search`]) that
+    /// starts in `data[from..limit)` and fits in `data`: `f(position, pattern index)` in
+    /// ascending position order (several patterns at one position: shortest first). Same
+    /// prefilter + trie walk as `search`, but every candidate position is verified.
+    pub fn search_every(&self, data: &[u8], from: usize, limit: usize, f: impl FnMut(usize, u32)) {
+        self.search_every_simd(data, from, limit, simd_enabled(), f)
+    }
+
+    fn search_every_simd(&self, data: &[u8], from: usize, limit: usize, simd: bool, mut f: impl FnMut(usize, u32)) {
+        if self.min_len == 0 || data.len() < self.min_len {
+            return;
+        }
+        let limit = limit.min(data.len() - self.min_len + 1);
+        if from >= limit {
+            return;
+        }
+        let d = &data[from..];
+        let lim = limit - from;
+        let mut every = |p: usize| {
+            let mut n = 0usize;
+            let mut j = p;
+            while j < d.len() {
+                let b = d[j];
+                let edges = &self.nodes[n].edges;
+                let next = if edges.len() <= 8 {
+                    edges.iter().find(|e| e.0 == b).map(|e| e.1)
+                } else {
+                    edges.binary_search_by_key(&b, |e| e.0).ok().map(|k| edges[k].1)
+                };
+                match next {
+                    Some(c) => {
+                        n = c as usize;
+                        j += 1;
+                        if let Some(t) = self.nodes[n].terminal {
+                            f(from + p, t);
+                        }
+                    }
+                    None => break,
+                }
+            }
+        };
+        #[cfg(target_arch = "x86_64")]
+        if simd
+            && let Some(t) = &self.teddy
+        {
+            let mut verify = |p: usize| -> Option<usize> {
+                every(p);
+                Some(p + 1)
+            };
+            // SAFETY: AVX2 availability checked by `simd_enabled`.
+            unsafe {
+                match t.m {
+                    1 => teddy_search::<1>(t, d, lim, &mut verify),
+                    2 => teddy_search::<2>(t, d, lim, &mut verify),
+                    _ => teddy_search::<3>(t, d, lim, &mut verify),
+                }
+            }
+            return;
+        }
+        let _ = simd;
+        for i in 0..lim {
+            let cand = match &self.pair {
+                Some(pair) => {
+                    let k = u16::from_le_bytes([d[i], d[i + 1]]) as usize;
+                    pair[k >> 6] & (1 << (k & 63)) != 0
+                }
+                None => self.first[d[i] as usize],
+            };
+            if cand {
+                every(i);
+            }
+        }
+    }
+
     /// Longest pattern matching at `data[i..]`: (pattern index, length).
     #[inline]
     fn longest_at(&self, data: &[u8], i: usize) -> Option<(u32, usize)> {
@@ -1407,6 +1525,9 @@ impl Scanner for MultiStringScanner {
     }
     fn stream_window(&self) -> Option<usize> {
         Some(self.max_len.max(1))
+    }
+    fn cache_query(&self) -> Option<super::scancache::CacheQuery<'_>> {
+        Some(super::scancache::CacheQuery::Greedy { patterns: &self.patterns, limit: self.chunk_size, cap: usize::MAX })
     }
     fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
         // the greedy search resumes at `from`; the scan of the whole chunk would be in the
@@ -1573,6 +1694,44 @@ mod tests {
                         true
                     });
                     assert_eq!(got, want, "trial {trial} simd {simd} max_start {max_start} patterns {patterns:?}");
+                }
+            }
+        }
+    }
+
+    /// `search_every` (SIMD and scalar) == every (position, pattern) occurrence, overlapping.
+    #[test]
+    fn search_every_matches_naive() {
+        let mut rng = Rng(0x5eed_0f_a11);
+        let alpha: [u8; 6] = [b'a', b'b', b'c', 0, 0xe3, b'P'];
+        for trial in 0..3000 {
+            let np = 1 + rng.below(12) as usize;
+            let minl = 1 + rng.below(4) as usize;
+            let mut patterns: Vec<Vec<u8>> = (0..np)
+                .map(|_| {
+                    let l = minl + rng.below(5) as usize;
+                    (0..l).map(|_| if trial % 3 == 0 { rng.next() as u8 } else { alpha[rng.below(alpha.len() as u64) as usize] }).collect()
+                })
+                .collect();
+            patterns.sort();
+            patterns.dedup();
+            let n = rng.below(700) as usize;
+            let data: Vec<u8> = (0..n).map(|_| alpha[rng.below(alpha.len() as u64) as usize]).collect();
+            let s = MultiStringScanner::new(&patterns);
+            for (from, limit) in [(0, usize::MAX), (0, n / 2), (3, 65), (n / 3, n), (64, 64)] {
+                let mut want = Vec::new();
+                for i in from..n.min(limit) {
+                    let mut at: Vec<(usize, usize)> = patterns.iter().enumerate().filter(|(_, p)| data[i..].starts_with(p)).map(|(pi, p)| (p.len(), pi)).collect();
+                    at.sort();
+                    want.extend(at.into_iter().map(|(_, pi)| (i, pi as u32)));
+                }
+                for simd in [false, true] {
+                    if simd && !simd_enabled() {
+                        continue;
+                    }
+                    let mut got = Vec::new();
+                    s.search_every_simd(&data, from, limit, simd, |p, i| got.push((p, i)));
+                    assert_eq!(got, want, "trial {trial} simd {simd} from {from} limit {limit} patterns {patterns:?}");
                 }
             }
         }

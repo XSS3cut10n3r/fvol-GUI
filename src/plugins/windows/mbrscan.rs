@@ -57,6 +57,9 @@ impl<T: Send, F: Fn(u64) -> T + Sync> Scanner for ParseScanner<T, F> {
     fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
         self.ms.prescan_piece(data, base, from, limit, out)
     }
+    fn cache_query(&self) -> Option<crate::layers::scancache::CacheQuery<'_>> {
+        self.ms.cache_query()
+    }
 }
 
 /// Rows of one hit and the exception python raised after them.

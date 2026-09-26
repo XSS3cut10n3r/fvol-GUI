@@ -114,11 +114,12 @@ impl Context {
     pub fn new(opts: GlobalOptions) -> Result<Context> {
         if opts.clear_cache {
             // python --clear-cache wipes its identifier cache and cached data; ours are the
-            // identifier index, the automagic results and the binary symbol tables
+            // identifier index, the automagic results, the binary symbol tables and the scan cache
             let dir = crate::util::paths::rsvol_cache_dir();
             let _ = std::fs::remove_file(dir.join("identifiers.cache"));
             let _ = std::fs::remove_dir_all(dir.join("automagic"));
             let _ = std::fs::remove_dir_all(dir.join("isf"));
+            let _ = std::fs::remove_dir_all(crate::layers::scancache::cache_root());
         }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         symbols::set_remote_isf_url(opts.remote_isf_url.clone(), opts.offline);
