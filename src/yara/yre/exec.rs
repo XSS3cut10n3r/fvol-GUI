@@ -56,6 +56,90 @@ struct Fiber {
     next: u32,
 }
 
+/// True when the straight-line prefix of the program starting at `start` (single
+/// consuming ops, following unconditional jumps, up to the first split / repeat /
+/// assertion / match) already fails at `pos`: then both executors would find no
+/// match at all (the only fiber dies before any branching), so they can be skipped.
+pub fn quick_reject(prog: &Program, start: u32, data: &[u8], pos: usize, flags: u32) -> bool {
+    let cs: isize = if flags & F_WIDE != 0 { 2 } else { 1 };
+    let backwards = flags & F_BACKWARDS != 0;
+    let nocase = flags & F_NOCASE != 0;
+    let dotall = flags & F_DOTALL != 0;
+    let fwd_size = data.len().saturating_sub(pos);
+    let bwd_size = pos.min(data.len());
+    let mut max_bytes = if backwards { bwd_size.min(SCAN_LIMIT) } else { fwd_size.min(SCAN_LIMIT) } as isize;
+    max_bytes -= max_bytes % cs;
+    let incr = if backwards { -cs } else { cs };
+    let mut input: isize = if backwards { pos as isize - cs } else { pos as isize };
+    let mut matched: isize = 0;
+    let mut pc = start as usize;
+    for _ in 0..64 {
+        let Some(&op) = prog.ops.get(pc) else { return false };
+        let ok = |c: u8| -> bool {
+            match op {
+                Op::Literal(v) => {
+                    if nocase {
+                        lower(c) == lower(v)
+                    } else {
+                        c == v
+                    }
+                }
+                Op::NotLiteral(v) => c != v,
+                Op::MaskedLiteral(v, m) => c & m == v,
+                Op::MaskedNotLiteral(v, m) => c & m != v,
+                Op::Any => dotall || c != b'\n',
+                Op::Class(i) => match prog.classes.get(i as usize) {
+                    Some(cl) => {
+                        let mut r = cl.has(c);
+                        if nocase {
+                            r |= cl.has(altercase(c));
+                        }
+                        if cl.negated { !r } else { r }
+                    }
+                    None => false,
+                },
+                Op::Digit => c.is_ascii_digit(),
+                Op::NonDigit => !c.is_ascii_digit(),
+                Op::Space => matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c),
+                Op::NonSpace => !matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c),
+                _ => true,
+            }
+        };
+        match op {
+            Op::Jump(t) => {
+                pc = t as usize;
+                continue;
+            }
+            Op::Literal(_)
+            | Op::NotLiteral(_)
+            | Op::MaskedLiteral(..)
+            | Op::MaskedNotLiteral(..)
+            | Op::Any
+            | Op::Class(_)
+            | Op::Digit
+            | Op::NonDigit
+            | Op::Space
+            | Op::NonSpace => {
+                if matched >= max_bytes || input < 0 || input >= data.len() as isize {
+                    return true;
+                }
+                let c = data[input as usize];
+                if cs == 2 && data.get(input as usize + 1) != Some(&0) {
+                    return true;
+                }
+                if !ok(c) {
+                    return true;
+                }
+                input += incr;
+                matched += cs;
+                pc += 1;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Reusable fiber storage.
 #[derive(Default)]
 pub struct Machine {

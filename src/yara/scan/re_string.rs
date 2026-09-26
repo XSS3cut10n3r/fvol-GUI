@@ -479,6 +479,9 @@ fn run(
     fast: bool,
     cb: &mut dyn FnMut(usize, usize),
 ) -> i64 {
+    if exec::quick_reject(prog, start, data, pos, flags) {
+        return -1;
+    }
     if fast && flags & exec::F_WIDE == 0 {
         m.fast_exec(prog, start, data, pos, flags, cb)
     } else {
