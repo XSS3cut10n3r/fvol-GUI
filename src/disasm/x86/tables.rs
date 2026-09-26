@@ -203,6 +203,8 @@ const CMP_PREDS: [&str; 32] = [
 
 pub(crate) struct Tables {
     pub mnems: Vec<&'static str>,
+    /// Mnemonics zero-padded to 31 bytes, byte 31 = length (fixed-size copies when formatting).
+    pub mnem_pad: Vec<[u8; 32]>,
     pub entries: Vec<Entry>,
     pub roots: Vec<[u32; 256]>,
     pub nodes: Vec<u32>,
@@ -764,7 +766,18 @@ fn build() -> Tables {
         eprintln!("x86 spec errors:\n{}", b.errors.join("\n"));
     }
     let _ = regs::NREGS;
-    Tables { mnems: b.mnems, entries: b.entries, roots, nodes }
+    let mnem_pad = b
+        .mnems
+        .iter()
+        .map(|m| {
+            let mut p = [0u8; 32];
+            let n = m.len().min(31);
+            p[..n].copy_from_slice(&m.as_bytes()[..n]);
+            p[31] = n as u8;
+            p
+        })
+        .collect();
+    Tables { mnems: b.mnems, mnem_pad, entries: b.entries, roots, nodes }
 }
 
 /// Spec validation errors (for tests).

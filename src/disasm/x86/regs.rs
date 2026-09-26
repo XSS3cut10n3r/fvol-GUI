@@ -32,7 +32,7 @@ pub(crate) const RIZ: u8 = 237;
 pub(crate) const EIZ: u8 = 238;
 pub(crate) const NREGS: usize = 239;
 
-static NAMES: [&str; NREGS] = [
+pub(crate) static NAMES: [&str; NREGS] = [
     "", "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh", "spl", "bpl", "sil", "dil", "r8b", "r9b",
     "r10b", "r11b", "r12b", "r13b", "r14b", "r15b", "ax", "cx", "dx", "bx", "sp", "bp", "si", "di",
     "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w", "eax", "ecx", "edx", "ebx", "esp",
