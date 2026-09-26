@@ -181,7 +181,13 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `task.cred.uid` (int or kuid_t) | `cred.cred_value("uid")?` |
 | `LinuxUtilities.container_of(addr, type, member, vmlinux)` | `crate::symbols::linux::container_of(addr, type, member, &vmlinux)?` → `Option<Obj>` |
 | `vmlinux = linux.LinuxUtilities.get_module_from_volobj_type(ctx, obj)` | `crate::symbols::linux::vmlinux_of(&obj)?` |
-| `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump}` |
+| `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump, elf_dump_ex}` (`elf_dump_ex` → (preferred, final) names) |
+| `elf` extension (`get_program_headers`, `get_section_headers`, `get_link_maps`, `get_symbols`, `elf_phdr.get_vaddr/dynamic_sections`, `elf_sym.get_name`, `elf_linkmap.get_name`) | `symbols::linux::elf::{Elf::new(layer, table, off)?, Phdr, ElfSym, LinkMap, elf_sym_get_name}` same method names |
+| bash `hist_entry` (`is_valid`, `get_command`, `get_time_object`) + `bash32/bash64` ISFs | `symbols::linux::bash::{bash_table(ctx, is_64bit), HistEntry::parse(&hist)?}` |
+| `yarascan.YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `plugins::linux::vmayarascan::{yarascan_option_requirements, yara_rules_from_config}` (+ `crate::yara::rules::volatility`) |
+| `renderers.LayerData(context, offset, layer, length)` | `plugins::linux::vmayarascan::layer_data(layer, offset, len)` → `Value::LayerBytes` |
+| `scanners.RegExScanner(pattern)` | `plugins::linux::vmaregexscan::regex_scanner(&Regex)` |
+| linux malfind `_get_dirty_pages` / `_is_suspicious` | `plugins::linux::malware::malfind::{get_dirty_pages, is_suspicious}` (`IntelLayer::page_dirty_cursor`) |
 | `LinuxUtilities.virtual_to_physical_address(a)` | `crate::symbols::linux::virtual_to_physical_address(a)` |
 | `pslist.list_tasks` into a Vec (for `par_map` per-task work) | `pslist::collect_tasks(k, &filter, threads)` → `(Vec<Obj>, Option<Error>)` (trailing python raise) |
 | `task.get_process_memory_sections(heap_only)` | same name → `Result<Vec<(start, size)>>` |
