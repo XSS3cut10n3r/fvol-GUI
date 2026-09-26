@@ -83,9 +83,9 @@ impl Plugin for RegExScan {
         // exception after the header was rendered)
         let compiled = match Regex::new(&pattern, 0) {
             Ok(r) => r,
-            Err(e) => panic!("ValueError: Invalid regex pattern: {}", e.msg),
+            Err(e) => panic!("ValueError: Invalid regex pattern: {}", e.py_str(&pattern)),
         };
-        let scanner = RegExScanner::new(&pattern).unwrap_or_else(|e| panic!("re.error: {}", e.msg));
+        let scanner = RegExScanner::new(&pattern).unwrap_or_else(|e| panic!("re.PatternError: {}", e.py_str(&pattern)));
         // python `layer.read(offset, maxsize, pad=True)`: a negative size raises in python
         let maxsize = usize::try_from(maxsize).unwrap_or_else(|_| panic!("ValueError: negative maxsize"));
         for offset in scan(p.layer, &scanner, None) {

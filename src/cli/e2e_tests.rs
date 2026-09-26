@@ -142,6 +142,118 @@ fn unsatisfied_matches_python() {
     );
 }
 
+/// A plugin panicking with python's exception line (mac.pslist on a garbage start time) ends
+/// like python's traceback: `ValueError: ...`, not `RuntimeError: ValueError: ...`.
+#[test]
+fn python_exception_panic_keeps_its_line() {
+    struct Boom;
+    impl Plugin for Boom {
+        fn name(&self) -> &'static str {
+            "mac.pslist.PsList"
+        }
+        fn description(&self) -> &'static str {
+            ""
+        }
+        fn run(&self, _ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> crate::error::Result<()> {
+            out.begin(crate::cols![("PID", Int)])?;
+            panic!("ValueError: year must be in 1..9999, not -15438");
+        }
+    }
+    static B: Boom = Boom;
+    let plugins: Vec<&'static dyn Plugin> = vec![&B];
+    let argv: Vec<String> = ["vol.py", "-q", "mac.pslist.PsList"].iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let s = Settings { no_system_defaults: true, ..Default::default() };
+    assert_eq!(run(&argv, &plugins, &mut out, &mut err, &s), 1);
+    let err = String::from_utf8(err).unwrap();
+    assert_eq!(err.lines().last(), Some("ValueError: year must be in 1..9999, not -15438"), "{err}");
+}
+
+/// python 2.28.2 with a `--cache-path` directory that does not exist: SymbolCacheMagic's
+/// SqliteCache fails while the automagics are listed, before the banner and before `-h`.
+#[test]
+fn missing_cache_path_fails_like_python() {
+    let plugins: Vec<&'static dyn Plugin> = Vec::new();
+    for extra in [&["windows.pslist.PsList"][..], &["-h"][..]] {
+        let mut argv: Vec<String> = ["vol.py", "-q", "--cache-path", "/nonexistent/rsvol-cache"].iter().map(|s| s.to_string()).collect();
+        argv.extend(extra.iter().map(|s| s.to_string()));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let s = Settings { no_system_defaults: true, ..Default::default() };
+        assert_eq!(run(&argv, &plugins, &mut out, &mut err, &s), 1);
+        assert!(out.is_empty());
+        let err = String::from_utf8(err).unwrap();
+        assert_eq!(
+            err.lines().last(),
+            Some("FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent/rsvol-cache/identifier.cache'")
+        );
+    }
+}
+
+/// Which error messages python reports as an uncaught traceback (anything but a
+/// VolatilityException) and which through `process_exceptions`.
+#[test]
+fn python_exception_classification() {
+    for m in ["RuntimeError: generator raised StopIteration", "yara.SyntaxError: line 1: x", "UnboundLocalError: x", "ValueError"] {
+        assert!(python_builtin_exception(&Error::Msg(m.into())).is_some(), "{m}");
+    }
+    for m in ["VolatilityException: x", "LinuxPageCacheException: x", "SymbolError: x", "index out of bounds: the len is 1", "no kernel"] {
+        assert!(python_builtin_exception(&Error::Msg(m.into())).is_none(), "{m}");
+    }
+}
+
+/// `-c` naming a file that does not exist: python's `open()` error line, not Rust's io::Error
+/// text ("... (os error 2)").
+#[test]
+fn missing_config_file_fails_like_python() {
+    let plugins: Vec<&'static dyn Plugin> = vec![&crate::plugins::generic::frameworkinfo::FrameworkInfo];
+    let argv: Vec<String> =
+        ["vol.py", "-q", "-c", "/nonexistent/rsvol.json", "frameworkinfo.FrameworkInfo"].iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let s = Settings { no_system_defaults: true, ..Default::default() };
+    assert_eq!(run(&argv, &plugins, &mut out, &mut err, &s), 1);
+    let err = String::from_utf8(err).unwrap();
+    assert_eq!(err.lines().last(), Some("FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent/rsvol.json'"));
+}
+
+/// `-c` with python's `--save-config` output for an ELF core: the image is the Elf64Layer's
+/// `base_layer.location` (rsvol only looked for `memory_layer.location`, and the round trip
+/// found no image), never a swap layer's location.
+#[test]
+fn config_file_finds_the_image_below_a_container_layer() {
+    struct Loc;
+    impl Plugin for Loc {
+        fn name(&self) -> &'static str {
+            "linux.pslist.PsList"
+        }
+        fn description(&self) -> &'static str {
+            ""
+        }
+        fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> crate::error::Result<()> {
+            out.begin(crate::cols![("Location", Str)])?;
+            out.row(0, vec![crate::renderers::Value::Str(ctx.opts.single_location.clone().unwrap_or_default())])
+        }
+    }
+    static L: Loc = Loc;
+    let plugins: Vec<&'static dyn Plugin> = vec![&L];
+    let dir = std::env::temp_dir().join(format!("rsvol-e2e-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("saved.json");
+    std::fs::write(
+        &cfg,
+        "{\"kernel.layer_name.memory_layer.base_layer.location\": \"file:///images/core.elf\",\n\
+         \"kernel.layer_name.memory_layer.class\": \"volatility3.framework.layers.elf.Elf64Layer\",\n\
+         \"kernel.layer_name.swap_layers.swap_layers0.location\": \"file:///images/swap.bin\"}",
+    )
+    .unwrap();
+    let argv: Vec<String> =
+        ["vol.py", "-q", "-r", "csv", "-c", cfg.to_str().unwrap(), "linux.pslist.PsList"].iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let s = Settings { no_system_defaults: true, ..Default::default() };
+    assert_eq!(run(&argv, &plugins, &mut out, &mut err, &s), 0, "{}", String::from_utf8_lossy(&err));
+    assert_eq!(String::from_utf8(out).unwrap(), "TreeDepth,Location\n0,file:///images/core.elf\n\n");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn output_files_follow_python_naming() {
     let dir = std::env::temp_dir().join(format!("rsvol-e2e-files-{}", std::process::id()));

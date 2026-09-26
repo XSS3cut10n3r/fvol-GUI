@@ -177,3 +177,81 @@ pub fn kernel_tree(ctx: &Context, plugin: &str, prefix: &str) -> Result<Items> {
     out.push((format!("{prefix}.symbol_table_name.symbol_mask"), Json::Int(table.symbol_mask() as i128)));
     Ok(out)
 }
+
+/// A configuration value as python's `json.dump` writes it.
+pub fn config_value_json(v: &crate::plugins::ConfigValue) -> Json {
+    use crate::plugins::ConfigValue;
+    match v {
+        ConfigValue::Bool(b) => Json::Bool(*b),
+        ConfigValue::Int(i) => Json::Int(*i),
+        ConfigValue::Str(x) => s(x.clone()),
+        ConfigValue::Bytes(b) => s(String::from_utf8_lossy(b).into_owned()),
+        ConfigValue::List(l) => Json::Arr(l.iter().map(config_value_json).collect()),
+    }
+}
+
+/// python `plugin.build_configuration()` after the automagics ran, keys under `prefix` (`""`
+/// for `--save-config`, `"<Class>."` for `timeliner --record-config`). Walks the plugin's python
+/// requirement list (`pyreqs`): the kernel module and translation layers as their configuration
+/// trees, version dependencies as `false`, lists as their value or `[]`, every other option when
+/// it has a value (given or defaulted). Fails like python's construction when the kernel or the
+/// layer cannot be found.
+pub fn build_configuration(ctx: &Context, plugin: &str, cfg: &crate::plugins::Config, prefix: &str) -> Result<Items> {
+    let mut out = Items::new();
+    for r in crate::plugins::pyreqs::py_reqs(plugin).unwrap_or(&[]) {
+        let (kind, name) = r.split_once(':').unwrap_or(("?", r));
+        let key = format!("{prefix}{name}");
+        match kind {
+            "K" => out.extend(kernel_tree(ctx, plugin, &key)?),
+            "P" => {
+                let prim = super::primary::primary(ctx, "Memory layer for the kernel")?;
+                // the WinSwapLayers automagic (swap_layers) is excluded for linux / mac plugins
+                let swap = !(plugin.starts_with("linux.") || plugin.starts_with("mac."));
+                out.extend(primary_tree(ctx, &prim, &key, false, swap)?);
+            }
+            "v" => out.push((key, Json::Bool(false))),
+            "l" => out.push((key, cfg.get(name).map(config_value_json).unwrap_or(Json::Arr(Vec::new())))),
+            _ => {
+                if let Some(v) = cfg.get(name) {
+                    out.push((key, config_value_json(v)));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::{Config, ConfigValue};
+
+    #[test]
+    fn py_reqs_sorted_and_cover_every_plugin() {
+        let t = &crate::plugins::pyreqs::PY_REQS;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "PY_REQS must stay sorted for the binary search");
+        for p in crate::plugins::all() {
+            assert!(crate::plugins::pyreqs::py_reqs(p.name()).is_some(), "{} has no python requirement list", p.name());
+        }
+    }
+
+    /// python's `--save-config` for `isfinfo.IsfInfo --filter linux`: version dependencies are
+    /// `false`, booleans always recorded, an unset URI left out (rsvol used to write only the
+    /// options it knows, so `-c` could not find the image again).
+    #[test]
+    fn build_configuration_records_like_python() {
+        let ctx = Context::new(Default::default()).unwrap();
+        let mut cfg = Config::default();
+        cfg.set("filter", ConfigValue::List(vec![ConfigValue::Str("linux".into())]));
+        cfg.set("validate", ConfigValue::Bool(false));
+        cfg.set("live", ConfigValue::Bool(false));
+        let items = build_configuration(&ctx, "isfinfo.IsfInfo", &cfg, "").unwrap();
+        assert_eq!(
+            Json::Obj(items).dump(Some(2)),
+            "{\n  \"SQLiteCache\": false,\n  \"filter\": [\n    \"linux\"\n  ],\n  \"live\": false,\n  \"validate\": false\n}"
+        );
+        // an unset list is recorded as []
+        let items = build_configuration(&ctx, "isfinfo.IsfInfo", &Config::default(), "x.").unwrap();
+        assert!(items.contains(&("x.filter".to_string(), Json::Arr(Vec::new()))));
+    }
+}

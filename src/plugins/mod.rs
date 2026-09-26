@@ -12,6 +12,7 @@
 //!   * `run()` writes columns then rows into the sink (see `renderers` contract).
 
 pub mod generic;
+pub mod pyreqs;
 pub mod linux;
 pub mod mac;
 pub mod windows;
