@@ -308,6 +308,36 @@ fn fmt_matches(id: usize, data_id: &str, ms: &[RuleMatch], out: &mut String) {
     }
 }
 
+/// The record format must stay byte-identical to `py_case` in bench/scripts/yara_diff.py.
+#[test]
+fn difftest_record_format() {
+    use super::rules::{Instance, StringMatch};
+    let m = RuleMatch {
+        rule: "r".into(),
+        namespace: "default".into(),
+        tags: vec!["t1".into(), "t2".into()],
+        meta: vec![("a".into(), MetaValue::Int(-1)), ("b".into(), MetaValue::Bool(true)), ("c".into(), MetaValue::Str(b"x\xffy".to_vec()))],
+        strings: vec![
+            StringMatch {
+                identifier: "$a".into(),
+                instances: vec![
+                    Instance { offset: 2, matched_data: b"abc".to_vec(), matched_length: 3, xor_key: 0 },
+                    Instance { offset: 10, matched_data: b"`cb".to_vec(), matched_length: 3, xor_key: 1 },
+                ],
+            },
+            StringMatch { identifier: "$p".into(), instances: vec![] },
+        ],
+    };
+    let mut s = String::new();
+    fmt_matches(7, "syn", &[m], &mut s);
+    assert_eq!(
+        s,
+        "7\tsyn\tM\tdefault\tr\tt1 t2\ta=i:-1 b=b:1 c=s:78ff79\n\
+         7\tsyn\tS\tdefault\tr\t$a\t2\t42077b9fefec23f40e003fdf6fe173fb\t2:3:0:616263 10:3:1:606362\n\
+         7\tsyn\tS\tdefault\tr\t$p\t0\td41d8cd98f00b204e9800998ecf8427e\t\n"
+    );
+}
+
 fn run_diff_case(id: usize, srcs: &[(String, String)], data_ids: &[String], data: &mut HashMap<String, Vec<u8>>, specs: &HashMap<String, DataSpec>) -> String {
     let refs: Vec<(&str, &str)> = srcs.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
     let rules = match Rules::compile_namespaced(&refs) {
