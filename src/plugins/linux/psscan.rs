@@ -35,9 +35,10 @@ pub fn scan_tasks(k: &LinuxKernel) -> Vec<Result<Obj>> {
         let sched_off = k.offset_of("task_struct", "sched_class")?;
         let task_ty = k.get_type("task_struct")?;
         let mut needles: Vec<Vec<u8>> = Vec::new();
-        for s in k.table.symbols() {
-            if s.name.contains("_sched_class") {
-                let addr = k.layer.canonicalize(k.module.offset.wrapping_add(s.address));
+        // names and addresses only (no symbol record is decoded: cheap on a lazy table too)
+        for (name, address) in k.table.symbol_names_addrs() {
+            if name.windows(12).any(|w| w == b"_sched_class") {
+                let addr = k.layer.canonicalize(k.module.offset.wrapping_add(address));
                 needles.push(if is_64 { addr.to_le_bytes().to_vec() } else { (addr as u32).to_le_bytes().to_vec() });
             }
         }
