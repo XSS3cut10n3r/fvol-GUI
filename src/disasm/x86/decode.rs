@@ -473,6 +473,14 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             Some(x) => x,
             None => return false,
         };
+        if node == 0 && st.vex == VEX_EVEX && st.evex_b && mm >> 6 == 3 {
+            // rounding / sae register forms: scalar (LIG) entries are listed under L=0
+            sel[SEL_L as usize] = 0;
+            node = match walk(t, root, &sel, have_modrm) {
+                Some(x) => x,
+                None => return false,
+            };
+        }
         if node == 0 && rexw && pfx != 0 && st.vex == VEX_NONE && map != MAP_1 {
             // capstone/LLVM REX.W contexts inherit the no-prefix (W0) entries
             sel[SEL_PFX as usize] = 0;
@@ -691,7 +699,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         let last = out.op_count as usize - 1;
         if let Operand::Imm(v) = out.operands[last] {
             let lim = if flags & F_CMP8 != 0 { 8 } else { 32 };
-            let v = if st.vex == VEX_EVEX { v & 0x1F } else { v };
+            // EVEX: capstone aliases masked compares by imm & 0x1f
+            let v = if st.vex == VEX_EVEX && st.evex_aaa != 0 { v & 0x1F } else { v };
             if (v as u64) < lim {
                 out.mnem = e.alias + v as u16;
                 out.op_count -= 1;
@@ -1115,7 +1124,7 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                 let mut num = ((modrm >> 3) & 7) | rexr;
                 if is_vec_class(s.cls) {
                     num |= st.evex_rr;
-                } else if st.evex_rr != 0 {
+                } else if st.evex_rr != 0 && s.cls != C_K {
                     return false;
                 }
                 let r = reg_for(st, s.cls, num);
