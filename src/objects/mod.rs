@@ -92,6 +92,22 @@ pub fn page_bytes(layer: LayerRef, addr: u64, len: usize) -> Option<&'static [u8
     Some(unsafe { std::slice::from_raw_parts((host as *const u8).add(off), len) })
 }
 
+/// Hint that the byte at `addr` of `layer` will be read soon: a software prefetch of its cache
+/// line in the image mapping (when the page is mapped whole; otherwise nothing). Issuing these
+/// for a batch of objects before reading them overlaps their memory latencies.
+#[inline]
+pub fn prefetch(layer: LayerRef, addr: u64) {
+    if let Some(s) = page_bytes(layer, addr, 1) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: a prefetch hint never faults; the address is inside the mapping anyway
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(s.as_ptr() as *const i8);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = s;
+    }
+}
+
 /// `layer.read(addr, buf)` through the page cache.
 #[inline]
 pub fn read_into(layer: LayerRef, addr: u64, buf: &mut [u8]) -> Result<()> {
@@ -850,6 +866,33 @@ impl Field {
             ty = m.ty;
         }
         Ok(Field { offset: off, ty, sp: None })
+    }
+
+    /// The python int value of this member, decoded from `rec` = the bytes of the containing
+    /// struct (from its start), exactly as `obj.f(self).int()` reads it: integers, bitfields
+    /// and pointers (masked with `native_mask`, the native layer's address mask). `None` for
+    /// other types (enums, floats, ...) or when `rec` is too short: read the object instead.
+    #[inline]
+    pub fn int_from(&self, rec: &[u8], native_mask: u64) -> Option<i128> {
+        let prim_at = |p: Prim| -> Option<i128> {
+            let o = usize::try_from(self.offset).ok()?;
+            let b = rec.get(o..o.checked_add(p.size as usize)?)?;
+            Some(p.decode_int(b))
+        };
+        match self.ty {
+            Ty::Int(p) if self.sp.is_none() => prim_at(p),
+            Ty::Pointer { prim, .. } if self.sp.is_none() => {
+                let mut p = prim;
+                p.signed = false;
+                Some((prim_at(p)? as u128 as u64 & native_mask) as i128)
+            }
+            Ty::BitField { start, end, base } if self.sp.is_none() => {
+                let v = prim_at(base)?;
+                let mask = if end >= 127 { -1i128 } else { (1i128 << end) - 1 };
+                Some((v & mask) >> start)
+            }
+            _ => None,
+        }
     }
 }
 
