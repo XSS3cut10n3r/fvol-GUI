@@ -1020,9 +1020,6 @@ impl IdentifierIndex {
                 }
             }
         }
-        if changed {
-            write_ident_cache(&cache_path, &all);
-        }
         let mut entries = Vec::with_capacity(locs.len());
         let mut locations = Vec::with_capacity(locs.len());
         for (l, u) in locs.into_iter().zip(&urls) {
@@ -1030,6 +1027,10 @@ impl IdentifierIndex {
                 entries.push(all[j].clone());
                 locations.push(l);
             }
+        }
+        if changed {
+            // off the critical path (joined before exit)
+            crate::util::bg::spawn(move || write_ident_cache(&cache_path, &all));
         }
         IdentifierIndex { entries, locations }
     }

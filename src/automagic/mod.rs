@@ -120,7 +120,15 @@ pub mod cache {
         for (k, v) in kv {
             s.push_str(&format!("{k}={v}\n"));
         }
-        let _ = paths::write_atomic(f, s.as_bytes());
+        if cfg!(test) {
+            let _ = paths::write_atomic(f, s.as_bytes());
+        } else {
+            // off the critical path (joined before exit)
+            let f = f.to_path_buf();
+            crate::util::bg::spawn(move || {
+                let _ = paths::write_atomic(&f, s.as_bytes());
+            });
+        }
     }
 
     /// Lookup helper.
