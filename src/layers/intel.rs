@@ -454,7 +454,7 @@ impl IntelLayer {
     /// their PTE. Semantics are identical to `translate_raw` (invalid PTEs take the full path
     /// for python's fault / swap handling).
     #[inline]
-    fn translate_cursor(&self, addr: u64, cur: &mut (u64, u64)) -> std::result::Result<(u64, u32, Target), Fault> {
+    pub fn translate_cursor(&self, addr: u64, cur: &mut (u64, u64)) -> std::result::Result<(u64, u32, Target), Fault> {
         let last_bits = self.p.levels[self.p.levels.len() - 1].0;
         let key = ((addr & self.vmask) >> (12 + last_bits)) + 1;
         if cur.0 == key {
