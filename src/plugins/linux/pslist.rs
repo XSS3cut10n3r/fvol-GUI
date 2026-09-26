@@ -59,6 +59,17 @@ pub fn list_tasks(k: &LinuxKernel, filter: &dyn Fn(&Obj) -> Result<bool>, includ
     Ok(())
 }
 
+/// [`list_tasks`] collected into a Vec (for parallel per-task work). The `Err` (if any) is
+/// where python's generator raised, after yielding the returned tasks.
+pub fn collect_tasks(k: &LinuxKernel, filter: &dyn Fn(&Obj) -> Result<bool>, include_threads: bool) -> (Vec<Obj>, Option<crate::error::Error>) {
+    let mut v = Vec::new();
+    let r = list_tasks(k, filter, include_threads, &mut |t| {
+        v.push(t);
+        Ok(true)
+    });
+    (v, r.err())
+}
+
 /// python `TaskFields`.
 pub struct TaskFields {
     pub offset: u64,

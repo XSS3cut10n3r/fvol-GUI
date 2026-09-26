@@ -11,13 +11,21 @@
 //! ```
 
 pub mod cache;
+pub mod consoles;
 pub mod ext;
+pub mod gui;
 pub mod kdbg;
+pub mod mbr;
+pub mod mft;
+pub mod network;
 pub mod objects;
 pub mod pdb;
 pub mod pe;
+pub mod pefile;
+mod pefile_ord;
 pub mod pool;
 pub mod registry;
+pub mod shimcache;
 pub mod token;
 pub mod vad;
 pub mod versions;

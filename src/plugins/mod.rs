@@ -180,6 +180,29 @@ pub trait Plugin: Sync {
     fn timeline(&self, _ctx: &Context, _cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
         None
     }
+    /// python's `generate_timeline` generator including the case where it raises midway: the
+    /// events yielded before the exception plus the error (the timeliner keeps those events).
+    /// Override this instead of [`Plugin::timeline`] when the python generator can raise after
+    /// its first yield; the default wraps `timeline()` (an `Err` there yields no events).
+    /// `Some((vec![], Some(Error::Unsatisfied(..))))` = python could not construct the plugin.
+    fn timeline_events(&self, ctx: &Context, cfg: &Config) -> Option<(Vec<TimelineEvent>, Option<crate::error::Error>)> {
+        self.timeline(ctx, cfg).map(|r| match r {
+            Ok(v) => (v, None),
+            Err(e) => (Vec::new(), Some(e)),
+        })
+    }
+}
+
+/// The plugin's configuration with every requirement default applied (what python's
+/// automagic/CLI gives a plugin constructed without options, e.g. by the timeliner).
+pub fn default_config(p: &dyn Plugin) -> Config {
+    let mut cfg = Config::default();
+    for r in p.requirements() {
+        if let Some(d) = r.default {
+            cfg.set(r.name, d);
+        }
+    }
+    cfg
 }
 
 /// The error python reports as an `UnsatisfiedException` (printed by the CLI as
