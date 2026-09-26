@@ -29,7 +29,7 @@
 
 use crate::error::{Error, Result};
 use crate::layers::{Layer, LayerExt};
-use crate::objects::Obj;
+use crate::objects::{Field, Obj};
 use crate::symbols::windows::{ListIter, WinExt};
 use crate::symbols::{StrEnc, StrErrors, Ty};
 use crate::util::FxHashSet;
@@ -167,7 +167,8 @@ impl Screen {
 
     /// python `SCREEN_INFORMATION.get_buffer(truncate_rows, truncate_lines)`: the rows of the
     /// ring buffer starting at `BufferStart`, stopping at the first row whose text cannot be
-    /// read. Rows are read in parallel (they are independent); the result is python's.
+    /// read. Rows are independent: they are read in parallel with pre-resolved members (see
+    /// [`RowReader`]); the result is python's.
     pub fn get_buffer(&self, truncate_rows_: bool, truncate_lines: bool) -> Result<Vec<String>> {
         let tbi = read_ptr(&self.ptr.deref()?, "TextBufferInfo")?;
         let capacity = tbi.m("BufferCapacity")?.int()?;
@@ -175,41 +176,175 @@ impl Screen {
         let buffer_rows = read_ptr(&tbi.deref()?, "BufferRows")?;
         let rows = buffer_rows.m("Rows")?.with_count(capacity.max(0) as u64);
         let n = capacity.max(0) as usize;
-        // per row: Ok(Ok(text)) / Ok(Err) = get_text failed (python: break) / Err = the
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let reader = RowReader::new(&rows.at(0)?);
+        // per row: Ok(Some(text)) / Ok(None) = get_text failed (python: break) / Err = the
         // `hasattr(row, "Row")` read failed (python: raises out of get_buffer)
-        let one = |i: usize| -> Result<Result<String>> {
+        let one = |i: usize, buf: &mut Vec<u8>| -> Result<Option<String>> {
             let index = (start + i as i128).rem_euclid(capacity);
-            let row = row_of(rows.at(index as u64)?)?;
-            let row = if row.is_pointer() { row.deref()? } else { row };
-            Ok(row.row_get_text(truncate_lines))
-        };
-        let results: Vec<Result<Result<String>>> = if n >= 512 {
-            const BATCH: usize = 256;
-            let parts = crate::util::par::par_map(n.div_ceil(BATCH), |b| {
-                let mut v = Vec::with_capacity(BATCH);
-                for i in b * BATCH..((b + 1) * BATCH).min(n) {
-                    let r = one(i);
-                    let stop = !matches!(r, Ok(Ok(_)));
-                    v.push(r);
-                    if stop {
-                        break;
-                    }
+            let elem = rows.at(index as u64)?;
+            match &reader {
+                Some(r) => r.text(elem, truncate_lines, buf),
+                None => {
+                    let row = row_of(elem)?;
+                    let row = if row.is_pointer() { row.deref()? } else { row };
+                    Ok(row.row_get_text(truncate_lines).ok())
                 }
-                v
-            });
-            parts.into_iter().flatten().collect()
+            }
+        };
+        let batch = |range: std::ops::Range<usize>| -> Vec<Result<Option<String>>> {
+            let mut buf = Vec::new();
+            let mut v = Vec::with_capacity(range.len());
+            for i in range {
+                let r = one(i, &mut buf);
+                let stop = !matches!(r, Ok(Some(_)));
+                v.push(r);
+                if stop {
+                    break;
+                }
+            }
+            v
+        };
+        let results: Vec<Result<Option<String>>> = if n >= 1024 {
+            let nb = crate::util::par::threads().min(n / 512).max(1);
+            let per = n.div_ceil(nb);
+            crate::util::par::par_map(nb, |b| batch(b * per..((b + 1) * per).min(n))).into_iter().flatten().collect()
         } else {
-            (0..n).map(one).collect()
+            batch(0..n)
         };
         let mut out = Vec::with_capacity(n);
         for r in results {
             match r? {
-                Ok(text) => out.push(text),
-                Err(_) => break,
+                Some(text) => out.push(text),
+                None => break,
             }
         }
         Ok(if truncate_rows_ { truncate_rows(out) } else { out })
     }
+}
+
+/// `ROW.get_text` for many rows of one array, with the members resolved once: the
+/// `_ROW_POINTER.Row` indirection (builds before 22000), `_ROW.CharRow` and `_ROW.RowLength`
+/// (read together when they are close: python reads both before using either, so one read
+/// fails exactly when one of the two would), and `_CHAR_ROW_CELL_ARRAY.Chars`.
+pub struct RowReader {
+    row_ptr: Option<Field>,
+    char_row: Field,
+    row_length: Field,
+    chars_off: u64,
+    /// (start offset relative to the row, length) of the combined CharRow + RowLength read
+    span: Option<(u64, usize)>,
+}
+
+impl RowReader {
+    /// Resolve the members for arrays whose elements look like `elem` (None: unexpected
+    /// layout, use the generic path).
+    pub fn new(elem: &Obj) -> Option<RowReader> {
+        let t = elem.table();
+        let row_ptr = if elem.has_member("Row") { Some(Field::new(t, elem.struct_name()?, "Row").ok()?) } else { None };
+        let row_ty = match &row_ptr {
+            Some(f) => match f.ty {
+                Ty::Pointer { target, .. } => t.node(target),
+                _ => return None,
+            },
+            None => elem.ty,
+        };
+        let row_name = match row_ty {
+            Ty::Struct(ut) => t.user_type_name(ut),
+            _ => return None,
+        };
+        let char_row = Field::new(t, row_name, "CharRow").ok()?;
+        let row_length = Field::new(t, row_name, "RowLength").ok()?;
+        let cells = match char_row.ty {
+            Ty::Pointer { target, .. } => match t.node(target) {
+                Ty::Struct(ut) => t.user_type_name(ut),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let chars_off = t.offset_of(cells, "Chars").ok()?;
+        let (Ty::Pointer { prim: pp, .. }, Ty::Int(lp)) = (char_row.ty, row_length.ty) else { return None };
+        let (a, b) = (char_row.offset as i64, row_length.offset as i64);
+        let lo = a.min(b);
+        let hi = (a + pp.size as i64).max(b + lp.size as i64);
+        let span = if hi - lo <= 64 && !pp.big_endian && !lp.big_endian { Some((lo as u64, (hi - lo) as usize)) } else { None };
+        Some(RowReader { row_ptr, char_row, row_length, chars_off, span })
+    }
+
+    /// python `row = Rows[index]; if hasattr(row, "Row"): row = row.Row; row.get_text(...)`:
+    /// `Err` = the `Row` read failed, `Ok(None)` = `get_text` raised.
+    pub fn text(&self, elem: Obj, truncate: bool, buf: &mut Vec<u8>) -> Result<Option<String>> {
+        let row = match &self.row_ptr {
+            Some(f) => {
+                let p = elem.f(f);
+                p.u64()?;
+                p.deref()?
+            }
+            None => elem,
+        };
+        let cr = row.f(&self.char_row);
+        let rl = row.f(&self.row_length);
+        let (ptr, length) = match self.span {
+            Some((lo, n)) => {
+                let mut b = [0u8; 64];
+                let at = row.addr.wrapping_add(lo) & row.sp.layer_mask;
+                if row.layer().read(at, &mut b[..n]).is_err() {
+                    return Ok(None);
+                }
+                let (Ty::Pointer { prim: pp, .. }, Ty::Int(lp)) = (cr.ty, rl.ty) else { return Ok(None) };
+                let po = self.char_row.offset.wrapping_sub(lo) as usize;
+                let lo_ = self.row_length.offset.wrapping_sub(lo) as usize;
+                let mut pp = pp;
+                pp.signed = false;
+                let ptr = (pp.decode_int(&b[po..po + pp.size as usize]) as u64) & cr.sp.native_mask;
+                (ptr, lp.decode_int(&b[lo_..lo_ + lp.size as usize]))
+            }
+            None => match (cr.u64(), rl.int()) {
+                (Ok(p), Ok(l)) => (p, l),
+                _ => return Ok(None),
+            },
+        };
+        let nsp = cr.sp.native_space();
+        let chars = (ptr & nsp.layer_mask).wrapping_add(self.chars_off) & nsp.layer_mask;
+        let length = length * 3;
+        if !py_layer_read_into(row.layer(), chars, length, buf) {
+            return Ok(None);
+        }
+        Ok(Some(decode_row(buf, truncate)))
+    }
+}
+
+/// The characters of a `CharRow` buffer (`ROW.get_text` without the reads).
+fn decode_row(char_row: &[u8], truncate: bool) -> String {
+    let mut line = String::with_capacity(char_row.len() / 3);
+    for cell in char_row.chunks_exact(3) {
+        if cell[1] == 0 && VALID_DBCS[cell[2] as usize] {
+            line.push(cell[0] as char);
+        }
+    }
+    if truncate {
+        let n = py_rstrip(&line).len();
+        line.truncate(n);
+    }
+    line
+}
+
+/// [`py_layer_read`] into a reusable buffer; false where python raises.
+fn py_layer_read_into(layer: &dyn Layer, offset: u64, length: i128, buf: &mut Vec<u8>) -> bool {
+    buf.clear();
+    if length < 0 {
+        return true;
+    }
+    if length == 0 {
+        return layer.is_valid(offset, 1);
+    }
+    if length > (1 << 30) {
+        return layer.read_vec(offset, length as usize).map(|v| *buf = v).is_ok();
+    }
+    buf.resize(length as usize, 0);
+    layer.read(offset, buf).is_ok()
 }
 
 /// Console structure extensions on [`Obj`].
@@ -331,17 +466,7 @@ impl ConsoleExt for Obj {
         let offset = self.m("CharRow")?.m("Chars")?.addr;
         let length = self.m("RowLength")?.int()? * 3;
         let char_row = py_layer_read(self.layer(), offset, length)?;
-        let mut line = String::with_capacity(char_row.len() / 3);
-        for cell in char_row.chunks_exact(3) {
-            if cell[1] == 0 && VALID_DBCS[cell[2] as usize] {
-                line.push(cell[0] as char);
-            }
-        }
-        if truncate {
-            let n = py_rstrip(&line).len();
-            line.truncate(n);
-        }
-        Ok(line)
+        Ok(decode_row(&char_row, truncate))
     }
 
     fn screen_buffer(&self) -> Result<Obj> {

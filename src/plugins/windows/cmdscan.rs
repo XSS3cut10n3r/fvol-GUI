@@ -7,8 +7,8 @@ use crate::error::Result;
 use crate::layers::scan::{BytesScanner, scan};
 use crate::objects::{Obj, Space};
 use crate::plugins::windows::consoles::{
-    ConhostProc, Data, ProcResult, Prop, PySet, SetElem, columns, config_ints, conhosts, emit_rows, get_console_settings_from_registry, pack_h,
-    py_exception, py_hex, raise,
+    ConhostProc, Data, ProcResult, Prop, PySet, SetElem, columns, config_ints, emit_rows, pack_h,
+    py_exception, py_hex, raise, settings_and_conhosts,
 };
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::RowSink;
@@ -113,14 +113,24 @@ fn history_for(c: &ConhostProc, table: TableRef, mut vads: Result<Vec<(i128, i12
             if sections.is_empty() {
                 continue;
             }
-            for address in scan(c.layer, &BytesScanner::new(&needle), Some(&sections)) {
-                let ch = Obj::new(sp, ty, address.wrapping_sub(ccm_offset));
-                res.last_candidate = Some(ch.addr);
-                let props = history_properties(&ch, value);
-                if !props.is_empty() {
-                    res.found.push(Ok((ch.addr, props)));
-                }
+            let hits = scan(c.layer, &BytesScanner::new(&needle), Some(&sections));
+            if let Some(&last) = hits.last() {
+                res.last_candidate = Some(Obj::new(sp, ty, last.wrapping_sub(ccm_offset)).addr);
             }
+            // candidates are independent (reads only): validate them in parallel, keep order
+            const PER: usize = 256;
+            let found = crate::util::par::par_map(hits.len().div_ceil(PER), |b| {
+                let mut v = Vec::new();
+                for &address in &hits[b * PER..((b + 1) * PER).min(hits.len())] {
+                    let ch = Obj::new(sp, ty, address.wrapping_sub(ccm_offset));
+                    let props = history_properties(&ch, value);
+                    if !props.is_empty() {
+                        v.push(Ok((ch.addr, props)));
+                    }
+                }
+                v
+            });
+            res.found.extend(found.into_iter().flatten());
         }
         Ok(())
     })();
@@ -148,12 +158,9 @@ impl Plugin for CmdScan {
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        let mut max_history = PySet::from_ints(&config_ints(cfg, "max_history", 50));
-        if !cfg.get_bool("no_registry") {
-            get_console_settings_from_registry(ctx, k, &mut max_history, None)?;
-        }
+        let max_history = PySet::from_ints(&config_ints(cfg, "max_history", 50));
+        let (max_history, _, ch) = settings_and_conhosts(ctx, k, max_history, None, !cfg.get_bool("no_registry"), false)?;
         let max_history = max_history.elems();
-        let ch = conhosts(ctx, k, false);
         let table = match &ch.table {
             Some(Ok(t)) => Some(*t),
             _ => None,

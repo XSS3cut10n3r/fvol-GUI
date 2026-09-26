@@ -11,7 +11,7 @@ use crate::layers::scan::{BytesScanner, scan, scan_each_progressive};
 use crate::layers::LayerExt;
 use crate::objects::util::array_to_string;
 use crate::objects::{LayerRef, Obj, Space};
-use crate::plugins::windows::registry::hivelist::list_hives;
+use crate::plugins::windows::registry::hivelist::{hive_at, list_hive_objects, registry_process};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::TableRef;
@@ -214,8 +214,20 @@ pub fn config_ints(cfg: &Config, name: &str, default: i128) -> Vec<i128> {
 /// (python `except Exception: continue`); errors listing the hives propagate.
 pub fn get_console_settings_from_registry(ctx: &Context, k: &WinKernel, max_history: &mut PySet, mut max_buffers: Option<&mut PySet>) -> Result<()> {
     let _t = crate::util::trace::span("consoles: registry settings");
-    for hive in list_hives(ctx, k, None, None) {
-        let hive = hive?;
+    // python `HiveList.list_hives`: the hive offsets first (an error there raises before any
+    // hive), then each hive layer (InvalidAddress while building one: skipped; any other
+    // error raises there). Hives are independent: build them and read their Console values
+    // in parallel, then apply python's per-hive semantics in order.
+    let mut offsets = Vec::new();
+    for h in list_hive_objects(ctx, k, None) {
+        offsets.push(h?.addr);
+    }
+    let _ = registry_process(k); // memoized once, before the parallel hive construction
+    let want_buffers = max_buffers.is_some();
+    let per_hive = crate::util::par::par_map(offsets.len(), |i| -> Result<Vec<(bool, SetElem)>> {
+        let hive = hive_at(k, offsets[i])?;
+        let mut adds = Vec::new();
+        // python `except Exception: continue`: an error ends this hive's values
         let _ = (|| -> Result<()> {
             let key = hive.get_key_node("Console")?;
             for value in key.get_values() {
@@ -225,16 +237,33 @@ pub fn get_console_settings_from_registry(ctx: &Context, k: &WinKernel, max_hist
                     RegData::Bytes(b) => SetElem::Bytes(b),
                 };
                 if val_name == "HistoryBufferSize" {
-                    max_history.add(data(value.decode_data()?));
+                    adds.push((true, data(value.decode_data()?)));
                 } else if val_name == "NumberOfHistoryBuffers" {
-                    match max_buffers.as_deref_mut() {
-                        Some(s) => s.add(data(value.decode_data()?)),
-                        None => return Err(Error::Symbol("AttributeError: 'list' object has no attribute 'add'".into())),
+                    if !want_buffers {
+                        // cmdscan's `max_buffers=[]`: list has no `add` (AttributeError)
+                        return Ok(());
                     }
+                    adds.push((false, data(value.decode_data()?)));
                 }
             }
             Ok(())
         })();
+        Ok(adds)
+    });
+    for hive in per_hive {
+        match hive {
+            Ok(adds) => {
+                for (history, e) in adds {
+                    match (history, max_buffers.as_deref_mut()) {
+                        (true, _) => max_history.add(e),
+                        (false, Some(b)) => b.add(e),
+                        (false, None) => {}
+                    }
+                }
+            }
+            Err(e) if e.is_invalid_address() => continue,
+            Err(e) => return Err(e),
+        }
     }
     Ok(())
 }
@@ -990,6 +1019,30 @@ pub fn conhosts(ctx: &Context, k: &WinKernel, case_insensitive: bool) -> Conhost
     Conhosts { procs, table }
 }
 
+/// python's `_generator` preamble: the registry lookup of console settings (unless
+/// `registry` is false) and the conhost discovery run concurrently (they are independent);
+/// a registry error is returned first, as python raises it before looking at processes.
+pub fn settings_and_conhosts(
+    ctx: &Context,
+    k: &WinKernel,
+    mut max_history: PySet,
+    mut max_buffers: Option<PySet>,
+    registry: bool,
+    case_insensitive: bool,
+) -> Result<(PySet, Option<PySet>, Conhosts)> {
+    std::thread::scope(|s| {
+        let reg = s.spawn(move || -> Result<(PySet, Option<PySet>)> {
+            if registry {
+                get_console_settings_from_registry(ctx, k, &mut max_history, max_buffers.as_mut())?;
+            }
+            Ok((max_history, max_buffers))
+        });
+        let ch = conhosts(ctx, k, case_insensitive);
+        let (h, b) = reg.join().unwrap_or_else(|p| std::panic::resume_unwind(p))?;
+        Ok((h, b, ch))
+    })
+}
+
 impl Plugin for Consoles {
     fn name(&self) -> &'static str {
         "windows.consoles.Consoles"
@@ -1011,13 +1064,10 @@ impl Plugin for Consoles {
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        let mut max_history = PySet::from_ints(&config_ints(cfg, "max_history", 50));
-        let mut max_buffers = PySet::from_ints(&config_ints(cfg, "max_buffers", 4));
-        if !cfg.get_bool("no_registry") {
-            get_console_settings_from_registry(ctx, k, &mut max_history, Some(&mut max_buffers))?;
-        }
-        let (max_history, max_buffers) = (max_history.elems(), max_buffers.elems());
-        let ch = conhosts(ctx, k, true);
+        let max_history = PySet::from_ints(&config_ints(cfg, "max_history", 50));
+        let max_buffers = PySet::from_ints(&config_ints(cfg, "max_buffers", 4));
+        let (max_history, max_buffers, ch) = settings_and_conhosts(ctx, k, max_history, Some(max_buffers), !cfg.get_bool("no_registry"), true)?;
+        let (max_history, max_buffers) = (max_history.elems(), max_buffers.map(|b| b.elems()).unwrap_or_default());
         let table = match &ch.table {
             Some(Ok(t)) => Some(*t),
             _ => None,
