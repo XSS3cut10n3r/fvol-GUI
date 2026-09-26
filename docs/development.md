@@ -222,6 +222,8 @@ Other checks:
 | Renderer fixtures from python | `bench/venv/bin/python bench/scripts/render_fixtures.py`, then `cargo.sh test --profile fast render` |
 | YARA engine vs yara-python   | `bench/scripts/limit.sh -m 4G bench/venv/bin/python bench/scripts/yara_diff.py` |
 | Disassembler vs capstone     | `bench/scripts/disasm_diff.py gen` once, then `bench/scripts/disasm_check_all.sh` |
+| Options x renderers sweep    | `bench/venv/bin/python bench/scripts/sweep.py gen`, then `sweep.py py` (python, cached), `sweep.py rs -b <BIN>` and `sweep.py report -v` |
+| python requirement table     | `bench/venv/bin/python bench/scripts/gen_pyreqs.py` rewrites `src/plugins/pyreqs.rs` (what `--save-config` records) |
 
 To make new references, use `bench/scripts/py_refs.sh` for the Windows image,
 `py_refs_linux.sh` and `py_refs_mac.sh` with `IMG` and `NAME` set for the others, and
