@@ -108,44 +108,34 @@ impl Partial {
 /// short literal is 60 bytes, the longest copy 64).
 const SLOP: usize = 64;
 
-/// Per-tag decode entry: `len | offset_base << 8`. Literals get a pseudo offset of 64 (never
-/// "overlapping", and "before the output start" only while op < 64, which sends the first
-/// elements of a block through the checked path); literals with a length field (tags 60..63)
-/// and copy-4 elements get len 0: the fast loop leaves them to the checked loop.
-static TAG_TABLE: [u32; 256] = {
-    let mut t = [0u32; 256];
+/// Per-tag decode entry: `len | offset_base << 8`. The fast loop's single test for the
+/// common case is `len <= off <= op` (as `off - len <= op - len`, with op >= 64): literals get
+/// a pseudo offset of 64 (always passes), literals with a length field (tags 60..63) and
+/// copy-4 elements (blocks > 64 KiB only) get len 0 and an offset base of 2^40 (never
+/// passes: the checked loop takes them).
+static TAG_TABLE: [u64; 256] = {
+    let mut t = [0u64; 256];
     let mut tag = 0usize;
     while tag < 256 {
         t[tag] = match tag & 3 {
             0 => {
                 let len = (tag >> 2) + 1;
-                if len > 60 { 0 } else { (len | (SLOP << 8)) as u32 }
+                if len > 60 { SLOW_BASE << 8 } else { (len | (SLOP << 8)) as u64 }
             }
-            1 => ((4 + ((tag >> 2) & 7)) | ((tag >> 5) << 16)) as u32,
-            2 => ((tag >> 2) + 1) as u32,
-            // copy-4 (only in blocks > 64 KiB): the checked loop
-            _ => 0,
+            1 => ((4 + ((tag >> 2) & 7)) | ((tag >> 5) << 16)) as u64,
+            2 => ((tag >> 2) + 1) as u64,
+            _ => SLOW_BASE << 8,
         };
         tag += 1;
     }
     t
 };
 
+/// Offset base of the table entries the fast loop must not decode.
+const SLOW_BASE: u64 = 1 << 40;
+
 /// Bits of the 4 bytes after the tag that hold (the low part of) the copy offset, by tag type.
 const OFFSET_MASK: [u32; 4] = [0, 0xff, 0xffff, 0xffff_ffff];
-
-/// 64-byte move by value (all loads before all stores): equals a forward byte copy of the
-/// first `len` bytes whenever `len <= dst - src`.
-#[inline(always)]
-unsafe fn move64(s: *const u8, d: *mut u8) {
-    // SAFETY: caller guarantees 64 readable bytes at s and 64 writable bytes at d
-    unsafe {
-        let a = (s as *const [u8; 32]).read_unaligned();
-        let b = (s.add(32) as *const [u8; 32]).read_unaligned();
-        (d as *mut [u8; 32]).write_unaligned(a);
-        (d.add(32) as *mut [u8; 32]).write_unaligned(b);
-    }
-}
 
 /// `PATTERN[off][i] = i % off`: pshufb masks replicating an `off`-byte period over 16 bytes.
 #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
@@ -209,10 +199,15 @@ fn decode_fast(src: &[u8], out: &mut [u8], ip: &mut usize, op: &mut usize, limit
         return;
     }
     let ip_end = n - (1 + SLOP); // ip <= ip_end
-    let op_end = (out.len() - SLOP).min(limit - 1); // op <= op_end
+    // op <= op_end (and below SLOW_BASE, so SLOW entries never pass the offset test)
+    let op_end = (out.len() - SLOP).min(limit - 1).min(usize::try_from(SLOW_BASE - 1).unwrap_or(usize::MAX));
     let sp = src.as_ptr();
     let dp = out.as_mut_ptr();
     let (mut i, mut o) = (*ip, *op);
+    // o >= 64: literals (pseudo offset 64) always pass the offset test, and o - len >= 0
+    if o < SLOP {
+        return;
+    }
     while i <= ip_end && o <= op_end {
         // SAFETY: i + 1 + SLOP <= n, so the tag, the 4 bytes after it and a 64-byte literal
         // are readable; o + SLOP <= out.len(), so 64 bytes are writable at o; copies read
@@ -225,20 +220,15 @@ fn decode_fast(src: &[u8], out: &mut [u8], ip: &mut usize, op: &mut usize, limit
             let len = e & 0xff;
             let off = (next & *OFFSET_MASK.get_unchecked(ty)) as usize + (e >> 8);
             let adv = std::hint::select_unpredictable(ty == 0, (tag >> 2) + 2, ty + 1);
-            if len.wrapping_sub(1) >= off || off.wrapping_sub(1) >= o {
-                // long literal / copy-4 (len 0), overlapping copy, offset 0 / before the
-                // output start, or a short literal while o < 64
-                if len == 0 {
+            // common case: len <= off <= o (a literal always, o >= 64)
+            if off.wrapping_sub(len) > o - len {
+                std::hint::cold_path();
+                // overlapping copy (off < len), offset 0 or before the output start, long
+                // literal / copy-4 (SLOW_BASE)
+                if off == 0 || off > o {
                     break;
                 }
-                if ty == 0 {
-                    move64(sp.add(i + 1), dp.add(o));
-                } else {
-                    if off == 0 || off > o {
-                        break;
-                    }
-                    pattern64(dp.add(o), off);
-                }
+                pattern64(dp.add(o), off);
             } else {
                 let s = std::hint::select_unpredictable(ty == 0, sp.add(i + 1), dp.add(o - off) as *const u8);
                 let d = dp.add(o);

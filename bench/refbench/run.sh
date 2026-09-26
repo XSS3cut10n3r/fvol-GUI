@@ -5,6 +5,7 @@
 #   xpress_huff  wimlib 1.14.4 XPRESS decompressor (built from source into $WORK)
 #   xpress_lz77  samba lib/compression/lzxpress.c (plain LZ77)
 # Usage: bench/refbench/run.sh [RAW_IMAGE] [NCHUNKS] [REPS]
+# (quick iteration on the rust side: bench/refbench/codec_micro.sh, same WORK dir)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -12,7 +13,7 @@ RAW="${1:-/home/user/cbc2/task2/memory-dirty.raw}"
 N="${2:-2048}"
 REPS="${3:-7}"
 export RSVOL_BENCH_CPU="${RSVOL_BENCH_CPU:-2}"   # pin both sides to one P-core
-WORK="${WORK:-/tmp/rsvol-refbench}"
+WORK="${WORK:-/home/user/rs-vol/testdata/scratch/refbench}"   # on disk, not tmpfs
 mkdir -p "$WORK"
 cd "$WORK"
 
@@ -32,5 +33,5 @@ gcc -O3 -march=native -o refbench "$HERE/refbench.c" lzxpress.c \
 [ -f snappy.vec ] || ./refbench mkvec "$RAW" "$WORK" "$N"
 ./refbench bench "$WORK" "$REPS"
 cd "$ROOT"
-RSVOL_CODEC_BENCH="$WORK" RSVOL_BENCH_REPS="$REPS" cargo test --release codec_bench -- --ignored --nocapture 2>/dev/null \
+RSVOL_CODEC_BENCH="$WORK" RSVOL_BENCH_REPS="$REPS" /home/user/rs-vol/bench/scripts/cargo.sh test --release codec_bench -- --ignored --nocapture 2>/dev/null \
     | grep -E "rsvol"
