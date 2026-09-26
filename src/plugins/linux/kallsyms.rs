@@ -80,7 +80,21 @@ impl Plugin for Kallsyms {
         }
         for (part, _) in flags.iter().enumerate().filter(|(_, f)| **f) {
             let symbols = match part {
-                0 => kas.get_core_symbols(),
+                0 => {
+                    // streamed: rows are rendered while the next symbols expand on all cores
+                    let mut err = None;
+                    kas.for_each_core_symbol(&mut |s| match s.and_then(row).and_then(|r| out.row(0, r)) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            err = Some(e);
+                            false
+                        }
+                    });
+                    if let Some(e) = err {
+                        return Err(e);
+                    }
+                    continue;
+                }
                 1 => kas.get_modules_symbols(None),
                 2 => kas.get_ftrace_symbols(),
                 _ => kas.get_bpf_symbols(),

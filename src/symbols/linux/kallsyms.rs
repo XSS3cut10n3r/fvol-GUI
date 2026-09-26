@@ -1112,37 +1112,106 @@ impl Kallsyms {
     /// python `get_core_symbols()`: every kernel core symbol in kallsyms order (a trailing
     /// `Err` marks where python raised).
     pub fn get_core_symbols(&self) -> Vec<Result<KasSymbol>> {
+        let mut out = Vec::new();
+        self.for_each_core_symbol(&mut |r| {
+            out.push(r);
+            true
+        });
+        out
+    }
+
+    /// Streaming [`get_core_symbols`](Self::get_core_symbols): `f` gets each symbol (or the
+    /// `Err` python raises, after which nothing follows) in kallsyms order on the calling thread
+    /// while the next ones are expanded on all cores; `f` returns false to stop.
+    ///
+    /// The symbols' stream offsets come from one pass over the length bytes; chunks of symbols
+    /// are then expanded in parallel. python's `continue` on an unreadable symbol does not
+    /// advance the stream offset, so from the first such symbol on the walk continues
+    /// sequentially (the chunks before it are exactly what the sequential walk yields).
+    pub fn for_each_core_symbol(&self, f: &mut dyn FnMut(Result<KasSymbol>) -> bool) {
         let n = match self.num_syms() {
             Ok(n) => n,
-            Err(e) => return vec![Err(e)],
+            Err(e) => {
+                f(Err(e));
+                return;
+            }
         };
-        if let Some(v) = self.core_symbols_parallel(n) {
-            return v;
+        let (mut start, mut off) = (0u64, 0u64);
+        if let Some(offsets) = self.core_offsets(n) {
+            const CHUNK: usize = 2048;
+            let chunks = offsets.len().div_ceil(CHUNK);
+            let mut done = false;
+            let mut resume: Option<usize> = None;
+            let threads = crate::util::par::threads();
+            crate::util::par::par_map_stream(
+                chunks,
+                4 * threads,
+                |c| -> (Vec<Result<KasSymbol>>, Option<usize>) {
+                    let mut names = PageReader::new(self.layer);
+                    let mut tokens = PageReader::new(self.layer);
+                    let lo = c * CHUNK;
+                    let hi = (lo + CHUNK).min(offsets.len());
+                    let mut v = Vec::with_capacity(hi - lo);
+                    for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
+                        match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
+                            Ok((s, _)) => v.push(Ok(s)),
+                            Err(e) if e.is_invalid_address() => return (v, Some(i)),
+                            Err(e) => {
+                                v.push(Err(e));
+                                break;
+                            }
+                        }
+                    }
+                    (v, None)
+                },
+                |_, (v, invalid)| {
+                    for r in v {
+                        let failed = r.is_err();
+                        if !f(r) || failed {
+                            done = true;
+                            return false;
+                        }
+                    }
+                    if let Some(i) = invalid {
+                        resume = Some(i);
+                        return false;
+                    }
+                    true
+                },
+            );
+            match resume {
+                _ if done => return,
+                None => return,
+                Some(i) => {
+                    start = i as u64;
+                    off = offsets[i];
+                }
+            }
         }
-        let mut out = Vec::new();
+        // python's sequential walk (from the first unreadable symbol, or from the start when
+        // the length bytes could not all be read)
         let mut names = PageReader::new(self.layer);
         let mut tokens = PageReader::new(self.layer);
-        let mut off = 0u64;
-        for idx in 0..n {
+        for idx in start..n {
             match self.get_symbol_at(&mut names, &mut tokens, off, idx) {
                 Ok((s, len)) => {
-                    out.push(Ok(s));
+                    if !f(Ok(s)) {
+                        return;
+                    }
                     off += len + 1;
                 }
                 Err(e) if e.is_invalid_address() => continue,
                 Err(e) => {
-                    out.push(Err(e));
-                    break;
+                    f(Err(e));
+                    return;
                 }
             }
         }
-        out
     }
 
-    /// Optimistic parallel `get_core_symbols`: stream offsets from the length bytes, expand the
-    /// symbols on all cores. `None` (caller falls back to the sequential walk) when any read
-    /// fails, since python's `continue` on InvalidAddress changes the offsets from there on.
-    fn core_symbols_parallel(&self, n: u64) -> Option<Vec<Result<KasSymbol>>> {
+    /// The stream offset of every core symbol from the length bytes (`None`: a length byte is
+    /// unreadable, or no `kallsyms_names`).
+    fn core_offsets(&self, n: u64) -> Option<Vec<u64>> {
         let names_base = self.cfg.names_address?;
         if n > 16 << 20 {
             return None;
@@ -1159,36 +1228,7 @@ impl Kallsyms {
             offsets.push(off);
             off += len + 1;
         }
-        const CHUNK: usize = 4096;
-        let chunks = offsets.len().div_ceil(CHUNK);
-        let parts = crate::util::par::par_map(chunks, |c| -> Option<Vec<Result<KasSymbol>>> {
-            let mut names = PageReader::new(self.layer);
-            let mut tokens = PageReader::new(self.layer);
-            let lo = c * CHUNK;
-            let hi = (lo + CHUNK).min(offsets.len());
-            let mut v = Vec::with_capacity(hi - lo);
-            for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
-                match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
-                    Ok((s, _)) => v.push(Ok(s)),
-                    Err(e) if e.is_invalid_address() => return None,
-                    Err(e) => {
-                        v.push(Err(e));
-                        break;
-                    }
-                }
-            }
-            Some(v)
-        });
-        let mut out = Vec::with_capacity(offsets.len());
-        for p in parts {
-            let p = p?;
-            let failed = p.last().is_some_and(|r| r.is_err());
-            out.extend(p);
-            if failed {
-                break;
-            }
-        }
-        Some(out)
+        Some(offsets)
     }
 
     /// python `_is_symbol_exported(name, address, module)`: `Ok(None)` where python returns None.
