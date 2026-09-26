@@ -122,6 +122,8 @@ pub struct Regex {
     names: Vec<(String, u32)>,
     bt: backtrack::Prog,
     engine: Engine,
+    /// Lower bound of any match length in bytes (sre's INFO min-width check).
+    min_len: usize,
     pool: Mutex<Vec<Box<Scratch>>>,
 }
 
@@ -143,6 +145,8 @@ impl Regex {
         let lowered = hir::lower(parsed)?;
         let props = hir::props(&lowered.hir, &lowered.group_widths);
         let mut bt = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
+        let min_len = lowered.hir.min_width(&lowered.group_widths).min(usize::MAX as u128) as usize;
+        bt.min_len = min_len;
         if lowered.hir.min_width(&lowered.group_widths) > 0 {
             bt.prefilter = literal::Prefilter::for_hir(&lowered.hir).map(|p| p.0);
         }
@@ -164,6 +168,7 @@ impl Regex {
             names: lowered.names,
             bt,
             engine,
+            min_len,
             pool: Mutex::new(Vec::new()),
         })
     }
@@ -178,6 +183,9 @@ impl Regex {
         let lowered = hir::lower_str(parsed)?;
         let mut bt = backtrack::Prog::new(&lowered.hir, lowered.groups, &lowered.group_widths)?;
         bt.utf8 = true;
+        // characters are at least one byte each
+        let min_len = lowered.hir.min_width(&lowered.group_widths).min(usize::MAX as u128) as usize;
+        bt.min_len = min_len;
         Ok(Regex {
             pattern: pattern.as_bytes().into(),
             flags,
@@ -185,6 +193,7 @@ impl Regex {
             names: lowered.names,
             bt,
             engine: Engine::Backtrack,
+            min_len,
             pool: Mutex::new(Vec::new()),
         })
     }
@@ -264,6 +273,9 @@ impl Regex {
     }
 
     fn find_with(&self, sc: &mut Scratch, hay: &[u8], start: usize, anchored: bool, must_advance: bool) -> Option<(usize, usize)> {
+        if start > hay.len() || hay.len() - start < self.min_len {
+            return None;
+        }
         match (&self.engine, sc.dfa.as_mut()) {
             (Engine::Fixed { finder, seq }, _) => {
                 let n = seq.len();

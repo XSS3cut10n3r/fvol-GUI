@@ -13,6 +13,35 @@
 use super::hir::{ByteSet, Hir, Look};
 use super::Error;
 use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
+
+#[derive(Default)]
+struct FxHasher(u64);
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64)
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64)
+    }
+}
+type FxBuild = BuildHasherDefault<FxHasher>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubKind {
@@ -39,6 +68,11 @@ pub enum Inst {
     RegSet(u16),
     RegJmpIfEq(u16, u32),
     RegFailIfEq(u16),
+    /// Counted repeat (large counts of multi-unit bodies): counter register init.
+    CntInit(u16),
+    /// Loop head: body at pc+1, `exit` after the loop.
+    CntLoop { r: u16, min: u32, max: u32, greedy: bool, exit: u32 },
+    CntIncr(u16),
     Backref { group: u32, icase: bool, unicode: bool },
     /// Sub-match; body starts at pc+1 and ends with SubEnd; continuation at `next`.
     SubStart { id: u32, kind: SubKind, width: u32, next: u32 },
@@ -71,8 +105,12 @@ pub struct Prog {
     capture_dependent: bool,
     /// Groups referenced by backrefs / conditionals.
     ref_groups: Vec<u32>,
+    /// Per pc: counters of enclosing counted loops.
+    cnt_list: Vec<Vec<u16>>,
     /// Candidate-start prefilter (only for non-nullable patterns).
     pub prefilter: Option<super::literal::Prefilter>,
+    /// Minimum match length: start positions closer than this to the end are skipped.
+    pub min_len: usize,
 }
 
 const MAX_INSTS: usize = 2_000_000;
@@ -88,6 +126,9 @@ struct Compiler {
     loop_stack: Vec<u16>,
     reg_list: Vec<u32>,
     reg_lists: Vec<Vec<u16>>,
+    cnt_stack: Vec<u16>,
+    /// Per pc: enclosing counted loops (their counters key the memo exactly).
+    cnt_list: Vec<Vec<u16>>,
     sub_depth: u32,
     in_sub: Vec<bool>,
     ref_groups: Vec<u32>,
@@ -109,6 +150,7 @@ impl Compiler {
             }
         };
         self.reg_list.push(idx as u32);
+        self.cnt_list.push(self.cnt_stack.clone());
         self.in_sub.push(self.sub_depth > 0);
         Ok(pc)
     }
@@ -259,6 +301,16 @@ impl Compiler {
             return Ok(());
         }
         let nullable = sub.min_width(&self.gw) == 0;
+        if !nullable {
+            let body = super::hir::props(sub, &self.gw).nfa_size.max(1);
+            let copies = match max {
+                Some(m) => m as u64,
+                None => min as u64 + 1,
+            };
+            if body.saturating_mul(copies) > 20_000 && self.nregs < u16::MAX as usize {
+                return self.counted(min, max, greedy, sub, depth);
+            }
+        }
         // Mandatory copies.
         for _ in 0..min {
             self.compile(sub, depth + 1)?;
@@ -361,6 +413,27 @@ impl Compiler {
     }
 }
 
+impl Compiler {
+    /// Counter-based repeat for non-nullable bodies with large counts (python
+    /// REPEAT / MAX_UNTIL / MIN_UNTIL semantics without zero-width checks).
+    fn counted(&mut self, min: u32, max: Option<u32>, greedy: bool, sub: &Hir, depth: usize) -> Result<(), Error> {
+        let r = self.nregs as u16;
+        self.nregs += 1;
+        self.push(Inst::CntInit(r))?;
+        let l = self.push(Inst::CntLoop { r, min, max: max.unwrap_or(u32::MAX), greedy, exit: u32::MAX })?;
+        self.cnt_stack.push(r);
+        self.compile(sub, depth + 1)?;
+        self.push(Inst::CntIncr(r))?;
+        self.push(Inst::Jmp(l))?;
+        self.cnt_stack.pop();
+        let exit = self.pc();
+        if let Inst::CntLoop { exit: e, .. } = &mut self.insts[l as usize] {
+            *e = exit;
+        }
+        Ok(())
+    }
+}
+
 impl Prog {
     pub fn new(h: &Hir, ngroups: u32, gw: &[(u128, u128)]) -> Result<Prog, Error> {
         let mut c = Compiler {
@@ -373,6 +446,8 @@ impl Prog {
             loop_stack: Vec::new(),
             reg_list: Vec::new(),
             reg_lists: vec![Vec::new()],
+            cnt_stack: Vec::new(),
+            cnt_list: Vec::new(),
             sub_depth: 0,
             in_sub: Vec::new(),
             ref_groups: Vec::new(),
@@ -395,6 +470,14 @@ impl Prog {
                 Inst::RepOne { .. } => {
                     if pc + 1 < n {
                         want[pc + 1] = true;
+                    }
+                }
+                Inst::CntLoop { exit, .. } => {
+                    if pc + 1 < n {
+                        want[pc + 1] = true;
+                    }
+                    if (exit as usize) < n {
+                        want[exit as usize] = true;
                     }
                 }
                 Inst::SubStart { next, .. } => {
@@ -438,7 +521,9 @@ impl Prog {
             nsubs: c.nsubs as usize,
             capture_dependent,
             ref_groups: c.ref_groups,
+            cnt_list: c.cnt_list,
             prefilter: None,
+            min_len: 0,
         })
     }
 }
@@ -458,14 +543,16 @@ struct Memo {
     touched: Vec<usize>,
     words_per_page: usize,
     allocated: usize,
-    exact: HashSet<(u32, usize, Box<[usize]>)>,
+    exact: HashSet<(u32, usize, Box<[usize]>), FxBuild>,
+    /// Exact keys with at most 4 extra values (no allocation).
+    exact4: HashSet<(u32, usize, [usize; 4]), FxBuild>,
 }
 
 impl Memo {
     fn new(keys: usize, hay_len: usize) -> Memo {
         let npages = (hay_len + 1) / PAGE + 1;
         let words_per_page = (keys * PAGE).div_ceil(64);
-        Memo { keys, pages: vec![None; npages], touched: Vec::new(), words_per_page, allocated: 0, exact: HashSet::new() }
+        Memo { keys, pages: vec![None; npages], touched: Vec::new(), words_per_page, allocated: 0, exact: HashSet::default(), exact4: HashSet::default() }
     }
 
     /// Returns true if the bit was already set; sets it.
@@ -515,6 +602,7 @@ impl Memo {
         self.touched.clear();
         self.allocated = 0;
         self.exact.clear();
+        self.exact4.clear();
     }
 }
 
@@ -604,6 +692,10 @@ impl<'a> Search<'a> {
         cache.regs.clear();
         cache.regs.resize(prog.nregs, NONE);
         let mut s = start;
+        let last_start = hay.len().saturating_sub(prog.min_len);
+        if s > last_start {
+            return None;
+        }
         let pre = if anchored { None } else { prog.prefilter.as_ref() };
         if let Some(pf) = pre {
             s = pf.find(hay, s)?;
@@ -616,7 +708,7 @@ impl<'a> Search<'a> {
                 }
                 return Some((s, end));
             }
-            if anchored || s >= hay.len() {
+            if anchored || s >= last_start {
                 return None;
             }
             s += if prog.utf8 { super::unicode_class::decode(hay, s).map_or(1, |(_, l)| l) } else { 1 };
@@ -653,25 +745,46 @@ impl<'a> Search<'a> {
             return false;
         };
         let prog = self.prog;
-        if prog.capture_dependent {
-            let mut spans = Vec::with_capacity(prog.ref_groups.len() * 2);
-            for &g in &prog.ref_groups {
-                let a = cache.slots.get(g as usize * 2).copied().unwrap_or(NONE);
-                let b = cache.slots.get(g as usize * 2 + 1).copied().unwrap_or(NONE);
-                spans.push(a);
-                spans.push(b);
+        let counters = prog.cnt_list.get(pc).map_or(&[][..], |v| &v[..]);
+        if prog.capture_dependent || !counters.is_empty() {
+            let nvals = counters.len() + if prog.capture_dependent { prog.ref_groups.len() * 2 } else { 0 };
+            let val = |i: usize| -> usize {
+                if i < counters.len() {
+                    cache.regs.get(counters[i] as usize).copied().unwrap_or(NONE)
+                } else {
+                    let j = i - counters.len();
+                    let g = prog.ref_groups[j / 2] as usize;
+                    cache.slots.get(g * 2 + (j & 1)).copied().unwrap_or(NONE)
+                }
+            };
+            let in_sub = prog.in_sub[pc];
+            if nvals <= 4 {
+                let mut arr = [NONE; 4];
+                for (i, a) in arr.iter_mut().enumerate().take(nvals) {
+                    *a = val(i);
+                }
+                let k = (key as u32, pos, arr);
+                let memo = match cache.memo.as_mut() {
+                    Some(m) => m,
+                    None => return false,
+                };
+                if in_sub {
+                    // No marker bookkeeping for exact keys inside sub bodies.
+                    return memo.exact4.contains(&k);
+                }
+                if memo.exact4.len() > 8_000_000 {
+                    return false;
+                }
+                return !memo.exact4.insert(k);
             }
+            let spans: Vec<usize> = (0..nvals).map(val).collect();
             let k = (key as u32, pos, spans.into_boxed_slice());
             let memo = match cache.memo.as_mut() {
                 Some(m) => m,
                 None => return false,
             };
-            if prog.in_sub[pc] {
-                if memo.exact.contains(&k) {
-                    return true;
-                }
-                // No marker bookkeeping for exact keys inside sub bodies: skip memo.
-                return false;
+            if in_sub {
+                return memo.exact.contains(&k);
             }
             if memo.exact.len() > 4_000_000 {
                 return false;
@@ -822,6 +935,35 @@ impl<'a> Search<'a> {
                             pc = t as usize;
                         } else {
                             pc += 1;
+                        }
+                    }
+                    Inst::CntInit(r) => {
+                        let old = cache.regs[r as usize];
+                        cache.stack.push(Frame::Reg { r, old });
+                        cache.regs[r as usize] = 0;
+                        pc += 1;
+                    }
+                    Inst::CntIncr(r) => {
+                        let old = cache.regs[r as usize];
+                        cache.stack.push(Frame::Reg { r, old });
+                        cache.regs[r as usize] = old.wrapping_add(1);
+                        pc += 1;
+                    }
+                    Inst::CntLoop { r, min, max, greedy, exit } => {
+                        let count = cache.regs[r as usize];
+                        if count < min as usize {
+                            pc += 1;
+                        } else if max != u32::MAX && count >= max as usize {
+                            pc = exit as usize;
+                        } else if greedy {
+                            cache.stack.push(Frame::Alt { pc: exit, pos });
+                            pc += 1;
+                        } else {
+                            cache.stack.push(Frame::Alt { pc: pc as u32 + 1, pos });
+                            pc = exit as usize;
+                        }
+                        if self.memo_skip(cache, pc, pos) {
+                            break 'exec true;
                         }
                     }
                     Inst::RegFailIfEq(r) => {
@@ -1076,7 +1218,7 @@ impl<'a> Search<'a> {
 
     /// Like memo_skip but without side effects (used to skip dead RepOne positions).
     fn memo_would_skip(&self, cache: &Cache, pc: usize, pos: usize) -> bool {
-        if self.prog.capture_dependent {
+        if self.prog.capture_dependent || self.prog.cnt_list.get(pc).is_some_and(|v| !v.is_empty()) {
             return false;
         }
         match (self.memo_index(cache, pc, pos), cache.memo.as_ref()) {

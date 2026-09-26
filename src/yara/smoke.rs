@@ -54,6 +54,27 @@ fn yara_smoke_yre_strings() {
 }
 
 #[test]
+fn yara_smoke_large_counted_repeats() {
+    // expectations from python re
+    let mut h1 = b"x".to_vec();
+    h1.extend(b"ab".repeat(100));
+    h1.push(b'a');
+    let mut h3 = b"ab".repeat(3000);
+    h3.push(b'c');
+    let cases: Vec<(&[u8], Vec<u8>, Vec<(usize, usize)>)> = vec![
+        (b"(?:ab){2,30000}", h1, vec![(1, 201)]),
+        (b"(?:ab){2,30000}?", b"ab".repeat(7), vec![(0, 4), (4, 8), (8, 12)]),
+        (b"(?:a|b){5000}c", h3, vec![(1000, 6001)]),
+        (b"(?:ab|a){3,20000}b", b"aab".repeat(50), vec![(0, 150)]),
+        (b"(?:xy){30000}", b"xy".repeat(29999), vec![]),
+    ];
+    for (p, h, want) in cases {
+        let re = Regex::new(p, 0).unwrap();
+        assert_eq!(re.find_iter(&h).collect::<Vec<_>>(), want, "{}", String::from_utf8_lossy(p));
+    }
+}
+
+#[test]
 fn yara_smoke_thread_safety() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Regex>();
