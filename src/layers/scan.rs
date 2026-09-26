@@ -1334,6 +1334,35 @@ mod tests {
         }
     }
 
+    /// Hits in the format of the python oracle plugin (`scancheck.ScanCheck`, see the sub-scan
+    /// report): `RSVOL_BENCH_IMG=img RSVOL_HITS_OUT=file [RSVOL_HITS_PHYS=1] cargo test
+    /// --profile fast hits_dump -- --ignored`
+    #[test]
+    #[ignore]
+    fn hits_dump() {
+        use std::io::Write;
+        let (Ok(path), Ok(outp)) = (std::env::var("RSVOL_BENCH_IMG"), std::env::var("RSVOL_HITS_OUT")) else {
+            eprintln!("set RSVOL_BENCH_IMG and RSVOL_HITS_OUT");
+            return;
+        };
+        let ctx = crate::context::Context::new(crate::context::GlobalOptions { file: Some(path), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let l = if std::env::var_os("RSVOL_HITS_PHYS").is_some() { k.phys } else { k.vlayer };
+        let tags: [&[u8]; 15] = [
+            b"AtmT", b"Pro\xe3", b"Proc", b"Thr\xe5", b"Thre", b"Fil\xe5", b"File", b"Mut\xe1", b"Muta", b"Dri\xf6", b"Driv", b"MmLd", b"Sym\xe2",
+            b"Symb", b"CM10",
+        ];
+        let mut o = std::io::BufWriter::new(std::fs::File::create(outp).unwrap());
+        writeln!(o, "Volatility 3 Framework 2.28.2\n\nKind\tOffset\tPattern\n").unwrap();
+        for (off, pi) in scan(l, &MultiStringScanner::new(&tags), None) {
+            let hex: String = tags[pi as usize].iter().map(|b| format!("{b:02x}")).collect();
+            writeln!(o, "multi\t{off:#x}\t{hex}").unwrap();
+        }
+        for off in scan(l, &BytesScanner::new(b"RSDS"), None) {
+            writeln!(o, "bytes\t{off:#x}\t52534453").unwrap();
+        }
+    }
+
     /// Single-thread search kernel throughput on cache-resident data:
     /// `cargo test --profile fast kernel_bench -- --ignored --nocapture`
     #[test]
