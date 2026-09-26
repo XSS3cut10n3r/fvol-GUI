@@ -248,10 +248,15 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
                 };
                 if r != 0 {
                     // XS/XD + ADSIZE contexts are empty in 32-bit mode
-                    if has67 && !m64 {
+                    if has67 && !m64 && !has66 {
                         return false;
                     }
-                    r + 2 * has66 as usize
+                    // REX.W contexts have no OPSIZE variant (REXW_XS / REXW_XD win)
+                    if m64 && rex & 8 != 0 {
+                        r
+                    } else {
+                        r + 2 * has66 as usize
+                    }
                 } else {
                     has66 as usize
                 }
@@ -547,8 +552,9 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             st.w = false;
             st.mosz = 4;
         } else if flags & F_NOPFX != 0 {
-            if pfx >= 4 {
+            if pfx >= 4 && !(m64 && map == MAP_0F && op & 0xF0 == 0x80) {
                 // XS_OPSIZE / XD_OPSIZE contexts hold no prefix-less instructions
+                // (capstone quirk: except jcc rel32 in 64-bit mode)
                 return false;
             }
             if (mand == 0xF2 || mand == 0xF3) && has66 {
@@ -702,6 +708,11 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             }
         }
         _ => {}
+    }
+    // a repeat prefix that differs from the (consumed) mandatory F2/F3 is printed
+    // (capstone: only for movss, whose id is in its repne-capable list)
+    if pp == P_NONE && map == MAP_0F && (op == 0x10 || op == 0x11) && lockrep == 0xF2 && mand == 0xF3 {
+        pp = P_REPNE;
     }
     if segp == 0x3E && flags & F_NOTRACK != 0 {
         pp = if pp == P_BND { P_BND_NOTRACK } else { P_NOTRACK };

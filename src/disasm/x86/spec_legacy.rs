@@ -153,6 +153,7 @@ pub(crate) const SPEC: &str = r#"
 1 90 rexb1 : xchg o:v, eAX
 1 90 f3 rexb0 o32 : pause
 1 90 f3 rexb0 o16 : INVALID
+1 90 f3 rexb0 mode32 a16 : INVALID
 1 90 f3 rexb0 o64 : xchg o:v, eAX
 1 91-97 : xchg o:v, eAX
 1 98 o16 : cbw
