@@ -377,6 +377,11 @@ impl WinExt for Obj {
             Some("_CONTROL_AREA") => super::cache::control_area_is_valid(self),
             Some("_SHARED_CACHE_MAP") => super::cache::shared_cache_map_is_valid(self).unwrap_or(false),
             Some("_ERESOURCE") => super::cache::eresource_is_valid(self).unwrap_or(false),
+            Some("_OBJECT_HEADER") => super::pool::object_header_is_valid(self),
+            Some("_POOL_TRACKER_BIG_PAGES") => {
+                use super::pool::PoolExt;
+                self.big_page_is_valid().unwrap_or(false)
+            }
             _ => true,
         }
     }
