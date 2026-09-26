@@ -103,14 +103,10 @@ impl Plugin for PsScan {
         ])?;
         let k = ctx.linux_kernel()?;
         let tasks = scan_tasks(k);
-        let rows = crate::util::par::par_map(tasks.len(), |i| match &tasks[i] {
-            Ok(t) => task_row(t),
-            Err(_) => Ok(Vec::new()),
-        });
-        for (t, r) in tasks.into_iter().zip(rows) {
-            t?;
-            out.row(0, r?)?;
-        }
-        Ok(())
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, tasks, |t, b| {
+            b.push(task_row(t)?);
+            Ok(())
+        })
     }
 }

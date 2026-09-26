@@ -128,6 +128,14 @@ pub fn stream_chunks(out: &mut dyn RowSink, n: usize, chunk: usize, f: impl Fn(s
     res
 }
 
+/// [`pslist::collect_tasks`]'s result as items for [`crate::plugins::emit_par_blocks`]: the
+/// tasks, then the generator's error (python raised after all of them) as an `Err` item.
+pub fn task_items(tasks: Vec<crate::objects::Obj>, tail: Option<Error>) -> Vec<Result<crate::objects::Obj>> {
+    let mut v: Vec<Result<crate::objects::Obj>> = tasks.into_iter().map(Ok).collect();
+    v.extend(tail.map(Err));
+    v
+}
+
 /// A copy of an error computed once and surfaced where python raises (possibly several times).
 pub fn clone_err(e: &Error) -> Error {
     match e {

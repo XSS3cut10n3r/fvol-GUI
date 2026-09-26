@@ -95,18 +95,13 @@ impl Plugin for LibraryList {
         let filter = pid_filter(&pids);
         let (tasks, tail) = collect_tasks(k, &filter, false);
         let elf_table = crate::symbols::linux::elf::elf_table(ctx)?;
-        let per_task = crate::util::par::par_map(tasks.len(), |i| task_rows(&tasks[i], elf_table, k.table));
-        for (rows, err) in per_task {
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, super::task_items(tasks, tail), |t, b| {
+            let (rows, err) = task_rows(t, elf_table, k.table);
             for row in rows {
-                out.row(0, row)?;
+                b.push(row);
             }
-            if let Some(e) = err {
-                return Err(e);
-            }
-        }
-        match tail {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+            err.map_or(Ok(()), Err)
+        })
     }
 }

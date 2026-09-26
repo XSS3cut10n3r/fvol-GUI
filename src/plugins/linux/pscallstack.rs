@@ -161,39 +161,18 @@ impl Plugin for PsCallStack {
         })
         .err();
         let f = CallStackFields::new(k)?;
-        // per task: (pid, comm, rows, error) computed on all cores, emitted in python order
-        struct TaskOut {
-            comm: Result<String>,
-            pid: Result<i128>,
-            entries: Vec<StackEntry>,
-            err: Option<Error>,
-        }
-        let results = crate::util::par::par_map(tasks.len(), |i| {
-            let t = &tasks[i];
-            let comm = t.m("comm").and_then(|c| array_to_string(&c, None));
-            if comm.is_err() {
-                return TaskOut { comm, pid: Ok(0), entries: Vec::new(), err: None };
-            }
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, super::task_items(tasks, list_err), |t, b| {
+            let comm = t.m("comm").and_then(|c| array_to_string(&c, None))?;
             let mut entries = Vec::new();
             let err = get_task_callstack(k, &f, t, kas, include_unresolved, &mut entries).err();
-            let pid = if entries.is_empty() { Ok(0) } else { t.f(&f.pid).int() };
-            TaskOut { comm, pid, entries, err }
-        });
-        for r in results {
-            let comm = r.comm?;
-            if !r.entries.is_empty() {
-                let pid = r.pid?;
-                for e in r.entries {
-                    out.row(0, row(pid, &comm, e)?)?;
+            if !entries.is_empty() {
+                let pid = t.f(&f.pid).int()?;
+                for e in entries {
+                    b.push(row(pid, &comm, e)?);
                 }
             }
-            if let Some(e) = r.err {
-                return Err(e);
-            }
-        }
-        match list_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+            err.map_or(Ok(()), Err)
+        })
     }
 }

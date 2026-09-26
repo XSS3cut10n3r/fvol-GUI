@@ -176,7 +176,15 @@ impl Plugin for Lsof {
         let k = ctx.linux_kernel()?;
         let pids = cfg.get_ints("pid");
         let filter = pid_filter(&pids);
-        for_each_fd_user(k, &filter, cfg.get_bool("files_only"), &mut |u| out.row(0, u.into_row()))
+        let files_only = cfg.get_bool("files_only");
+        let (tasks, tail) = collect_tasks(k, &filter, true);
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, super::task_items(tasks, tail), |task, b| {
+            for e in files_descriptors_for_process(task, files_only) {
+                b.push(e.and_then(|fd| fd_user(task, &fd))?.into_row());
+            }
+            Ok(())
+        })
     }
     fn timeline_events(&self, ctx: &Context, cfg: &Config) -> Option<(Vec<TimelineEvent>, Option<Error>)> {
         let mut ev = Vec::new();

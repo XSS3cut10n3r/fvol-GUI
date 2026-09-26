@@ -200,6 +200,18 @@ impl Plugin for Maps {
         let maxsize = cfg.get_int("maxsize").unwrap_or(MAXSIZE_DEFAULT);
         let filter = pid_filter(&pids);
         let (tasks, tail) = collect_tasks(k, &filter, false);
+        if !dump {
+            // per task in parallel, rows formatted on the workers, emitted in python's order
+            return crate::plugins::emit_par_blocks(out, super::task_items(tasks, tail), |t, b| {
+                let (rows, err) = task_rows(t, &addresses);
+                for row in rows {
+                    b.push(row.values);
+                }
+                err.map_or(Ok(()), Err)
+            });
+        }
+        // --dump: python dumps each row's region before the next row (in order, stopping at
+        // its first failure)
         let per_task = crate::util::par::par_map(tasks.len(), |i| task_rows(&tasks[i], &addresses));
         for (rows, err) in per_task {
             for mut row in rows {

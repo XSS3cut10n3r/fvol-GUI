@@ -91,6 +91,18 @@ impl Plugin for Elfs {
         let filter = pid_filter(&pids);
         let (tasks, tail) = collect_tasks(k, &filter, false);
         let elf_table = elf::elf_table(ctx)?;
+        if !dump {
+            // per task in parallel, rows formatted on the workers, emitted in python's order
+            return crate::plugins::emit_par_blocks(out, super::task_items(tasks, tail), |t, b| {
+                let (rows, err) = task_rows(t);
+                for row in rows {
+                    b.push(row.values);
+                }
+                err.map_or(Ok(()), Err)
+            });
+        }
+        // --dump: python dumps each row's file before the next row (in order, stopping at its
+        // first failure)
         let per_task = crate::util::par::par_map(tasks.len(), |i| task_rows(&tasks[i]));
         for (rows, err) in per_task {
             for mut row in rows {
