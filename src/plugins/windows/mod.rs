@@ -3,6 +3,7 @@
 use crate::plugins::Plugin;
 
 pub mod bigpools;
+pub mod callbacks;
 pub mod devicetree;
 pub mod driverirp;
 pub mod drivermodule;
@@ -26,6 +27,7 @@ pub mod vadinfo;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&bigpools::BigPools);
+    v.push(&callbacks::Callbacks);
     v.push(&devicetree::DeviceTree);
     v.push(&driverirp::DriverIrp);
     v.push(&drivermodule::DriverModule);
