@@ -131,7 +131,7 @@ pub const VMCS_REVISION_IDS: [u32; 5] = [4, 14, 15, 16, 18];
 /// the next collide easily -- measured on real keys (kernel-address needles straddling a word
 /// boundary). Every step is a bijection of the state, so keys that differ in one word never
 /// collide; the length is mixed in first.
-fn key_hash(b: &[u8]) -> u64 {
+pub(crate) fn key_hash(b: &[u8]) -> u64 {
     #[inline(always)]
     fn fmix(mut h: u64) -> u64 {
         h ^= h >> 33;

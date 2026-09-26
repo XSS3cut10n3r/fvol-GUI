@@ -441,15 +441,11 @@ fn darwin_scan(data: &[u8], data_offset: u64, chunk_size: u64, hits: &mut Vec<u6
 // Cache
 // ---------------------------------------------------------------------------------------------
 
-/// Identity of the symbol search path (a different `-s` may resolve banners differently).
+/// Identity of the symbol search path (a different `-s` may resolve banners differently): the
+/// full key material, stored in the cache entry and compared.
 fn symbol_path_fingerprint() -> String {
-    use crate::util::fxhash::FxHasher;
-    use std::hash::Hasher;
     let sp = symbols::symbol_path();
-    let mut h = FxHasher::default();
-    h.write(format!("{:?}", sp.download_dir).as_bytes());
-    h.write_u64(sp.os_fingerprint("mac"));
-    format!("{:016x}", h.finish())
+    format!("{}-{}", crate::util::paths::hex(format!("{:?}", sp.download_dir).as_bytes()), sp.os_fingerprint("mac"))
 }
 
 fn hex(b: &[u8]) -> String {

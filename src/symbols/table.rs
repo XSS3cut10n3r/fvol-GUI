@@ -155,7 +155,7 @@ pub enum Ty {
 
 pub(crate) const MAGIC: &[u8; 8] = b"RSVOLIS1";
 /// Bump when the blob layout or the builder semantics change (invalidates caches).
-pub(crate) const BLOB_VERSION: u32 = 6;
+pub(crate) const BLOB_VERSION: u32 = 7;
 
 /// Section indexes in the header.
 pub(crate) mod sec {

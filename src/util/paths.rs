@@ -34,6 +34,17 @@ pub fn vol3_cache_dir(cache_path: Option<&str>) -> PathBuf {
     }
 }
 
+/// Lower-case hex of `b` (cache key material in text files).
+pub fn hex(b: &[u8]) -> String {
+    const D: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(b.len() * 2);
+    for &x in b {
+        s.push(D[(x >> 4) as usize] as char);
+        s.push(D[(x & 15) as usize] as char);
+    }
+    s
+}
+
 /// Write `data` to `path` atomically (temp file + rename), creating parent directories.
 /// Errors are returned but callers writing caches usually ignore them.
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {

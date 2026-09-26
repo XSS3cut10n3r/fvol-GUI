@@ -387,19 +387,15 @@ fn mode_name(m: PagingMode) -> &'static str {
     }
 }
 
-/// The cache "kind": depends on the symbol search path and the `--stackers` filter.
+/// The cache "kind": depends on the symbol search path and the `--stackers` filter (full key
+/// material; the cache stores and compares it).
 fn cache_kind(ctx: &Context) -> String {
-    use crate::util::fxhash::FxHasher;
-    use std::hash::Hasher;
-    let mut h = FxHasher::default();
-    h.write_u64(ctx.symbol_path().os_fingerprint("linux"));
+    let mut k = format!("linux-{}", ctx.symbol_path().os_fingerprint("linux"));
     if let Some(s) = &ctx.opts.stackers {
-        for x in s {
-            h.write(x.as_bytes());
-            h.write_u8(0);
-        }
+        k.push('-');
+        k.push_str(&crate::util::paths::hex(s.join("\0").as_bytes()));
     }
-    format!("linux-{:016x}", h.finish())
+    k
 }
 
 fn load_cached(image: &std::path::Path, kind: &str) -> Option<LinuxAutomagic> {

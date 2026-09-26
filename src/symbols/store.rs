@@ -17,11 +17,9 @@
 use super::isf::{BuildOptions, build_blob};
 use super::table::{Blob, SymbolTable};
 use crate::error::{Error, Result};
-use crate::util::fxhash::{FxHasher, hash_bytes};
 use crate::util::json::Json;
 use crate::util::mmap::Mmap;
 use crate::util::paths;
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 /// ISF file extensions in python's preference order (`constants.ISF_EXTENSIONS`).
@@ -81,34 +79,11 @@ impl IsfLocation {
         }
     }
 
-    /// Cache identity: (url, size, mtime or content hash).
+    /// Change detector for the identifier index: a fully mixing hash of (url, size, mtime)
+    /// (the executable's for embedded ISFs: one stat for all ~170 entries instead of hashing
+    /// 6 MB on every index check). The index file stores the URL itself.
     fn stamp_with_url(&self, url: &str) -> Option<u64> {
-        let mut h = FxHasher::default();
-        h.write(url.as_bytes());
-        match self {
-            IsfLocation::File(p) => {
-                let (s, m) = paths::file_stamp(p)?;
-                h.write_u64(s);
-                h.write_u64(m as u64);
-            }
-            IsfLocation::Zip { zip, .. } => {
-                let (s, m) = paths::file_stamp(zip)?;
-                h.write_u64(s);
-                h.write_u64(m as u64);
-            }
-            IsfLocation::Url(u) => {
-                let (s, m) = paths::file_stamp(&url_local_path(u).ok()?)?;
-                h.write_u64(s);
-                h.write_u64(m as u64);
-            }
-            IsfLocation::Embedded { data, .. } => {
-                // embedded data only changes with the executable: its (size, mtime) is one stat
-                // for all ~170 entries instead of hashing 6 MB on every index check
-                h.write_u64(data.len() as u64);
-                h.write_u64(embedded_stamp(data));
-            }
-        }
-        Some(h.finish())
+        Some(crate::layers::scancache::key_hash(&source_identity(self, url)?))
     }
 }
 
@@ -121,8 +96,12 @@ pub fn url_local_path(url: &str) -> Result<PathBuf> {
     if !["http://", "https://", "ftp://"].iter().any(|s| url.starts_with(s)) {
         return Err(Error::msg(format!("URL does not reference an openable file: {url}")));
     }
-    let cache = paths::rsvol_cache_dir().join("remote").join(format!("{:016x}-{}.cache", hash_bytes(url.as_bytes()), url.len()));
-    if cache.is_file() {
+    // named by a fully mixing hash of the URL; the URL itself is kept next to the download
+    // and compared, so a hash collision re-downloads instead of serving another URL's file
+    let base = paths::rsvol_cache_dir().join("remote").join(format!("{:016x}-{}", crate::layers::scancache::key_hash(url.as_bytes()), url.len()));
+    let cache = base.with_extension("cache");
+    let tag = base.with_extension("url");
+    if cache.is_file() && std::fs::read(&tag).is_ok_and(|t| t == url.as_bytes()) {
         return Ok(cache);
     }
     let out = std::process::Command::new("curl")
@@ -133,6 +112,7 @@ pub fn url_local_path(url: &str) -> Result<PathBuf> {
         return Err(Error::msg(format!("download of {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
     paths::write_atomic(&cache, &out.stdout)?;
+    paths::write_atomic(&tag, url.as_bytes())?;
     Ok(cache)
 }
 
@@ -191,18 +171,12 @@ pub fn remote_identifiers(url: &str) -> Result<Vec<(String, Vec<u8>, String)>> {
     Ok(out)
 }
 
-/// Identity of the embedded ISF data: the running executable's (size, mtime); a content hash
-/// only when the executable cannot be stat'ed.
-fn embedded_stamp(data: &[u8]) -> u64 {
-    static EXE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let exe = EXE.get_or_init(|| {
-        let (s, m) = paths::file_stamp(paths::current_exe()?)?;
-        let mut h = FxHasher::default();
-        h.write_u64(s);
-        h.write_u64(m as u64);
-        Some(h.finish())
-    });
-    exe.unwrap_or_else(|| hash_bytes(data))
+/// Identity of the embedded ISF data: the running executable's (size, mtime), exactly; a
+/// content hash only when the executable cannot be stat'ed.
+fn embedded_stamp(data: &[u8]) -> (u64, i128) {
+    static EXE: std::sync::OnceLock<Option<(u64, i128)>> = std::sync::OnceLock::new();
+    let exe = EXE.get_or_init(|| paths::file_stamp(paths::current_exe()?));
+    exe.unwrap_or_else(|| (u64::MAX, crate::layers::scancache::key_hash(data) as i128))
 }
 
 /// Decompress according to the file extension.
@@ -333,20 +307,25 @@ impl SymbolPath {
     /// A cheap fingerprint of where `os` ISFs can come from, for per-image automagic caches:
     /// the roots, the mtimes of each root and its `<os>/` directory (adding or removing an ISF
     /// there changes them; deeper directories are not stat'ed) and the `-u` list URL.
-    pub fn os_fingerprint(&self, os: &str) -> u64 {
-        let mut h = FxHasher::default();
+    /// Returned as the full key material (hex), not a hash: callers store it and compare.
+    pub fn os_fingerprint(&self, os: &str) -> String {
+        let mut k: Vec<u8> = Vec::new();
         for r in &self.roots {
-            h.write(format!("{r:?}").as_bytes());
+            let d = format!("{r:?}");
+            k.extend_from_slice(&(d.len() as u64).to_le_bytes());
+            k.extend_from_slice(d.as_bytes());
             if let Root::Dir(d) = r {
                 for p in [d.clone(), d.join(os)] {
                     let (s, m) = paths::file_stamp(&p).unwrap_or((0, 0));
-                    h.write_u64(s);
-                    h.write_u64(m as u64);
+                    k.extend_from_slice(&s.to_le_bytes());
+                    k.extend_from_slice(&m.to_le_bytes());
                 }
             }
         }
-        h.write(super::remote_isf_url().unwrap_or_default().as_bytes());
-        h.finish()
+        let remote = super::remote_isf_url().unwrap_or_default();
+        k.extend_from_slice(&(remote.len() as u64).to_le_bytes());
+        k.extend_from_slice(remote.as_bytes());
+        paths::hex(&k)
     }
 
     pub fn all(&self) -> Vec<IsfLocation> {
@@ -573,30 +552,84 @@ fn path_ends_with(path: &Path, tail: &str) -> bool {
     s == tail || s.ends_with(&format!("/{tail}"))
 }
 
-/// Cache file for a location + options.
-fn cache_file(loc: &IsfLocation, opts: &BuildOptions) -> Option<PathBuf> {
-    let stamp = loc.stamp_with_url(&loc.url())?;
-    let mut h = FxHasher::default();
-    h.write_u64(stamp);
-    h.write_u32(super::table::BLOB_VERSION);
-    if let Some(n) = &opts.natives {
-        for (name, ty) in n {
-            h.write(name.as_bytes());
-            h.write(&super::table::ty_encode(ty));
+/// The exact identity of a location's source file: its URL plus (size, mtime) of the file on
+/// disk (the zip for pack members, the running executable for embedded ISFs).
+fn source_identity(loc: &IsfLocation, url: &str) -> Option<Vec<u8>> {
+    let mut k = Vec::with_capacity(url.len() + 32);
+    k.extend_from_slice(&(url.len() as u64).to_le_bytes());
+    k.extend_from_slice(url.as_bytes());
+    let (s, m) = match loc {
+        IsfLocation::File(p) => paths::file_stamp(p)?,
+        IsfLocation::Zip { zip, .. } => paths::file_stamp(zip)?,
+        IsfLocation::Url(u) => paths::file_stamp(&url_local_path(u).ok()?)?,
+        IsfLocation::Embedded { data, .. } => {
+            k.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            embedded_stamp(data)
+        }
+    };
+    k.extend_from_slice(&s.to_le_bytes());
+    k.extend_from_slice(&m.to_le_bytes());
+    Some(k)
+}
+
+/// Cache file of a location + options and its full key material. The file is named by a
+/// fully mixing 64-bit hash of the key and carries the key itself in a trailer
+/// (`blob | key | key_len u32 | ISFB_TRAILER`), verified on load: a hash collision is a miss,
+/// never a wrong table.
+fn cache_file(loc: &IsfLocation, url: &str, opts: &BuildOptions) -> Option<(PathBuf, Vec<u8>)> {
+    let mut key = b"rsvol-isfb\0".to_vec();
+    key.extend_from_slice(&super::table::BLOB_VERSION.to_le_bytes());
+    key.extend_from_slice(&source_identity(loc, url)?);
+    match &opts.natives {
+        None => key.push(0),
+        Some(n) => {
+            key.push(1);
+            key.extend_from_slice(&(n.len() as u64).to_le_bytes());
+            for (name, ty) in n {
+                key.extend_from_slice(&(name.len() as u64).to_le_bytes());
+                key.extend_from_slice(name.as_bytes());
+                key.extend_from_slice(&super::table::ty_encode(ty));
+            }
         }
     }
-    Some(paths::rsvol_cache_dir().join("isf").join(format!("{:016x}.isfb", h.finish())))
+    let h = crate::layers::scancache::key_hash(&key);
+    Some((paths::rsvol_cache_dir().join("isf").join(format!("{h:016x}.isfb")), key))
+}
+
+const ISFB_TRAILER: &[u8; 8] = b"RSVKEY01";
+
+/// The blob of a mapped cache file whose trailer holds exactly `key` (only the file's last
+/// bytes are compared before the blob is trusted).
+fn cached_blob_matches(file: &[u8], key: &[u8]) -> bool {
+    let n = file.len();
+    if n < 12 + key.len() || &file[n - 8..] != ISFB_TRAILER {
+        return false;
+    }
+    let kl = u32::from_le_bytes(file[n - 12..n - 8].try_into().unwrap()) as usize;
+    kl == key.len() && &file[n - 12 - kl..n - 12] == key
+}
+
+/// The bytes of a cache file for `blob` under `key`.
+fn cache_file_bytes(blob: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(blob.len() + key.len() + 12);
+    v.extend_from_slice(blob);
+    v.extend_from_slice(key);
+    v.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    v.extend_from_slice(ISFB_TRAILER);
+    v
 }
 
 /// Load a symbol table from `loc` (binary cache first). `name` is the table name.
 pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
     let url = loc.url();
-    let cf = cache_file(loc, opts);
-    if let Some(cf) = &cf {
+    let cf = cache_file(loc, &url, opts);
+    if let Some((cf, key)) = &cf {
         if let Ok(f) = std::fs::File::open(cf) {
             if let Ok(m) = Mmap::map(&f) {
-                if let Ok(t) = SymbolTable::from_blob(Blob::Mapped(m), name, &url) {
-                    return Ok(t);
+                if cached_blob_matches(m.as_slice(), key) {
+                    if let Ok(t) = SymbolTable::from_blob(Blob::Mapped(m), name, &url) {
+                        return Ok(t);
+                    }
                 }
             }
         }
@@ -609,9 +642,9 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
         let _t = crate::util::trace::span("isf parse+build");
         build_blob(&json, opts).map_err(|e| Error::msg(format!("{url}: {e}")))?
     };
-    if let Some(cf) = &cf {
+    if let Some((cf, key)) = &cf {
         let _t = crate::util::trace::span("isf cache write");
-        let _ = paths::write_atomic(cf, &blob);
+        let _ = paths::write_atomic(cf, &cache_file_bytes(&blob, key));
     }
     SymbolTable::from_blob(Blob::Owned(blob), name, &url)
 }
@@ -899,7 +932,7 @@ fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
         *i += n;
         Some(s)
     };
-    if rd(&mut i, 8) != Some(b"RSVOLID1") {
+    if rd(&mut i, 8) != Some(b"RSVOLID2") {
         return out;
     }
     loop {
@@ -925,7 +958,7 @@ fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
 
 fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
     let mut b = Vec::new();
-    b.extend_from_slice(b"RSVOLID1");
+    b.extend_from_slice(b"RSVOLID2");
     for e in entries {
         b.extend_from_slice(&(e.url.len() as u32).to_le_bytes());
         b.extend_from_slice(e.url.as_bytes());
@@ -1065,6 +1098,23 @@ mod tests {
             );
         }
         println!("SymbolPath::new {t_new:?}");
+    }
+
+    /// The ISF cache trailer: only the exact key matches (a colliding file name is a miss).
+    #[test]
+    fn isfb_key_is_verified() {
+        let blob = b"RSVOLIS1 pretend blob bytes".to_vec();
+        let f = cache_file_bytes(&blob, b"key-a");
+        assert!(cached_blob_matches(&f, b"key-a"));
+        assert!(!cached_blob_matches(&f, b"key-b"));
+        assert!(!cached_blob_matches(&f, b"ey-a"));
+        assert!(!cached_blob_matches(&f[..f.len() - 1], b"key-a"));
+        assert!(!cached_blob_matches(&blob, b"key-a"));
+        let loc = IsfLocation::File(std::env::current_exe().unwrap());
+        let url = loc.url();
+        let (pa, ka) = cache_file(&loc, &url, &BuildOptions::default()).unwrap();
+        let (pb, kb) = cache_file(&loc, &url, &BuildOptions { natives: Some(vec![("int".into(), crate::symbols::Ty::Void)]) }).unwrap();
+        assert_ne!((pa, ka), (pb, kb));
     }
 
     #[test]

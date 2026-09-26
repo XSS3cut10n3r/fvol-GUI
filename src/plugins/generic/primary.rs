@@ -66,17 +66,12 @@ pub fn primary_intel(ctx: &Context, description: &str) -> Result<Primary> {
 /// and `--stackers`, so e.g. a Windows image does not pay for the Linux/Mac banner scans on
 /// every run.
 fn absent_kind(ctx: &Context, os: &str) -> String {
-    use crate::util::fxhash::FxHasher;
-    use std::hash::Hasher;
-    let mut h = FxHasher::default();
-    h.write_u64(ctx.symbol_path().os_fingerprint(os));
+    let mut k = format!("absent-{os}-{}", ctx.symbol_path().os_fingerprint(os));
     if let Some(s) = &ctx.opts.stackers {
-        for x in s {
-            h.write(x.as_bytes());
-            h.write_u8(0);
-        }
+        k.push('-');
+        k.push_str(&crate::util::paths::hex(s.join("\0").as_bytes()));
     }
-    format!("absent-{os}-{:016x}", h.finish())
+    k
 }
 
 fn known_absent(ctx: &Context, os: &str) -> bool {

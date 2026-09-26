@@ -39,43 +39,85 @@ pub fn stacker_enabled(stackers: Option<&[String]>, class: &str) -> bool {
 }
 
 /// Per-image automagic cache (tiny `key=value` text files).
+///
+/// A file is named by a fully mixing 64-bit hash of its key material (canonical image path,
+/// size, mtime, `kind`, `CACHE_VERSION`) and starts with a `key=<hex>` line holding that
+/// material, compared on load: a hash collision is a miss, never another image's result.
+/// `kind` may carry arbitrary key material (e.g. a symbol path fingerprint); only a short
+/// sanitized prefix of it appears in the file name.
 pub mod cache {
     use super::*;
-    use crate::util::fxhash::FxHasher;
-    use std::hash::Hasher;
 
-    fn file_for(image: &Path, kind: &str) -> Option<std::path::PathBuf> {
+    fn key_for(image: &Path, kind: &str) -> Option<(std::path::PathBuf, String)> {
         let canon = paths::canonicalize(image).ok()?;
         let (size, mtime) = paths::file_stamp(&canon)?;
-        let mut h = FxHasher::default();
-        h.write(canon.to_string_lossy().as_bytes());
-        h.write_u64(size);
-        h.write_u64(mtime as u64);
-        h.write(kind.as_bytes());
-        h.write_u32(CACHE_VERSION);
-        Some(paths::rsvol_cache_dir().join("automagic").join(format!("{:016x}.{kind}", h.finish())))
+        let c = canon.to_string_lossy();
+        let mut k: Vec<u8> = Vec::with_capacity(c.len() + kind.len() + 48);
+        k.extend_from_slice(&CACHE_VERSION.to_le_bytes());
+        k.extend_from_slice(&(c.len() as u64).to_le_bytes());
+        k.extend_from_slice(c.as_bytes());
+        k.extend_from_slice(&size.to_le_bytes());
+        k.extend_from_slice(&mtime.to_le_bytes());
+        k.extend_from_slice(&(kind.len() as u64).to_le_bytes());
+        k.extend_from_slice(kind.as_bytes());
+        let label: String = kind.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').take(24).collect();
+        let h = crate::layers::scancache::key_hash(&k);
+        Some((paths::rsvol_cache_dir().join("automagic").join(format!("{h:016x}.{label}")), paths::hex(&k)))
     }
 
     /// Bump when the cached automagic semantics change.
-    const CACHE_VERSION: u32 = 1;
+    const CACHE_VERSION: u32 = 2;
 
-    /// Read cached `key=value` pairs for `image` / `kind`.
+    /// Read cached `key=value` pairs for `image` / `kind` (None: absent, or another key).
     pub fn load(image: &Path, kind: &str) -> Option<Vec<(String, String)>> {
-        let f = file_for(image, kind)?;
-        let s = std::fs::read_to_string(f).ok()?;
-        Some(s.lines().filter_map(|l| l.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect())
+        let (f, key) = key_for(image, kind)?;
+        load_at(&f, &key)
     }
 
     /// Store `key=value` pairs (best effort).
     pub fn store(image: &Path, kind: &str, kv: &[(&str, String)]) {
-        if let Some(f) = file_for(image, kind) {
-            let s: String = kv.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-            let _ = paths::write_atomic(&f, s.as_bytes());
+        if let Some((f, key)) = key_for(image, kind) {
+            store_at(&f, &key, kv);
         }
+    }
+
+    fn load_at(f: &Path, key: &str) -> Option<Vec<(String, String)>> {
+        let s = std::fs::read_to_string(f).ok()?;
+        let mut lines = s.lines();
+        if lines.next()?.strip_prefix("key=")? != key {
+            return None;
+        }
+        Some(lines.filter_map(|l| l.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect())
+    }
+
+    fn store_at(f: &Path, key: &str, kv: &[(&str, String)]) {
+        let mut s = format!("key={key}\n");
+        for (k, v) in kv {
+            s.push_str(&format!("{k}={v}\n"));
+        }
+        let _ = paths::write_atomic(f, s.as_bytes());
     }
 
     /// Lookup helper.
     pub fn get<'a>(kv: &'a [(String, String)], key: &str) -> Option<&'a str> {
         kv.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// A file found under a colliding name but written for another key is a miss.
+    #[test]
+    fn key_is_verified() {
+        let dir = std::env::temp_dir().join(format!("rsvol-amcache-{}", std::process::id()));
+        let f = dir.join("0123456789abcdef.win");
+        store_at(&f, "aa01", &[("dtb", "0x1ad000".to_string())]);
+        assert_eq!(load_at(&f, "aa01"), Some(vec![("dtb".to_string(), "0x1ad000".to_string())]));
+        assert_eq!(load_at(&f, "aa02"), None);
+        assert_eq!(load_at(&f, "aa0"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let img = std::env::current_exe().unwrap();
+        let (fa, ka) = key_for(&img, "linux-00").unwrap();
+        let (fb, kb) = key_for(&img, "linux-01").unwrap();
+        assert_ne!(ka, kb);
+        assert_ne!(fa, fb);
+        assert!(fa.file_name().unwrap().to_string_lossy().ends_with(".linux-00"));
     }
 }

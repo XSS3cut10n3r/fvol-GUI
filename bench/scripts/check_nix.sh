@@ -12,7 +12,7 @@ run_set() { # os refdir image list
   while read p; do
     [ -f "$refdir/$p.txt" ] || continue
     if ! grep -qE "^ *$p( |$)" <<< "$avail"; then miss=$((miss+1)); continue; fi
-    r=$(IMG=$img REF=$refdir/$p.txt OUTDIR=/home/user/rs-vol/bench/out/$(basename $refdir) DIFFLINES=${DIFFLINES:-3} \
+    r=$(IMG=$img REF=$refdir/$p.txt OUTDIR=${OUTBASE:-/home/user/rs-vol/bench/out}/$(basename $refdir) DIFFLINES=${DIFFLINES:-3} \
         GLOBAL_ARGS="-s /home/user/rs-vol/testdata/symbols" /home/user/rs-vol/bench/scripts/compare.sh -b $BIN $p 2>/dev/null)
     case "$r" in OK*) ok=$((ok+1));; *) bad=$((bad+1)); echo "[$(basename $refdir)] $r";; esac
   done < $list
