@@ -455,8 +455,17 @@ fn store_cached(image: &std::path::Path, kind: &str, a: &LinuxAutomagic) {
 /// Run the Linux automagic for `ctx` (called once by `Context::linux_kernel`).
 pub fn init(ctx: &Context) -> Result<LinuxKernel> {
     let _t = span("linux kernel init (total)");
-    let (phys_arc, phys) = ctx.physical_arc()?;
-    let image = ctx.image_path()?;
+    // python: no Linux translation layer -> both the kernel's layer and symbol requirements are
+    // unsatisfied (the stackers only build a layer together with a loadable ISF, so there is no
+    // "layer without symbols" case); the detail goes to stderr at -v like python's logging
+    let unsatisfied = |detail: &dyn std::fmt::Display| {
+        if ctx.opts.verbosity > 0 {
+            eprintln!("automagic: {detail}");
+        }
+        crate::plugins::unsatisfied(&["kernel.layer_name", "kernel.symbol_table_name"])
+    };
+    let (phys_arc, phys) = ctx.physical_arc().map_err(|e| unsatisfied(&e))?;
+    let image = ctx.image_path().map_err(|e| unsatisfied(&e))?;
     let kind = cache_kind(ctx);
     let am = match load_cached(&image, &kind) {
         Some(a) => a,
@@ -466,8 +475,14 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                 crate::symbols::store::identifier_index(ctx.symbol_path()).dictionary("linux")
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
-            let a = run(*phys, &banners, &allow)
-                .ok_or_else(|| Error::Unsatisfied("Unable to validate the plugin requirements: no Linux kernel found".into()))?;
+            let a = run(*phys, &banners, &allow).ok_or_else(|| {
+                let why = if banners.is_empty() {
+                    "No Linux banners found - if this is a linux plugin, please check your symbol files location"
+                } else {
+                    "No suitable linux banner could be matched"
+                };
+                unsatisfied(&why)
+            })?;
             store_cached(&image, &kind, &a);
             a
         }
@@ -481,7 +496,7 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
     let vlayer: LayerRef = layer;
     let table = {
         let _t = span("linux kernel isf load");
-        crate::symbols::load_location(&am.isf, "symbol_table_name", None, vlayer.address_mask())?
+        crate::symbols::load_location(&am.isf, "symbol_table_name", None, vlayer.address_mask()).map_err(|e| unsatisfied(&e))?
     };
     let module = Module::new(vlayer, table, am.aslr_shift);
     register_kernel(module);
