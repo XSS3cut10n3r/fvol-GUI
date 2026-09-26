@@ -11,6 +11,7 @@
 //!   * [`vmlinux_of`] is python's `LinuxUtilities.get_module_from_volobj_type(context, obj)`.
 //!   * [`container_of`] is python's `LinuxUtilities.container_of`.
 
+pub mod elf;
 pub mod ext;
 pub mod search;
 pub mod timespec;

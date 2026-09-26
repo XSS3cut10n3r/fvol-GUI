@@ -9,7 +9,7 @@ use crate::objects::Obj;
 use crate::objects::util::array_to_string;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement, TimeKind, TimelineEvent};
 use crate::renderers::{ColType, Column, DateTime, RowSink, Value};
-use crate::symbols::linux::LinuxExt;
+use crate::symbols::linux::{LinuxExt, elf};
 use crate::util::FxHashSet;
 
 pub struct PsList;
@@ -104,7 +104,7 @@ fn run_rows(ctx: &Context, cfg: &Config, out: &mut dyn FnMut(Vec<Value>) -> Resu
     let decorate = cfg.get_bool("decorate_comm");
     let dump = cfg.get_bool("dump");
     list_tasks(k, &filter, threads, &mut |t| {
-        let file_output = if dump { dump_elf(ctx, k, &t) } else { Value::SStr("Disabled") };
+        let file_output = if dump { get_file_output(ctx, &t)? } else { Value::SStr("Disabled") };
         let tf = get_task_fields(&t, decorate)?;
         let cred = |i: usize| tf.creds.map_or(Value::NotAvailable, |c| Value::Int(c[i]));
         out(vec![
@@ -124,14 +124,63 @@ fn run_rows(ctx: &Context, cfg: &Config, out: &mut dyn FnMut(Vec<Value>) -> Resu
     })
 }
 
-/// python `PsList._get_file_output(task)` (`--dump`). Dumping the main ELF of a process needs
-/// the VMA walk (maple tree / mmap list) and the ELF reconstruction of `linux.elfs`, which are
-/// not ported yet: report python's "VMA start matching task start_code not found" text only
-/// where it is certain, else the error text.
-fn dump_elf(_ctx: &Context, _k: &LinuxKernel, task: &Obj) -> Value {
-    match task.add_process_layer() {
-        Ok(None) => Value::NotApplicable,
-        _ => Value::SStr("Error outputting file"),
+/// python `PsList._get_file_output(task)` (`--dump`): dump the ELF mapped at the VMA starting
+/// at `mm.start_code`. `Err` where python raises (the plugin fails).
+pub fn get_file_output(ctx: &Context, task: &Obj) -> Result<Value> {
+    let elf_table = elf::elf_table(ctx)?;
+    let Some(proc_layer) = task.add_process_layer()? else { return Ok(Value::NotApplicable) };
+    let mm = task.m("mm")?;
+    for v in mm.deref()?.get_vma_iter() {
+        let v = v?;
+        if v.m("vm_start")?.u64()? == mm.m("start_code")?.u64()? {
+            return Ok(match elf::elf_dump(ctx, proc_layer, elf_table, &v, task)? {
+                Some(name) => Value::Str(name),
+                None => Value::SStr("Error outputting file"),
+            });
+        }
+    }
+    Ok(Value::SStr("VMA start matching task start_code not found"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exercise `elf::elf_dump` like python's `linux.elfs --pid 1 2912 --dump` (every VMA
+    /// starting with an ELF header): `RSVOL_BENCH_IMAGE=<image> RSVOL_TEST_OUT=<dir> cargo test
+    /// --profile fast elfs_like_dump -- --ignored`, then `diff -r` against python's files.
+    #[test]
+    #[ignore]
+    fn elfs_like_dump() {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let out = std::env::var("RSVOL_TEST_OUT").unwrap();
+        let opts = crate::context::GlobalOptions {
+            file: Some(image),
+            symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+            output_dir: out,
+            ..Default::default()
+        };
+        let ctx = Context::new(opts).unwrap();
+        let k = ctx.linux_kernel().unwrap();
+        let table = elf::elf_table(&ctx).unwrap();
+        let filter = pid_filter(&[1, 2912]);
+        let mut n = 0;
+        list_tasks(k, &filter, false, &mut |t| {
+            let pl = t.add_process_layer()?.unwrap();
+            for v in t.m("mm")?.deref()?.get_vma_iter() {
+                let v = v?;
+                let mut hdr = [0u8; 4];
+                pl.read_padded(v.m("vm_start")?.u64()?, &mut hdr);
+                if &hdr != b"\x7fELF" {
+                    continue;
+                }
+                elf::elf_dump(&ctx, pl, table, &v, &t)?;
+                n += 1;
+            }
+            Ok(true)
+        })
+        .unwrap();
+        eprintln!("dumped {n} ELFs");
     }
 }
 

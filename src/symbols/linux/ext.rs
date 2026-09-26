@@ -137,7 +137,8 @@ pub trait LinuxExt {
     fn hlist_to_list(&self, symbol_type: &str, member: &str) -> HListIter;
 
     // ---- dispatching
-    /// python `is_valid()` of `task_struct` and `inode`. Other types: `true` (not ported yet).
+    /// python `is_valid()` of `task_struct`, `vm_area_struct` and `inode` (python exceptions ->
+    /// false; use [`LinuxExt::vma_is_valid`] to keep them). Other types: `true` (not ported yet).
     fn is_valid(&self) -> bool;
 
     // ---- task_struct
@@ -178,6 +179,28 @@ pub trait LinuxExt {
     fn get_time_namespace_monotonic_offset(&self) -> Result<Option<Obj>>;
     /// python `task_struct._get_time_namespace_boottime_offset()`.
     fn get_time_namespace_boottime_offset(&self) -> Result<Option<Obj>>;
+
+    // ---- mm_struct / maple_tree / vm_area_struct / file
+    /// python `mm_struct.get_vma_iter()`: the valid VMAs (`mmap` list on kernels < 6.1, the
+    /// `mm_mt` maple tree after). A trailing `Err` means python would have raised there.
+    fn get_vma_iter(&self) -> Vec<Result<Obj>>;
+    /// python `maple_tree.get_slot_iter()`: every non-empty leaf slot value, in python order.
+    /// A trailing `Err` means python would have raised there.
+    fn get_slot_iter(&self) -> Vec<Result<u64>>;
+    /// python `vm_area_struct.is_valid()` with python's exceptions kept (`Err`).
+    fn vma_is_valid(&self) -> Result<bool>;
+    /// python `vm_area_struct.get_protection()` (`"r-x"` style, the rwx bits of `vm_flags`).
+    fn get_protection(&self) -> Result<String>;
+    /// python `vm_area_struct.get_flags()` (all extended `VM_*` flag names).
+    fn get_flags(&self) -> Result<String>;
+    /// python `vm_area_struct.get_page_offset()`.
+    fn get_page_offset(&self) -> Result<u64>;
+    /// python `struct_file.get_dentry()` (a `dentry *` pointer object).
+    fn get_dentry(&self) -> Result<Obj>;
+    /// python `struct_file.get_vfsmnt()` (a `vfsmount *` pointer object).
+    fn get_vfsmnt(&self) -> Result<Obj>;
+    /// python `struct_file.get_inode()` (the `inode` struct), `None` where python returns None.
+    fn get_inode(&self) -> Result<Option<Obj>>;
 
     // ---- cred
     /// python `cred._get_cred_int_value(member)` (`cred.uid`, `.gid`, `.euid`, `.egid`).
@@ -287,7 +310,8 @@ impl LinuxExt for Obj {
     fn is_valid(&self) -> bool {
         match self.struct_name() {
             Some("task_struct") => task_is_valid(self).unwrap_or(false),
-            Some("inode") => (|| -> Result<bool> { Ok(self.m("i_ino")?.int()? > 0 && self.path("i_count.counter")?.int()? >= 0) })().unwrap_or(false),
+            Some("inode") => inode_is_valid(self).unwrap_or(false),
+            Some("vm_area_struct") => self.vma_is_valid().unwrap_or(false),
             _ => true,
         }
     }
@@ -473,6 +497,129 @@ impl LinuxExt for Obj {
         })
     }
 
+    fn get_vma_iter(&self) -> Vec<Result<Obj>> {
+        let mut out = Vec::new();
+        let raw = if self.has_member("mmap") {
+            mmap_iter(self)
+        } else if self.has_member("mm_mt") {
+            maple_vma_iter(self)
+        } else {
+            vec![Err(Error::msg("AttributeError: Unable to find mmap or mm_mt in mm_struct"))]
+        };
+        for v in raw {
+            match v.and_then(|vma| vma.vma_is_valid().map(|ok| (vma, ok))) {
+                Ok((vma, true)) => out.push(Ok(vma)),
+                Ok((_, false)) => {}
+                Err(e) => {
+                    out.push(Err(e));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn get_slot_iter(&self) -> Vec<Result<u64>> {
+        let mut out = Vec::new();
+        let r = (|| -> Result<()> {
+            let tree_off = self.addr & !MAPLE_NODE_POINTER_MASK;
+            let root = self.m("ma_root")?.u64()?;
+            let mut seen = FxHashSet::default();
+            parse_maple_node(self, root, tree_off, &mut seen, 1, &mut out)
+        })();
+        if let Err(e) = r {
+            out.push(Err(e));
+        }
+        out
+    }
+
+    fn vma_is_valid(&self) -> Result<bool> {
+        let r = (|| -> Result<(u64, u64)> {
+            let s = self.m("vm_start")?.u64()?;
+            let e = self.m("vm_end")?.u64()?;
+            self.get_protection()?;
+            Ok((s, e))
+        })();
+        let (start, end) = match r {
+            Ok(v) => v,
+            Err(e) if e.is_invalid_address() => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let length = end.wrapping_sub(start);
+        if start > end || (start == 0 && length == 0) || length % 0x1000 != 0 {
+            return Ok(false);
+        }
+        let vm_file = self.m("vm_file")?;
+        if vm_file.u64()? != 0 {
+            let inode = match vm_file.deref().and_then(|f| f.get_inode()) {
+                Ok(i) => i,
+                Err(e) if e.is_invalid_address() => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            let inode = inode.ok_or_else(|| Error::msg("AttributeError: 'NoneType' object has no attribute 'i_size'"))?;
+            let i_size = inode.m("i_size")?.int()?;
+            if i_size > 0 && self.get_page_offset()? as i128 > i_size {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn get_protection(&self) -> Result<String> {
+        let f = self.m("vm_flags")?.int()? & 0b1111;
+        Ok([(1, 'r'), (2, 'w'), (4, 'x')].iter().map(|&(m, c)| if f & m == m { c } else { '-' }).collect())
+    }
+
+    fn get_flags(&self) -> Result<String> {
+        let f = self.m("vm_flags")?.int()?;
+        Ok(VM_FLAG_NAMES.iter().enumerate().map(|(i, n)| if f & (1 << i) != 0 { *n } else { "-" }).collect())
+    }
+
+    fn get_page_offset(&self) -> Result<u64> {
+        if self.m("vm_file")?.u64()? == 0 {
+            return Ok(0);
+        }
+        Ok(self.m("vm_pgoff")?.u64()?.wrapping_shl(12))
+    }
+
+    fn get_dentry(&self) -> Result<Obj> {
+        if self.has_member("f_path") { self.m("f_path")?.m("dentry") } else { Err(Error::msg("AttributeError: Unable to find file -> dentry")) }
+    }
+
+    fn get_vfsmnt(&self) -> Result<Obj> {
+        if self.has_member("f_path") { self.m("f_path")?.m("mnt") } else { Err(Error::msg("AttributeError: Unable to find file -> vfs mount")) }
+    }
+
+    fn get_inode(&self) -> Result<Option<Obj>> {
+        // `inode_ptr and inode_ptr.is_readable() and inode_ptr.is_valid()`
+        let usable = |p: &Obj| -> Result<bool> { Ok(p.u64()? != 0 && p.is_readable() && inode_is_valid(&p.deref()?)?) };
+        let mut inode_ptr = None;
+        if self.has_member("f_inode") {
+            let p = self.m("f_inode")?;
+            if p.u64()? != 0 && p.is_readable() {
+                inode_ptr = Some(p);
+            }
+        }
+        let ok = match &inode_ptr {
+            Some(p) => usable(p)?,
+            None => false,
+        };
+        let p = if ok {
+            inode_ptr.unwrap()
+        } else {
+            let d = self.get_dentry()?;
+            if !(d.u64()? != 0 && d.is_readable()) {
+                return Ok(None);
+            }
+            let p = d.m("d_inode")?;
+            if !usable(&p)? {
+                return Ok(None);
+            }
+            p
+        };
+        Ok(Some(p.deref()?))
+    }
+
     fn cred_value(&self, member: &str) -> Result<i128> {
         if !self.has_member(member) {
             return Err(Error::msg(format!("AttributeError: struct cred doesn't have a '{member}' member")));
@@ -490,6 +637,141 @@ impl LinuxExt for Obj {
     fn timespec(&self) -> Result<Timespec> {
         Ok(Timespec::from_ints(self.m("tv_sec")?.int()?, self.m("tv_nsec")?.int()?))
     }
+}
+
+/// python `inode.is_valid()` (exceptions kept).
+fn inode_is_valid(i: &Obj) -> Result<bool> {
+    Ok(i.m("i_ino")?.int()? > 0 && i.path("i_count.counter")?.int()? >= 0)
+}
+
+/// python `vm_area_struct.extended_flags` names by bit (insertion order = bit order).
+const VM_FLAG_NAMES: [&str; 32] = [
+    "VM_READ",
+    "VM_WRITE",
+    "VM_EXEC",
+    "VM_SHARED",
+    "VM_MAYREAD",
+    "VM_MAYWRITE",
+    "VM_MAYEXEC",
+    "VM_MAYSHARE",
+    "VM_GROWSDOWN",
+    "VM_NOHUGEPAGE",
+    "VM_PFNMAP",
+    "VM_DENYWRITE",
+    "VM_EXECUTABLE",
+    "VM_LOCKED",
+    "VM_IO",
+    "VM_SEQ_READ",
+    "VM_RAND_READ",
+    "VM_DONTCOPY",
+    "VM_DONTEXPAND",
+    "VM_RESERVED",
+    "VM_ACCOUNT",
+    "VM_NORESERVE",
+    "VM_HUGETLB",
+    "VM_NONLINEAR",
+    "VM_MAPPED_COP__VM_HUGEPAGE",
+    "VM_INSERTPAGE",
+    "VM_ALWAYSDUMP",
+    "VM_CAN_NONLINEAR",
+    "VM_MIXEDMAP",
+    "VM_SAO",
+    "VM_PFN_AT_MMAP",
+    "VM_MERGEABLE",
+];
+
+/// python `mm_struct._get_mmap_iter()` (unfiltered).
+fn mmap_iter(mm: &Obj) -> Vec<Result<Obj>> {
+    let mut out = Vec::new();
+    let r = (|| -> Result<()> {
+        let mut p = mm.m("mmap")?;
+        let v = p.u64()?;
+        if v == 0 || !p.is_readable() {
+            return Ok(());
+        }
+        out.push(Ok(p.deref()?));
+        let mut seen = FxHashSet::default();
+        seen.insert(v);
+        p = p.m("vm_next")?;
+        loop {
+            let v = p.u64()?;
+            if v == 0 || !p.is_readable() || seen.contains(&v) {
+                return Ok(());
+            }
+            out.push(Ok(p.deref()?));
+            seen.insert(v);
+            p = p.m("vm_next")?;
+        }
+    })();
+    if let Err(e) = r {
+        out.push(Err(e));
+    }
+    out
+}
+
+/// python `mm_struct._get_maple_tree_iter()` (unfiltered).
+fn maple_vma_iter(mm: &Obj) -> Vec<Result<Obj>> {
+    let mut out = Vec::new();
+    let tree = match mm.m("mm_mt") {
+        Ok(t) => t,
+        Err(e) => return vec![Err(e)],
+    };
+    // slots are `void *` values read on the tree's layer: dereference onto its native layer
+    let sp = tree.sp.native_space();
+    for slot in tree.get_slot_iter() {
+        match slot.and_then(|s| Obj::named(sp, "vm_area_struct", s)) {
+            Ok(vma) => {
+                if vma.addr >= 0x1000 {
+                    out.push(Ok(vma));
+                }
+            }
+            Err(e) => {
+                out.push(Err(e));
+                break;
+            }
+        }
+    }
+    out
+}
+
+const MAPLE_NODE_POINTER_MASK: u64 = 0xFF;
+
+/// python `maple_tree._parse_maple_tree_node` (recursive, python order).
+fn parse_maple_node(tree: &Obj, entry: u64, parent: u64, seen: &mut FxHashSet<u64>, depth: u32, out: &mut Vec<Result<u64>>) -> Result<()> {
+    if !seen.insert(entry) {
+        return Ok(());
+    }
+    if depth > 900 {
+        return Err(Error::msg("RecursionError: maximum recursion depth exceeded"));
+    }
+    let pointer = entry & !MAPLE_NODE_POINTER_MASK;
+    let node_type = (entry >> 3) & 0x0F;
+    // the node's parent pointer, read on the tree's native layer
+    let parent_mte = Obj::named(tree.sp.native_space(), "pointer", pointer)?.u64()?;
+    if parent_mte & !MAPLE_NODE_POINTER_MASK != parent {
+        return Ok(());
+    }
+    let node = Obj::named(Space::on(tree.sp.layer, tree.sp.table), "maple_node", pointer)?;
+    let (member, recurse) = match node_type {
+        0 => ("alloc", false),
+        1 => ("mr64", false),
+        2 => ("mr64", true),
+        3 => ("ma64", true),
+        t => return Err(Error::msg(format!("AttributeError: Unknown Maple Tree node type {t} at offset {pointer:#x}."))),
+    };
+    let slots = node.m(member)?.m("slot")?;
+    for i in 0..slots.count() {
+        let v = slots.at(i)?.u64()?;
+        if v & !0x0F == 0 {
+            continue;
+        }
+        if recurse {
+            parse_maple_node(tree, v, pointer, seen, depth + 1, out)?;
+        } else {
+            out.push(Ok(v));
+        }
+    }
+    Ok(())
 }
 
 /// python `task_struct._get_time_namespace_offsets()`.
