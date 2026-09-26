@@ -113,6 +113,11 @@ impl RegList {
         RegList { n: 0, mode, regs: [Reg::NONE; MAX_REGS] }
     }
     #[inline]
+    pub(crate) fn reset(&mut self, mode: Mode) {
+        self.n = 0;
+        self.mode = mode;
+    }
+    #[inline]
     pub(crate) fn push(&mut self, r: Reg) {
         if (self.n as usize) < MAX_REGS {
             self.regs[self.n as usize] = r;
@@ -621,18 +626,27 @@ pub(crate) struct Info {
 }
 
 pub(crate) fn info(insn: &Insn) -> Info {
+    let mut i = Info { ops: DetailOps::default(), read: RegList::new(insn.mode), write: RegList::new(insn.mode) };
+    fill(insn, &mut i.ops, &mut i.read, &mut i.write);
+    i
+}
+
+/// Detail operands (with access flags) and implicit register lists of `insn`, written into
+/// reused buffers (no intermediate copies).
+fn fill(insn: &Insn, ops: &mut DetailOps, read: &mut RegList, write: &mut RegList) {
     let p = detail::prefixes(insn);
-    let mut ops = detail::cs_operands(insn, &p);
-    let mut read = RegList::new(insn.mode);
-    let mut write = RegList::new(insn.mode);
+    detail::cs_operands_into(insn, &p, ops);
+    read.reset(insn.mode);
+    write.reset(insn.mode);
     let rs = rules();
     let (s, e) = rs.by_mnem.get(insn.mnem as usize).copied().unwrap_or((0, 0));
-    let mut codes = [0u16; 8];
-    for (k, o) in ops.iter().enumerate() {
-        codes[k] = op_code(o);
-    }
     let n = ops.n as usize;
     let mode = if insn.mode == Mode::X86_64 { 2 } else { 1 };
+    // features are computed lazily, at most once each
+    let mut codes = [0u16; 8];
+    let mut have_codes = false;
+    let mut f_opc = u32::MAX;
+    let mut f_ctx = 0xFFu8;
     let mut hit = None;
     for r in rs.rules.get(s as usize..e as usize).unwrap_or(&[]) {
         if r.mode != 0 && r.mode != mode {
@@ -641,27 +655,42 @@ pub(crate) fn info(insn: &Insn) -> Info {
         if r.pfx != 0xFF && r.pfx != insn.pfx {
             continue;
         }
-        match r.sigk {
-            1 => {
-                if r.nsig as usize != n || (0..n).any(|k| r.sig[k] != codes[k] & 0xFF00) {
+        if r.sigk != 0 {
+            if r.nsig as usize != n {
+                continue;
+            }
+            if !have_codes {
+                for (k, o) in ops.iter().enumerate() {
+                    codes[k] = op_code(o);
+                }
+                have_codes = true;
+            }
+            if r.sigk == 1 {
+                if (0..n).any(|k| r.sig[k] != codes[k] & 0xFF00) {
                     continue;
                 }
+            } else if r.sig[..n] != codes[..n] {
+                continue;
             }
-            2 => {
-                if r.nsig as usize != n || r.sig[..n] != codes[..n] {
-                    continue;
-                }
-            }
-            _ => {}
         }
         if r.asz != 0 && r.asz != asz(insn, &p) {
             continue;
         }
-        if r.opc != 0 && r.opc != opc_key(insn, &p) + 1 {
-            continue;
+        if r.opc != 0 {
+            if f_opc == u32::MAX {
+                f_opc = opc_key(insn, &p) + 1;
+            }
+            if r.opc != f_opc {
+                continue;
+            }
         }
-        if r.ctx != 0xFF && r.ctx != ctx(insn, &p) {
-            continue;
+        if r.ctx != 0xFF {
+            if f_ctx == 0xFF {
+                f_ctx = ctx(insn, &p);
+            }
+            if r.ctx != f_ctx {
+                continue;
+            }
         }
         hit = Some(r);
         break;
@@ -681,9 +710,8 @@ pub(crate) fn info(insn: &Insn) -> Info {
                 write.push(resolve(t, insn.mode));
             }
         }
-        None => fallback(&mut ops, detail::vex_kind(insn, &p) != detail::VexKind::None),
+        None => fallback(ops, detail::vex_kind(insn, &p) != detail::VexKind::None),
     }
-    Info { ops, read, write }
 }
 
 /// Heuristic for mnemonics the spec does not know: destination written (VEX/EVEX/XOP) or read+written
@@ -703,7 +731,92 @@ fn fallback(ops: &mut DetailOps, vex: bool) {
     }
 }
 
+/// Everything capstone's detail mode reports for one instruction, computed in one pass
+/// (use [`Insn::detail`] when more than one of the individual accessors is needed).
+#[derive(Clone, Copy, Debug)]
+pub struct Detail {
+    /// `insn.operands` (with `size` and `access`)
+    pub ops: DetailOps,
+    /// `insn.regs_read` (implicit)
+    pub implicit_read: RegList,
+    /// `insn.regs_write` (implicit)
+    pub implicit_write: RegList,
+    /// `insn.regs_access()[0]`
+    pub regs_read: RegList,
+    /// `insn.regs_access()[1]`
+    pub regs_write: RegList,
+}
+
+/// capstone's `X86_reg_access`: implicit registers first, then explicit operands in order.
+fn reg_access_into(ops: &DetailOps, iread: &RegList, iwrite: &RegList, r: &mut RegList, w: &mut RegList) {
+    *r = *iread;
+    *w = *iwrite;
+    for o in ops.iter() {
+        match o.op {
+            Operand::Reg(x) => {
+                if o.access & detail::CS_AC_READ != 0 {
+                    r.push_unique(x);
+                }
+                if o.access & detail::CS_AC_WRITE != 0 {
+                    w.push_unique(x);
+                }
+            }
+            Operand::Mem(m) => {
+                // capstone does not de-duplicate segment registers
+                if !m.segment.is_none() {
+                    r.push(m.segment);
+                }
+                if !m.base.is_none() {
+                    r.push_unique(m.base);
+                }
+                if !m.index.is_none() {
+                    r.push_unique(m.index);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Detail {
+    /// An empty detail record (reuse it with [`Insn::detail_into`]).
+    pub fn new() -> Self {
+        let l = RegList::new(Mode::X86_64);
+        Detail { ops: DetailOps::default(), implicit_read: l, implicit_write: l, regs_read: l, regs_write: l }
+    }
+}
+
+impl Default for Detail {
+    fn default() -> Self {
+        Detail::new()
+    }
+}
+
+#[doc(hidden)]
+pub fn _bench_part(insn: &Insn, which: u8) -> u64 {
+    match which {
+        0 => detail::prefixes(insn).op as u64,
+        1 => {
+            let p = detail::prefixes(insn);
+            detail::cs_operands(insn, &p).n as u64
+        }
+        _ => info(insn).ops.n as u64,
+    }
+}
+
 impl Insn {
+    /// All of capstone's detail information in one pass (operands, implicit registers and
+    /// `regs_access()`), cheaper than calling the individual accessors separately.
+    pub fn detail(&self) -> Detail {
+        let mut d = Detail::new();
+        self.detail_into(&mut d);
+        d
+    }
+    /// [`Insn::detail`] into a reused record (fastest: no zeroing, no copies).
+    pub fn detail_into(&self, d: &mut Detail) {
+        fill(self, &mut d.ops, &mut d.implicit_read, &mut d.implicit_write);
+        reg_access_into(&d.ops, &d.implicit_read, &d.implicit_write, &mut d.regs_read, &mut d.regs_write);
+    }
     /// capstone's detail operands (`insn.operands`), including `size` and `access`.
     pub fn detail_operands(&self) -> DetailOps {
         info(self).ops
@@ -719,32 +832,8 @@ impl Insn {
     /// capstone's `X86_reg_access`.
     pub fn regs_access(&self) -> (RegList, RegList) {
         let i = info(self);
-        let (mut r, mut w) = (i.read, i.write);
-        for o in i.ops.iter() {
-            match o.op {
-                Operand::Reg(x) => {
-                    if o.access & detail::CS_AC_READ != 0 {
-                        r.push_unique(x);
-                    }
-                    if o.access & detail::CS_AC_WRITE != 0 {
-                        w.push_unique(x);
-                    }
-                }
-                Operand::Mem(m) => {
-                    // capstone does not de-duplicate segment registers
-                    if !m.segment.is_none() {
-                        r.push(m.segment);
-                    }
-                    if !m.base.is_none() {
-                        r.push_unique(m.base);
-                    }
-                    if !m.index.is_none() {
-                        r.push_unique(m.index);
-                    }
-                }
-                _ => {}
-            }
-        }
+        let (mut r, mut w) = (RegList::new(self.mode), RegList::new(self.mode));
+        reg_access_into(&i.ops, &i.read, &i.write, &mut r, &mut w);
         (r, w)
     }
     /// True if `regs_access()`'s written list contains a register named `name` (capstone
