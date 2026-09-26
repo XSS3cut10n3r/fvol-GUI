@@ -9,6 +9,7 @@ pub mod modules;
 pub mod poolscanner;
 pub mod pslist;
 pub mod psscan;
+pub mod registry;
 pub mod vadinfo;
 pub mod windows;
 pub mod windowstations;
@@ -24,4 +25,5 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&vadinfo::VadInfo);
     v.push(&windows::Windows);
     v.push(&windowstations::WindowStations);
+    registry::register(v);
 }

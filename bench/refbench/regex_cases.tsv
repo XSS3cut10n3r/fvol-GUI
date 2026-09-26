@@ -1,0 +1,13 @@
+# Regex throughput cases shared by every engine (bench/scripts/refbench.sh):
+#   python re (bench/scripts/regex_bench.py), PCRE2-JIT (bench/refbench/regex_pcre2.c),
+#   RE2 (bench/refbench/regex_re2.cc), rsvol (src/yara/benchdrv.rs yara_regex_bench_driver).
+# Format: name<TAB>pattern. The pattern bytes are passed verbatim to every engine (bytes pattern,
+# flags 0; use inline (?i) and regex escapes such as \x00, never literal tabs/newlines).
+literal	Microsoft
+lit_class	\\Device\\HarddiskVolume\d+
+class_exe	[a-z]{5,}\.exe
+alt20	kernel32|ntdll|svchost|explorer|lsass|winlogon|csrss|services|advapi32|user32|shell32|ole32|msvcrt|wininet|ws2_32|crypt32|rpcrt4|gdi32|comctl32|oleaut32
+nocase	(?i)password
+ipv4	\b(?:\d{1,3}\.){3}\d{1,3}\b
+url	https?://[a-zA-Z0-9./?=_%:-]+
+wide_lit	M\x00i\x00c\x00r\x00o\x00s\x00o\x00f\x00t\x00

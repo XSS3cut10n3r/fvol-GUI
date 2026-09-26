@@ -378,6 +378,7 @@ impl WinExt for Obj {
             Some("_SHARED_CACHE_MAP") => super::cache::shared_cache_map_is_valid(self).unwrap_or(false),
             Some("_ERESOURCE") => super::cache::eresource_is_valid(self).unwrap_or(false),
             Some("_OBJECT_HEADER") => super::pool::object_header_is_valid(self),
+            Some("_CMHIVE") => super::registry::cmhive_is_valid(self),
             Some("tagWINDOWSTATION") | Some("tagDESKTOP") | Some("tagWND") => super::gui::gui_is_valid(self).unwrap_or(true),
             Some("_POOL_TRACKER_BIG_PAGES") => {
                 use super::pool::PoolExt;

@@ -32,3 +32,11 @@ impl Drop for Span {
 pub fn span(name: &'static str) -> Option<Span> {
     if enabled() { Some(Span { name, start: Instant::now() }) } else { None }
 }
+
+/// Print `[trace] <msg>` when tracing is enabled (the message is only built then).
+#[inline]
+pub fn note(msg: impl FnOnce() -> String) {
+    if enabled() {
+        eprintln!("[trace] {}", msg());
+    }
+}
