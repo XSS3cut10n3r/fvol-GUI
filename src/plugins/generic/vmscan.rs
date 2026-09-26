@@ -72,26 +72,18 @@ fn gather_vmcs_structures() -> Vec<([u8; 4], String, TableRef)> {
 }
 
 /// python `_verify_vmcs_page` + the row: `None` = python skipped the page (a failed test or an
-/// InvalidAddressException / AttributeError).
+/// InvalidAddressException / AttributeError). Any failed test skips the page (python 3.11+:
+/// every non-empty `VMCSTest` flag combination has a `name`), and so does any later read error,
+/// so the checks stop at the first failure.
 fn check(layer: &'static dyn Layer, table: TableRef, off: u64) -> Option<(u64, u64)> {
     let r = (|| -> Result<Option<(u64, u64)>> {
         let vmcs = Obj::named(Space::on(layer, table), "_VMCS", off)?;
-        let mut failed = false;
-        if layer.read_vec(off + 4, 4)? != [0, 0, 0, 0] {
-            failed = true;
-        }
-        if vmcs.m("vmcs_link_ptr")?.int()? != 0xFFFF_FFFF_FFFF_FFFF {
-            failed = true;
-        }
-        if vmcs.m("host_cr4")?.int()? & (1 << 13) == 0 {
-            failed = true;
-        }
-        if vmcs.m("guest_cr3")?.int()? == 0 || vmcs.m("host_cr3")?.int()? == 0 {
-            failed = true;
-        }
-        if vmcs.m("guest_cr4")?.int()? & 0xFFFF_FFFF_FF88_9000 != 0 {
-            failed = true;
-        }
+        let failed = layer.read_vec(off + 4, 4)? != [0, 0, 0, 0]
+            || vmcs.m("vmcs_link_ptr")?.int()? != 0xFFFF_FFFF_FFFF_FFFF
+            || vmcs.m("host_cr4")?.int()? & (1 << 13) == 0
+            || vmcs.m("guest_cr3")?.int()? == 0
+            || vmcs.m("host_cr3")?.int()? == 0
+            || vmcs.m("guest_cr4")?.int()? & 0xFFFF_FFFF_FF88_9000 != 0;
         if failed {
             return Ok(None);
         }
@@ -115,7 +107,10 @@ impl Plugin for Vmscan {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         // python: the primary layer, moved down to its memory_layer when it has one
         let layer = super::primary::physical(ctx, "Physical base memory layer")?;
-        let structures = gather_vmcs_structures();
+        let structures = {
+            let _t = crate::util::trace::span("vmscan: vmcs tables");
+            gather_vmcs_structures()
+        };
         out.begin(vec![
             Column::new("Architecture", ColType::Str),
             Column::new("VMCS Physical offset", ColType::Hex),
@@ -150,6 +145,7 @@ impl Plugin for Vmscan {
         // cache when an earlier run (or another physical scan's sweep) recorded them; the VMCS
         // checks run every time
         let sigs: Vec<u32> = structures.iter().map(|s| u32::from_le_bytes(s.0)).collect();
+        let _t = crate::util::trace::span("vmscan: page starts + checks");
         let raw = crate::layers::scancache::page_start_hits(layer, &sigs, || {
             let chunks = chunk_layout(layer, 0x1000000, 0x1000, None);
             let per_chunk: Vec<Vec<(u64, u64, u32)>> = crate::util::par::par_map(chunks.len(), |ci| {
@@ -172,10 +168,13 @@ impl Plugin for Vmscan {
             });
             per_chunk.concat()
         });
-        let checked: Vec<Option<(u64, u64)>> = crate::util::par::par_map(raw.len(), |i| {
+        let check_one = |i: usize| {
             let (start, ps, si) = raw[i];
             structures.get(si as usize).and_then(|s| check(layer, s.2, start + ps))
-        });
+        };
+        // a few us per hit: threads pay off beyond a few hundred hits
+        let checked: Vec<Option<(u64, u64)>> =
+            if raw.len() < 256 { (0..raw.len()).map(check_one).collect() } else { crate::util::par::par_map(raw.len(), check_one) };
         for (&(start, ps, si), c) in raw.iter().zip(checked) {
             if let Some((ept, cr3)) = c {
                 out.row(0, vec![Value::Str(structures[si as usize].1.clone()), Value::Int((start + ps) as i128), Value::Int(ept as i128), Value::Int(cr3 as i128)])?;
