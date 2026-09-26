@@ -219,7 +219,10 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             0
         };
     } else if (b == 0xC4 || b == 0xC5) && st.pos < n && (m64 || d[st.pos] & 0xC0 == 0xC0) {
-        // VEX
+        // VEX (a LOCK or REX prefix makes it invalid; 66/F2/F3 are ignored)
+        if lockrep == 0xF0 || rex != 0 {
+            return false;
+        }
         let b1 = d[st.pos];
         st.pos += 1;
         let (r, x, bb, mmmmm, b2) = if b == 0xC5 {
@@ -393,49 +396,51 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
         let _ = node;
     } else {
         let modrm_pos = st.pos;
-        while node != 0 && node & LEAF == 0 {
-            let off = node as usize;
-            let kind = t.nodes[off];
-            let v: usize = match kind {
-                SEL_MODE => m64 as usize,
-                SEL_PFX => pfx,
-                SEL_W => (if st.vex != VEX_NONE { st.w } else { rexw }) as usize,
-                SEL_L => st.l as usize,
-                SEL_B => st.evex_b as usize,
-                SEL_MOD | SEL_REG | SEL_RM => {
-                    if modrm_pos >= n {
-                        return false;
-                    }
-                    let m = d[modrm_pos];
-                    match kind {
-                        SEL_MOD => (m >> 6 == 3) as usize,
-                        SEL_REG => ((m >> 3) & 7) as usize,
-                        _ => (m & 7) as usize,
-                    }
-                }
-                SEL_REXB => (st.rex & 1) as usize,
-                SEL_O => match osz_def {
-                    2 => 0,
-                    4 => 1,
-                    _ => 2,
-                },
-                SEL_D => match osz_d64 {
-                    2 => 0,
-                    4 => 1,
-                    _ => 2,
-                },
-                _ => match st.asz {
-                    2 => 0,
-                    4 => 1,
-                    _ => 2,
-                },
+        let (mm, have_modrm) = if modrm_pos < n { (d[modrm_pos], true) } else { (0, false) };
+        let sz = |s: u8| -> u8 {
+            match s {
+                2 => 0,
+                4 => 1,
+                _ => 2,
+            }
+        };
+        let w = if st.vex != VEX_NONE { st.w } else { rexw };
+        let mut sel: [u8; NSEL] = [
+            m64 as u8,
+            pfx as u8,
+            w as u8,
+            st.l,
+            st.evex_b as u8,
+            (mm >> 6 == 3) as u8,
+            (mm >> 3) & 7,
+            mm & 7,
+            st.rex & 1,
+            sz(osz_def),
+            sz(osz_d64),
+            sz(st.asz),
+            has66 as u8,
+        ];
+        let root = node;
+        node = match walk(t, root, &sel, have_modrm) {
+            Some(x) => x,
+            None => return false,
+        };
+        if node == 0 && rexw && pfx != 0 && st.vex == VEX_NONE && map != MAP_1 {
+            // capstone/LLVM REX.W contexts inherit the no-prefix (W0) entries
+            sel[SEL_PFX as usize] = 0;
+            sel[SEL_W as usize] = 0;
+            node = match walk(t, root, &sel, have_modrm) {
+                Some(x) => x,
+                None => return false,
             };
-            node = t.nodes[off + 1 + v];
         }
         if node == 0 {
             return false;
         }
         entry_idx = (node & 0xFFFF) as usize;
+        if t.entries[entry_idx].flags & F_INVALID != 0 {
+            return false;
+        }
     }
 
     // 3DNow! path
@@ -478,7 +483,13 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
 
     let e = &t.entries[entry_idx];
     let flags = e.flags;
-    st.osz = if m64 && flags & F_F64 != 0 {
+    st.osz = if flags & F_Z66 != 0 {
+        if has66 {
+            2
+        } else {
+            4
+        }
+    } else if m64 && flags & F_F64 != 0 {
         8
     } else if flags & F_D64 != 0 {
         osz_d64
@@ -495,8 +506,8 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
             return false;
         }
     }
-    if flags & F_NOVVVV != 0 && st.vvvv & 0xF != 0 && st.vex != VEX_NONE {
-        // capstone ignores a non-1111 vvvv for most of these; keep permissive
+    if flags & F_NOVVVV != 0 && st.vvvv != 0 && st.vex != VEX_NONE {
+        return false;
     }
 
     if lockrep == 0xF0 && flags & F_LOCK == 0 {
@@ -561,6 +572,20 @@ pub(crate) fn decode_into(data: &[u8], addr: u64, mode: Mode, out: &mut Insn) ->
     }
     out.pfx = pp;
     finish(&st, out, addr, mode, opcode)
+}
+
+/// Walk the decision tree from `node`; `None` if a ModRM selector is needed but missing.
+#[inline(always)]
+fn walk(t: &Tables, mut node: u32, sel: &[u8; NSEL], have_modrm: bool) -> Option<u32> {
+    while node != 0 && node & LEAF == 0 {
+        let off = node as usize;
+        let kind = t.nodes[off] as usize;
+        if !have_modrm && (SEL_MOD as usize..=SEL_RM as usize).contains(&kind) {
+            return None;
+        }
+        node = t.nodes[off + 1 + sel[kind] as usize];
+    }
+    Some(node)
 }
 
 #[inline]
@@ -768,7 +793,13 @@ fn reg_for(st: &St, cls: u8, num: u8) -> u8 {
             _ => YMM0 + (num & 31),
         },
         C_VLQ => XMM0 + (num & 31),
-        C_K => K0 + (num & 7),
+        C_K => {
+            if num > 7 {
+                0
+            } else {
+                K0 + num
+            }
+        }
         C_BND => {
             if num > 3 {
                 0
@@ -978,6 +1009,10 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                         Some(v) => (v as i64, false),
                         None => return false,
                     },
+                    I_W4 => match st.le(4) {
+                        Some(v) => ((v & 0xFFFF) as i64, false),
+                        None => return false,
+                    },
                     I_S16 => match st.le(2) {
                         Some(v) => (v as u16 as i16 as i64, true),
                         None => return false,
@@ -1034,20 +1069,33 @@ fn operands(st: &mut St, e: &Entry, out: &mut Insn, _addr: u64, mode: Mode, op: 
                         Some(b) => b as i8 as i64,
                         None => return false,
                     }
-                } else if st.osz == 2 && !m64 {
+                } else if st.osz == 2 {
+                    // capstone: jmp/jcc rel16 are zero-extended in 32-bit mode (F_RELQ),
+                    // call rel16 and 64-bit mode forms are sign-extended.
                     match st.le(2) {
-                        Some(v) => v as u16 as i16 as i64,
+                        Some(v) => {
+                            if !m64 && e.flags & F_RELQ != 0 {
+                                v as i64
+                            } else {
+                                v as u16 as i16 as i64
+                            }
+                        }
                         None => return false,
                     }
                 } else {
                     match st.le(4) {
-                        Some(v) => v as u32 as i32 as i64,
+                        Some(v) => {
+                            let mut v = v as u32;
+                            // capstone: with an 0x67 prefix in 32-bit mode jmp/jcc rel32 get
+                            // bits 16..31 forced on when bit 15 is set.
+                            if !m64 && st.asz == 2 && e.flags & F_RELQ != 0 && v & 0x8000 != 0 {
+                                v |= 0xFFFF_0000;
+                            }
+                            v as i32 as i64
+                        }
                         None => return false,
                     }
                 };
-                if e.flags & F_REL16MASK != 0 {
-                    out.ofmt[k] |= OF_REL16;
-                }
                 out.ofmt[k] |= OF_REL;
                 Operand::Imm(rel)
             }

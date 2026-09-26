@@ -42,8 +42,9 @@ pub(crate) const SEL_REXB: u32 = 8;
 pub(crate) const SEL_O: u32 = 9; // 0 16, 1 32, 2 64
 pub(crate) const SEL_D: u32 = 10; // same, with 64-bit default operand size in long mode
 pub(crate) const SEL_A: u32 = 11; // address size 0 16, 1 32, 2 64
-pub(crate) const NSEL: usize = 12;
-const ARITY: [u32; NSEL] = [2, 4, 2, 4, 2, 2, 8, 8, 2, 3, 3, 3];
+pub(crate) const SEL_H66: u32 = 12; // 0x66 prefix present (0/1)
+pub(crate) const NSEL: usize = 13;
+const ARITY: [u32; NSEL] = [2, 4, 2, 4, 2, 2, 8, 8, 2, 3, 3, 3, 2];
 
 // ---------------------------------------------------------------------------------------- operands
 // operand sources
@@ -104,6 +105,7 @@ pub(crate) const I_ZN: u8 = 7; // imm16/32 by operand size with d64 semantics (p
 pub(crate) const I_U32: u8 = 8;
 pub(crate) const I_S16: u8 = 9; // imm16 sign-extended, printed signed
 pub(crate) const I_ZS: u8 = 10; // imm16/32 sign-extended, printed signed
+pub(crate) const I_W4: u8 = 11; // 4 immediate bytes consumed, low 16 bits printed (capstone quirk)
 
 // memory keyword (mk)
 pub(crate) const K_DEF: u8 = 0; // derived from the register class
@@ -157,7 +159,7 @@ pub(crate) const F_SAE: u32 = 1 << 17; // EVEX.b on register form -> {sae}
 pub(crate) const F_3DN: u32 = 1 << 18;
 pub(crate) const F_NOSEG: u32 = 1 << 19; // segment prefix not printed
 pub(crate) const F_MODRM_MEMONLY: u32 = 1 << 20; // (internal)
-pub(crate) const F_REL16MASK: u32 = 1 << 21;
+pub(crate) const F_RELQ: u32 = 1 << 21; // capstone rel16/rel32 quirks for jmp/jcc (see decode)
 pub(crate) const F_NOREXW_O: u32 = 1 << 22;
 pub(crate) const F_BCST_W: u32 = 1 << 23; // {1toN} word elements
 pub(crate) const F_KNOTZERO: u32 = 1 << 24; // EVEX: aaa must not be 0
@@ -166,6 +168,8 @@ pub(crate) const F_REGFORM: u32 = 1 << 26; // ModRM.mod ignored: rm is always a 
 pub(crate) const F_CMP8: u32 = 1 << 27; // imm < 8 selects a cmpXXps alias (imm dropped)
 pub(crate) const F_CMP32: u32 = 1 << 28; // imm < 32 selects a vcmpXXps alias
 pub(crate) const F_REPF3: u32 = 1 << 29; // F3 -> "rep", F2 -> nothing (capstone movsd quirk)
+pub(crate) const F_INVALID: u32 = 1 << 30; // explicit "INVALID" override entry
+pub(crate) const F_Z66: u32 = 1 << 31; // accumulator/operand size: 16 with 66 else 32 (REX.W ignored)
 
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Entry {
@@ -325,6 +329,8 @@ fn parse_sel(tok: &str, sel: &mut [u8; NSEL]) -> Result<(), String> {
         "a16" => set(sel, SEL_A, 1),
         "a32" => set(sel, SEL_A, 2),
         "a64" => set(sel, SEL_A, 4),
+        "n66" => set(sel, SEL_H66, 1),
+        "p66" => set(sel, SEL_H66, 2),
         _ => {
             if let Some(r) = tok.strip_prefix('/') {
                 let m = parse_range(r, 8).ok_or_else(|| format!("bad /reg {tok}"))?;
@@ -449,6 +455,7 @@ fn parse_op(tok: &str) -> Result<OpSpec, String> {
                 "d" => I_U32,
                 "ws" => I_S16,
                 "zs" => I_ZS,
+                "w4" => I_W4,
                 _ => return Err(bad()),
             },
             S_REL => match cls_s {
@@ -497,13 +504,14 @@ fn parse_flag(tok: &str) -> Result<u32, String> {
         "sae" => F_SAE,
         "noseg" => F_NOSEG,
         "modrm" => F_MODRM,
-        "rel16" => F_REL16MASK,
+        "relq" => F_RELQ,
         "knz" => F_KNOTZERO,
         "nok" => F_NOEVK,
         "regform" => F_REGFORM,
         "cmp8" => F_CMP8,
         "cmp32" => F_CMP32,
         "repf3" => F_REPF3,
+        "z66" => F_Z66,
         _ => return Err(format!("bad flag {tok}")),
     })
 }
@@ -578,6 +586,9 @@ impl Builder {
             None => (body, ""),
         };
         let mut e = Entry { mnem: self.mnem(mn), ..Default::default() };
+        if mn == "INVALID" {
+            e.flags |= F_INVALID;
+        }
         if !ops_s.is_empty() {
             for (i, t) in ops_s.split(',').enumerate() {
                 if i >= MAX_OPS {

@@ -47,13 +47,15 @@ pub(crate) const SPEC: &str = r#"
 0f 01 @fa : monitorx
 0f 01 @fb : mwaitx
 0f 01 @fc : clzero
-0f 02 : lar r:v, m:v/w
-0f 03 : lsl r:v, m:v/w
+0f 02 : lar r:v, m:z/w
+0f 03 : lsl r:v, m:z/w
 0f 05 : syscall
 0f 06 : clts
-0f 07 : sysret
+0f 07 w0 : sysret
+0f 07 w1 : sysretq
 0f 08 : invd
 0f 09 : wbinvd
+0f 09 f3 : wbnoinvd
 0f 0b : ud2
 0f 0d m /0 : prefetch M:/b
 0f 0d m /1 : prefetchw M:/b
@@ -90,8 +92,8 @@ pub(crate) const SPEC: &str = r#"
 0f 18 m /1 : prefetcht0 M:/b
 0f 18 m /2 : prefetcht1 M:/b
 0f 18 m /3 : prefetcht2 M:/b
-0f 18 /4-7 : nop m:v
-0f 19 m : nop m:v
+0f 18 /4-7 : nop m:v/z
+0f 19 m : nop m:v/z
 0f 19 r : nop m:v, r:v
 0f 1a np m : bndldx r:bnd, M:
 0f 1a 66 : bndmov r:bnd, m:bnd/x
@@ -101,9 +103,10 @@ pub(crate) const SPEC: &str = r#"
 0f 1b 66 : bndmov m:bnd/x, r:bnd
 0f 1b f3 m : bndmk r:bnd, M:
 0f 1b f2 : bndcn r:bnd, m:n/n
-0f 1c m /0 : cldemote M:/b
-0f 1d m : nop m:v
-0f 1e m : nop m:v
+0f 1c np m /0 : cldemote M:/b
+0f 1c 66 m : nop m:v/z
+0f 1d m : nop m:v/z
+0f 1e m : nop m:v/z
 0f 1f : nop m:v ; lock
 # ------------------------------------------------------------------ 0F 20-2F
 0f 20 : mov R:n, r:c ; regform
@@ -140,7 +143,8 @@ pub(crate) const SPEC: &str = r#"
 0f 32 : rdmsr
 0f 33 : rdpmc
 0f 34 : sysenter
-0f 35 : sysexit
+0f 35 w0 : sysexit
+0f 35 w1 : sysexitq
 0f 37 : getsec
 # ------------------------------------------------------------------ 0F 40-4F cmovcc
 0f 40 : cmovo r:v, m:v
@@ -292,22 +296,22 @@ pub(crate) const SPEC: &str = r#"
 0f 7f 66 : movdqa m:x, r:x
 0f 7f f3 : movdqu m:x, r:x
 # ------------------------------------------------------------------ 0F 80-8F jcc
-0f 80 : jo j:z ; bnd f64
-0f 81 : jno j:z ; bnd f64
-0f 82 : jb j:z ; bnd f64
-0f 83 : jae j:z ; bnd f64
-0f 84 : je j:z ; bnd f64
-0f 85 : jne j:z ; bnd f64
-0f 86 : jbe j:z ; bnd f64
-0f 87 : ja j:z ; bnd f64
-0f 88 : js j:z ; bnd f64
-0f 89 : jns j:z ; bnd f64
-0f 8a : jp j:z ; bnd f64
-0f 8b : jnp j:z ; bnd f64
-0f 8c : jl j:z ; bnd f64
-0f 8d : jge j:z ; bnd f64
-0f 8e : jle j:z ; bnd f64
-0f 8f : jg j:z ; bnd f64
+0f 80 : jo j:z ; bnd d64 relq
+0f 81 : jno j:z ; bnd d64 relq
+0f 82 : jb j:z ; bnd f64 relq
+0f 83 : jae j:z ; bnd f64 relq
+0f 84 : je j:z ; bnd f64 relq
+0f 85 : jne j:z ; bnd f64 relq
+0f 86 : jbe j:z ; bnd f64 relq
+0f 87 : ja j:z ; bnd f64 relq
+0f 88 : js j:z ; bnd f64 relq
+0f 89 : jns j:z ; bnd f64 relq
+0f 8a : jp j:z ; bnd f64 relq
+0f 8b : jnp j:z ; bnd f64 relq
+0f 8c : jl j:z ; bnd f64 relq
+0f 8d : jge j:z ; bnd f64 relq
+0f 8e : jle j:z ; bnd f64 relq
+0f 8f : jg j:z ; bnd f64 relq
 # ------------------------------------------------------------------ 0F 90-9F setcc
 0f 90 : seto m:b
 0f 91 : setno m:b
@@ -355,7 +359,20 @@ pub(crate) const SPEC: &str = r#"
 0f ae f3 r /1 : rdgsbase R:y
 0f ae f3 r /2 : wrfsbase R:y
 0f ae f3 r /3 : wrgsbase R:y
-0f ae f3 r /5 : incsspd R:y
+0f ae f3 r /5 w0 : incsspd R:d
+0f ae f3 r /5 w1 : incsspq R:q
+0f ae f3 m /6 : clrssbsy M:/q
+0f 1e f3 r /1 w0 : rdsspd R:d
+0f 1e f3 r /1 w1 : rdsspq R:q
+0f 1e f3 @fa : endbr64
+0f 1e f3 @fb : endbr32
+0f 01 f3 m /5 : rstorssp M:/d
+0f 01 f3 @ea : saveprevssp
+0f 01 f3 @e8 : setssbsy
+38 f6 np m w0 : wrssd M:d, r:d
+38 f6 np m w1 : wrssq M:q, r:q
+38 f5 66 m w0 : wrussd M:d, r:d
+38 f5 66 m w1 : wrussq M:q, r:q
 0f af : imul r:v, m:v
 0f b0 : cmpxchg m:b, r:b ; lock
 0f b1 : cmpxchg m:v, r:v ; lock

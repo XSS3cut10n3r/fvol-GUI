@@ -74,16 +74,18 @@ pub(crate) const SPEC: &str = r#"
 1 62 mode32 m o32 : bound r:d, M:/q
 1 63 mode32 : arpl m:w, r:w
 1 63 mode64 : movsxd r:v, m:d
+1 63 mode64 a32 w0 : INVALID
 1 68 : push i:z ; d64
+1 68 mode64 p66 w1 : push i:d
 1 69 : imul r:v, m:v, i:z
 1 6a : push i:bn ; d64
 1 6b : imul r:v, m:v, i:bs
 1 6c : insb D:b, dx ; rep
-1 6d o16 : insw D:w, dx ; rep
-1 6d o32|o64 : insd D:d, dx ; rep
+1 6d p66 : insw D:w, dx ; rep
+1 6d n66 : insd D:d, dx ; rep
 1 6e : outsb dx, S:b ; rep
-1 6f o16 : outsw dx, S:w ; rep
-1 6f o32|o64 : outsd dx, S:d ; rep
+1 6f p66 : outsw dx, S:w ; rep
+1 6f n66 : outsd dx, S:d ; rep
 # ------------------------------------------------------------------ 70-7f
 1 70 : jo j:b ; bnd f64
 1 71 : jno j:b ; bnd f64
@@ -149,7 +151,9 @@ pub(crate) const SPEC: &str = r#"
 # ------------------------------------------------------------------ 90-9f
 1 90 : nop
 1 90 rexb1 : xchg o:v, eAX
-1 90 f3 rexb0 : pause
+1 90 f3 rexb0 o32 : pause
+1 90 f3 rexb0 o16 : INVALID
+1 90 f3 rexb0 o64 : xchg o:v, eAX
 1 91-97 : xchg o:v, eAX
 1 98 o16 : cbw
 1 98 o32 : cwde
@@ -159,21 +163,23 @@ pub(crate) const SPEC: &str = r#"
 1 99 o64 : cqo
 1 9a mode32 : lcall farc
 1 9b : wait
-1 9c d16 : pushf ; d64
-1 9c d32 : pushfd ; d64
-1 9c d64 : pushfq ; d64
-1 9d d16 : popf ; d64
-1 9d d32 : popfd ; d64
-1 9d d64 : popfq ; d64
+1 9c p66 : pushf
+1 9c n66 mode32 : pushfd
+1 9c n66 mode64 : pushfq
+1 9d p66 : popf
+1 9d n66 mode32 : popfd
+1 9d n66 mode64 : popfq
 1 9e : sahf
 1 9f : lahf
 # ------------------------------------------------------------------ a0-af
 1 a0 a16|a32 : mov al, a:b
 1 a0 a64 : movabs al, a:b
+1 a0 a32 mode64 w1 : movabs al, a:b
 1 a1 a16|a32 : mov eAX, a:v
 1 a1 a64 : movabs eAX, a:v
 1 a2 a16|a32 : mov a:b, al
 1 a2 a64 : movabs a:b, al
+1 a2 a32 mode64 w1 : movabs a:b, al
 1 a3 a16|a32 : mov a:v, eAX
 1 a3 a64 : movabs a:v, eAX
 1 a4 : movsb D:b, S:b ; rep
@@ -220,11 +226,12 @@ pub(crate) const SPEC: &str = r#"
 1 c1 /6 : sal m:v, i:b
 1 c1 /7 : sar m:v, i:b
 1 c2 : ret i:w ; bnd repz f64
+1 c2 mode64 p66 w1 : ret i:w4 ; bnd repz f64
 1 c3 : ret ; bnd repz f64
 1 c4 mode32 m : les r:v, M:/p
 1 c5 mode32 m : lds r:v, M:/p
 1 c6 /0 : mov m:b, i:b
-1 c6 @f8 : xabort i:b
+1 c6 @f8 : xabort i:bs
 1 c7 /0 : mov m:v, i:z ; immu
 1 c7 @f8 : xbegin j:z
 1 c8 : enter i:ws, i:bs ; d64
@@ -429,19 +436,20 @@ pub(crate) const SPEC: &str = r#"
 1 e2 : loop j:b ; f64
 1 e3 a16 : jcxz j:b ; bnd f64
 1 e3 a32 : jecxz j:b ; bnd f64
+1 e3 a32 mode64 o16|o64 : jrcxz j:b ; bnd f64
 1 e3 a64 : jrcxz j:b ; bnd f64
 1 e4 : in al, i:b
-1 e5 : in zAX, i:b
+1 e5 : in zAX, i:b ; z66
 1 e6 : out i:b, al
-1 e7 : out i:b, zAX
+1 e7 : out i:b, zAX ; z66
 1 e8 : call j:z ; bnd f64 notrack
-1 e9 : jmp j:z ; bnd f64 notrack
+1 e9 : jmp j:z ; bnd f64 notrack relq
 1 ea mode32 : ljmp far
 1 eb : jmp j:b ; bnd f64 notrack
 1 ec : in al, dx
-1 ed : in zAX, dx
+1 ed : in zAX, dx ; z66
 1 ee : out dx, al
-1 ef : out dx, zAX
+1 ef : out dx, zAX ; z66
 1 f1 : int1
 1 f4 : hlt
 1 f5 : cmc
