@@ -198,12 +198,28 @@ fn symbols_at_cached(kernel: &Module, addr: u64) -> Vec<&'static str> {
     type Entry = (usize, u64, Vec<&'static str>);
     static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
     let key = kernel.table() as *const _ as usize;
-    if let Some(e) = CACHE.lock().unwrap().iter().find(|e| e.0 == key && e.1 == addr) {
+    let mut cache = CACHE.lock().unwrap();
+    if let Some(e) = cache.iter().find(|e| e.0 == key && e.1 == addr) {
         return e.2.clone();
     }
-    let v = kernel.symbols_at_exact(addr);
-    CACHE.lock().unwrap().push((key, addr, v.clone()));
-    v
+    // One scan of the symbol records also resolves the d_dname callbacks python knows (their
+    // addresses by name), so lsof / sockstat pay for one linear scan instead of one per
+    // callback. Results are exactly `symbols_at_exact(a)` for each address `a`.
+    let mut addrs = vec![addr];
+    for n in ["sockfs_dname", "anon_inodefs_dname", "pipefs_dname", "simple_dname", "ns_dname"] {
+        if let Ok(a) = kernel.symbol_addr(n) {
+            let a = a & kernel.sp.native_mask;
+            if !addrs.contains(&a) && !cache.iter().any(|e| e.0 == key && e.1 == a) {
+                addrs.push(a);
+            }
+        }
+    }
+    let rel: Vec<u64> = addrs.iter().map(|a| a.wrapping_sub(kernel.offset)).collect();
+    let res = kernel.table().symbols_at_exact_multi(&rel);
+    for (a, v) in addrs.iter().zip(res) {
+        cache.push((key, *a, v));
+    }
+    cache.iter().find(|e| e.0 == key && e.1 == addr).map(|e| e.2.clone()).unwrap_or_default()
 }
 
 /// The `ns_dname` branch of `_get_new_sock_pipe_path` (SymbolError / IndexError -> the

@@ -809,6 +809,28 @@ impl SymbolTable {
         v
     }
 
+    /// [`SymbolTable::symbols_at_exact`] for several offsets in one linear scan (for a handful
+    /// of offsets; `out[i]` belongs to `offsets[i]`).
+    pub fn symbols_at_exact_multi(&self, offsets: &[u64]) -> Vec<Vec<&str>> {
+        if self.by_addr.get().is_some() {
+            return offsets.iter().map(|&o| self.symbols_at(o, 0)).collect();
+        }
+        let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+        let mut out: Vec<Vec<&str>> = vec![Vec::new(); offsets.len()];
+        for r in self.sec(sec::SYMBOLS).chunks_exact(SYMBOL_SZ) {
+            let a = rd64(r, 8) & mask;
+            for (i, &o) in offsets.iter().enumerate() {
+                if a == o {
+                    out[i].push(self.rec_str(r));
+                }
+            }
+        }
+        for v in &mut out {
+            v.sort_unstable();
+        }
+        out
+    }
+
     /// Symbol names with `offset <= address <= offset + size` (python
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
