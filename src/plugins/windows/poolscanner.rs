@@ -325,11 +325,24 @@ where
     type Hit = H;
     fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<H>) {
         let mut found = Vec::new();
-        self.tags.scan(data, data_offset, &mut found);
-        for (off, pi) in found {
+        self.tags.prescan(data, &mut found);
+        self.finish(&found, data_offset, hits);
+    }
+    // the tag search depends only on the bytes: the executor runs it once per distinct range
+    fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
+        self.tags.prescan(data, out)
+    }
+    fn stream_window(&self) -> Option<usize> {
+        self.tags.stream_window()
+    }
+    fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
+        self.tags.prescan_piece(data, base, from, limit, out)
+    }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<H>) {
+        for &(rel, pi) in matches {
             let ci = pi as usize;
             // a header before address 0 cannot be read (python raises -> skipped)
-            let Some(at) = off.checked_sub(self.header_offset) else { continue };
+            let Some(at) = (data_offset + rel).checked_sub(self.header_offset) else { continue };
             let header = Obj::new(self.header_sp, self.header_ty, at);
             if let Ok(true) = self.passes(&self.constraints[ci], &header) {
                 (self.post)(ci, header, hits);

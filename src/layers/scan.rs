@@ -15,8 +15,17 @@
 //!     non-overlapping match position restarts per chunk), and a scanner only reports hits that
 //!     start before `chunk_size` in its chunk; results come back in chunk order.
 //!
-//! Chunks are processed on all cores; big file-backed chunks are mapped with a private
-//! [`MapWindow`](crate::util::mmap::MapWindow) per chunk (parallel page-table setup/teardown).
+//! Execution (all cores, python order, early stop) is described at "Execution plan" below.
+//! Measured on a 5 GiB Windows 10 image (20 threads, warm page cache): a full physical-layer
+//! `MultiStringScanner` scan ~150 ms (~35 GB/s, the machine's read bandwidth; python's trie
+//! regex ~60 s), the kernel virtual layer (330k chunks, 1.8 GB of mapped pages, 0.7 GB
+//! distinct) ~30 ms + 10 ms run enumeration.
+//!
+//! Search kernels: [`MultiStringScanner`] = AVX2 Teddy prefilter + trie verification (15-19
+//! GB/s per core), [`BytesScanner`] = glibc `memmem`. Scanners may implement the two-phase
+//! [`Scanner::prescan`] / [`Scanner::finish`] (pure byte search + per-chunk hits) and
+//! [`Scanner::stream_window`] / [`Scanner::prescan_piece`] (piecewise reading); the pool
+//! scanner does.
 //!
 //! ```ignore
 //! let hits: Vec<u64> = scan(layer, &BytesScanner::new(b"KDBG"), None);
@@ -46,6 +55,31 @@ pub trait Scanner: Sync {
     }
     /// Scan one chunk; `data_offset` is the layer address of `data[0]`.
     fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<Self::Hit>);
+    /// Optional two-phase form for searches whose byte matching depends only on the chunk's
+    /// bytes: `prescan` appends `(offset in data, tag)` matches (already filtered by the
+    /// `chunk_size` rule) and returns true; `finish` turns one chunk's matches into hits (it
+    /// may read memory, e.g. to validate a structure at the hit). Must satisfy
+    /// `scan(d, o) == finish(prescan(d), o)`. The executor then scans identical file ranges
+    /// (physical pages mapped at several virtual addresses) only once.
+    fn prescan(&self, _data: &[u8], _out: &mut Vec<(u64, u32)>) -> bool {
+        false
+    }
+    /// See [`Scanner::prescan`].
+    fn finish(&self, _matches: &[(u64, u32)], _data_offset: u64, _hits: &mut Vec<Self::Hit>) {}
+    /// Two-phase scanners whose matches examine at most `n` bytes from their start return
+    /// `Some(n)`: big chunks are then read in small cache-resident pieces
+    /// ([`Scanner::prescan_piece`]) instead of being mapped whole.
+    fn stream_window(&self) -> Option<usize> {
+        None
+    }
+    /// `prescan` of one piece of a chunk: `data` starts at offset `base` of the chunk and
+    /// extends `stream_window() - 1` bytes past `limit` (or to the chunk's end). Append the
+    /// matches starting in `[from, limit)` as `(base + position, tag)` and return where the
+    /// next piece resumes (`>= limit`; beyond it when a match runs past `limit`, like the
+    /// greedy non-overlapping search of one whole chunk).
+    fn prescan_piece(&self, _data: &[u8], _base: u64, _from: usize, limit: usize, _out: &mut Vec<(u64, u32)>) -> usize {
+        limit
+    }
 }
 
 /// Where a chunk's bytes come from.
@@ -234,26 +268,29 @@ fn file_span(layer: &dyn Layer, addr: u64, len: u64) -> Option<(&FileLayer, u64)
 // Execution plan
 //
 // python's chunk list is fixed (see the module docs); how the chunks are *executed* is ours:
-//   * big file-backed chunks (python's 16 MiB data-layer chunks) are one work item each, read
-//     through a private `MapWindow` (map -> scan -> unmap on the worker: page-table setup and
-//     teardown run in parallel and never pile up in the global mapping);
+//   * big file-backed chunks (python's 16 MiB data-layer chunks) are one work item each. Two-
+//     phase streaming scanners read them with `pread` in 64 KiB pieces (+ the scanner's window)
+//     into a buffer that stays in L1/L2 and search each piece, carrying the greedy match state
+//     across pieces (exactly one whole-chunk search); other scanners get a private `MapWindow`
+//     of the chunk (map -> scan -> unmap on the worker);
 //   * small chunks (translation-layer runs, mostly single 4 KiB pages scattered over the file)
-//     are batched into rounds of consecutive chunks; inside a round they are grouped by the
-//     4 MiB file window they live in, and each window is one work item (one mmap, dense
-//     sequential faults, one munmap). Hits are buffered per round and emitted in chunk order,
-//     so results keep python's order and an early stop wastes at most one round;
+//     are batched into rounds of consecutive chunks (256 MiB). A round's chunks are sorted by
+//     file range: ranges mapped at several virtual addresses (60% of a Windows kernel's pages)
+//     are read once -- and searched once by two-phase scanners -- with a small `pread` each
+//     (mapping scattered pages serializes on the mm locks). Work items take ~1 MiB of distinct
+//     data. Hits are buffered per round and emitted in chunk order, so results keep python's
+//     order and an early stop wastes at most one round;
 //   * chunks that are not one contiguous span of the backing file are read through the layer.
 // ---------------------------------------------------------------------------------------------
 
-/// Tuning knob (temporary): env override of a constant.
-fn knob(name: &str, default: u64) -> u64 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
 /// Chunks at least this big are a work item of their own.
 const BIG_CHUNK: u64 = 1 << 20;
-/// Small chunks are grouped by file window of this size (log2).
-const WIN_SHIFT: u32 = 22;
+/// Big chunks of streaming scanners are read in pieces of this size.
+const PIECE: u64 = 64 << 10;
+/// Distinct bytes per group work item (about).
+const GROUP_BYTES: u64 = 1 << 20;
+/// Chunks per group work item (about).
+const GROUP_CHUNKS: usize = 4096;
 /// Bytes of small chunks per round (bounds the work wasted by an early stop).
 const ROUND_BYTES: u64 = 256 << 20;
 /// Generic (read-through-the-layer) items carry about this many bytes.
@@ -265,8 +302,8 @@ const NO_FILE: u64 = u64::MAX;
 enum Item {
     /// one chunk, file-backed at `off`
     Big { chunk: u32, off: u64 },
-    /// chunks `idx[a..b]` (ascending), all file-backed inside the file range `[lo, hi)`
-    Group { a: u32, b: u32, lo: u64, hi: u64 },
+    /// chunks `idx[a..b]`, file-backed, sorted by file range
+    Group { a: u32, b: u32 },
     /// chunks `idx[a..b]` (ascending), read through the layer
     Generic { a: u32, b: u32 },
 }
@@ -287,7 +324,9 @@ struct Plan<'a> {
 /// hits omitted; a span starts where the previous one ended).
 struct ItemOut<H> {
     hits: Vec<H>,
-    spans: Vec<(u32, u32)>,
+    /// `(chunk, start, end)`: `hits[start..end]` belong to `chunk` (chunks without hits are
+    /// omitted; ascending chunk order except for `Group` items)
+    spans: Vec<(u32, u32, u32)>,
 }
 
 fn chunk_source<'a>(layer: &'a dyn Layer, c: &Chunk) -> Option<(&'a FileLayer, u64)> {
@@ -338,7 +377,7 @@ fn make_plan(layer: &dyn Layer, chunks: Vec<Chunk>) -> Plan<'_> {
         }
         round_bytes += c.len;
         i += 1;
-        if round_bytes >= knob("RSVOL_SCAN_ROUND", ROUND_BYTES >> 20) << 20 {
+        if round_bytes >= ROUND_BYTES {
             close_round(&mut plan, round_start, i);
             round_start = i;
             round_bytes = 0;
@@ -354,24 +393,27 @@ fn close_round(plan: &mut Plan, start: usize, end: usize) {
         return;
     }
     let first_item = plan.items.len();
-    // file-backed: group by window, ascending chunk index inside each group
-    let mut keyed: Vec<(u64, u32)> = (start..end).filter(|&i| plan.offs[i] != NO_FILE).map(|i| (plan.offs[i] >> knob("RSVOL_SCAN_WIN", WIN_SHIFT as u64), i as u32)).collect();
+    // file-backed: sorted by (file offset, length, chunk) so identical ranges (the same
+    // physical pages mapped at several virtual addresses) are adjacent and read once; items
+    // take up to GROUP_BYTES of distinct data (and GROUP_CHUNKS chunks)
+    let mut keyed: Vec<(u64, u64, u32)> = (start..end).filter(|&i| plan.offs[i] != NO_FILE).map(|i| (plan.offs[i], plan.chunks[i].len, i as u32)).collect();
     keyed.sort_unstable();
     let mut k = 0;
     while k < keyed.len() {
-        let key = keyed[k].0;
         let a = plan.idx.len() as u32;
-        let (mut lo, mut hi) = (u64::MAX, 0u64);
-        while k < keyed.len() && keyed[k].0 == key {
-            let ci = keyed[k].1 as usize;
-            let off = plan.offs[ci];
-            lo = lo.min(off);
-            hi = hi.max(off + plan.chunks[ci].len);
-            plan.idx.push(ci as u32);
-            k += 1;
+        let mut bytes = 0u64;
+        let mut n = 0usize;
+        while k < keyed.len() && bytes < GROUP_BYTES && n < GROUP_CHUNKS {
+            let (off, len, _) = keyed[k];
+            bytes += len;
+            while k < keyed.len() && keyed[k].0 == off && keyed[k].1 == len {
+                plan.idx.push(keyed[k].2);
+                k += 1;
+                n += 1;
+            }
         }
         let b = plan.idx.len() as u32;
-        plan.items.push(Item::Group { a, b, lo, hi });
+        plan.items.push(Item::Group { a, b });
     }
     // not file-backed: consecutive items of ~GENERIC_ITEM_BYTES
     let mut a = plan.idx.len() as u32;
@@ -432,12 +474,18 @@ fn run_item<S: Scanner>(layer: &dyn Layer, scanner: &S, plan: &Plan, item: Item)
     let mut out = ItemOut { hits: Vec::new(), spans: Vec::new() };
     let push_span = |out: &mut ItemOut<S::Hit>, ci: u32| {
         let end = out.hits.len() as u32;
-        let prev = out.spans.last().map(|s| s.1).unwrap_or(0);
+        let prev = out.spans.last().map(|s| s.2).unwrap_or(0);
         if end > prev {
-            out.spans.push((ci, end));
+            out.spans.push((ci, prev, end));
         }
     };
     match item {
+        Item::Big { chunk, off } if scanner.stream_window().is_some() => {
+            let c = &plan.chunks[chunk as usize];
+            let file = plan.file.expect("file-backed item without file");
+            scan_pieces(scanner, file, off, c, PIECE, &mut out.hits);
+            push_span(&mut out, chunk);
+        }
         Item::Big { chunk, off } => {
             let c = &plan.chunks[chunk as usize];
             let file = plan.file.expect("file-backed item without file");
@@ -448,18 +496,10 @@ fn run_item<S: Scanner>(layer: &dyn Layer, scanner: &S, plan: &Plan, item: Item)
             });
             push_span(&mut out, chunk);
         }
-        Item::Group { a, b, lo, hi } => {
+        Item::Group { a, b } => {
             let file = plan.file.expect("file-backed item without file");
-            with_window(file, lo, hi, |win| {
-                for &ci in &plan.idx[a as usize..b as usize] {
-                    let c = &plan.chunks[ci as usize];
-                    let s = (plan.offs[ci as usize] - lo) as usize;
-                    if let Some(data) = win.get(s..s + c.len as usize) {
-                        scanner.scan(data, c.start, &mut out.hits);
-                    }
-                    push_span(&mut out, ci);
-                }
-            });
+            let ids = &plan.idx[a as usize..b as usize];
+            BUF.with(|buf| scan_group(scanner, plan, ids, file, &mut buf.borrow_mut(), &mut out, &push_span));
         }
         Item::Generic { a, b } => {
             for &ci in &plan.idx[a as usize..b as usize] {
@@ -476,9 +516,107 @@ fn run_item<S: Scanner>(layer: &dyn Layer, scanner: &S, plan: &Plan, item: Item)
     out
 }
 
+/// A big chunk read in `piece`-byte pieces with `pread` into a cache-resident buffer (each
+/// piece re-reads the `stream_window() - 1` bytes after it), scanned with
+/// [`Scanner::prescan_piece`] and finished once: exactly `scan(whole chunk)`, but the bytes
+/// never leave L1/L2 and no page tables are built (python: an unreadable chunk has no hits).
+fn scan_pieces<S: Scanner>(scanner: &S, file: &FileLayer, off: u64, c: &Chunk, piece: u64, hits: &mut Vec<S::Hit>) {
+    use std::os::unix::fs::FileExt;
+    let w = scanner.stream_window().unwrap_or(1).max(1) as u64;
+    BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        let cap = (piece + w - 1) as usize;
+        if buf.len() < cap {
+            buf.resize(cap, 0);
+        }
+        let mut rel: Vec<(u64, u32)> = Vec::new();
+        let mut next = 0u64;
+        let mut p = 0u64;
+        while p < c.len {
+            let limit = (p + piece).min(c.len);
+            let end = (limit + w - 1).min(c.len);
+            let n = (end - p) as usize;
+            if file.file().read_exact_at(&mut buf[..n], off + p).is_err() {
+                return;
+            }
+            if next < limit {
+                let from = (next.max(p) - p) as usize;
+                next = p + scanner.prescan_piece(&buf[..n], p, from, (limit - p) as usize, &mut rel) as u64;
+            }
+            p = limit;
+        }
+        if !rel.is_empty() {
+            scanner.finish(&rel, c.start, hits);
+        }
+    });
+}
+
+/// `pread` the file bytes `[off, off+len)` into `buf` (None if unreadable). Small scattered
+/// ranges are read, not mapped: mapping them serializes on the mm locks and pays page-table
+/// setup + teardown per page; a small `pread` lands in L1/L2 right before the search.
+#[inline]
+fn pread<'b>(file: &FileLayer, buf: &'b mut Vec<u8>, off: u64, len: u64) -> Option<&'b [u8]> {
+    use std::os::unix::fs::FileExt;
+    let n = len as usize;
+    if buf.len() < n {
+        buf.resize(n, 0);
+    }
+    file.file().read_exact_at(&mut buf[..n], off).ok()?;
+    Some(&buf[..n])
+}
+
+/// Scan the chunks `ids` (file-backed, sorted by file range): every distinct range is read
+/// once; two-phase scanners also search it once and turn the matches into hits per chunk.
+fn scan_group<S: Scanner>(
+    scanner: &S,
+    plan: &Plan,
+    ids: &[u32],
+    file: &FileLayer,
+    buf: &mut Vec<u8>,
+    out: &mut ItemOut<S::Hit>,
+    push_span: &dyn Fn(&mut ItemOut<S::Hit>, u32),
+) {
+    // distinct ranges: (offset, len) and the ids[k..e] mapped to it
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let mut bounds: Vec<(usize, usize)> = Vec::new();
+    let mut k = 0;
+    while k < ids.len() {
+        let c0 = ids[k] as usize;
+        let (off, len) = (plan.offs[c0], plan.chunks[c0].len);
+        let mut e = k + 1;
+        while e < ids.len() && plan.offs[ids[e] as usize] == off && plan.chunks[ids[e] as usize].len == len {
+            e += 1;
+        }
+        ranges.push((off, len));
+        bounds.push((k, e));
+        k = e;
+    }
+    let mut rel: Vec<(u64, u32)> = Vec::new();
+    let two_phase = scanner.prescan(&[], &mut rel);
+    for (r, &(off, len)) in ranges.iter().enumerate() {
+        let (k, e) = bounds[r];
+        let Some(data) = pread(file, buf, off, len) else { continue };
+        if two_phase {
+            rel.clear();
+            scanner.prescan(data, &mut rel);
+            if !rel.is_empty() {
+                for &ci in &ids[k..e] {
+                    scanner.finish(&rel, plan.chunks[ci as usize].start, &mut out.hits);
+                    push_span(out, ci);
+                }
+            }
+        } else {
+            for &ci in &ids[k..e] {
+                scanner.scan(data, plan.chunks[ci as usize].start, &mut out.hits);
+                push_span(out, ci);
+            }
+        }
+    }
+}
+
 /// Emit the hits of one round in chunk order; false if `f` asked to stop.
 fn emit_round<H, F: FnMut(H) -> bool>(outs: &mut Vec<ItemOut<H>>, f: &mut F) -> bool {
-    if outs.len() == 1 {
+    if outs.len() == 1 && outs[0].spans.windows(2).all(|w| w[0].0 < w[1].0) {
         let o = outs.pop().unwrap();
         for h in o.hits {
             if !f(h) {
@@ -487,31 +625,20 @@ fn emit_round<H, F: FnMut(H) -> bool>(outs: &mut Vec<ItemOut<H>>, f: &mut F) -> 
         }
         return true;
     }
-    // k-way merge by chunk index (each item's spans are ascending)
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
-    let mut iters: Vec<(std::vec::IntoIter<H>, Vec<(u32, u32)>, usize, u32)> = outs.drain(..).map(|o| (o.hits.into_iter(), o.spans, 0usize, 0u32)).collect();
-    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
-    for (k, it) in iters.iter().enumerate() {
-        if let Some(&(ci, _)) = it.1.first() {
-            heap.push(Reverse((ci, k as u32)));
-        }
+    // order all spans of the round by chunk (each chunk is in exactly one item)
+    let mut recs: Vec<(u32, u32, u32, u32)> = Vec::new();
+    for (k, o) in outs.iter().enumerate() {
+        recs.extend(o.spans.iter().map(|&(ci, s, e)| (ci, k as u32, s, e)));
     }
-    while let Some(Reverse((_, k))) = heap.pop() {
-        let it = &mut iters[k as usize];
-        let (_, end) = it.1[it.2];
-        let n = end - it.3;
-        for _ in 0..n {
-            if let Some(h) = it.0.next() {
+    recs.sort_unstable();
+    let mut hits: Vec<Vec<Option<H>>> = outs.drain(..).map(|o| o.hits.into_iter().map(Some).collect()).collect();
+    for (_, k, s, e) in recs {
+        for h in &mut hits[k as usize][s as usize..e as usize] {
+            if let Some(h) = h.take() {
                 if !f(h) {
                     return false;
                 }
             }
-        }
-        it.3 = end;
-        it.2 += 1;
-        if let Some(&(ci, _)) = it.1.get(it.2) {
-            heap.push(Reverse((ci, k)));
         }
     }
     true
@@ -573,18 +700,34 @@ where
         make_plan(layer, chunks)
     };
     let _t = crate::util::trace::span("scan: execute");
-    let lookahead = par::threads() * knob("RSVOL_SCAN_LA", 4) as usize;
+    let lookahead = par::threads() * 4;
     let mut round: Vec<ItemOut<S::Hit>> = Vec::new();
     par::par_map_stream(
         plan.items.len(),
         lookahead,
-        |i| run_item(layer, scanner, &plan, plan.items[i]),
+        |i| {
+            if !crate::util::trace::enabled() {
+                return run_item(layer, scanner, &plan, plan.items[i]);
+            }
+            let t = std::time::Instant::now();
+            let r = run_item(layer, scanner, &plan, plan.items[i]);
+            let ns = t.elapsed().as_nanos() as u64;
+            BUSY.fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+            MAXI.fetch_max(ns, std::sync::atomic::Ordering::Relaxed);
+            r
+        },
         |i, out| {
             round.push(out);
             if plan.round_end[i] { emit_round(&mut round, &mut f) } else { true }
         },
     );
+    if crate::util::trace::enabled() {
+        eprintln!("[trace] scan: {} items, worker busy {:.1} ms total, slowest item {:.2} ms", plan.items.len(), BUSY.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6, MAXI.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6);
+    }
 }
+/// Trace counters: total worker time and the slowest item of the last scan.
+static BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MAXI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Scan several sections of `layer` and collect `(chunk start, hits)`; convenience for tests.
 pub fn chunk_layout(layer: &dyn Layer, chunk: u64, overlap: u64, sections: Option<&[(u64, u64)]>) -> Vec<(u64, u64)> {
@@ -652,6 +795,42 @@ impl Scanner for BytesScanner {
             }
         }
     }
+    fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
+        let mut pos = 0usize;
+        while let Some(i) = find(&data[pos..], &self.needle) {
+            let at = pos + i;
+            if (at as u64) >= self.chunk_size {
+                break;
+            }
+            out.push((at as u64, 0));
+            pos = at + 1;
+            if pos > data.len() {
+                break;
+            }
+        }
+        true
+    }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<u64>) {
+        hits.extend(matches.iter().map(|m| data_offset + m.0));
+    }
+    fn stream_window(&self) -> Option<usize> {
+        if self.needle.is_empty() { None } else { Some(self.needle.len()) }
+    }
+    fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
+        // occurrences may overlap: every start in [from, limit) is independent
+        let cs_limit = self.chunk_size.saturating_sub(base).min(limit as u64) as usize;
+        let mut pos = from;
+        while pos < cs_limit {
+            match find(&data[pos..], &self.needle) {
+                Some(i) if pos + i < cs_limit => {
+                    out.push((base + (pos + i) as u64, 0));
+                    pos += i + 1;
+                }
+                _ => break,
+            }
+        }
+        limit
+    }
 }
 
 /// Whether the AVX2 search kernels may be used (runtime detection; `RSVOL_NO_SIMD=1` forces the
@@ -687,6 +866,7 @@ pub struct MultiStringScanner {
     pair: Option<Box<[u64; 1024]>>,
     teddy: Option<Teddy>,
     min_len: usize,
+    max_len: usize,
     chunk_size: u64,
     overlap: u64,
 }
@@ -871,7 +1051,8 @@ impl MultiStringScanner {
         };
         let min_len = if min_len == usize::MAX { 0 } else { min_len };
         let teddy = if min_len > 0 { Some(Teddy::new(&patterns, min_len.min(3))) } else { None };
-        MultiStringScanner { patterns, nodes, first, pair, teddy, min_len, chunk_size: DEFAULT_CHUNK_SIZE, overlap: DEFAULT_OVERLAP }
+        let max_len = patterns.iter().map(|p| p.len()).max().unwrap_or(0);
+        MultiStringScanner { patterns, nodes, first, pair, teddy, min_len, max_len, chunk_size: DEFAULT_CHUNK_SIZE, overlap: DEFAULT_OVERLAP }
     }
 
     /// Pattern by index (hits carry the index).
@@ -993,6 +1174,31 @@ impl Scanner for MultiStringScanner {
             hits.push((data_offset + off as u64, pi));
             true
         });
+    }
+    fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
+        self.scan(data, 0, out);
+        true
+    }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        hits.extend(matches.iter().map(|&(o, p)| (data_offset + o, p)));
+    }
+    fn stream_window(&self) -> Option<usize> {
+        Some(self.max_len.max(1))
+    }
+    fn prescan_piece(&self, data: &[u8], base: u64, from: usize, limit: usize, out: &mut Vec<(u64, u32)>) -> usize {
+        // the greedy search resumes at `from`; the scan of the whole chunk would be in the
+        // same state there
+        let cs_limit = self.chunk_size.saturating_sub(base).min(limit as u64) as usize;
+        let mut next = limit;
+        if from < cs_limit {
+            self.search_limit(&data[from..], cs_limit - from, simd_enabled(), |o, pi| {
+                out.push((base + (from + o) as u64, pi));
+                let len = self.patterns[pi as usize].len();
+                next = next.max(from + o + len);
+                true
+            });
+        }
+        next
     }
 }
 
@@ -1145,6 +1351,48 @@ mod tests {
                     });
                     assert_eq!(got, want, "trial {trial} simd {simd} max_start {max_start} patterns {patterns:?}");
                 }
+            }
+        }
+    }
+
+    /// Reading a chunk in pieces ([`scan_pieces`]) == scanning it whole, for any piece size.
+    #[test]
+    fn streaming_pieces_match_whole_chunk() {
+        let mut rng = Rng(0xdeadbeef12345);
+        let alpha: [u8; 5] = [b'a', b'b', b'c', 0, b'P'];
+        let n = 20000usize;
+        let data: Vec<u8> = (0..n).map(|_| alpha[rng.below(alpha.len() as u64) as usize]).collect();
+        let path = std::env::temp_dir().join(format!("rsvol-scan-pieces-{}.bin", std::process::id()));
+        std::fs::write(&path, &data).unwrap();
+        let file = FileLayer::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for trial in 0..60 {
+            let np = 1 + rng.below(6) as usize;
+            let patterns: Vec<Vec<u8>> = (0..np)
+                .map(|_| {
+                    let l = 1 + rng.below(if trial % 2 == 0 { 3 } else { 7 }) as usize;
+                    (0..l).map(|_| alpha[rng.below(alpha.len() as u64) as usize]).collect()
+                })
+                .collect();
+            let start = rng.below(1000);
+            let len = 1 + rng.below((n as u64 - start).min(12000));
+            let cs = 1 + rng.below(len + 10);
+            let c = Chunk { start: 0x1000_0000 + start, len, src: Src::Layer };
+            let whole = &data[start as usize..(start + len) as usize];
+            let mut m = MultiStringScanner::new(&patterns);
+            m.chunk_size = cs;
+            let bs = BytesScanner { needle: patterns[0].clone(), chunk_size: cs, overlap: 0 };
+            let mut want_m = Vec::new();
+            m.scan(whole, c.start, &mut want_m);
+            let mut want_b = Vec::new();
+            bs.scan(whole, c.start, &mut want_b);
+            for piece in [1u64, 2, 3, 5, 64, 4096] {
+                let mut got = Vec::new();
+                scan_pieces(&m, &file, start, &c, piece, &mut got);
+                assert_eq!(got, want_m, "multi trial {trial} piece {piece} patterns {patterns:?} cs {cs}");
+                let mut got = Vec::new();
+                scan_pieces(&bs, &file, start, &c, piece, &mut got);
+                assert_eq!(got, want_b, "bytes trial {trial} piece {piece}");
             }
         }
     }
@@ -1450,6 +1698,22 @@ mod tests {
         let total: u64 = chunks.iter().map(|c| c.len).sum();
         let small = chunks.iter().filter(|c| c.len <= 0x1000).count();
         eprintln!("build_chunks: {:.1} ms, {} chunks ({} <= 4K), {:.1} MB", best * 1e3, chunks.len(), small, total as f64 / 1e6);
+        {
+            let mut pages: Vec<u64> = Vec::new();
+            for c in &chunks {
+                if let Src::Lower(m) = c.src {
+                    let mut p = m & !0xfff;
+                    while p < m + c.len {
+                        pages.push(p);
+                        p += 0x1000;
+                    }
+                }
+            }
+            let n = pages.len();
+            pages.sort_unstable();
+            pages.dedup();
+            eprintln!("physical pages touched: {n} ({} distinct, {:.1} MB)", pages.len(), pages.len() as f64 * 4096.0 / 1e6);
+        }
         let ps = MultiStringScanner::new(&[b"Pro\xe3".as_ref(), b"Proc"]);
         let mut best = f64::MAX;
         let mut n = 0;
