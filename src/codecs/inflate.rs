@@ -741,9 +741,295 @@ pub fn decompress_sized(data: &[u8], size: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Test data and a small raw-DEFLATE writer shared by the inflate, zlib and gzip tests.
+#[cfg(test)]
+pub(crate) mod test_util {
+    use super::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA, PRECODE_ORDER};
+
+    /// 1000 bytes of random words (python `random.Random(7)`), used for the real
+    /// zlib / GNU gzip vectors.
+    pub(crate) const TEXT: &[u8] = b"0x struct type the kernel { kernel 0x } the { _EPROCESS the kernel type type kernel \
+        _EPROCESS kernel { type the } kernel _EPROCESS } the } } type the _EPROCESS the { \
+        struct offset type struct { kernel } offset { struct kernel } } _EPROCESS 0x kernel { \
+        kernel } the } _EPROCESS pointer { type 0x pointer } pointer 0x offset _EPROCESS struct \
+        _EPROCESS kernel } offset { pointer 0x pointer offset } kernel kernel { type struct 0x \
+        struct pointer type the kernel { } 0x 0x 0x } pointer } pointer kernel kernel offset \
+        pointer kernel the offset } pointer offset type 0x the pointer 0x struct } kernel \
+        pointer the _EPROCESS offset struct _EPROCESS type type pointer kernel struct pointer \
+        type { offset struct type { offset type 0x type _EPROCESS struct kernel struct struct \
+        _EPROCESS _EPROCESS the pointer } struct offset offset the struct type { 0x } } 0x \
+        struct { } the pointer { type type type type kernel pointer type the _EPROCESS kernel \
+        _EPROCESS pointer struct kernel 0x } the kernel the } struct { ke";
+
+    /// LSB-first bit writer (DEFLATE bit order).
+    pub(crate) struct BitW {
+        pub(crate) out: Vec<u8>,
+        acc: u64,
+        n: u32,
+    }
+
+    impl BitW {
+        pub(crate) fn new() -> BitW {
+            BitW { out: Vec::new(), acc: 0, n: 0 }
+        }
+
+        pub(crate) fn bits(&mut self, v: u32, n: u32) {
+            self.acc |= (v as u64 & ((1u64 << n) - 1)) << self.n;
+            self.n += n;
+            while self.n >= 8 {
+                self.out.push(self.acc as u8);
+                self.acc >>= 8;
+                self.n -= 8;
+            }
+        }
+
+        /// A Huffman code (sent most significant bit first).
+        pub(crate) fn code(&mut self, code: u32, len: u32) {
+            self.bits(code.reverse_bits() >> (32 - len), len);
+        }
+
+        pub(crate) fn align(&mut self) {
+            if !self.n.is_multiple_of(8) {
+                self.bits(0, 8 - self.n % 8);
+            }
+        }
+
+        pub(crate) fn finish(mut self) -> Vec<u8> {
+            self.align();
+            self.out
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum Tok {
+        Lit(u8),
+        /// (length, distance)
+        Match(usize, usize),
+    }
+
+    /// Reference LZ77 expansion.
+    pub(crate) fn expand(toks: &[Tok]) -> Vec<u8> {
+        let mut v: Vec<u8> = Vec::new();
+        for &t in toks {
+            match t {
+                Tok::Lit(b) => v.push(b),
+                Tok::Match(len, dist) => {
+                    for _ in 0..len {
+                        v.push(v[v.len() - dist]);
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Canonical Huffman codes for `lens`.
+    pub(crate) fn canonical(lens: &[u8]) -> Vec<u32> {
+        let mut count = [0u32; 16];
+        for &l in lens {
+            count[l as usize] += 1;
+        }
+        count[0] = 0;
+        let mut next = [0u32; 16];
+        let mut code = 0;
+        for l in 1..16 {
+            code = (code + count[l - 1]) << 1;
+            next[l] = code;
+        }
+        lens.iter()
+            .map(|&l| {
+                if l == 0 {
+                    0
+                } else {
+                    let c = next[l as usize];
+                    next[l as usize] += 1;
+                    c
+                }
+            })
+            .collect()
+    }
+
+    /// (symbol index from 0, extra bit count, extra value) for a match length / distance.
+    pub(crate) fn len_code(len: usize) -> (usize, u32, u32) {
+        let i = LEN_BASE.iter().rposition(|&b| b as usize <= len).unwrap();
+        (i, LEN_EXTRA[i] as u32, (len - LEN_BASE[i] as usize) as u32)
+    }
+
+    pub(crate) fn dist_code(dist: usize) -> (usize, u32, u32) {
+        let i = DIST_BASE.iter().rposition(|&b| b as usize <= dist).unwrap();
+        (i, DIST_EXTRA[i] as u32, (dist - DIST_BASE[i] as usize) as u32)
+    }
+
+    /// Fixed-code lengths (288 literal/length, 32 distance).
+    pub(crate) fn fixed_lens() -> (Vec<u8>, Vec<u8>) {
+        let mut ll = vec![8u8; 288];
+        ll[144..256].fill(9);
+        ll[256..280].fill(7);
+        (ll, vec![5u8; 32])
+    }
+
+    /// Complete codes over all 286 literal/length and 30 distance symbols.
+    pub(crate) fn full_lens() -> (Vec<u8>, Vec<u8>) {
+        // 226 * 2^-8 + 60 * 2^-9 = 1 and 2 * 2^-4 + 28 * 2^-5 = 1.
+        let mut ll = vec![8u8; 286];
+        ll[226..].fill(9);
+        let mut dl = vec![5u8; 30];
+        dl[..2].fill(4);
+        (ll, dl)
+    }
+
+    /// Writes `toks` + end-of-block with the codes `ll` / `dl`.
+    pub(crate) fn put_tokens(w: &mut BitW, toks: &[Tok], ll: &[u8], dl: &[u8]) {
+        let lc = canonical(ll);
+        let dc = canonical(dl);
+        for &t in toks {
+            match t {
+                Tok::Lit(b) => w.code(lc[b as usize], ll[b as usize] as u32),
+                Tok::Match(len, dist) => {
+                    let (s, eb, ev) = len_code(len);
+                    w.code(lc[257 + s], ll[257 + s] as u32);
+                    w.bits(ev, eb);
+                    let (d, deb, dev) = dist_code(dist);
+                    w.code(dc[d], dl[d] as u32);
+                    w.bits(dev, deb);
+                }
+            }
+        }
+        w.code(lc[256], ll[256] as u32);
+    }
+
+    pub(crate) fn stored_block(w: &mut BitW, data: &[u8], last: bool) {
+        assert!(data.len() <= 0xFFFF);
+        w.bits(last as u32, 1);
+        w.bits(0, 2);
+        w.align();
+        w.bits(data.len() as u32, 16);
+        w.bits(!data.len() as u32 & 0xFFFF, 16);
+        w.out.extend_from_slice(data);
+    }
+
+    pub(crate) fn fixed_block(w: &mut BitW, toks: &[Tok], last: bool) {
+        w.bits(last as u32, 1);
+        w.bits(1, 2);
+        let (ll, dl) = fixed_lens();
+        put_tokens(w, toks, &ll, &dl);
+    }
+
+    /// Dynamic block header: HLIT/HDIST/HCLEN, the code-length code (symbols 0..15, 4 bits
+    /// each, complete) and the code lengths `ll` ++ `dl`, one symbol per length.
+    pub(crate) fn dynamic_header(w: &mut BitW, ll: &[u8], dl: &[u8], last: bool) {
+        w.bits(last as u32, 1);
+        w.bits(2, 2);
+        w.bits((ll.len() - 257) as u32, 5);
+        w.bits((dl.len() - 1) as u32, 5);
+        w.bits(19 - 4, 4);
+        for &sym in &PRECODE_ORDER {
+            w.bits(if sym < 16 { 4 } else { 0 }, 3);
+        }
+        for &l in ll.iter().chain(dl) {
+            w.code(l as u32, 4);
+        }
+    }
+
+    pub(crate) fn dynamic_block(w: &mut BitW, toks: &[Tok], ll: &[u8], dl: &[u8], last: bool) {
+        dynamic_header(w, ll, dl, last);
+        put_tokens(w, toks, ll, dl);
+    }
+
+    pub(crate) fn xorshift(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Random literals and matches (distances within the output so far and <= 32768).
+    pub(crate) fn random_tokens(n: usize, seed: u64, pos0: usize) -> Vec<Tok> {
+        let mut s = seed | 1;
+        let mut pos = pos0;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            let r = xorshift(&mut s);
+            if pos == 0 || r.is_multiple_of(3) {
+                v.push(Tok::Lit((r >> 8) as u8));
+                pos += 1;
+            } else {
+                let len = match r % 7 {
+                    0 => 258,
+                    1 => 3 + (r >> 20) as usize % 30,
+                    _ => 3 + (r >> 20) as usize % 256,
+                };
+                let far = pos.min(32768);
+                let dist = match (r >> 40) % 4 {
+                    0 => 1 + (r >> 44) as usize % far.min(16),
+                    1 => far,
+                    _ => 1 + (r >> 44) as usize % far,
+                };
+                v.push(Tok::Match(len, dist));
+                pos += len;
+            }
+        }
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_util::*;
     use super::*;
+
+    // raw deflate (python zlib) of TEXT: level 1 Z_FIXED (fixed block), levels 6, 9 (dynamic)
+    const RAW_TEXT: [&[u8]; 3] = [
+        &[
+            0x33, 0xa8, 0x50, 0x28, 0x2e, 0x29, 0x2a, 0x4d, 0x2e, 0x51, 0x28, 0xa9, 0x2c, 0x48, 0x55, 0x28, 0xc9, 0x48, 0x55, 0xc8,
+            0x4e, 0x2d, 0xca, 0x4b, 0xcd, 0x51, 0xa8, 0x86, 0x31, 0x0c, 0x2a, 0x14, 0x6a, 0xc1, 0x12, 0xd5, 0x0a, 0xf1, 0xae, 0x01,
+            0x41, 0xfe, 0xce, 0xae, 0xc1, 0xc1, 0xc8, 0x0a, 0x21, 0x1a, 0x41, 0xba, 0xa1, 0x3a, 0x11, 0xaa, 0xe0, 0x46, 0xc1, 0x0d,
+            0xaf, 0xc5, 0x54, 0x04, 0x31, 0xbc, 0x16, 0x64, 0x09, 0xcc, 0x09, 0x08, 0x13, 0x40, 0x0e, 0xaa, 0x86, 0x39, 0x31, 0x3f,
+            0x2d, 0xad, 0x38, 0x15, 0xea, 0x52, 0xa8, 0xab, 0xe1, 0xae, 0xac, 0x55, 0x80, 0xca, 0xc2, 0x55, 0x43, 0x2d, 0x07, 0x19,
+            0x8c, 0x30, 0x0f, 0xe8, 0x19, 0xb8, 0xa3, 0xe0, 0x0a, 0x40, 0x96, 0x20, 0x2b, 0x2a, 0xc8, 0xcf, 0xcc, 0x2b, 0x49, 0x2d,
+            0x02, 0x5a, 0x0c, 0x76, 0x11, 0x50, 0x0f, 0x4c, 0xa4, 0x16, 0xce, 0x02, 0x0a, 0x42, 0x2d, 0x44, 0x18, 0x0e, 0x75, 0x13,
+            0x42, 0x00, 0x6e, 0x03, 0xdc, 0x6d, 0x30, 0x83, 0x90, 0xcc, 0x84, 0xca, 0xc1, 0x43, 0x06, 0xee, 0x3e, 0xb0, 0xe5, 0x50,
+            0x33, 0x81, 0xea, 0xa1, 0x2c, 0x98, 0x09, 0xf0, 0xc0, 0x82, 0xab, 0xaf, 0x55, 0x00, 0xaa, 0x82, 0x20, 0x84, 0x3b, 0x11,
+            0x2c, 0xa8, 0x3a, 0x28, 0x05, 0xb5, 0x15, 0x66, 0x1a, 0x54, 0x14, 0x14, 0x12, 0x70, 0xf7, 0xc0, 0xe4, 0xa0, 0x02, 0xb0,
+            0xb0, 0x00, 0xa9, 0x81, 0x49, 0x21, 0x9c, 0x05, 0x77, 0x3e, 0x4c, 0x0a, 0xa4, 0x0c, 0x11, 0x12, 0x50, 0x33, 0x30, 0x42,
+            0x08, 0xe2, 0x0b, 0x50, 0xbc, 0xc3, 0xf4, 0x41, 0x5d, 0x82, 0xcd, 0xb7, 0xd5, 0x30, 0xb7, 0x41, 0x25, 0xc1, 0x9a, 0xe1,
+            0x82, 0x70, 0xf7, 0x81, 0x4c, 0x43, 0xd8, 0x0c, 0x55, 0x8b, 0x6a, 0x2c, 0x86, 0x3b, 0x10, 0xea, 0x91, 0xbd, 0x57, 0x0b,
+            0x0b, 0x74, 0xa8, 0xf3, 0x61, 0x21, 0x01, 0xf4, 0x1a, 0xaa, 0x13, 0x80, 0xe1, 0x00, 0x4a, 0x67, 0x88, 0xe0, 0xa8, 0x06,
+            0xf2, 0x90, 0x4d, 0x82, 0x26, 0x25, 0x84, 0x77, 0xc1, 0x2c, 0xa8, 0xa3, 0x60, 0x5e, 0x87, 0xc8, 0xa2, 0x84, 0x1b, 0x54,
+            0x05, 0xc2, 0x79, 0x30, 0xb5, 0xa8, 0xde, 0x02, 0xdb, 0x0f, 0xb2, 0x0f, 0xaa, 0x1e, 0xc4, 0x84, 0x3b, 0x1e, 0x94, 0x47,
+            0x00,
+        ],
+        &[
+            0x6d, 0x53, 0x6d, 0x0a, 0x83, 0x30, 0x0c, 0xbd, 0x4a, 0x8f, 0xe0, 0x1d, 0x86, 0xbf, 0x37, 0xb6, 0x03, 0xec, 0xc7, 0xa8,
+            0x38, 0x36, 0xa6, 0x68, 0x07, 0x8e, 0x92, 0xbb, 0xcf, 0x6a, 0x92, 0xe6, 0x43, 0x90, 0x5a, 0x92, 0x97, 0x97, 0x97, 0x8f,
+            0x36, 0x4b, 0x98, 0xd3, 0xf4, 0x7d, 0xa4, 0x90, 0x7e, 0x63, 0x0c, 0xa9, 0x8f, 0xe1, 0x15, 0xa7, 0x4f, 0x7c, 0x87, 0x4c,
+            0x97, 0x66, 0x09, 0xb0, 0x39, 0x72, 0xb8, 0xb7, 0x97, 0xeb, 0xf9, 0xd4, 0xde, 0x6e, 0x12, 0xb8, 0x07, 0x96, 0x03, 0x0d,
+            0x15, 0xc5, 0x54, 0x4c, 0x0e, 0x1e, 0x04, 0xe8, 0x80, 0x8a, 0xd2, 0x79, 0x32, 0x49, 0x1c, 0xba, 0x6e, 0x8e, 0xa8, 0x14,
+            0x4d, 0xac, 0x12, 0xc8, 0xcb, 0x68, 0x76, 0x80, 0xe0, 0x5b, 0x8b, 0xb1, 0xf5, 0x51, 0xfe, 0x0a, 0x1a, 0x87, 0xe7, 0x27,
+            0xc5, 0x89, 0x74, 0xaf, 0x31, 0x64, 0x01, 0xbe, 0xad, 0x46, 0x4c, 0x58, 0xe3, 0x30, 0xb1, 0xab, 0x5f, 0x68, 0x13, 0xe1,
+            0x74, 0x45, 0x1f, 0x77, 0x46, 0x37, 0x0d, 0x39, 0x1b, 0x9e, 0x13, 0x85, 0xf9, 0x79, 0x41, 0x41, 0xed, 0x1f, 0x1c, 0x28,
+            0xd6, 0xf4, 0x98, 0xd5, 0x38, 0x0b, 0x1f, 0xeb, 0x31, 0x02, 0xa9, 0x17, 0x05, 0x23, 0xca, 0x40, 0x59, 0x2c, 0x9f, 0xf5,
+            0xa9, 0x39, 0x22, 0x87, 0xeb, 0x50, 0x5d, 0x1e, 0xa3, 0xe4, 0xa8, 0xda, 0x6c, 0x68, 0xb4, 0x91, 0xf5, 0x95, 0xbf, 0x1b,
+            0x8a, 0xa6, 0x75, 0x3a, 0xf4, 0xc6, 0xd5, 0xe6, 0xe9, 0xcd, 0xa3, 0x4c, 0x7d, 0x34, 0x12, 0xb6, 0x96, 0x83, 0x68, 0x47,
+            0xc6, 0xb5, 0x32, 0xab, 0x64, 0x0e, 0xdb, 0x32, 0xbf, 0xff, 0xee, 0xb5, 0x10, 0x56, 0x97, 0xc5, 0x6f, 0x54, 0xcc, 0x11,
+            0xe4, 0x1b, 0xf9, 0x03,
+        ],
+        &[
+            0x6d, 0x53, 0x6d, 0x0a, 0x83, 0x30, 0x0c, 0xbd, 0x4a, 0x8f, 0xe0, 0x1d, 0x86, 0xbf, 0x37, 0xb6, 0x03, 0xec, 0xc7, 0xa8,
+            0x38, 0x36, 0xa6, 0x68, 0x07, 0x8e, 0x92, 0xbb, 0xcf, 0x6a, 0x92, 0xe6, 0x43, 0x90, 0x5a, 0x92, 0x97, 0x97, 0x97, 0x8f,
+            0x36, 0x4b, 0x98, 0xd3, 0xf4, 0x7d, 0xa4, 0x90, 0x7e, 0x63, 0x0c, 0xa9, 0x8f, 0xe1, 0x15, 0xa7, 0x4f, 0x7c, 0x87, 0x4c,
+            0x97, 0x66, 0x09, 0xb0, 0x39, 0x72, 0xb8, 0xb7, 0x97, 0xeb, 0xf9, 0xd4, 0xde, 0x6e, 0x12, 0xb8, 0x07, 0x96, 0x03, 0x0d,
+            0x15, 0xc5, 0x54, 0x4c, 0x0e, 0x1e, 0x04, 0xe8, 0x80, 0x8a, 0xd2, 0x79, 0x32, 0x49, 0x1c, 0xba, 0x6e, 0x8e, 0xa8, 0x14,
+            0x4d, 0xac, 0x12, 0xc8, 0xcb, 0x68, 0x76, 0x80, 0xe0, 0x5b, 0x8b, 0xb1, 0xf5, 0x51, 0xfe, 0x0a, 0x1a, 0x87, 0xe7, 0x27,
+            0xc5, 0x89, 0x74, 0xaf, 0x31, 0x64, 0x01, 0xbe, 0xad, 0x46, 0x4c, 0x58, 0xe3, 0x30, 0xb1, 0xab, 0x5f, 0x68, 0x13, 0xe1,
+            0x74, 0x45, 0x1f, 0x77, 0x46, 0x37, 0x0d, 0x39, 0x1b, 0x9e, 0x13, 0x85, 0xf9, 0x79, 0x41, 0x41, 0xed, 0x1f, 0x1c, 0x28,
+            0xd6, 0xf4, 0x98, 0xd5, 0x38, 0x0b, 0x1f, 0xeb, 0x31, 0x02, 0xa9, 0x17, 0x05, 0x23, 0xca, 0x40, 0x59, 0x2c, 0x9f, 0xf5,
+            0xa9, 0x39, 0x22, 0x87, 0xeb, 0x50, 0x5d, 0x1e, 0xa3, 0xe4, 0xa8, 0xda, 0x6c, 0x68, 0xb4, 0x91, 0xf5, 0x95, 0xbf, 0x1b,
+            0x8a, 0xa6, 0x75, 0x3a, 0xf4, 0xc6, 0xd5, 0xe6, 0xe9, 0xcd, 0xa3, 0x4c, 0x7d, 0x34, 0x12, 0xb6, 0x96, 0x83, 0x68, 0x47,
+            0xc6, 0xb5, 0x32, 0xab, 0x64, 0x0e, 0xdb, 0x32, 0xbf, 0xff, 0xee, 0xb5, 0x10, 0x56, 0x97, 0xc5, 0x6f, 0x54, 0xcc, 0x11,
+            0xe4, 0x1b, 0xf9, 0x03,
+        ],
+    ];
 
     #[test]
     fn codecs_inflate_stored_fixed_dynamic() {
@@ -754,6 +1040,372 @@ mod tests {
         assert_eq!(decompress(&fixed).unwrap(), b"hello hello hello");
         // Empty fixed block.
         assert_eq!(decompress(&[0x03, 0x00]).unwrap(), b"");
+        // Real zlib output: a fixed block (Z_FIXED) and dynamic blocks.
+        assert_eq!(RAW_TEXT[0][0] >> 1 & 3, 1);
+        assert_eq!(RAW_TEXT[1][0] >> 1 & 3, 2);
+        for raw in RAW_TEXT {
+            assert_eq!(decompress(raw).unwrap(), TEXT);
+            assert_eq!(decompress_sized(raw, TEXT.len()).unwrap(), TEXT);
+        }
+        // All three block types in one stream (a stored block after a Huffman block starts
+        // at the next byte boundary).
+        let toks = random_tokens(3000, 1, 0);
+        let mut want = expand(&toks);
+        let mut w = BitW::new();
+        fixed_block(&mut w, &toks, false);
+        stored_block(&mut w, b"stored after fixed", false);
+        want.extend_from_slice(b"stored after fixed");
+        let more = random_tokens(3000, 2, want.len());
+        let (ll, dl) = full_lens();
+        dynamic_block(&mut w, &more, &ll, &dl, false);
+        let mut all: Vec<Tok> = want.iter().map(|&b| Tok::Lit(b)).collect();
+        all.extend_from_slice(&more);
+        want = expand(&all);
+        stored_block(&mut w, b"", false);
+        fixed_block(&mut w, &[], true);
+        let stream = w.finish();
+        assert_eq!(decompress(&stream).unwrap(), want);
+        // The consumed length is reported exactly (trailing data is left alone).
+        let mut v = Vec::new();
+        let mut padded = stream.clone();
+        padded.extend_from_slice(b"TRAILER");
+        assert_eq!(inflate_into(&padded, &mut v).unwrap(), stream.len());
+        assert_eq!(v, want);
+    }
+
+    #[test]
+    fn codecs_inflate_stored_over_64k() {
+        let mut s = 5u64;
+        let data: Vec<u8> = (0..200_000).map(|_| xorshift(&mut s) as u8).collect();
+        let mut w = BitW::new();
+        let chunks: Vec<&[u8]> = data.chunks(0xFFFF).collect();
+        for (i, c) in chunks.iter().enumerate() {
+            stored_block(&mut w, c, i + 1 == chunks.len());
+        }
+        let stream = w.finish();
+        assert_eq!(decompress(&stream).unwrap(), data);
+        assert_eq!(decompress_sized(&stream, data.len()).unwrap(), data);
+        // A single 65535-byte stored block is the maximum; LEN/NLEN must agree.
+        let mut bad = stream.clone();
+        bad[3] ^= 1; // NLEN of the first block
+        assert!(decompress(&bad).is_err());
+    }
+
+    #[test]
+    fn codecs_inflate_all_byte_values() {
+        let lits: Vec<Tok> = (0..=255u8).chain((0..=255u8).rev()).map(Tok::Lit).collect();
+        let want = expand(&lits);
+        let (ll, dl) = full_lens();
+        for kind in 0..3 {
+            let mut w = BitW::new();
+            match kind {
+                0 => fixed_block(&mut w, &lits, true),
+                1 => dynamic_block(&mut w, &lits, &ll, &dl, true),
+                _ => stored_block(&mut w, &want, true),
+            }
+            assert_eq!(decompress(&w.finish()).unwrap(), want, "block kind {kind}");
+        }
+    }
+
+    #[test]
+    fn codecs_inflate_max_distance() {
+        let mut s = 77u64;
+        let mut toks: Vec<Tok> = (0..32768).map(|_| Tok::Lit(xorshift(&mut s) as u8)).collect();
+        toks.extend([Tok::Match(258, 32768), Tok::Match(3, 32768), Tok::Match(258, 1), Tok::Match(100, 32768)]);
+        let want = expand(&toks);
+        let (ll, dl) = full_lens();
+        let mut w = BitW::new();
+        fixed_block(&mut w, &toks, false);
+        dynamic_block(&mut w, &[Tok::Match(258, 32768), Tok::Match(77, 32767)], &ll, &dl, true);
+        let mut all = toks.clone();
+        all.extend([Tok::Match(258, 32768), Tok::Match(77, 32767)]);
+        let stream = w.finish();
+        assert_eq!(decompress(&stream).unwrap(), expand(&all));
+        assert_eq!(&decompress(&stream).unwrap()[..want.len()], &want[..]);
+        // One byte short of the window: distance 32768 reaches before the stream start.
+        let mut w = BitW::new();
+        let mut short = toks[..32767].to_vec();
+        short.push(Tok::Match(3, 32768));
+        fixed_block(&mut w, &short, true);
+        assert!(decompress(&w.finish()).is_err());
+        // Back-references never reach bytes that were already in the output vector.
+        let mut w = BitW::new();
+        fixed_block(&mut w, &[Tok::Lit(b'a'), Tok::Match(3, 2)], true);
+        let mut v = b"prefix".to_vec();
+        assert!(inflate_into(&w.finish(), &mut v).is_err());
+    }
+
+    #[test]
+    fn codecs_inflate_long_codes() {
+        // Complete codes with lengths 1..=15 (16 symbols each): the longest literal/length
+        // and distance codes go through the second-level tables.
+        let lit_syms = [b'a' as usize, 256, b'b' as usize, 257, b'c' as usize, 265, 285, b'd' as usize, 270, b'e' as usize,
+            275, b'f' as usize, 280, b'g' as usize, 284, b'h' as usize];
+        let dist_syms = [0usize, 3, 4, 10, 15, 20, 25, 29, 1, 2, 5, 6, 7, 8, 9, 11];
+        let lens: Vec<u8> = (1..=15).chain([15]).collect();
+        let mut ll = vec![0u8; 286];
+        let mut dl = vec![0u8; 30];
+        for i in 0..16 {
+            ll[lit_syms[i]] = lens[i];
+            dl[dist_syms[i]] = lens[i];
+        }
+        // Tokens using every symbol, in particular the 15-bit ones.
+        let lit_bytes = *b"abcdefgh";
+        let len_of = |sym: usize| LEN_BASE[sym - 257] as usize;
+        let dist_of = |sym: usize| DIST_BASE[sym] as usize;
+        let mut toks: Vec<Tok> = Vec::new();
+        let mut pos = 0usize;
+        let mut s = 3u64;
+        while pos < 40_000 {
+            let r = xorshift(&mut s);
+            if pos < 30_000 || r.is_multiple_of(2) {
+                toks.push(Tok::Lit(lit_bytes[(r % 8) as usize]));
+                pos += 1;
+            } else {
+                let lsym = [257usize, 265, 270, 275, 280, 284, 285][(r >> 8) as usize % 7];
+                let d = dist_syms[(r >> 16) as usize % 16];
+                let dist = dist_of(d);
+                if dist > pos {
+                    continue;
+                }
+                let len = len_of(lsym);
+                toks.push(Tok::Match(len, dist));
+                pos += len;
+            }
+        }
+        let want = expand(&toks);
+        let mut w = BitW::new();
+        dynamic_block(&mut w, &toks, &ll, &dl, true);
+        let stream = w.finish();
+        assert_eq!(decompress(&stream).unwrap(), want);
+        assert_eq!(decompress_sized(&stream, want.len()).unwrap(), want);
+    }
+
+    #[test]
+    fn codecs_inflate_random_streams() {
+        // Long streams through the fast loop (output growth, 64 KiB checksum chunks) and
+        // the careful tail, in fixed, dynamic and stored blocks.
+        for seed in 1..6u64 {
+            let (ll, dl) = full_lens();
+            let mut w = BitW::new();
+            let mut all: Vec<Tok> = Vec::new();
+            for b in 0..4 {
+                let prev = expand(&all).len();
+                let toks = random_tokens(20_000, seed * 10 + b, prev);
+                match (seed + b) % 3 {
+                    0 => fixed_block(&mut w, &toks, b == 3),
+                    1 => dynamic_block(&mut w, &toks, &ll, &dl, b == 3),
+                    _ => {
+                        // The matches may reach into earlier blocks.
+                        let mut full = all.clone();
+                        full.extend_from_slice(&toks);
+                        let bytes = expand(&full).split_off(prev);
+                        for c in bytes.chunks(0xFFFF) {
+                            stored_block(&mut w, c, false);
+                        }
+                        if b == 3 {
+                            fixed_block(&mut w, &[], true);
+                        }
+                    }
+                }
+                all.extend_from_slice(&toks);
+            }
+            let want = expand(&all);
+            let stream = w.finish();
+            assert_eq!(decompress(&stream).unwrap(), want, "seed {seed}");
+            assert_eq!(decompress_sized(&stream, want.len()).unwrap(), want, "seed {seed}");
+        }
+    }
+
+    /// Streams with invalid codes or headers; each must fail (and not panic).
+    #[test]
+    fn codecs_inflate_invalid_codes() {
+        // (expected error, stream)
+        let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+        let (ll, dl) = full_lens();
+        let hdr = |f: &dyn Fn(&mut BitW)| {
+            let mut w = BitW::new();
+            f(&mut w);
+            // Enough zero bits so a decoder never runs out while parsing.
+            w.bits(0, 32);
+            w.finish()
+        };
+        // Code-length code: over-subscribed (19 codes of length 1) and incomplete (one code).
+        cases.push((
+            "over-subscribed",
+            hdr(&|w| {
+                w.bits(1, 1);
+                w.bits(2, 2);
+                w.bits(0, 5);
+                w.bits(0, 5);
+                w.bits(15, 4);
+                for _ in 0..19 {
+                    w.bits(1, 3);
+                }
+            }),
+        ));
+        cases.push((
+            "incomplete",
+            hdr(&|w| {
+                w.bits(1, 1);
+                w.bits(2, 2);
+                w.bits(0, 5);
+                w.bits(0, 5);
+                w.bits(0, 4);
+                for i in 0..4 {
+                    w.bits(if i == 3 { 1 } else { 0 }, 3);
+                }
+            }),
+        ));
+        // Literal/length code over-subscribed (three codes of length 1).
+        let mut over = vec![0u8; 257];
+        over[0] = 1;
+        over[1] = 1;
+        over[256] = 1;
+        cases.push(("over-subscribed", hdr(&|w| dynamic_header(w, &over, &[1], true))));
+        // Incomplete (two codes of length 2).
+        let mut inc = vec![0u8; 257];
+        inc[0] = 2;
+        inc[256] = 2;
+        cases.push(("incomplete", hdr(&|w| dynamic_header(w, &inc, &[1], true))));
+        // No end-of-block code.
+        let mut no_eob = ll.clone();
+        no_eob[256] = 0;
+        no_eob[255] = 7; // keep it complete otherwise irrelevant
+        cases.push(("missing end-of-block", hdr(&|w| dynamic_header(w, &no_eob, &dl, true))));
+        // Distance code over-subscribed / incomplete.
+        cases.push(("over-subscribed", hdr(&|w| dynamic_header(w, &ll, &[1, 1, 1], true))));
+        cases.push(("incomplete", hdr(&|w| dynamic_header(w, &ll, &[2, 2], true))));
+        // HLIT 287 / 288 and HDIST 31 / 32 are out of range.
+        cases.push((
+            "too many length or distance symbols",
+            hdr(&|w| {
+                w.bits(1, 1);
+                w.bits(2, 2);
+                w.bits(30, 5);
+                w.bits(0, 5);
+            }),
+        ));
+        cases.push((
+            "too many length or distance symbols",
+            hdr(&|w| {
+                w.bits(1, 1);
+                w.bits(2, 2);
+                w.bits(0, 5);
+                w.bits(30, 5);
+            }),
+        ));
+        // Repeat code 16 as the first length, and a repeat running past HLIT + HDIST.
+        cases.push((
+            "repeat with no previous length",
+            hdr(&|w| {
+                w.bits(1, 1);
+                w.bits(2, 2);
+                w.bits(0, 5);
+                w.bits(0, 5);
+                w.bits(15, 4);
+                // Code-length code: 16 and 17 of length 1.
+                for &sym in &PRECODE_ORDER {
+                    w.bits(if sym == 16 || sym == 17 { 1 } else { 0 }, 3);
+                }
+                w.code(0, 1); // symbol 16
+            }),
+        ));
+        cases.push((
+            "too many code lengths",
+            hdr(&|w| {
+                w.bits(1, 1);
+                w.bits(2, 2);
+                w.bits(0, 5);
+                w.bits(0, 5);
+                w.bits(15, 4);
+                // Code-length code: 18 (length 1) and 8 (length 1).
+                for &sym in &PRECODE_ORDER {
+                    w.bits(if sym == 18 || sym == 8 { 1 } else { 0 }, 3);
+                }
+                for _ in 0..3 {
+                    w.code(1, 1); // symbol 18
+                    w.bits(127, 7); // 138 zeros
+                }
+            }),
+        ));
+        // Fixed block: literal/length symbols 286/287 and distance symbols 30/31 are invalid.
+        {
+            let (fl, fd) = fixed_lens();
+            let lc = canonical(&fl);
+            let dc = canonical(&fd);
+            for sym in [286usize, 287] {
+                let mut w = BitW::new();
+                w.bits(1, 1);
+                w.bits(1, 2);
+                w.code(lc[sym], fl[sym] as u32);
+                cases.push(("invalid literal/length code", w.finish()));
+            }
+            for sym in [30usize, 31] {
+                // Three literals, then a match whose distance symbol is 30/31.
+                let mut w2 = BitW::new();
+                w2.bits(1, 1);
+                w2.bits(1, 2);
+                for b in 1..=3u32 {
+                    w2.code(lc[b as usize], 8);
+                }
+                w2.code(lc[257], fl[257] as u32);
+                w2.code(dc[sym], 5);
+                w2.bits(0, 16);
+                cases.push(("invalid distance code", w2.finish()));
+            }
+        }
+        // Reserved block type.
+        cases.push(("invalid block type", vec![0x07, 0, 0, 0]));
+        // Each fails at the intended check (not by running out of input).
+        for (what, v) in &cases {
+            match decompress(v) {
+                Ok(_) => panic!("{what}: accepted"),
+                Err(e) => assert!(e.to_string().contains(what), "{what}: got {e}"),
+            }
+        }
+        // Allowed incomplete codes: a single literal/length or distance code of length 1.
+        let mut one = vec![0u8; 257];
+        one[256] = 1;
+        let mut w = BitW::new();
+        dynamic_block(&mut w, &[], &one, &[1], true);
+        assert_eq!(decompress(&w.finish()).unwrap(), b"");
+        // ... and a distance code with no codes at all when no match is used.
+        let mut w = BitW::new();
+        dynamic_block(&mut w, &[Tok::Lit(b'x')], &ll, &[0], true);
+        assert_eq!(decompress(&w.finish()).unwrap(), b"x");
+    }
+
+    #[test]
+    fn codecs_inflate_truncation() {
+        let (ll, dl) = full_lens();
+        let toks = random_tokens(400, 9, 0);
+        let mut w = BitW::new();
+        fixed_block(&mut w, &toks[..200], false);
+        stored_block(&mut w, b"0123456789", false);
+        dynamic_block(&mut w, &toks[200..], &ll, &dl, true);
+        let stream = w.finish();
+        assert!(decompress(&stream).is_ok());
+        for n in 0..stream.len() {
+            assert!(decompress(&stream[..n]).is_err(), "truncated at {n}");
+        }
+        for raw in RAW_TEXT {
+            for n in 0..raw.len() {
+                assert!(decompress(&raw[..n]).is_err(), "truncated at {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn codecs_inflate_sized() {
+        let raw = RAW_TEXT[2];
+        assert_eq!(decompress_sized(raw, TEXT.len()).unwrap(), TEXT);
+        assert!(decompress_sized(raw, TEXT.len() - 1).is_err());
+        assert!(decompress_sized(raw, TEXT.len() + 1).is_err());
+        // Absurd sizes (e.g. from a corrupt ZIP directory) fail without allocating.
+        assert!(decompress_sized(raw, 1 << 50).is_err());
+        assert!(decompress_sized(raw, usize::MAX).is_err());
+        assert!(decompress_sized(&[], 0).is_err());
     }
 
     #[test]
@@ -761,16 +1413,30 @@ mod tests {
         assert!(decompress(&[0x07]).is_err()); // reserved block type
         assert!(decompress(&[0x01, 0x03, 0x00, 0xfc, 0xfe, b'a']).is_err()); // bad NLEN
         assert!(decompress(&[0xcb, 0x48]).is_err()); // truncated
+        assert!(decompress(&[]).is_err());
         let mut s = 0x2545_F491_4F6C_DD1Du64;
         for n in 0..2000usize {
-            let mut v = vec![0u8; n % 97 + 1];
-            for b in v.iter_mut() {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                *b = s as u8;
+            let v: Vec<u8> = (0..n % 97 + 1).map(|_| xorshift(&mut s) as u8).collect();
+            let _ = decompress(&v);
+        }
+        // Bit flips and truncations of valid streams (all code paths), no panics.
+        let (ll, dl) = full_lens();
+        let mut w = BitW::new();
+        let toks = random_tokens(3000, 4, 0);
+        dynamic_block(&mut w, &toks, &ll, &dl, false);
+        fixed_block(&mut w, &random_tokens(2000, 5, expand(&toks).len()), true);
+        let streams = [w.finish(), RAW_TEXT[0].to_vec(), RAW_TEXT[2].to_vec()];
+        for round in 0..3000 {
+            let mut v = streams[round % 3].clone();
+            for _ in 0..1 + round % 3 {
+                let i = (xorshift(&mut s) as usize) % v.len();
+                v[i] ^= 1 << (xorshift(&mut s) % 8);
+            }
+            if round % 7 == 0 {
+                v.truncate((xorshift(&mut s) as usize) % v.len());
             }
             let _ = decompress(&v);
+            let _ = decompress_sized(&v, (xorshift(&mut s) % 100_000) as usize);
         }
     }
 }

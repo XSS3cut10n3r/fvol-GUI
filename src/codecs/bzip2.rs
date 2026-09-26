@@ -109,7 +109,7 @@ impl<'a> BitReader<'a> {
     /// A reader positioned at bit `pos` of `data`.
     fn at_bit(data: &'a [u8], pos: usize) -> Self {
         let mut br = BitReader::new(data, pos / 8);
-        if pos % 8 != 0 {
+        if !pos.is_multiple_of(8) {
             br.bits((pos % 8) as u32);
         }
         br
@@ -478,7 +478,7 @@ impl Scratch {
         }
         // Coding tables (delta-coded lengths).
         let mut lens = [0u8; MAX_ALPHA];
-        for t in 0..n_groups {
+        for table in self.tables.iter_mut().take(n_groups) {
             let mut curr = br.bits(5) as i32;
             for l in lens.iter_mut().take(alpha) {
                 loop {
@@ -499,7 +499,7 @@ impl Scratch {
             if br.overrun() {
                 return Err(Fail::Truncated);
             }
-            if let Err(e) = self.tables[t].build(&lens[..alpha]) {
+            if let Err(e) = table.build(&lens[..alpha]) {
                 return Err(br.fail(e));
             }
         }
@@ -607,7 +607,7 @@ impl Scratch {
     /// Inverse BWT + RLE1 of the block in `ll8`, appended to `out`; checks the block CRC.
     fn finish(&mut self, info: &BlockInfo, out: &mut Vec<u8>) -> Result<()> {
         let n = info.n;
-        debug_assert!(n >= 1 && n <= MAX_BLOCK && info.orig_ptr < n);
+        debug_assert!((1..=MAX_BLOCK).contains(&n) && info.orig_ptr < n);
         // SAFETY: ll8 holds n decoded bytes whose histogram is `counts` (so every tt slot
         // below n is written exactly once with an index < n); buffer capacities are fixed at
         // construction (tt: MAX_BLOCK + 1, pre: MAX_BLOCK + PAD).
@@ -1696,7 +1696,7 @@ mod tests {
             }
             _ => {
                 while v.len() < len {
-                    if xorshift(&mut s) % 4 == 0 {
+                    if xorshift(&mut s).is_multiple_of(4) {
                         v.extend((0..4096).map(|_| xorshift(&mut s) as u8 & 7));
                     } else {
                         v.extend(std::iter::repeat_n(0, 4096));
@@ -1947,7 +1947,7 @@ mod tests {
             assert_same(&v, &text);
         }
         // Level digits outside 1..9 are not bzip2.
-        for bad in [b'0', b':', b'a'] {
+        for bad in *b"0:a" {
             let mut v = LEVEL9.to_vec();
             v[3] = bad;
             assert!(decompress(&v).is_err());
