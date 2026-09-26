@@ -20,6 +20,7 @@
 //!   each primed with the preceding 32 KiB as dictionary. The output depends only on the input
 //!   and the level, never on the number of threads.
 
+use super::huffman_enc::huffman_lengths;
 use super::zlib::adler32;
 
 /// Size of the independently (parallel) compressed pieces of large inputs.
@@ -38,12 +39,12 @@ const SENTINEL: u32 = 0u32.wrapping_sub(WSIZE as u32 + 1);
 const HASH4_BITS: u32 = 16;
 const HASH3_BITS: u32 = 14;
 
-/// Block size limits (tokens / input bytes) and the statistics check interval.
-const MAX_BLOCK_TOKENS: usize = 1 << 16;
-const TOKEN_SLACK: usize = 4;
+/// Block size limits (input bytes) and the block-split check interval.
 const SOFT_MAX_BLOCK_LEN: usize = 300_000;
 const MIN_BLOCK_LEN: usize = 10_000;
-const OBS_INTERVAL: usize = 512;
+const CHECK_INTERVAL: usize = 512;
+/// Observations (literals + matches) needed before a block-split evaluation.
+const MIN_NEW_OBS: u64 = 512;
 const NUM_OBS: usize = 10;
 
 /// Search parameters of one compression level.
@@ -73,6 +74,14 @@ fn params(level: u32) -> Params {
         8 => (128, 258, 2, 64, 258),
         _ => (256, 258, 2, 96, 258),
     };
+    #[cfg(test)]
+    if let Ok(s) = std::env::var("RSVOL_DEFLATE_PARAMS") {
+        // Benchmark-only override: "depth,nice,lazy,good,max_insert".
+        let v: Vec<usize> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        if v.len() == 5 {
+            return Params { depth: v[0] as u32, nice: v[1], lazy: v[2] as u8, good: v[3], max_insert: v[4] };
+        }
+    }
     Params { depth, nice, lazy, good, max_insert }
 }
 
@@ -186,140 +195,19 @@ unsafe fn extend(b: &[u8], a: usize, p: usize, mut i: usize, max: usize) -> usiz
     i
 }
 
-/// Number of bytes equal to `b[pos - 1]` starting at `pos` (up to `end`).
-fn run_length(b: &[u8], pos: usize, end: usize) -> usize {
-    let byte = b[pos - 1];
-    let pat = u64::from_ne_bytes([byte; 8]);
-    let mut i = pos;
-    while i + 8 <= end {
-        // SAFETY: i + 8 <= end <= b.len().
-        let x = unsafe { ld64(b, i) } ^ pat;
-        if x != 0 {
-            return i - pos + (x.trailing_zeros() >> 3) as usize;
-        }
-        i += 8;
-    }
-    while i < end && b[i] == byte {
-        i += 1;
-    }
-    i - pos
+/// Match finder statistics (build with RUSTFLAGS="--cfg deflate_stats"): finds, chain
+/// candidates, inserts, literals, matches, matched bytes, blocks.
+#[cfg(deflate_stats)]
+pub(crate) static STATS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+#[inline(always)]
+fn stat(_i: usize, _n: u64) {
+    #[cfg(deflate_stats)]
+    STATS[_i].fetch_add(_n, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------------------
 // Huffman code construction
 // ---------------------------------------------------------------------------------------
-
-/// In-place minimum-redundancy code lengths (Moffat & Katajainen): `a` holds the symbol
-/// weights sorted ascending (n >= 2) and is overwritten with their code lengths.
-fn minimum_redundancy(a: &mut [u32]) {
-    let n = a.len();
-    debug_assert!(n >= 2);
-    // Phase 1: build the tree; internal node weights, then parent pointers.
-    a[0] += a[1];
-    let mut root = 0usize;
-    let mut leaf = 2usize;
-    for next in 1..n - 1 {
-        if leaf >= n || a[root] < a[leaf] {
-            a[next] = a[root];
-            a[root] = next as u32;
-            root += 1;
-        } else {
-            a[next] = a[leaf];
-            leaf += 1;
-        }
-        if leaf >= n || (root < next && a[root] < a[leaf]) {
-            a[next] += a[root];
-            a[root] = next as u32;
-            root += 1;
-        } else {
-            a[next] += a[leaf];
-            leaf += 1;
-        }
-    }
-    // Phase 2: internal node depths.
-    a[n - 2] = 0;
-    for next in (0..n - 2).rev() {
-        a[next] = a[a[next] as usize] + 1;
-    }
-    // Phase 3: leaf depths.
-    let mut avail = 1usize;
-    let mut used = 0usize;
-    let mut depth = 0u32;
-    let mut root = n as isize - 2;
-    let mut next = n as isize - 1;
-    while avail > 0 {
-        while root >= 0 && a[root as usize] == depth {
-            used += 1;
-            root -= 1;
-        }
-        while avail > used {
-            a[next as usize] = depth;
-            next -= 1;
-            avail -= 1;
-        }
-        avail = 2 * used;
-        depth += 1;
-        used = 0;
-    }
-}
-
-/// Length-limited (`max_len` <= 15) Huffman code lengths for `freqs` (unused symbols get 0).
-/// The code is always complete with at least two symbols (a dummy symbol is added if fewer
-/// are used), which every inflater accepts.
-fn huffman_lengths(freqs: &[u32], max_len: u32, lens: &mut [u8]) {
-    let n = freqs.len();
-    debug_assert!(n <= 320 && lens.len() >= n && n >= 2);
-    lens[..n].fill(0);
-    let mut keys = [0u64; 320];
-    let mut cnt = 0;
-    for (s, &f) in freqs.iter().enumerate() {
-        if f != 0 {
-            keys[cnt] = ((f as u64) << 16) | s as u64;
-            cnt += 1;
-        }
-    }
-    if cnt < 2 {
-        let s = if cnt == 1 { (keys[0] & 0xFFFF) as usize } else { 0 };
-        lens[s] = 1;
-        lens[if s == 0 { 1 } else { 0 }] = 1;
-        return;
-    }
-    let keys = &mut keys[..cnt];
-    keys.sort_unstable();
-    let mut a = [0u32; 320];
-    for (x, k) in a.iter_mut().zip(keys.iter()) {
-        *x = (k >> 16) as u32;
-    }
-    minimum_redundancy(&mut a[..cnt]);
-    // Count leaves per length, clamping over-long codes, then repair the Kraft sum.
-    let mut bl = [0u32; 16];
-    for &d in &a[..cnt] {
-        bl[d.min(max_len) as usize] += 1;
-    }
-    let mut total: u32 = 0;
-    for l in 1..=max_len {
-        total += bl[l as usize] << (max_len - l);
-    }
-    while total > 1 << max_len {
-        bl[max_len as usize] -= 1;
-        for l in (1..max_len as usize).rev() {
-            if bl[l] != 0 {
-                bl[l] -= 1;
-                bl[l + 1] += 2;
-                break;
-            }
-        }
-        total -= 1;
-    }
-    // Most frequent symbols (end of `keys`) get the shortest codes.
-    let mut i = cnt;
-    for l in 1..=max_len as usize {
-        for _ in 0..bl[l] {
-            i -= 1;
-            lens[(keys[i] & 0xFFFF) as usize] = l as u8;
-        }
-    }
-}
 
 /// Canonical codes for `lens`, bit-reversed for LSB-first output.
 fn canonical_codes(lens: &[u8], codes: &mut [u16]) {
@@ -381,8 +269,10 @@ impl BitWriter {
     /// Stores the whole bytes of the bit buffer; afterwards `count < 8`.
     #[inline(always)]
     fn flush(&mut self) {
-        debug_assert!(self.pos + 8 <= self.buf.len() && self.count < 64);
-        self.buf[self.pos..self.pos + 8].copy_from_slice(&self.bits.to_le_bytes());
+        assert!(self.pos + 8 <= self.buf.len() && self.count < 64);
+        // SAFETY: checked above (the assert is almost free and never fails: reserve() keeps
+        // 16 bytes of slack past every block's worst case).
+        unsafe { (self.buf.as_mut_ptr().add(self.pos) as *mut u64).write_unaligned(self.bits.to_le()) };
         let nb = self.count >> 3;
         self.pos += nb as usize;
         self.bits >>= nb << 3;
@@ -420,31 +310,256 @@ impl BitWriter {
 // The compressor
 // ---------------------------------------------------------------------------------------
 
-/// Reusable DEFLATE compressor state (hash tables, token buffer). One per thread; about
-/// 1 MiB of memory. Create with [`Compressor::new`] and call [`Compressor::compress`] any
+/// Sequence budget per block: a block ends before it could overflow (one check interval
+/// adds at most (CHECK_INTERVAL + MAX_MATCH) / 3 sequences; long runs are emitted within the
+/// remaining room).
+const MAX_BLOCK_SEQS: usize = 1 << 17;
+const SEQ_HEADROOM: usize = (CHECK_INTERVAL + 2 * MAX_MATCH) / MIN_MATCH + 64;
+
+/// A sequence is a literal run (bytes taken from the input) followed by a match:
+/// `lit_run | len << 32 | dist << 48`.
+#[inline(always)]
+fn seq(lit_run: u32, len: usize, dist: usize) -> u64 {
+    lit_run as u64 | ((len as u64) << 32) | ((dist as u64) << 48)
+}
+
+#[inline(always)]
+fn unseq(s: u64) -> (usize, usize, usize) {
+    (s as u32 as usize, (s >> 32) as u16 as usize, (s >> 48) as usize)
+}
+
+/// Reusable DEFLATE compressor state (hash tables, sequence buffer). One per thread; about
+/// 1.5 MiB of memory. Create with [`Compressor::new`] and call [`Compressor::compress`] any
 /// number of times.
 pub struct Compressor {
     level: u32,
     p: Params,
-    shift4: u32,
-    shift3: u32,
     head4: Vec<u32>,
     head3: Vec<u32>,
-    prev: Vec<u16>,
-    toks: Vec<u32>,
-    lit_freq: [u32; 288],
-    dist_freq: [u32; 32],
+    /// prev[p & WMASK] = the previous position with the same 4-byte hash as p.
+    prev: Vec<u32>,
+    /// Sequence buffer (MAX_BLOCK_SEQS entries).
+    seqs: Vec<u64>,
+}
+
+/// The match finder's tables as raw pointers plus the hash shifts: a `Copy` handle that
+/// lives in registers in the parse loop (LLVM cannot prove that stores into the tables do
+/// not alias the fields of a `&mut Compressor`, so going through `self` reloads everything).
+#[derive(Clone, Copy)]
+struct Mf {
+    h4: *mut u32,
+    h3: *mut u32,
+    prev: *mut u32,
+    s4: u32,
+    s3: u32,
+}
+
+impl Mf {
+    #[inline(always)]
+    fn hash4(&self, v: u32) -> usize {
+        (v.wrapping_mul(0x1E35_A7BD) >> self.s4) as usize
+    }
+
+    #[inline(always)]
+    fn hash3(&self, v: u32) -> usize {
+        ((v << 8).wrapping_mul(0x9E37_79B1) >> self.s3) as usize
+    }
+
+    /// Inserts positions `p..to` (those with fewer than 4 bytes left are skipped).
+    ///
+    /// # Safety
+    /// The tables are alive and sized for the shifts (see [`Compressor::reset`]).
+    #[inline(always)]
+    unsafe fn insert_range(self, buf: &[u8], mut p: usize, to: usize) {
+        let to = to.min(buf.len().saturating_sub(MIN_LOOKAHEAD - 1));
+        stat(2, to.saturating_sub(p) as u64);
+        while p < to {
+            // SAFETY: p + 4 <= buf.len(); hashes are < table lengths; p & WMASK < WSIZE.
+            unsafe {
+                let v = ld32(buf, p);
+                let (h4, h3) = (self.hash4(v), self.hash3(v));
+                *self.prev.add(p & WMASK) = *self.h4.add(h4);
+                *self.h4.add(h4) = p as u32;
+                *self.h3.add(h3) = p as u32;
+            }
+            p += 1;
+        }
+    }
+
+    /// Inserts `pos` and searches for the longest match longer than `best_len` (the hash-3
+    /// candidate first when `best_len < 3`). Returns (len, dist); len <= best_len: none.
+    ///
+    /// # Safety
+    /// As [`Mf::insert_range`]; `pos + max_len <= buf.len()`, `max_len >= MIN_LOOKAHEAD`,
+    /// `nice <= max_len`.
+    #[inline(always)]
+    unsafe fn find(
+        self,
+        buf: &[u8],
+        pos: usize,
+        max_len: usize,
+        nice: usize,
+        mut depth: u32,
+        best_len: usize,
+    ) -> (usize, usize) {
+        debug_assert!(max_len >= MIN_LOOKAHEAD && pos + max_len <= buf.len() && nice <= max_len);
+        stat(0, 1);
+        // SAFETY: pos + 4 <= buf.len().
+        let cur = unsafe { ld32(buf, pos) };
+        let (h4, h3) = (self.hash4(cur), self.hash3(cur));
+        // SAFETY: hash values are < table lengths; pos & WMASK < WSIZE.
+        let (mut cand, cand3) = unsafe {
+            let c4 = *self.h4.add(h4);
+            *self.h4.add(h4) = pos as u32;
+            *self.prev.add(pos & WMASK) = c4;
+            let c3 = *self.h3.add(h3);
+            *self.h3.add(h3) = pos as u32;
+            (c4, c3)
+        };
+        let mut best = best_len;
+        let mut best_dist = 0usize;
+        if best < MIN_MATCH {
+            let d3 = (pos as u32).wrapping_sub(cand3);
+            // SAFETY: cand3 < pos, so cand3 + 4 <= pos + 3 < buf.len().
+            if d3.wrapping_sub(1) < MAX_DIST3 && (unsafe { ld32(buf, cand3 as usize) } ^ cur) & 0x00FF_FFFF == 0 {
+                best = MIN_MATCH;
+                best_dist = d3 as usize;
+            }
+        }
+        // Chain candidates must beat `t` (>= 3: the chain finds 4-byte matches).
+        let mut t = best.max(MIN_MATCH);
+        if t >= max_len {
+            return (best, best_dist);
+        }
+        // SAFETY: t < max_len, so pos + t + 1 <= buf.len().
+        let mut tail = unsafe { ld32(buf, pos + t - 3) };
+        loop {
+            let dist = (pos as u32).wrapping_sub(cand);
+            if dist.wrapping_sub(1) >= WSIZE as u32 {
+                break;
+            }
+            let c = cand as usize;
+            stat(1, 1);
+            // SAFETY: c < pos and t < max_len, so c + t + 1 <= pos + max_len <= buf.len().
+            unsafe {
+                if ld32(buf, c + t - 3) == tail && ld32(buf, c) == cur {
+                    let len = extend(buf, c, pos, 4, max_len);
+                    if len > t {
+                        best = len;
+                        best_dist = dist as usize;
+                        if len >= nice {
+                            break;
+                        }
+                        t = len;
+                        tail = ld32(buf, pos + t - 3);
+                    }
+                }
+            }
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+            // SAFETY: c & WMASK < WSIZE.
+            let next = unsafe { *self.prev.add(c & WMASK) };
+            // Links only go backwards; a link overwritten by a newer position (at exactly
+            // 32 KiB distance) or the sentinel ends the walk.
+            if next >= cand {
+                break;
+            }
+            cand = next;
+        }
+        (best, best_dist)
+    }
+}
+
+/// Block-split statistics (8 literal classes by top 3 bits, 2 match-length classes) of the
+/// block so far, updated every CHECK_INTERVAL input bytes.
+struct SplitStats {
     obs: [u32; NUM_OBS],
-    new_obs: [u32; NUM_OBS],
     num_obs: u32,
+    /// Observations not yet compared with the block (evaluated once there are enough).
+    new: [u32; NUM_OBS],
     num_new: u32,
+    /// Input before `obs_pos` has been observed; sequence `obs_seq` (the first not fully
+    /// observed one) starts at `obs_seq_pos`.
+    obs_seq: usize,
+    obs_seq_pos: usize,
+    obs_pos: usize,
+    /// Position of the next check.
     next_check: usize,
 }
 
-/// A literal is `byte`; a match is `(len << 16) | dist` (len >= 3, so `tok >> 16 != 0`).
-#[inline(always)]
-fn match_tok(len: usize, dist: usize) -> u32 {
-    ((len as u32) << 16) | dist as u32
+impl SplitStats {
+    fn new(pos: usize) -> SplitStats {
+        SplitStats {
+            obs: [0; NUM_OBS],
+            num_obs: 0,
+            new: [0; NUM_OBS],
+            num_new: 0,
+            obs_seq: 0,
+            obs_seq_pos: pos,
+            obs_pos: pos,
+            next_check: pos + CHECK_INTERVAL,
+        }
+    }
+
+    /// Should the block (`seqs` + a pending literal run, `block_start..pos`) end at `pos`?
+    fn should_end(&mut self, buf: &[u8], seqs: &[u64], block_start: usize, pos: usize) -> bool {
+        let block_len = pos - block_start;
+        if block_len >= SOFT_MAX_BLOCK_LEN || seqs.len() >= MAX_BLOCK_SEQS - SEQ_HEADROOM {
+            return true;
+        }
+        self.next_check = pos + CHECK_INTERVAL;
+        // Observe the input since the last check.
+        let mut new = self.new;
+        let from = self.obs_pos;
+        let count_lits = |new: &mut [u32; NUM_OBS], a: usize, b: usize| {
+            let a = a.max(from);
+            if a < b {
+                for &x in &buf[a..b] {
+                    new[(x >> 5) as usize] += 1;
+                }
+            }
+        };
+        let mut q = self.obs_seq_pos;
+        for &s in &seqs[self.obs_seq..] {
+            let (lr, len, _) = unseq(s);
+            count_lits(&mut new, q, q + lr);
+            q += lr;
+            new[8 + (len >= 9) as usize] += 1;
+            q += len;
+        }
+        count_lits(&mut new, q, pos);
+        self.obs_seq = seqs.len();
+        self.obs_seq_pos = q;
+        self.obs_pos = pos;
+        let n_new: u64 = new.iter().map(|&x| x as u64).sum();
+        if n_new < MIN_NEW_OBS {
+            self.new = new;
+            self.num_new = n_new as u32;
+            return false;
+        }
+        self.new = [0; NUM_OBS];
+        self.num_new = 0;
+        let n_old = self.num_obs as u64;
+        if n_old > 0 && n_new > 0 && block_len >= MIN_BLOCK_LEN {
+            // L1 distance between the observation distributions of the block so far and of
+            // the latest interval; long blocks split more readily.
+            let mut delta = 0u64;
+            for i in 0..NUM_OBS {
+                delta += (new[i] as u64 * n_old).abs_diff(self.obs[i] as u64 * n_new);
+            }
+            let cutoff = n_new * n_old * 200 / 512;
+            if delta + (block_len as u64 / 4096) * n_old >= cutoff {
+                return true;
+            }
+        }
+        for i in 0..NUM_OBS {
+            self.obs[i] += new[i];
+        }
+        self.num_obs += n_new as u32;
+        false
+    }
 }
 
 impl Compressor {
@@ -452,23 +567,7 @@ impl Compressor {
     /// are treated as 9).
     pub fn new(level: u32) -> Compressor {
         let level = level.min(9);
-        Compressor {
-            level,
-            p: params(level),
-            shift4: 32 - HASH4_BITS,
-            shift3: 32 - HASH3_BITS,
-            head4: Vec::new(),
-            head3: Vec::new(),
-            prev: Vec::new(),
-            toks: Vec::new(),
-            lit_freq: [0; 288],
-            dist_freq: [0; 32],
-            obs: [0; NUM_OBS],
-            new_obs: [0; NUM_OBS],
-            num_obs: 0,
-            num_new: 0,
-            next_check: 0,
-        }
+        Compressor { level, p: params(level), head4: Vec::new(), head3: Vec::new(), prev: Vec::new(), seqs: Vec::new() }
     }
 
     /// The compression level.
@@ -514,40 +613,12 @@ impl Compressor {
         *out = bw.finish();
     }
 
-    fn compress_segment(&mut self, buf: &[u8], start: usize, last: bool, bw: &mut BitWriter) {
-        if self.level == 0 {
-            write_stored(bw, &buf[start..], last);
-            return;
-        }
-        self.reset(buf.len() - start);
-        let end = buf.len();
-        // Prime the hash tables with the dictionary.
-        let dict_end = start.min(end.saturating_sub(MIN_LOOKAHEAD - 1));
-        for p in 0..dict_end {
-            // SAFETY: p + 4 <= end.
-            unsafe { self.insert(buf, p) };
-        }
-        let mut pos = start;
-        let mut block_start = start;
-        self.begin_block();
-        while pos < end {
-            if self.toks.len() >= self.next_check && self.end_block_check(pos - block_start) {
-                self.flush_block(bw, buf, block_start, pos, false);
-                block_start = pos;
-                self.begin_block();
-            }
-            pos = self.parse_step(buf, pos, end);
-        }
-        self.flush_block(bw, buf, block_start, end, last);
-    }
-
-    fn reset(&mut self, len: usize) {
+    /// Sizes and clears the tables for an input of `len` bytes; returns the table handle.
+    fn reset(&mut self, len: usize) -> Mf {
         // Small inputs get small hash tables (cheap to clear).
         let need = (len.max(1) as u64 * 2).next_power_of_two().trailing_zeros();
         let b4 = need.clamp(10, HASH4_BITS);
         let b3 = need.clamp(10, HASH3_BITS);
-        self.shift4 = 32 - b4;
-        self.shift3 = 32 - b3;
         if self.head4.len() < 1 << b4 {
             self.head4.resize(1 << b4, SENTINEL);
         }
@@ -557,343 +628,154 @@ impl Compressor {
         self.head4[..1 << b4].fill(SENTINEL);
         self.head3[..1 << b3].fill(SENTINEL);
         if self.prev.len() < WSIZE {
-            self.prev.resize(WSIZE, 0);
+            self.prev.resize(WSIZE, SENTINEL);
         }
-        if self.toks.capacity() < MAX_BLOCK_TOKENS {
-            self.toks.reserve_exact(MAX_BLOCK_TOKENS - self.toks.len());
+        let want = (len / MIN_MATCH + SEQ_HEADROOM + 64).min(MAX_BLOCK_SEQS);
+        if self.seqs.len() < want {
+            self.seqs.resize(want, 0);
         }
-    }
-
-    #[inline(always)]
-    fn hash4(&self, v: u32) -> usize {
-        (v.wrapping_mul(0x1E35_A7BD) >> self.shift4) as usize
-    }
-
-    #[inline(always)]
-    fn hash3(&self, v: u32) -> usize {
-        ((v << 8).wrapping_mul(0x9E37_79B1) >> self.shift3) as usize
-    }
-
-    /// Inserts position `p` into the hash tables.
-    ///
-    /// # Safety
-    /// `p + 4 <= buf.len()`.
-    #[inline(always)]
-    unsafe fn insert(&mut self, buf: &[u8], p: usize) {
-        // SAFETY: caller guarantees p + 4 <= buf.len().
-        let v = unsafe { ld32(buf, p) };
-        let h4 = self.hash4(v);
-        let h3 = self.hash3(v);
-        // SAFETY: hash values are < 1 << bits <= table length; p & WMASK < WSIZE.
-        unsafe {
-            let old = *self.head4.get_unchecked(h4);
-            *self.head4.get_unchecked_mut(h4) = p as u32;
-            let d = (p as u32).wrapping_sub(old);
-            *self.prev.get_unchecked_mut(p & WMASK) = if d <= WSIZE as u32 { d as u16 } else { 0 };
-            *self.head3.get_unchecked_mut(h3) = p as u32;
+        Mf {
+            h4: self.head4.as_mut_ptr(),
+            h3: self.head3.as_mut_ptr(),
+            prev: self.prev.as_mut_ptr(),
+            s4: 32 - b4,
+            s3: 32 - b3,
         }
     }
 
-    /// Inserts `pos` and searches for the longest match longer than `best_len` (hash-3
-    /// candidate first when `best_len < 3`). Returns (len, dist); len <= best_len means none.
-    ///
-    /// # Safety
-    /// `pos + max_len <= buf.len()` and `max_len >= MIN_LOOKAHEAD`.
-    #[inline(always)]
-    unsafe fn find(&mut self, buf: &[u8], pos: usize, max_len: usize, depth: u32, best_len: usize) -> (usize, usize) {
-        debug_assert!(max_len >= MIN_LOOKAHEAD && pos + max_len <= buf.len());
-        // SAFETY: pos + 4 <= buf.len().
-        let cur = unsafe { ld32(buf, pos) };
-        let h4 = self.hash4(cur);
-        let h3 = self.hash3(cur);
-        // SAFETY: hash values are < table length.
-        let (cand4, cand3) = unsafe {
-            let c4 = *self.head4.get_unchecked(h4);
-            *self.head4.get_unchecked_mut(h4) = pos as u32;
-            let d = (pos as u32).wrapping_sub(c4);
-            *self.prev.get_unchecked_mut(pos & WMASK) = if d <= WSIZE as u32 { d as u16 } else { 0 };
-            let c3 = *self.head3.get_unchecked(h3);
-            *self.head3.get_unchecked_mut(h3) = pos as u32;
-            (c4, c3)
-        };
-        let mut best = best_len;
-        let mut best_dist = 0usize;
-        if best < MIN_MATCH {
-            let d3 = (pos as u32).wrapping_sub(cand3);
-            // SAFETY: cand3 < pos, so cand3 + 4 <= pos + 3 < buf.len().
-            if d3 != 0 && d3 <= MAX_DIST3 && (unsafe { ld32(buf, cand3 as usize) } ^ cur) & 0x00FF_FFFF == 0 {
-                best = MIN_MATCH;
-                best_dist = d3 as usize;
-            }
+    fn compress_segment(&mut self, buf: &[u8], start: usize, last: bool, bw: &mut BitWriter) {
+        if self.level == 0 {
+            write_stored(bw, &buf[start..], last);
+            return;
         }
-        // Chain candidates must beat `t` (>= 3: the chain finds 4-byte matches).
-        let mut t = best.max(MIN_MATCH);
-        if t >= max_len {
-            return (best, best_dist);
-        }
-        let nice = self.p.nice.min(max_len);
-        // SAFETY: t < max_len, so pos + t + 1 <= buf.len().
-        let mut tail = unsafe { ld32(buf, pos + t - 3) };
-        let mut cand = cand4;
-        let mut depth = depth;
-        loop {
-            let dist = (pos as u32).wrapping_sub(cand);
-            if dist.wrapping_sub(1) >= WSIZE as u32 {
-                break;
-            }
-            let c = cand as usize;
-            // SAFETY: c < pos and t < max_len, so c + t + 1 <= pos + max_len <= buf.len().
-            unsafe {
-                if ld32(buf, c + t - 3) == tail && ld32(buf, c) == cur {
-                    let len = extend(buf, c, pos, 4, max_len);
-                    if len > t {
-                        best = len;
-                        best_dist = dist as usize;
-                        if len >= nice {
-                            break;
-                        }
-                        t = len;
-                        tail = ld32(buf, pos + t - 3);
-                    }
-                }
-            }
-            depth -= 1;
-            if depth == 0 {
-                break;
-            }
-            // SAFETY: c & WMASK < WSIZE.
-            let d = unsafe { *self.prev.get_unchecked(c & WMASK) };
-            if d == 0 {
-                break;
-            }
-            cand = cand.wrapping_sub(d as u32);
-        }
-        (best, best_dist)
-    }
-
-    #[inline(always)]
-    fn lit(&mut self, b: u8) {
-        self.toks.push(b as u32);
-        self.lit_freq[b as usize] += 1;
-        self.new_obs[(b >> 5) as usize] += 1;
-        self.num_new += 1;
-    }
-
-    #[inline(always)]
-    fn mat(&mut self, len: usize, dist: usize) {
-        self.toks.push(match_tok(len, dist));
-        self.lit_freq[257 + LEN_SLOT[len] as usize] += 1;
-        self.dist_freq[dist_slot(dist)] += 1;
-        self.new_obs[8 + (len >= 9) as usize] += 1;
-        self.num_new += 1;
-    }
-
-    /// Emits the tokens for the input at `pos` (a literal, a match, or an RLE run) and
-    /// returns the next position to process.
-    #[inline(always)]
-    fn parse_step(&mut self, buf: &[u8], pos: usize, end: usize) -> usize {
-        let rem = end - pos;
-        if rem < MIN_LOOKAHEAD {
-            self.lit(buf[pos]);
-            return pos + 1;
-        }
-        // RLE fast path: at least 258 more copies of the previous byte.
-        if pos > 0 && rem >= MAX_MATCH && buf[pos] == buf[pos - 1] {
-            let pat = u64::from_ne_bytes([buf[pos - 1]; 8]);
-            // SAFETY: pos + 258 <= end.
-            if unsafe { ld64(buf, pos) == pat && ld64(buf, pos + MAX_MATCH - 8) == pat } {
-                let r = run_length(buf, pos, end);
-                let room = MAX_BLOCK_TOKENS - TOKEN_SLACK - self.toks.len().min(MAX_BLOCK_TOKENS - TOKEN_SLACK);
-                let n = (r / MAX_MATCH).min(room.max(1));
-                if n == 0 {
-                    return self.parse_match(buf, pos, end);
-                }
-                for _ in 0..n {
-                    self.mat(MAX_MATCH, 1);
-                }
-                let run_end = pos + n * MAX_MATCH;
-                // Only the last positions of the run need to be findable later.
-                let from = run_end - MIN_LOOKAHEAD;
-                for q in from..run_end.min(end - (MIN_LOOKAHEAD - 1)) {
-                    // SAFETY: q + 4 <= end.
-                    unsafe { self.insert(buf, q) };
-                }
-                return run_end;
-            }
-        }
-        self.parse_match(buf, pos, end)
-    }
-
-    /// LZ77 step at `pos` (at least MIN_LOOKAHEAD bytes left): literal or (lazy) match.
-    #[inline(always)]
-    fn parse_match(&mut self, buf: &[u8], mut pos: usize, end: usize) -> usize {
-        let rem = end - pos;
+        let end = buf.len();
+        let mf = self.reset(end - start);
         let p = self.p;
-        let max_len = rem.min(MAX_MATCH);
-        // SAFETY: pos + max_len <= end, max_len >= 4.
-        let (mut len, mut dist) = unsafe { self.find(buf, pos, max_len, p.depth, MIN_MATCH - 1) };
-        if len < MIN_MATCH {
-            self.lit(buf[pos]);
-            return pos + 1;
-        }
-        let mut cur = pos;
-        pos += 1;
-        if p.lazy > 0 {
-            loop {
-                if len >= p.nice || end - pos < MIN_LOOKAHEAD {
-                    break;
-                }
-                let depth = if len >= p.good { (p.depth >> 2).max(1) } else { p.depth };
-                let ml = (end - pos).min(MAX_MATCH);
-                // SAFETY: pos + ml <= end, ml >= 4.
-                let (l2, d2) = unsafe { self.find(buf, pos, ml, depth, len) };
-                if l2 > len && better(l2, d2, len, dist, 2) {
-                    self.lit(buf[cur]);
-                    cur = pos;
-                    len = l2;
-                    dist = d2;
-                    pos += 1;
-                    continue;
-                }
+        let mut seqbuf = std::mem::take(&mut self.seqs);
+        // A block needs at most (block bytes) / 3 sequences: shrink the budget for small inputs.
+        let max_seqs = seqbuf.len();
+        let seqs: &mut [u64] = &mut seqbuf;
+        // SAFETY (all mf calls below): the tables stay allocated and unresized until the end
+        // of this function, and `reset` sized them for mf's shifts.
+        unsafe { mf.insert_range(buf, 0, start) };
+        let mut pos = start;
+        let mut block_start = start;
+        let mut ns = 0usize;
+        let mut lit_run = 0u32;
+        let mut split = SplitStats::new(start);
+        while pos < end {
+            if pos >= split.next_check && split.should_end(buf, &seqs[..ns], block_start, pos) {
+                write_block(bw, buf, block_start, pos, &seqs[..ns], lit_run, false);
+                block_start = pos;
+                ns = 0;
+                lit_run = 0;
+                split = SplitStats::new(pos);
+            }
+            // ---- one parse step: a literal, a (lazily chosen) match, or a long run ----
+            let rem = end - pos;
+            if rem < MIN_LOOKAHEAD {
+                lit_run += 1;
                 pos += 1;
-                if p.lazy > 1 && end - pos >= MIN_LOOKAHEAD && len < p.nice {
+                continue;
+            }
+            let max_len = rem.min(MAX_MATCH);
+            // SAFETY: pos + max_len <= end, max_len >= 4.
+            let (mut len, mut dist) =
+                unsafe { mf.find(buf, pos, max_len, p.nice.min(max_len), p.depth, MIN_MATCH - 1) };
+            if len < MIN_MATCH {
+                lit_run += 1;
+                pos += 1;
+                continue;
+            }
+            let mut cur = pos;
+            pos += 1;
+            if p.lazy > 0 {
+                loop {
+                    if len >= p.nice || end - pos < MIN_LOOKAHEAD {
+                        break;
+                    }
+                    let depth = if len >= p.good { (p.depth >> 2).max(1) } else { p.depth };
                     let ml = (end - pos).min(MAX_MATCH);
-                    // SAFETY: as above.
-                    let (l3, d3) = unsafe { self.find(buf, pos, ml, depth, len) };
-                    if l3 > len && better(l3, d3, len, dist, 6) {
-                        self.lit(buf[cur]);
-                        self.lit(buf[cur + 1]);
+                    // SAFETY: pos + ml <= end, ml >= 4.
+                    let (l2, d2) = unsafe { mf.find(buf, pos, ml, p.nice.min(ml), depth, len) };
+                    if l2 > len && better(l2, d2, len, dist, 2) {
+                        lit_run += 1;
                         cur = pos;
-                        len = l3;
-                        dist = d3;
+                        len = l2;
+                        dist = d2;
                         pos += 1;
                         continue;
                     }
                     pos += 1;
+                    if p.lazy > 1 && end - pos >= MIN_LOOKAHEAD && len < p.nice {
+                        let ml = (end - pos).min(MAX_MATCH);
+                        // SAFETY: as above.
+                        let (l3, d3) = unsafe { mf.find(buf, pos, ml, p.nice.min(ml), depth, len) };
+                        if l3 > len && better(l3, d3, len, dist, 6) {
+                            lit_run += 2;
+                            cur = pos;
+                            len = l3;
+                            dist = d3;
+                            pos += 1;
+                            continue;
+                        }
+                        pos += 1;
+                    }
+                    break;
                 }
-                break;
             }
-        }
-        self.mat(len, dist);
-        let mend = cur + len;
-        let ins_end = mend.min(end - (MIN_LOOKAHEAD - 1));
-        if len <= p.max_insert {
-            while pos < ins_end {
-                // SAFETY: pos + 4 <= end.
-                unsafe { self.insert(buf, pos) };
-                pos += 1;
+            if len == MAX_MATCH {
+                // Runs and long repeats: follow the same distance as far as it matches and
+                // emit maximal matches without hashing the interior (zero pages!).
+                // SAFETY: cur - dist < cur, cur + (end - cur) <= end; 258 bytes match already.
+                let l = unsafe { extend(buf, cur - dist, cur, MAX_MATCH, end - cur) };
+                let room = (max_seqs - SEQ_HEADROOM).saturating_sub(ns);
+                let n = (l / MAX_MATCH).min(room);
+                if n > 1 {
+                    stat(3, lit_run as u64);
+                    stat(4, n as u64);
+                    stat(5, (n * MAX_MATCH) as u64);
+                    seqs[ns] = seq(lit_run, MAX_MATCH, dist);
+                    seqs[ns + 1..ns + n].fill(seq(0, MAX_MATCH, dist));
+                    ns += n;
+                    lit_run = 0;
+                    let mend = cur + n * MAX_MATCH;
+                    // SAFETY: see above.
+                    unsafe {
+                        if dist < 16 || p.max_insert < MAX_MATCH {
+                            // A run (short period): its interior hashes to a few chains.
+                            mf.insert_range(buf, pos, (pos + 4).min(mend));
+                            mf.insert_range(buf, mend - MIN_LOOKAHEAD, mend);
+                        } else {
+                            // Repeated content: keep it findable.
+                            mf.insert_range(buf, pos, mend);
+                        }
+                    }
+                    pos = mend;
+                    continue;
+                }
             }
-        } else {
-            // Long match: only the first and last few positions.
-            let a = (pos + 8).min(ins_end);
-            while pos < a {
-                // SAFETY: pos + 4 <= end.
-                unsafe { self.insert(buf, pos) };
-                pos += 1;
+            stat(3, lit_run as u64);
+            stat(4, 1);
+            stat(5, len as u64);
+            seqs[ns] = seq(lit_run, len, dist);
+            ns += 1;
+            lit_run = 0;
+            let mend = cur + len;
+            // SAFETY: see above.
+            unsafe {
+                if len <= p.max_insert {
+                    mf.insert_range(buf, pos, mend);
+                } else {
+                    // Long match: only the first and last few positions.
+                    mf.insert_range(buf, pos, (pos + 8).min(mend));
+                    mf.insert_range(buf, (pos + 8).max(mend - 8), mend);
+                }
             }
-            pos = pos.max(ins_end.saturating_sub(8));
-            while pos < ins_end {
-                // SAFETY: pos + 4 <= end.
-                unsafe { self.insert(buf, pos) };
-                pos += 1;
-            }
+            pos = mend;
         }
-        mend
-    }
-
-    fn begin_block(&mut self) {
-        self.toks.clear();
-        self.lit_freq = [0; 288];
-        self.dist_freq = [0; 32];
-        self.obs = [0; NUM_OBS];
-        self.new_obs = [0; NUM_OBS];
-        self.num_obs = 0;
-        self.num_new = 0;
-        self.next_check = OBS_INTERVAL;
-    }
-
-    /// Called every OBS_INTERVAL tokens: should the block end here?
-    fn end_block_check(&mut self, block_len: usize) -> bool {
-        if self.toks.len() >= MAX_BLOCK_TOKENS - TOKEN_SLACK || block_len >= SOFT_MAX_BLOCK_LEN {
-            return true;
-        }
-        self.next_check = (self.toks.len() + OBS_INTERVAL).min(MAX_BLOCK_TOKENS - TOKEN_SLACK);
-        let (n_old, n_new) = (self.num_obs as u64, self.num_new as u64);
-        if n_old > 0 && block_len >= MIN_BLOCK_LEN {
-            // L1 distance between the token-class distributions of the block so far and of
-            // the latest tokens; long blocks split more readily.
-            let mut delta = 0u64;
-            for i in 0..NUM_OBS {
-                delta += (self.new_obs[i] as u64 * n_old).abs_diff(self.obs[i] as u64 * n_new);
-            }
-            let cutoff = n_new * n_old * 200 / 512;
-            if delta + (block_len as u64 / 4096) * n_old >= cutoff {
-                return true;
-            }
-        }
-        for i in 0..NUM_OBS {
-            self.obs[i] += self.new_obs[i];
-            self.new_obs[i] = 0;
-        }
-        self.num_obs += self.num_new;
-        self.num_new = 0;
-        false
-    }
-
-    /// Writes the tokens of `buf[bstart..bend]` as the cheapest block type.
-    fn flush_block(&mut self, bw: &mut BitWriter, buf: &[u8], bstart: usize, bend: usize, last: bool) {
-        self.lit_freq[256] = 1;
-        let mut llens = [0u8; 288];
-        let mut dlens = [0u8; 32];
-        huffman_lengths(&self.lit_freq[..286], 15, &mut llens);
-        huffman_lengths(&self.dist_freq[..30], 15, &mut dlens);
-        let hdr = DynHeader::new(&llens, &dlens);
-
-        let mut extra = 0u64;
-        for i in 0..29 {
-            extra += self.lit_freq[257 + i] as u64 * LEN_EXTRA[i] as u64;
-        }
-        for i in 0..30 {
-            extra += self.dist_freq[i] as u64 * DIST_EXTRA[i] as u64;
-        }
-        let fixed_l = fixed_litlen_lens();
-        let mut dyn_cost = 3 + hdr.cost + extra;
-        let mut fixed_cost = 3 + extra;
-        for s in 0..286 {
-            let f = self.lit_freq[s] as u64;
-            dyn_cost += f * llens[s] as u64;
-            fixed_cost += f * fixed_l[s] as u64;
-        }
-        for s in 0..30 {
-            let f = self.dist_freq[s] as u64;
-            dyn_cost += f * dlens[s] as u64;
-            fixed_cost += f * 5;
-        }
-        let n = bend - bstart;
-        // Stored: header + padding (<= 7) + LEN/NLEN per 65535-byte piece, then the bytes.
-        let pieces = n.div_ceil(65535).max(1) as u64;
-        let stored_cost = pieces * (3 + 7 + 32) + 8 * n as u64;
-
-        if stored_cost <= dyn_cost.min(fixed_cost) {
-            write_stored(bw, &buf[bstart..bend], last);
-            return;
-        }
-        let mut lcodes = [0u16; 288];
-        let mut dcodes = [0u16; 32];
-        bw.reserve((dyn_cost.min(fixed_cost) / 8) as usize + 64);
-        if dyn_cost < fixed_cost {
-            canonical_codes(&llens, &mut lcodes);
-            canonical_codes(&dlens, &mut dcodes);
-            bw.put(last as u64 | (2 << 1), 3);
-            hdr.write(bw);
-            write_tokens(bw, &self.toks, &llens, &lcodes, &dlens, &dcodes);
-        } else {
-            let dl = [5u8; 32];
-            canonical_codes(&fixed_l, &mut lcodes);
-            canonical_codes(&dl, &mut dcodes);
-            bw.put(last as u64 | (1 << 1), 3);
-            write_tokens(bw, &self.toks, &fixed_l, &lcodes, &dl, &dcodes);
-        }
+        write_block(bw, buf, block_start, end, &seqs[..ns], lit_run, last);
+        self.seqs = seqbuf;
     }
 }
 
@@ -903,6 +785,80 @@ impl Compressor {
 fn better(l2: usize, d2: usize, l1: usize, d1: usize, bias: i32) -> bool {
     let lg = |d: usize| 31 - (d as u32).leading_zeros() as i32;
     4 * (l2 as i32 - l1 as i32) + lg(d1) - lg(d2) > bias
+}
+
+/// Writes `buf[bstart..bend]` (= `seqs` followed by `tail_lits` literals) as the cheapest
+/// block type.
+fn write_block(bw: &mut BitWriter, buf: &[u8], bstart: usize, bend: usize, seqs: &[u64], tail_lits: u32, last: bool) {
+    stat(6, 1);
+    let mut lit_freq = [0u32; 288];
+    let mut dist_freq = [0u32; 32];
+    let mut q = bstart;
+    for &s in seqs {
+        let (lr, len, dist) = unseq(s);
+        for &b in &buf[q..q + lr] {
+            lit_freq[b as usize] += 1;
+        }
+        lit_freq[257 + LEN_SLOT[len] as usize] += 1;
+        dist_freq[dist_slot(dist)] += 1;
+        q += lr + len;
+    }
+    for &b in &buf[q..q + tail_lits as usize] {
+        lit_freq[b as usize] += 1;
+    }
+    debug_assert_eq!(q + tail_lits as usize, bend);
+    lit_freq[256] = 1;
+    let mut llens = [0u8; 288];
+    let mut dlens = [0u8; 32];
+    huffman_lengths(&lit_freq[..286], 15, &mut llens);
+    huffman_lengths(&dist_freq[..30], 15, &mut dlens);
+    let hdr = DynHeader::new(&llens, &dlens);
+
+    let mut extra = 0u64;
+    for i in 0..29 {
+        extra += lit_freq[257 + i] as u64 * LEN_EXTRA[i] as u64;
+    }
+    for i in 0..30 {
+        extra += dist_freq[i] as u64 * DIST_EXTRA[i] as u64;
+    }
+    let fixed_l = fixed_litlen_lens();
+    let mut dyn_cost = 3 + hdr.cost + extra;
+    let mut fixed_cost = 3 + extra;
+    for s in 0..286 {
+        let f = lit_freq[s] as u64;
+        dyn_cost += f * llens[s] as u64;
+        fixed_cost += f * fixed_l[s] as u64;
+    }
+    for s in 0..30 {
+        let f = dist_freq[s] as u64;
+        dyn_cost += f * dlens[s] as u64;
+        fixed_cost += f * 5;
+    }
+    let n = bend - bstart;
+    // Stored: header + padding (<= 7) + LEN/NLEN per 65535-byte piece, then the bytes.
+    let pieces = n.div_ceil(65535).max(1) as u64;
+    let stored_cost = pieces * (3 + 7 + 32) + 8 * n as u64;
+
+    if stored_cost <= dyn_cost.min(fixed_cost) {
+        write_stored(bw, &buf[bstart..bend], last);
+        return;
+    }
+    let mut lcodes = [0u16; 288];
+    let mut dcodes = [0u16; 32];
+    bw.reserve((dyn_cost.min(fixed_cost) / 8) as usize + 64);
+    if dyn_cost < fixed_cost {
+        canonical_codes(&llens, &mut lcodes);
+        canonical_codes(&dlens, &mut dcodes);
+        bw.put(last as u64 | (2 << 1), 3);
+        hdr.write(bw);
+        write_seqs(bw, buf, bstart, seqs, tail_lits, &llens, &lcodes, &dlens, &dcodes);
+    } else {
+        let dl = [5u8; 32];
+        canonical_codes(&fixed_l, &mut lcodes);
+        canonical_codes(&dl, &mut dcodes);
+        bw.put(last as u64 | (1 << 1), 3);
+        write_seqs(bw, buf, bstart, seqs, tail_lits, &fixed_l, &lcodes, &dl, &dcodes);
+    }
 }
 
 /// Writes stored blocks for `data` (at least one block, even when empty).
@@ -926,38 +882,108 @@ fn write_stored(bw: &mut BitWriter, data: &[u8], last: bool) {
     }
 }
 
-/// Emits the block's tokens and the end-of-block code.
-fn write_tokens(bw: &mut BitWriter, toks: &[u32], llens: &[u8; 288], lcodes: &[u16; 288], dlens: &[u8; 32], dcodes: &[u16; 32]) {
-    // Length code + extra bits, merged per length.
-    let mut lenc = [(0u32, 0u32); 259];
+/// Emits the block's sequences and `tail_lits` trailing literals (literal bytes read from
+/// `buf` starting at `bstart`) and the end-of-block code. The caller reserved room for the
+/// block's exact bit cost.
+#[allow(clippy::too_many_arguments)]
+fn write_seqs(
+    bw: &mut BitWriter,
+    buf: &[u8],
+    bstart: usize,
+    seqs: &[u64],
+    tail_lits: u32,
+    llens: &[u8; 288],
+    lcodes: &[u16; 288],
+    dlens: &[u8; 32],
+    dcodes: &[u16; 32],
+) {
+    // Length code + extra bits merged per length; literal code | bit length << 16; distance
+    // slot code | bit length << 16 (+ extra bit count << 24).
+    let mut lenc = [0u64; 259];
     for (len, e) in lenc.iter_mut().enumerate().skip(3) {
         let s = LEN_SLOT[len] as usize;
         let sym = 257 + s;
-        let nb = llens[sym] as u32;
-        *e = (lcodes[sym] as u32 | ((len as u32 - LEN_BASE[s] as u32) << nb), nb + LEN_EXTRA[s] as u32);
+        let nb = llens[sym] as u64;
+        *e = (lcodes[sym] as u64 | ((len as u64 - LEN_BASE[s] as u64) << nb)) | ((nb + LEN_EXTRA[s] as u64) << 32);
     }
-    let mut lit = [(0u32, 0u32); 256];
+    let mut lit = [0u32; 256];
     for (b, e) in lit.iter_mut().enumerate() {
-        *e = (lcodes[b] as u32, llens[b] as u32);
+        *e = lcodes[b] as u32 | ((llens[b] as u32) << 16);
     }
-    for &t in toks {
-        if t < 256 {
-            let (c, n) = lit[t as usize];
-            bw.put(c as u64, n);
-        } else {
-            let len = (t >> 16) as usize;
-            let dist = (t & 0xFFFF) as usize;
-            let (c, n) = lenc[len];
-            bw.put(c as u64, n);
-            let s = dist_slot(dist);
-            let nb = dlens[s] as u32;
-            let v = dcodes[s] as u64 | (((dist - DIST_BASE[s] as usize) as u64) << nb);
-            bw.put(v, nb + DIST_EXTRA[s] as u32);
+    let mut dsym = [0u32; 30];
+    for (s, e) in dsym.iter_mut().enumerate() {
+        *e = dcodes[s] as u32 | ((dlens[s] as u32) << 16) | ((DIST_EXTRA[s] as u32) << 24);
+    }
+    // The bit writer state lives in registers for the whole loop.
+    let out = bw.buf.as_mut_ptr();
+    let cap = bw.buf.len();
+    let (mut bits, mut count, mut pos) = (bw.bits, bw.count, bw.pos);
+    macro_rules! put {
+        ($v:expr, $n:expr) => {{
+            bits |= ($v as u64) << count;
+            count += $n as u32;
+        }};
+    }
+    macro_rules! flush {
+        () => {{
+            debug_assert!(pos + 8 <= cap && count < 64);
+            // SAFETY: the caller reserved the block's exact size + 64 bytes, and pos only
+            // advances by bits actually written, so pos + 8 <= cap.
+            unsafe { (out.add(pos) as *mut u64).write_unaligned(bits.to_le()) };
+            pos += (count >> 3) as usize;
+            bits >>= count & !7;
+            count &= 7;
+        }};
+    }
+    let _ = cap;
+    let emit_lits = |lits: &[u8], bits: &mut u64, count: &mut u32, pos: &mut usize| {
+        let (mut b_, mut c_, mut p_) = (*bits, *count, *pos);
+        let mut it = lits.chunks_exact(2);
+        for two in &mut it {
+            let (a, b) = (lit[two[0] as usize], lit[two[1] as usize]);
+            b_ |= ((a & 0xFFFF) as u64) << c_;
+            c_ += a >> 16;
+            b_ |= ((b & 0xFFFF) as u64) << c_;
+            c_ += b >> 16;
+            // SAFETY: as in flush!.
+            unsafe { (out.add(p_) as *mut u64).write_unaligned(b_.to_le()) };
+            p_ += (c_ >> 3) as usize;
+            b_ >>= c_ & !7;
+            c_ &= 7;
         }
-        bw.flush();
+        if let [x] = it.remainder() {
+            let a = lit[*x as usize];
+            b_ |= ((a & 0xFFFF) as u64) << c_;
+            c_ += a >> 16;
+            // SAFETY: as in flush!.
+            unsafe { (out.add(p_) as *mut u64).write_unaligned(b_.to_le()) };
+            p_ += (c_ >> 3) as usize;
+            b_ >>= c_ & !7;
+            c_ &= 7;
+        }
+        (*bits, *count, *pos) = (b_, c_, p_);
+    };
+    let mut q = bstart;
+    for &s in seqs {
+        let (lr, len, dist) = unseq(s);
+        if lr != 0 {
+            emit_lits(&buf[q..q + lr], &mut bits, &mut count, &mut pos);
+        }
+        q += lr + len;
+        let lc = lenc[len];
+        put!(lc as u32, (lc >> 32) as u32);
+        let ds = dist_slot(dist);
+        let d = dsym[ds];
+        let nb = (d >> 16) & 0xFF;
+        put!((d & 0xFFFF) as u64 | (((dist - DIST_BASE[ds] as usize) as u64) << nb), nb + (d >> 24));
+        flush!();
     }
-    bw.put(lcodes[256] as u64, llens[256] as u32);
-    bw.flush();
+    if tail_lits != 0 {
+        emit_lits(&buf[q..q + tail_lits as usize], &mut bits, &mut count, &mut pos);
+    }
+    put!(lcodes[256], llens[256]);
+    flush!();
+    (bw.bits, bw.count, bw.pos) = (bits, count, pos);
 }
 
 /// A dynamic block header: HLIT/HDIST/HCLEN, the precode and the RLE-coded code lengths.
@@ -1189,29 +1215,6 @@ mod tests {
             panic!("level {level}: roundtrip mismatch (len {} vs {}), first diff at {i}", d.len(), data.len());
         }
         c.len()
-    }
-
-    #[test]
-    fn codecs_deflate_enc_huffman_lengths() {
-        // Skewed (Fibonacci) frequencies force the length limit.
-        let mut f = [0u32; 40];
-        let (mut a, mut b) = (1u32, 1u32);
-        for x in f.iter_mut() {
-            *x = a;
-            let c = a.saturating_add(b);
-            a = b;
-            b = c;
-        }
-        for max in [7u32, 9, 15] {
-            let mut lens = [0u8; 40];
-            huffman_lengths(&f, max, &mut lens);
-            let kraft: f64 = lens.iter().filter(|&&l| l > 0).map(|&l| 0.5f64.powi(l as i32)).sum();
-            assert!((kraft - 1.0).abs() < 1e-12, "max {max}: kraft {kraft}");
-            assert!(lens.iter().all(|&l| l >= 1 && l as u32 <= max));
-        }
-        let mut lens = [0u8; 4];
-        huffman_lengths(&[0, 0, 5, 0], 15, &mut lens);
-        assert_eq!(lens.iter().filter(|&&l| l == 1).count(), 2);
     }
 
     #[test]

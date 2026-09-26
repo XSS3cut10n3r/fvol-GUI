@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::util::fxhash::hash_bytes;
 use crate::util::json::Json;
 use crate::util::mmap::Mmap;
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Index of a type node. High bit set = runtime-created node.
@@ -368,6 +368,9 @@ pub struct SymbolTable {
     meta_json: OnceLock<Json<'static>>,
     table_mapping: Vec<(String, String)>,
     by_addr: OnceLock<Vec<(u64, u32)>>,
+    /// exact-address lookups answered by a linear scan before the address index was built
+    /// (see `symbols_at`)
+    exact_linear: AtomicU32,
     /// per user type: 0 = not yet validated, 1 = valid, 2 = corrupt (see `validate_type`)
     checked: Box<[AtomicU8]>,
 }
@@ -377,6 +380,41 @@ pub struct SymbolTable {
 fn rd32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
+/// Stable LSD radix sort of `(key, index)` pairs by key (16-bit digits; digits on which all
+/// keys agree are skipped; one histogram pass for all digits).
+fn radix_sort_by_addr(v: &mut Vec<(u64, u32)>) {
+    let n = v.len();
+    if n < 256 {
+        v.sort_by_key(|e| e.0);
+        return;
+    }
+    let mut hist = vec![[0u32; 1 << 16]; 4];
+    for e in v.iter() {
+        for (d, h) in hist.iter_mut().enumerate() {
+            h[((e.0 >> (16 * d)) & 0xffff) as usize] += 1;
+        }
+    }
+    let mut tmp: Vec<(u64, u32)> = vec![(0, 0); n];
+    for (d, h) in hist.iter_mut().enumerate() {
+        if h.iter().any(|&c| c as usize == n) {
+            continue;
+        }
+        let mut sum = 0u32;
+        for c in h.iter_mut() {
+            let t = *c;
+            *c = sum;
+            sum += t;
+        }
+        let shift = 16 * d;
+        for e in v.iter() {
+            let b = ((e.0 >> shift) & 0xffff) as usize;
+            tmp[h[b] as usize] = *e;
+            h[b] += 1;
+        }
+        std::mem::swap(v, &mut tmp);
+    }
+}
+
 #[inline(always)]
 fn rd64(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
@@ -416,6 +454,7 @@ impl SymbolTable {
             meta_json: OnceLock::new(),
             table_mapping: Vec::new(),
             by_addr: OnceLock::new(),
+            exact_linear: AtomicU32::new(0),
             checked,
         })
     }
@@ -795,6 +834,17 @@ impl SymbolTable {
     pub fn symbols(&self) -> impl Iterator<Item = Symbol<'_>> + '_ {
         (0..self.symbol_count() as u32).map(move |i| self.sym_at(i))
     }
+    /// (raw name bytes, address masked like [`Symbol::address`]) of every symbol in ISF
+    /// order: the cheap form of [`symbols`](Self::symbols) for whole-table scans (no UTF-8
+    /// validation, no type decoding).
+    pub fn symbol_names_addrs(&self) -> impl Iterator<Item = (&[u8], u64)> + '_ {
+        let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+        let pool = self.sec(sec::STRINGS);
+        self.sec(sec::SYMBOLS).chunks_exact(SYMBOL_SZ).map(move |r| {
+            let (o, l) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
+            (pool.get(o..o.saturating_add(l)).unwrap_or(&[]), rd64(r, 8) & mask)
+        })
+    }
     /// `symbols_at(offset, 0)` (python `get_symbols_by_location(offset)`: the names of the
     /// symbols exactly at `offset`, sorted) without building the address index: a linear scan
     /// over the raw records, cheap when only a handful of addresses are looked up.
@@ -802,6 +852,10 @@ impl SymbolTable {
         if self.by_addr.get().is_some() {
             return self.symbols_at(offset, 0);
         }
+        self.symbols_at_linear(offset)
+    }
+
+    fn symbols_at_linear(&self, offset: u64) -> Vec<&str> {
         let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
         let recs = self.sec(sec::SYMBOLS);
         let mut v: Vec<&str> = recs.chunks_exact(SYMBOL_SZ).filter(|r| rd64(r, 8) & mask == offset).map(|r| self.rec_str(r)).collect();
@@ -809,20 +863,31 @@ impl SymbolTable {
         v
     }
 
-    /// [`SymbolTable::symbols_at_exact`] for several offsets in one linear scan (for a handful
-    /// of offsets; `out[i]` belongs to `offsets[i]`).
-    pub fn symbols_at_exact_multi(&self, offsets: &[u64]) -> Vec<Vec<&str>> {
+    /// [`symbols_at_exact`](Self::symbols_at_exact) for several offsets with ONE linear pass
+    /// over the raw records (or the address index when it is already built): for each offset
+    /// (in input order) the sorted names of the symbols exactly at it. For plugins that look up
+    /// a few dozen addresses once (cheaper than building the address index).
+    pub fn symbols_at_exact_many(&self, offsets: &[u64]) -> Vec<Vec<&str>> {
+        if offsets.is_empty() {
+            return Vec::new();
+        }
         if self.by_addr.get().is_some() {
             return offsets.iter().map(|&o| self.symbols_at(o, 0)).collect();
         }
         let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+        let mut wanted: Vec<(u64, usize)> = offsets.iter().enumerate().map(|(i, &o)| (o, i)).collect();
+        wanted.sort_unstable();
+        let (lo, hi) = (wanted[0].0, wanted[wanted.len() - 1].0);
         let mut out: Vec<Vec<&str>> = vec![Vec::new(); offsets.len()];
         for r in self.sec(sec::SYMBOLS).chunks_exact(SYMBOL_SZ) {
             let a = rd64(r, 8) & mask;
-            for (i, &o) in offsets.iter().enumerate() {
-                if a == o {
-                    out[i].push(self.rec_str(r));
-                }
+            if a < lo || a > hi {
+                continue;
+            }
+            let mut i = wanted.partition_point(|e| e.0 < a);
+            while i < wanted.len() && wanted[i].0 == a {
+                out[wanted[i].1].push(self.rec_str(r));
+                i += 1;
             }
         }
         for v in &mut out {
@@ -834,13 +899,21 @@ impl SymbolTable {
     /// Symbol names with `offset <= address <= offset + size` (python
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
+        // the first few exact lookups scan the records (~0.5 ms each on a 300k-symbol kernel)
+        // instead of building the index (~6 ms): most plugins resolve only a handful
+        const LINEAR_LOOKUPS: u32 = 8;
+        if size == 0 && self.by_addr.get().is_none() && self.exact_linear.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < LINEAR_LOOKUPS {
+            return self.symbols_at_linear(offset);
+        }
         let idx = self.by_addr.get_or_init(|| {
             let _t = crate::util::trace::span("symbol address index");
             let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
             let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (rd64(self.sym_rec(i), 8) & mask, i)).collect();
-            // sort by address (cheap integer keys), then order equal-address runs by name like
-            // python's (address, name) tuples (names are unique: the result is deterministic)
-            v.sort_unstable_by_key(|e| e.0);
+            // sort by address (cheap integer keys, stable LSD radix sort: ~5x faster than a
+            // comparison sort on a 300k-symbol kernel), then order equal-address runs by name
+            // like python's (address, name) tuples (names are unique: the result is
+            // deterministic)
+            radix_sort_by_addr(&mut v);
             let mut i = 0;
             while i < v.len() {
                 let mut j = i + 1;

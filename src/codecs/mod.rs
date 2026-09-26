@@ -20,13 +20,17 @@
 #![allow(dead_code, unexpected_cfgs)]
 
 pub mod bzip2;
+pub mod bzip2_enc;
 pub mod crc;
 pub mod deflate_enc;
 mod enc_pipeline;
+pub(crate) mod huffman_enc;
+pub(crate) mod sais;
 pub mod gzip;
 pub mod gzip_enc;
 pub mod inflate;
 pub mod lzma;
+pub(crate) mod lzma_enc;
 pub mod lznt1;
 pub mod png;
 pub mod snappy;
@@ -34,6 +38,7 @@ pub mod snappy;
 mod testdata;
 pub mod xpress;
 pub mod xz;
+pub mod xz_enc;
 pub mod zip;
 pub mod zlib;
 pub mod zlib_exact;

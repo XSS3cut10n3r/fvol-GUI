@@ -215,7 +215,7 @@ fn symbols_at_cached(kernel: &Module, addr: u64) -> Vec<&'static str> {
         }
     }
     let rel: Vec<u64> = addrs.iter().map(|a| a.wrapping_sub(kernel.offset)).collect();
-    let res = kernel.table().symbols_at_exact_multi(&rel);
+    let res = kernel.table().symbols_at_exact_many(&rel);
     for (a, v) in addrs.iter().zip(res) {
         cache.push((key, *a, v));
     }

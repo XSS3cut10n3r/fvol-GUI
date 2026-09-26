@@ -892,6 +892,18 @@ trait FinishWrite: Write + Send {
     fn finish(self: Box<Self>) -> std::io::Result<()>;
 }
 
+impl<W: Write + Send> FinishWrite for crate::codecs::xz_enc::XzEncoder<W> {
+    fn finish(self: Box<Self>) -> std::io::Result<()> {
+        (*self).finish()?.flush()
+    }
+}
+
+impl<W: Write + Send> FinishWrite for crate::codecs::bzip2_enc::Bzip2Encoder<W> {
+    fn finish(self: Box<Self>) -> std::io::Result<()> {
+        (*self).finish()?.flush()
+    }
+}
+
 impl<W: Write + Send> FinishWrite for crate::codecs::gzip_enc::GzipEncoder<W> {
     fn finish(self: Box<Self>) -> std::io::Result<()> {
         (*self).finish()?.flush()
@@ -900,7 +912,7 @@ impl<W: Write + Send> FinishWrite for crate::codecs::gzip_enc::GzipEncoder<W> {
 
 /// Our deflate level for the `.tar.gz`. python uses zlib level 9; the tarball bytes differ from
 /// python's anyway (timestamps), so we pick the level that gives python's compression ratio
-/// or better at a fraction of the CPU (noble ELF image: 3.8 GB tar -> 837 MB in ~3 s on 20
+/// or better at a fraction of the CPU (noble ELF image: 3.8 GB tar -> 837.5 MB in ~3 s on 20
 /// threads, python's zlib -9: 842 MB). The gzip header stays python's (XFL = 2).
 const GZ_LEVEL: u32 = 4;
 
@@ -915,7 +927,11 @@ fn open_compressor(format: &str, file: std::fs::File, mtime: u32) -> Result<Box<
             opts.level = GZ_LEVEL;
             Ok(Box::new(crate::codecs::gzip_enc::GzipEncoder::new(w, opts)))
         }
-        other => Err(Error::msg(format!("compression format {other} not supported yet"))),
+        // python `bz2.BZ2File(fileobj, "w", compresslevel=9)`
+        "bz2" => Ok(Box::new(crate::codecs::bzip2_enc::Bzip2Encoder::new(w, 9))),
+        // python `lzma.LZMAFile(fileobj, "w", preset=None)` (preset 6, CRC64 check)
+        "xz" => Ok(Box::new(crate::codecs::xz_enc::XzEncoder::new(w, 6))),
+        other => Err(Error::msg(format!("ValueError: unknown compression format {other:?}"))),
     }
 }
 
