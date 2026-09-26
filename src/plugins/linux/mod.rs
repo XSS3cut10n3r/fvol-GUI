@@ -20,6 +20,7 @@ pub mod pslist;
 pub mod psscan;
 pub mod pstree;
 pub mod ptrace;
+pub mod sockscan;
 pub mod sockstat;
 pub mod vmaregexscan;
 pub mod vmayarascan;
@@ -44,6 +45,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&psscan::PsScan);
     v.push(&pstree::PsTree);
     v.push(&ptrace::Ptrace);
+    v.push(&sockscan::Sockscan);
     v.push(&sockstat::Sockstat);
     v.push(&vmaregexscan::VmaRegExScan);
     v.push(&vmayarascan::VmaYaraScan);
