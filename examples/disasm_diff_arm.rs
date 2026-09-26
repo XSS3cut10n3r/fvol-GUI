@@ -81,7 +81,11 @@ fn hash_cmd(args: &[String]) {
             });
         }
     });
-    eprintln!("rust: {} words in {:.2}s", end - start, t0.elapsed().as_secs_f64());
+    eprintln!(
+        "rust: {} words in {:.2}s",
+        end - start,
+        t0.elapsed().as_secs_f64()
+    );
     let r = results.into_inner().unwrap();
     let stdout = std::io::stdout();
     let mut o = std::io::BufWriter::new(stdout.lock());
@@ -99,11 +103,14 @@ fn cmp_cmd(args: &[String]) {
     }
     let (mut n, mut bad) = (0u64, 0u64);
     let mut buf = String::new();
-    let mut kinds: std::collections::HashMap<String, (u64, String)> = std::collections::HashMap::new();
+    let mut kinds: std::collections::HashMap<String, (u64, String)> =
+        std::collections::HashMap::new();
     for line in std::io::BufReader::new(f).lines() {
         let line = line.unwrap();
         let mut it = line.splitn(3, '\t');
-        let (Some(w), Some(a), Some(exp)) = (it.next(), it.next(), it.next()) else { continue };
+        let (Some(w), Some(a), Some(exp)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
         let w = u32::from_str_radix(w, 16).unwrap();
         let a = u64::from_str_radix(a, 16).unwrap();
         buf.clear();
@@ -117,16 +124,21 @@ fn cmp_cmd(args: &[String]) {
                 exp.split('\t').next().unwrap_or(""),
                 got.split('\t').next().unwrap_or("")
             );
-            let e = kinds.entry(key).or_insert((0, format!("{w:08x}  exp {exp:?}  got {got:?}")));
+            let e = kinds
+                .entry(key)
+                .or_insert((0, format!("{w:08x}  exp {exp:?}  got {got:?}")));
             e.0 += 1;
         }
     }
     let mut v: Vec<_> = kinds.into_iter().collect();
-    v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    v.sort_by_key(|e| std::cmp::Reverse(e.1.0));
     for (k, (c, ex)) in v.iter().take(show) {
         println!("{c:8} {k:30} {ex}");
     }
-    println!("{arch}: {n} words, {bad} mismatches ({:.5}%)", 100.0 * bad as f64 / n.max(1) as f64);
+    println!(
+        "{arch}: {n} words, {bad} mismatches ({:.5}%)",
+        100.0 * bad as f64 / n.max(1) as f64
+    );
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 
@@ -140,13 +152,25 @@ fn mis_cmd(args: &[String]) {
     for line in std::io::BufReader::new(f).lines() {
         let line = line.unwrap();
         let mut it = line.splitn(3, '\t');
-        let (Some(w), Some(a), Some(exp)) = (it.next(), it.next(), it.next()) else { continue };
+        let (Some(w), Some(a), Some(exp)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
         let w = u32::from_str_radix(w, 16).unwrap();
         let a = u64::from_str_radix(a, 16).unwrap();
         buf.clear();
-        let got = if render(&arch, w, a, &mut buf) { buf.as_str() } else { "!" };
+        let got = if render(&arch, w, a, &mut buf) {
+            buf.as_str()
+        } else {
+            "!"
+        };
         if got != exp {
-            writeln!(o, "{w:08x}\t{}\t{}", exp.replace('\t', " "), got.replace('\t', " ")).unwrap();
+            writeln!(
+                o,
+                "{w:08x}\t{}\t{}",
+                exp.replace('\t', " "),
+                got.replace('\t', " ")
+            )
+            .unwrap();
         }
     }
 }
@@ -182,10 +206,10 @@ fn corpora_cmd(args: &[String]) {
     names.sort();
     let mut total_bad = 0u64;
     for name in names {
-        if let Some(o) = &only {
-            if !o.iter().any(|x| x == &name) {
-                continue;
-            }
+        if let Some(o) = &only
+            && !o.iter().any(|x| x == &name)
+        {
+            continue;
         }
         let f = std::fs::File::open(format!("{dir}/{name}.ref")).expect("open ref");
         let mis = std::fs::File::create(format!("{dir}/{name}.mis")).expect("create mis");
@@ -203,19 +227,30 @@ fn corpora_cmd(args: &[String]) {
             let count: u64 = p[0].parse().unwrap_or(1);
             let arch = p[1];
             let addr = u64::from_str_radix(p[2], 16).unwrap_or(0);
-            let b: Vec<u8> = (0..4).map(|k| u8::from_str_radix(&p[3][2 * k..2 * k + 2], 16).unwrap_or(0)).collect();
+            let b: Vec<u8> = (0..4)
+                .map(|k| u8::from_str_radix(&p[3][2 * k..2 * k + 2], 16).unwrap_or(0))
+                .collect();
             let w = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
             let esize: u32 = p[4].parse().unwrap_or(0);
             uniq += 1;
             wtot += count;
             buf.clear();
             let ok = render(arch, w, addr, &mut buf);
-            let exp = if esize == 0 { "!".to_string() } else { format!("{}\t{}", p[5], p[6]) };
+            let exp = if esize == 0 {
+                "!".to_string()
+            } else {
+                format!("{}\t{}", p[5], p[6])
+            };
             let got = if ok { buf.as_str() } else { "!" };
             if got != exp {
                 ubad += 1;
                 wbad += count;
-                writeln!(mis, "{count}\t{arch}\t{:x}\t{w:08x}\t{exp:?}\t{got:?}", addr).unwrap();
+                writeln!(
+                    mis,
+                    "{count}\t{arch}\t{:x}\t{w:08x}\t{exp:?}\t{got:?}",
+                    addr
+                )
+                .unwrap();
                 if shown < show {
                     shown += 1;
                     println!("  {arch} {w:08x} exp {exp:?} | got {got:?}");
@@ -235,12 +270,20 @@ fn corpora_cmd(args: &[String]) {
 
 fn bench_cmd(args: &[String]) {
     let arch = args[0].clone();
-    let n: usize = args.get(1).and_then(|x| x.parse().ok()).unwrap_or(10_000_000);
+    let n: usize = args
+        .get(1)
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(10_000_000);
     let mut words = Vec::with_capacity(n);
     if let Some(path) = args.get(2) {
         // real code: the file's words, repeated cyclically up to n words (like arm_bench.c)
         let data = std::fs::read(path).expect("read code file");
-        let fw: Vec<u32> = data.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let fw: Vec<u32> = data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect();
         for i in 0..n {
             words.push(fw[i % fw.len()]);
         }
@@ -254,7 +297,11 @@ fn bench_cmd(args: &[String]) {
         }
     }
     let t = Instant::now();
-    let eng = if arch == "arm64" { disasm::arm64::engine_ref() } else { disasm::arm::engine_ref() };
+    let eng = if arch == "arm64" {
+        disasm::arm64::engine_ref()
+    } else {
+        disasm::arm::engine_ref()
+    };
     let (nc, no, nt, nl) = eng.sizes();
     println!(
         "spec compile {:.1} ms: {nc} classes, {no} ops, {nt} tree words, {nl} leaf entries",
@@ -268,14 +315,23 @@ fn bench_cmd(args: &[String]) {
         sm += m as u64;
     }
     let k = words.len().min(1_000_000) as f64;
-    println!("avg tree depth {:.2}, leaf size {:.2}, mask matches {:.2}", sd as f64 / k, sl as f64 / k, sm as f64 / k);
+    println!(
+        "avg tree depth {:.2}, leaf size {:.2}, mask matches {:.2}",
+        sd as f64 / k,
+        sl as f64 / k,
+        sm as f64 / k
+    );
     let mut buf = String::with_capacity(256);
     {
         // split timing: valid-only vs invalid-only words
         let (mut vw, mut iw) = (Vec::new(), Vec::new());
         for &w in words.iter().take(2_000_000) {
             buf.clear();
-            if render(&arch, w, 0x10000, &mut buf) { vw.push(w) } else { iw.push(w) }
+            if render(&arch, w, 0x10000, &mut buf) {
+                vw.push(w)
+            } else {
+                iw.push(w)
+            }
         }
         for (name, set) in [("valid", &vw), ("invalid", &iw)] {
             let t = Instant::now();
@@ -284,7 +340,11 @@ fn bench_cmd(args: &[String]) {
                 render(&arch, w, 0x10000, &mut buf);
             }
             let dt = t.elapsed().as_secs_f64();
-            println!("  {name}: {} words, {:.1} ns/word", set.len(), dt * 1e9 / set.len().max(1) as f64);
+            println!(
+                "  {name}: {} words, {:.1} ns/word",
+                set.len(),
+                dt * 1e9 / set.len().max(1) as f64
+            );
         }
     }
     for round in 0..3 {

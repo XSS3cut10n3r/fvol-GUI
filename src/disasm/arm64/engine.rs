@@ -48,8 +48,7 @@ impl Field {
     fn raw(&self, w: u32) -> u64 {
         let mut v: u64 = 0;
         let mut sh = 0u32;
-        for i in 0..self.nseg as usize {
-            let (lsb, n) = self.segs[i];
+        for &(lsb, n) in &self.segs[..self.nseg as usize] {
             let x = (w >> lsb) as u64 & ((1u64 << n) - 1);
             v |= x << sh;
             sh += n as u32;
@@ -81,15 +80,38 @@ impl Field {
 #[derive(Clone, Copy, Debug)]
 enum Op {
     Lit(SRef),
-    Reg { cls: u8, sp31: u8, field: Field, suffix: SRef, exc_off: u32, exc_len: u32 },
-    Num { prefix: SRef, style: u8, pc: u8, field: Field, exc_off: u32, exc_len: u32 },
-    Tab { table: u32, idx_off: u32, nbits: u8, np31: u8 },
+    Reg {
+        cls: u8,
+        sp31: u8,
+        field: Field,
+        suffix: SRef,
+        exc_off: u32,
+        exc_len: u32,
+    },
+    Num {
+        prefix: SRef,
+        style: u8,
+        pc: u8,
+        field: Field,
+        exc_off: u32,
+        exc_len: u32,
+    },
+    Tab {
+        table: u32,
+        idx_off: u32,
+        nbits: u8,
+        np31: u8,
+    },
 }
 
 #[derive(Clone, Debug)]
 enum Table {
     Dense(Vec<u32>),
-    Gen { generator: Gen, rules: Vec<(u32, u32, u32)>, default: u32 },
+    Gen {
+        generator: Gen,
+        rules: Vec<(u32, u32, u32)>,
+        default: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -99,7 +121,11 @@ enum Gen {
     Reglist(u8),
     /// VFP register list: b's' or b'd'
     VfpList(u8),
-    Bitmask { lsb: u8, size: u8, style: u8 },
+    Bitmask {
+        lsb: u8,
+        size: u8,
+        style: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,7 +153,9 @@ struct Cons {
 }
 
 pub(crate) struct Engine {
-    text: &'static str,
+    /// tree roots: main (AL / unconditional words), cond (conditional words, ARM only)
+    root_main: u32,
+    root_cond: u32,
     classes: Vec<Class>,
     ops: Vec<Op>,
     lin: Vec<(u8, i64)>,
@@ -286,9 +314,17 @@ pub(crate) fn decode_bitmask(n: u32, immr: u32, imms: u32, regsize: u32) -> Opti
     if s == levels {
         return None;
     }
-    let emask: u64 = if esize == 64 { u64::MAX } else { (1u64 << esize) - 1 };
+    let emask: u64 = if esize == 64 {
+        u64::MAX
+    } else {
+        (1u64 << esize) - 1
+    };
     let welem: u64 = (1u64 << (s + 1)) - 1;
-    let rot = if r == 0 { welem } else { ((welem >> r) | (welem << (esize - r))) & emask };
+    let rot = if r == 0 {
+        welem
+    } else {
+        ((welem >> r) | (welem << (esize - r))) & emask
+    };
     let mut v = 0u64;
     let mut i = 0;
     while i < regsize {
@@ -311,11 +347,6 @@ impl Engine {
         s
     }
 
-    #[inline(always)]
-    fn s(&self, r: SRef) -> &'static str {
-        r
-    }
-
     fn entry(&mut self, s: &'static str) -> u32 {
         match s {
             "!O" => E_OTHER,
@@ -329,7 +360,10 @@ impl Engine {
     }
 
     fn parse_field(&mut self, s: &'static str) -> Option<Field> {
-        let mut f = Field { scale: 1, ..Default::default() };
+        let mut f = Field {
+            scale: 1,
+            ..Default::default()
+        };
         // base: trailing [+-]digits after the core
         let bytes = s.as_bytes();
         let mut core_end = s.len();
@@ -411,7 +445,14 @@ impl Engine {
                 let field = self.parse_field(f[3])?;
                 let suffix = if f[4] == "-" { "" } else { self.sref(f[4]) };
                 let (exc_off, exc_len) = self.parse_exc(f[5])?;
-                Some(Op::Reg { cls, sp31, field, suffix, exc_off, exc_len })
+                Some(Op::Reg {
+                    cls,
+                    sp31,
+                    field,
+                    suffix,
+                    exc_off,
+                    exc_len,
+                })
             }
             "n" if f.len() == 6 => {
                 let prefix = if f[1] == "-" { "" } else { self.sref(f[1]) };
@@ -419,7 +460,14 @@ impl Engine {
                 let pc: u8 = f[3].parse().ok()?;
                 let field = self.parse_field(f[4])?;
                 let (exc_off, exc_len) = self.parse_exc(f[5])?;
-                Some(Op::Num { prefix, style, pc, field, exc_off, exc_len })
+                Some(Op::Num {
+                    prefix,
+                    style,
+                    pc,
+                    field,
+                    exc_off,
+                    exc_len,
+                })
             }
             "t" if f.len() == 3 => {
                 let table = *self.table_names.get(f[1])?;
@@ -448,7 +496,12 @@ impl Engine {
                     self.idx_bits.push(a | (wd << 5));
                     np31 += 1;
                 }
-                Some(Op::Tab { table, idx_off, nbits, np31 })
+                Some(Op::Tab {
+                    table,
+                    idx_off,
+                    nbits,
+                    np31,
+                })
             }
             _ => None,
         }
@@ -457,7 +510,8 @@ impl Engine {
     /// Compile a spec. `handlers` maps handler names (H records) to functions.
     pub(crate) fn compile(text: &'static str, handlers: &[(&str, Handler)]) -> Engine {
         let mut e = Engine {
-            text,
+            root_main: 0,
+            root_cond: 0,
             classes: Vec::new(),
             ops: Vec::new(),
             lin: Vec::new(),
@@ -504,9 +558,24 @@ impl Engine {
             "G" if f.len() >= 6 => {
                 let args: Vec<&str> = f[4].split(' ').collect();
                 let (generator, default) = match f[3] {
-                    "const" => (Gen::Const, if args.first() == Some(&"!I") { E_INVALID } else { E_OTHER }),
-                    "sysreg" => (Gen::Sysreg(args.first().and_then(|x| x.parse().ok()).unwrap_or(5)), 0),
-                    "reglist" => (Gen::Reglist(args.first().and_then(|x| x.parse::<u8>().ok()).unwrap_or(0) & 31), 0),
+                    "const" => (
+                        Gen::Const,
+                        if args.first() == Some(&"!I") {
+                            E_INVALID
+                        } else {
+                            E_OTHER
+                        },
+                    ),
+                    "sysreg" => (
+                        Gen::Sysreg(args.first().and_then(|x| x.parse().ok()).unwrap_or(5)),
+                        0,
+                    ),
+                    "reglist" => (
+                        Gen::Reglist(
+                            args.first().and_then(|x| x.parse::<u8>().ok()).unwrap_or(0) & 31,
+                        ),
+                        0,
+                    ),
                     "vfplist" => (
                         Gen::VfpList(match args.first() {
                             Some(&"s") => b's',
@@ -526,19 +595,33 @@ impl Engine {
                 let mut rules = Vec::new();
                 if f[5] != "-" {
                     for r in f[5].split('|') {
-                        let Some((mv, res)) = r.split_once('=') else { continue };
-                        let Some((m, v)) = mv.split_once(':') else { continue };
-                        let (Some(m), Some(v)) = (parse_hex(m), parse_hex(v)) else { continue };
+                        let Some((mv, res)) = r.split_once('=') else {
+                            continue;
+                        };
+                        let Some((m, v)) = mv.split_once(':') else {
+                            continue;
+                        };
+                        let (Some(m), Some(v)) = (parse_hex(m), parse_hex(v)) else {
+                            continue;
+                        };
                         let id = e.entry(res);
                         rules.push((m, v, id));
                     }
                 }
                 e.table_names.insert(f[1], e.tables.len() as u32);
-                e.tables.push(Table::Gen { generator, rules, default });
+                e.tables.push(Table::Gen {
+                    generator,
+                    rules,
+                    default,
+                });
             }
             "H" if f.len() >= 4 => {
-                let (Some(mask), Some(value)) = (parse_hex(f[1]), parse_hex(f[2])) else { return };
-                let Some(h) = handlers.iter().find(|(n, _)| *n == f[3]).map(|x| x.1) else { return };
+                let (Some(mask), Some(value)) = (parse_hex(f[1]), parse_hex(f[2])) else {
+                    return;
+                };
+                let Some(h) = handlers.iter().find(|(n, _)| *n == f[3]).map(|x| x.1) else {
+                    return;
+                };
                 e.handlers.push(h);
                 e.classes.push(Class {
                     mask,
@@ -552,7 +635,9 @@ impl Engine {
                 });
             }
             "C" if f.len() >= 6 => {
-                let (Some(mask), Some(value)) = (parse_hex(f[1]), parse_hex(f[2])) else { return };
+                let (Some(mask), Some(value)) = (parse_hex(f[1]), parse_hex(f[2])) else {
+                    return;
+                };
                 let mnem = e.sref(f[3]);
                 let (prog_off, prog_len) = match e.prog_cache.get(f[4]) {
                     Some(&p) => p,
@@ -585,25 +670,46 @@ impl Engine {
                 let cons_off = e.cons.len() as u32;
                 if f[5] != "-" {
                     for c in f[5].split(' ') {
-                        let Some((kind, arg)) = c.split_once(':') else { continue };
+                        let Some((kind, arg)) = c.split_once(':') else {
+                            continue;
+                        };
                         match kind {
                             "tie" => {
                                 for pr in arg.split(',') {
-                                    let Some((a, b)) = pr.split_once('=') else { continue };
-                                    let (Ok(a), Ok(b)) = (a.parse::<u8>(), b.parse::<u8>()) else { continue };
-                                    e.cons.push(Cons { kind: 0, a: a & 31, b: b & 31, w: 1 });
+                                    let Some((a, b)) = pr.split_once('=') else {
+                                        continue;
+                                    };
+                                    let (Ok(a), Ok(b)) = (a.parse::<u8>(), b.parse::<u8>()) else {
+                                        continue;
+                                    };
+                                    e.cons.push(Cons {
+                                        kind: 0,
+                                        a: a & 31,
+                                        b: b & 31,
+                                        w: 1,
+                                    });
                                 }
                             }
                             "neq" | "neq31" => {
-                                let xs: Vec<u8> = arg.split(',').filter_map(|x| x.parse().ok()).collect();
+                                let xs: Vec<u8> =
+                                    arg.split(',').filter_map(|x| x.parse().ok()).collect();
                                 if xs.len() < 2 {
                                     continue;
                                 }
                                 let (a, b, wd) = (xs[0], xs[1], xs.get(2).copied().unwrap_or(5));
-                                if wd == 0 || wd > 5 || a as u32 + wd as u32 > 32 || b as u32 + wd as u32 > 32 {
+                                if wd == 0
+                                    || wd > 5
+                                    || a as u32 + wd as u32 > 32
+                                    || b as u32 + wd as u32 > 32
+                                {
                                     continue;
                                 }
-                                e.cons.push(Cons { kind: if kind == "neq" { 1 } else { 2 }, a, b, w: wd });
+                                e.cons.push(Cons {
+                                    kind: if kind == "neq" { 1 } else { 2 },
+                                    a,
+                                    b,
+                                    w: wd,
+                                });
                             }
                             _ => {}
                         }
@@ -636,18 +742,45 @@ const LEAF_MAX: usize = 3;
 
 impl Engine {
     fn build_tree(&mut self) {
-        let all: Vec<u32> = (0..self.classes.len() as u32).collect();
         let mut memo: std::collections::HashMap<Vec<u32>, u32> = std::collections::HashMap::new();
         self.tree.clear();
         self.leaf.clear();
-        self.node(&all, 0, 0, &mut memo);
+        if !self.fold_cond {
+            let all: Vec<u32> = (0..self.classes.len() as u32).collect();
+            self.root_main = self.node(&all, 0, 0, &mut memo);
+            self.root_cond = self.root_main;
+            return;
+        }
+        // 32-bit ARM: one tree over the classes that can match AL / unconditional words (cond
+        // 14 / 15: direct lookups and folded twins), one over those that can match a
+        // conditional word directly (condition-specific and invalid classes) -- usually tiny
+        let can =
+            |k: &Class, lo: u32, hi: u32| (lo..hi).any(|c| (c & (k.mask >> 28)) == (k.value >> 28));
+        let main: Vec<u32> = (0..self.classes.len() as u32)
+            .filter(|&i| can(&self.classes[i as usize], 14, 16))
+            .collect();
+        let cond: Vec<u32> = (0..self.classes.len() as u32)
+            .filter(|&i| can(&self.classes[i as usize], 0, 14))
+            .collect();
+        self.root_main = self.node(&main, 0, 0, &mut memo);
+        self.root_cond = self.node(&cond, 0, 0, &mut memo);
     }
 
-    fn node(&mut self, set: &[u32], known: u32, depth: u32, memo: &mut std::collections::HashMap<Vec<u32>, u32>) -> u32 {
+    fn node(
+        &mut self,
+        set: &[u32],
+        known: u32,
+        depth: u32,
+        memo: &mut std::collections::HashMap<Vec<u32>, u32>,
+    ) -> u32 {
         if let Some(&n) = memo.get(set) {
             return n;
         }
-        let split = if set.len() <= LEAF_MAX || depth >= 16 { None } else { self.best_split(set, known) };
+        let split = if set.len() <= LEAF_MAX || depth >= 16 {
+            None
+        } else {
+            self.best_split(set, known)
+        };
         let here = self.tree.len() as u32;
         match split {
             None => {
@@ -731,34 +864,40 @@ impl Engine {
     /// appended) if the word is not a valid instruction.
     #[inline]
     pub(crate) fn render(&self, w: u32, addr: u64, out: &mut String) -> bool {
-        match self.render_direct(w, addr, out) {
-            Some(ok) => ok,
-            None => {
-                let c = w >> 28;
-                if !self.fold_cond || c >= 14 {
-                    return false;
-                }
-                let start = out.len();
-                if self.render_direct((w & 0x0FFF_FFFF) | 0xE000_0000, addr, out) != Some(true) {
-                    out.truncate(start);
-                    return false;
-                }
-                let tail = &out[start..];
-                let tab = tail.find('\t').unwrap_or(tail.len());
-                let pos = tail[..tab].find('.').unwrap_or(tab);
-                out.insert_str(start + pos, COND_NAMES[c as usize]);
-                true
+        let c = w >> 28;
+        if self.fold_cond && c < 14 {
+            if let Some(ok) = self.render_direct(self.root_cond, w, addr, out, None) {
+                return ok;
             }
+            // no class claims the conditional word: render its AL twin, condition suffix
+            // written into the mnemonic
+            let twin = (w & 0x0FFF_FFFF) | 0xE000_0000;
+            return self.render_direct(
+                self.root_main,
+                twin,
+                addr,
+                out,
+                Some(COND_NAMES[c as usize]),
+            ) == Some(true);
         }
+        self.render_direct(self.root_main, w, addr, out, None) == Some(true)
     }
 
-    /// Like `render` without condition folding: None if no class claims the word.
+    /// Walk the tree at `root` and render with the first class that claims `w`: None if no
+    /// class claims it.  `cond`: condition suffix to insert into the mnemonic.
     #[inline]
-    fn render_direct(&self, w: u32, addr: u64, out: &mut String) -> Option<bool> {
+    fn render_direct(
+        &self,
+        root: u32,
+        w: u32,
+        addr: u64,
+        out: &mut String,
+        cond: Option<&str>,
+    ) -> Option<bool> {
         let tree = &self.tree[..];
-        let mut n = 0usize;
+        let mut n = root as usize;
         loop {
-            let Some(&x) = tree.get(n) else { return None };
+            let &x = tree.get(n)?;
             if x & 0x8000_0000 == 0 {
                 break;
             }
@@ -775,7 +914,7 @@ impl Engine {
             if w & c.mask != c.value {
                 continue;
             }
-            match self.render_class(c, w, addr, out) {
+            match self.render_class(c, w, addr, out, cond) {
                 Res::Ok => return Some(true),
                 Res::Other => out.truncate(start),
                 Res::Invalid => {
@@ -788,8 +927,13 @@ impl Engine {
     }
 
     /// (tree depth, leaf size, candidates whose mask matched) for word `w` (benchmarking aid).
+    #[allow(dead_code)]
     pub(crate) fn walk_stats(&self, w: u32) -> (u32, u32, u32) {
-        let mut n = 0usize;
+        let mut n = if self.fold_cond && w >> 28 < 14 {
+            self.root_cond
+        } else {
+            self.root_main
+        } as usize;
         let mut depth = 0;
         while let Some(&x) = self.tree.get(n) {
             if x & 0x8000_0000 == 0 {
@@ -801,39 +945,51 @@ impl Engine {
         }
         let cnt = self.tree.get(n).copied().unwrap_or(0) as usize;
         let off = self.tree.get(n + 1).copied().unwrap_or(0) as usize;
-        let matched = self.leaf.get(off..off + cnt).unwrap_or(&[]).iter()
-            .filter(|&&ci| { let c = &self.classes[ci as usize]; w & c.mask == c.value }).count();
+        let matched = self
+            .leaf
+            .get(off..off + cnt)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&ci| {
+                let c = &self.classes[ci as usize];
+                w & c.mask == c.value
+            })
+            .count();
         (depth, cnt as u32, matched as u32)
     }
 
     /// (classes, ops, tree words, leaf entries) sizes.
+    #[allow(dead_code)]
     pub(crate) fn sizes(&self) -> (usize, usize, usize, usize) {
-        (self.classes.len(), self.ops.len(), self.tree.len(), self.leaf.len())
+        (
+            self.classes.len(),
+            self.ops.len(),
+            self.tree.len(),
+            self.leaf.len(),
+        )
     }
 
-    /// Index of the class that renders `w` (for debugging), if any.
-    pub(crate) fn class_of(&self, w: u32, addr: u64) -> Option<usize> {
-        let mut s = String::new();
-        for (ci, c) in self.classes.iter().enumerate() {
-            if w & c.mask != c.value {
-                continue;
-            }
-            s.clear();
-            match self.render_class(c, w, addr, &mut s) {
-                Res::Ok => return Some(ci),
-                Res::Other => {}
-                Res::Invalid => return Some(ci),
-            }
-        }
-        None
-    }
-
-    fn render_class(&self, c: &Class, w: u32, addr: u64, out: &mut String) -> Res {
+    fn render_class(
+        &self,
+        c: &Class,
+        w: u32,
+        addr: u64,
+        out: &mut String,
+        cond: Option<&str>,
+    ) -> Res {
         if c.handler != u32::MAX {
-            return match self.handlers.get(c.handler as usize) {
+            let start = out.len();
+            let r = match self.handlers.get(c.handler as usize) {
                 Some(h) => h(w, addr, out),
                 None => Res::Invalid,
             };
+            if let (Res::Ok, Some(sfx)) = (r, cond) {
+                let tail = &out[start..];
+                let tab = tail.find('\t').unwrap_or(tail.len());
+                let pos = tail[..tab].find('.').unwrap_or(tab);
+                out.insert_str(start + pos, sfx);
+            }
+            return r;
         }
         for k in &self.cons[c.cons_off as usize..(c.cons_off + c.cons_len) as usize] {
             match k.kind {
@@ -852,29 +1008,60 @@ impl Engine {
                 }
             }
         }
-        out.push_str(self.s(c.mnem));
+        match cond {
+            None => out.push_str(c.mnem),
+            Some(sfx) => {
+                // condition suffix goes before the data-type part ("vadd" "eq" ".f32")
+                let (base, rest) = c.mnem.split_at(c.mnem.find('.').unwrap_or(c.mnem.len()));
+                out.push_str(base);
+                out.push_str(sfx);
+                out.push_str(rest);
+            }
+        }
         out.push('\t');
         for op in &self.ops[c.prog_off as usize..(c.prog_off + c.prog_len) as usize] {
             match *op {
-                Op::Lit(r) => out.push_str(self.s(r)),
-                Op::Reg { cls, sp31, ref field, suffix, exc_off, exc_len } => {
+                Op::Lit(r) => out.push_str(r),
+                Op::Reg {
+                    cls,
+                    sp31,
+                    ref field,
+                    suffix,
+                    exc_off,
+                    exc_len,
+                } => {
                     let n = field.eval(w, &self.lin).rem_euclid(32) as u32;
                     if exc_len != 0 {
                         for &(k, v) in &self.exc[exc_off as usize..(exc_off + exc_len) as usize] {
                             if k == n as u64 {
-                                return if v == E_OTHER { Res::Other } else { Res::Invalid };
+                                return if v == E_OTHER {
+                                    Res::Other
+                                } else {
+                                    Res::Invalid
+                                };
                             }
                         }
                     }
                     push_reg(out, cls, sp31, n);
-                    out.push_str(self.s(suffix));
+                    out.push_str(suffix);
                 }
-                Op::Num { prefix, style, pc, ref field, exc_off, exc_len } => {
+                Op::Num {
+                    prefix,
+                    style,
+                    pc,
+                    ref field,
+                    exc_off,
+                    exc_len,
+                } => {
                     if exc_len != 0 {
                         let key = self.exc_key(field, w);
                         for &(k, v) in &self.exc[exc_off as usize..(exc_off + exc_len) as usize] {
                             if k == key {
-                                return if v == E_OTHER { Res::Other } else { Res::Invalid };
+                                return if v == E_OTHER {
+                                    Res::Other
+                                } else {
+                                    Res::Invalid
+                                };
                             }
                         }
                     }
@@ -884,11 +1071,17 @@ impl Engine {
                         2 => v = v.wrapping_add((addr & !0xFFF) as i64),
                         _ => {}
                     }
-                    out.push_str(self.s(prefix));
+                    out.push_str(prefix);
                     push_num(out, v, style);
                 }
-                Op::Tab { table, idx_off, nbits, np31 } => {
-                    let bits = &self.idx_bits[idx_off as usize..idx_off as usize + nbits as usize + np31 as usize];
+                Op::Tab {
+                    table,
+                    idx_off,
+                    nbits,
+                    np31,
+                } => {
+                    let bits = &self.idx_bits
+                        [idx_off as usize..idx_off as usize + nbits as usize + np31 as usize];
                     let mut idx = 0u32;
                     for (k, &b) in bits[..nbits as usize].iter().enumerate() {
                         idx |= ((w >> b) & 1) << k;
@@ -899,10 +1092,16 @@ impl Engine {
                             idx |= 1 << (nbits as usize + k);
                         }
                     }
-                    let Some(t) = self.tables.get(table as usize) else { return Res::Invalid };
+                    let Some(t) = self.tables.get(table as usize) else {
+                        return Res::Invalid;
+                    };
                     let e = match t {
                         Table::Dense(v) => v.get(idx as usize).copied().unwrap_or(E_INVALID),
-                        Table::Gen { generator, rules, default } => {
+                        Table::Gen {
+                            generator,
+                            rules,
+                            default,
+                        } => {
                             let mut e = None;
                             for &(m, v, r) in rules {
                                 if idx & m == v {
@@ -924,9 +1123,13 @@ impl Engine {
                                             b'a' => b's',
                                             k => k,
                                         };
-                                        let (vd, d, imm8) = ((w >> 12) & 15, (w >> 22) & 1, w & 0xFF);
-                                        let (first, mut n) =
-                                            if kind == b's' { ((vd << 1) | d, imm8) } else { ((d << 4) | vd, imm8 >> 1) };
+                                        let (vd, d, imm8) =
+                                            ((w >> 12) & 15, (w >> 22) & 1, w & 0xFF);
+                                        let (first, mut n) = if kind == b's' {
+                                            ((vd << 1) | d, imm8)
+                                        } else {
+                                            ((d << 4) | vd, imm8 >> 1)
+                                        };
                                         // capstone's clamping of unpredictable counts
                                         if n == 0 || first + n > 32 || (kind == b'd' && n > 16) {
                                             if first + n > 32 {
@@ -1004,8 +1207,7 @@ impl Engine {
                 }
             }
         } else {
-            for i in 0..f.nseg as usize {
-                let (lsb, w_) = f.segs[i];
+            for &(lsb, w_) in &f.segs[..f.nseg as usize] {
                 for b in lsb..lsb.saturating_add(w_) {
                     if n < 64 {
                         bits[n] = b;
@@ -1024,10 +1226,13 @@ impl Engine {
     }
 }
 
-const COND_NAMES: [&str; 14] = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"];
+const COND_NAMES: [&str; 14] = [
+    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le",
+];
 
-const ARM_GPR: [&str; 16] =
-    ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "sb", "sl", "fp", "ip", "sp", "lr", "pc"];
+const ARM_GPR: [&str; 16] = [
+    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "sb", "sl", "fp", "ip", "sp", "lr", "pc",
+];
 
 #[inline]
 fn push_reg(out: &mut String, cls: u8, sp31: u8, n: u32) {

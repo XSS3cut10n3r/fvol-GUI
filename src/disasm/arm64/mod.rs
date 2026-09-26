@@ -174,7 +174,11 @@ pub fn decode(data: &[u8], addr: u64) -> Option<Insn> {
     let word = u32::from_le_bytes(b);
     let mut s = String::new();
     if engine().render(word, addr, &mut s) {
-        Some(Insn { address: addr, size: 4, word })
+        Some(Insn {
+            address: addr,
+            size: 4,
+            word,
+        })
     } else {
         None
     }
@@ -197,7 +201,11 @@ impl Iterator for Disasm<'_> {
             self.data = &[];
             return None;
         }
-        let i = Insn { address: self.addr, size: 4, word };
+        let i = Insn {
+            address: self.addr,
+            size: 4,
+            word,
+        };
         self.data = &self.data[4..];
         self.addr = self.addr.wrapping_add(4);
         Some(i)
@@ -206,7 +214,11 @@ impl Iterator for Disasm<'_> {
 
 /// `capstone.Cs(CS_ARCH_ARM64, CS_MODE_ARM).disasm(data, addr)` equivalent.
 pub fn disasm(data: &[u8], addr: u64) -> Disasm<'_> {
-    Disasm { data, addr, scratch: String::new() }
+    Disasm {
+        data,
+        addr,
+        scratch: String::new(),
+    }
 }
 
 /// Append volatility's rendering (`"\n{addr:#x}:\t{mnemonic}\t{op_str}"` per instruction,
@@ -214,8 +226,8 @@ pub fn disasm(data: &[u8], addr: u64) -> Disasm<'_> {
 pub fn format_arm64_into(data: &[u8], addr: u64, out: &mut String) {
     let e = engine();
     let mut a = addr;
-    for chunk in data.chunks_exact(4) {
-        let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for chunk in data.as_chunks::<4>().0 {
+        let word = u32::from_le_bytes(*chunk);
         let mark = out.len();
         out.push_str("\n0x");
         engine::push_hex(out, a);
@@ -239,6 +251,7 @@ pub fn warm_up() {
 }
 
 /// The compiled engine (benchmarks / diagnostics).
+#[allow(dead_code)]
 pub(crate) fn engine_ref() -> &'static Engine {
     engine()
 }

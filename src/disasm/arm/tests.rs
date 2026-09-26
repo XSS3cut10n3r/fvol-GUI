@@ -5,7 +5,11 @@ use super::*;
 
 fn fmt(word: u32, addr: u64) -> String {
     let mut s = String::new();
-    if render_word(word, addr, &mut s) { s } else { "INVALID".into() }
+    if render_word(word, addr, &mut s) {
+        s
+    } else {
+        "INVALID".into()
+    }
 }
 
 #[test]
@@ -38,7 +42,10 @@ fn disasm_arm_golden() {
 #[test]
 fn disasm_arm_format_capstone() {
     // push {r4, lr}; add r0, r1, r2; 0xffffffff is invalid and stops the listing
-    let data = [0x10, 0x40, 0x2d, 0xe9, 0x02, 0x00, 0x81, 0xe0, 0xff, 0xff, 0xff, 0xff, 0x1e, 0xff, 0x2f, 0xe1];
+    let data = [
+        0x10, 0x40, 0x2d, 0xe9, 0x02, 0x00, 0x81, 0xe0, 0xff, 0xff, 0xff, 0xff, 0x1e, 0xff, 0x2f,
+        0xe1,
+    ];
     let mut s = String::new();
     format_arm_into(&data, 0x8000, &mut s);
     assert_eq!(s, "\n0x8000:\tpush\t{r4, lr}\n0x8004:\tadd\tr0, r1, r2");
@@ -56,7 +63,11 @@ fn disasm_arm_never_panics() {
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
-        let addr = if i & 1 == 0 { x.rotate_left(17) } else { x & 0xFFFF };
+        let addr = if i & 1 == 0 {
+            x.rotate_left(17)
+        } else {
+            x & 0xFFFF
+        };
         s.clear();
         let _ = render_word(x as u32, addr, &mut s);
         s.clear();
