@@ -65,7 +65,7 @@ use crate::renderers::{Value, ColType, Column};
 | python | rust |
 |---|---|
 | `proc.UniqueProcessId` (int) | `proc.m("UniqueProcessId")?.int()?` (`i128`, exact python int) / `.u64()?` / `.i64()?` |
-| `proc.Pcb.DirectoryTableBase` | `proc.path("Pcb.DirectoryTableBase")?.u64()?` or `proc.m("Pcb")?.m("DirectoryTableBase")?` |
+| `proc.Pcb.DirectoryTableBase` | `proc.u64_at("Pcb.DirectoryTableBase")?` (= `proc.path(..)?.u64()?`, `proc.m("Pcb")?.m("DirectoryTableBase")?.u64()?`); `int_at` for the exact python int |
 | `ptr.Member` (auto-deref) | `ptr.m("Member")?` (dereferences pointers like python) |
 | `ptr.dereference()` | `ptr.deref()?` ; `ptr.deref_on(layer)?` for `dereference(layer_name)` |
 | `if ptr:` / `bool(x)` | `x.bool()?` (value != 0) |

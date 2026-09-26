@@ -240,6 +240,17 @@ impl Obj {
         Ok(o)
     }
 
+    /// Shorthand for `self.path(path)?.int()?` (python `obj.A.B` used as an int).
+    #[inline]
+    pub fn int_at(&self, path: &str) -> Result<i128> {
+        self.path(path)?.int()
+    }
+    /// Shorthand for `self.path(path)?.u64()?`.
+    #[inline]
+    pub fn u64_at(&self, path: &str) -> Result<u64> {
+        self.path(path)?.u64()
+    }
+
     /// python `has_member(name)` (pointers: whether the target type has it).
     pub fn has_member(&self, name: &str) -> bool {
         match self.ty {
