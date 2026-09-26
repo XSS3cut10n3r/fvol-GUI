@@ -22,6 +22,15 @@ pub struct StringDef {
     pub id: String,
     pub kind: StringKind,
     pub mods: Modifiers,
+    /// libyara STRING_FLAGS_FIXED_OFFSET: `Some(off)` when every reference to this
+    /// string in the rule's condition is `$x at <constant off>` (see parser.c
+    /// yr_parser_emit_pushes_for_strings / yr_parser_reduce_string_identifier;
+    /// anonymous `$` inside for-of loops affects all strings of the rule; strings
+    /// that are unreferenced keep None). The matcher then reports matches of this
+    /// string ONLY at that offset. libyara clears it for non-literal hex/regex
+    /// strings (a hex/regex string whose AST is a plain literal counts as literal)
+    /// and for chained strings — the matcher applies those rules.
+    pub fixed_offset: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
