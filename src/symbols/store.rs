@@ -143,7 +143,16 @@ impl SymbolPath {
                 }
             }
         }
+        // python's own install (volatility3/symbols, volatility3/framework/symbols) when present,
+        // so lookups resolve to the same files (and URLs) as python; embedded copies otherwise
+        let py = python_install();
+        if let Some(p) = &py {
+            roots.push(Root::Dir(p.join("symbols")));
+        }
         roots.push(Root::Embedded { top: true });
+        if let Some(p) = &py {
+            roots.push(Root::Dir(p.join("framework").join("symbols")));
+        }
         roots.push(Root::Embedded { top: false });
         let cache_syms = paths::vol3_cache_dir(None).join("symbols");
         roots.push(Root::Dir(cache_syms.clone()));
@@ -253,6 +262,35 @@ impl SymbolPath {
         }
         out
     }
+}
+
+/// Locate a python volatility3 package directory (the one containing `framework/`):
+/// `$RSVOL_VOL3_ROOT` (the package dir or a checkout containing it), else the nearest ancestor
+/// of the rsvol binary holding `volatility3/volatility3/framework/symbols` or
+/// `volatility3/framework/symbols`.
+pub fn python_install() -> Option<PathBuf> {
+    let is_pkg = |p: &Path| p.join("framework").join("symbols").is_dir();
+    if let Some(r) = std::env::var_os("RSVOL_VOL3_ROOT").filter(|v| !v.is_empty()) {
+        let r = PathBuf::from(r);
+        for c in [r.clone(), r.join("volatility3")] {
+            if is_pkg(&c) {
+                return Some(c);
+            }
+        }
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent();
+    for _ in 0..10 {
+        let d = dir?;
+        for c in [d.join("volatility3").join("volatility3"), d.join("volatility3")] {
+            if is_pkg(&c) {
+                return Some(c);
+            }
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 /// Recursively list regular files under `dir` (sorted for determinism).

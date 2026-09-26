@@ -490,19 +490,33 @@ fn method_slow_scan(vlayer: &IntelLayer) -> Option<KernelFound> {
 
 /// python `KernelPDBScanner.determine_valid_kernel` on one Intel layer.
 pub fn find_kernel(vlayer: &IntelLayer, phys: &dyn Layer) -> Result<Option<KernelFound>> {
-    if let Some(k) = method_low_stub(vlayer, phys) {
-        return Ok(Some(k));
+    use crate::util::trace::span;
+    {
+        let _t = span("pdbscan: low stub");
+        if let Some(k) = method_low_stub(vlayer, phys) {
+            return Ok(Some(k));
+        }
     }
-    if let Some(k) = method_offset(vlayer, phys, b"KDBG", 8)? {
-        return Ok(Some(k));
+    {
+        let _t = span("pdbscan: kdbg offset");
+        if let Some(k) = method_offset(vlayer, phys, b"KDBG", 8)? {
+            return Ok(Some(k));
+        }
     }
-    let ro = -16 - (vlayer.bits_per_register() as i64 / 8);
-    if let Some(k) = method_offset(vlayer, phys, b"\\SystemRoot\\system32\\nt", ro)? {
-        return Ok(Some(k));
+    {
+        let _t = span("pdbscan: module offset");
+        let ro = -16 - (vlayer.bits_per_register() as i64 / 8);
+        if let Some(k) = method_offset(vlayer, phys, b"\\SystemRoot\\system32\\nt", ro)? {
+            return Ok(Some(k));
+        }
     }
-    if let Some(k) = method_fixed_mapping(vlayer, phys) {
-        return Ok(Some(k));
+    {
+        let _t = span("pdbscan: fixed mapping");
+        if let Some(k) = method_fixed_mapping(vlayer, phys) {
+            return Ok(Some(k));
+        }
     }
+    let _t = span("pdbscan: slow scan");
     Ok(method_slow_scan(vlayer))
 }
 
