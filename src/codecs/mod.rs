@@ -10,6 +10,10 @@
 //! * [`inflate::decompress`] (raw DEFLATE), [`zlib::decompress`], [`gzip::decompress`]
 //!   (multi-member).
 //! * [`bzip2::decompress`] (multi-stream).
+//! * Streaming, for whole memory images: [`gzip::decompress_to`] and
+//!   [`bzip2::decompress_to`] emit into a [`sink::Sink`] (e.g. [`sink::FileSink`], a writer
+//!   thread) with bounded memory; [`xz::decompress_to_file`] decodes blocks in parallel and
+//!   writes each at its offset.
 //! * [`zip::ZipArchive`] — `parse`, `entries`, `find(name)`, `read(&entry)`.
 //! * [`lznt1::decompress`] — NTFS / RtlDecompressBuffer LZNT1.
 //! * [`snappy`], [`xpress`] — owned by the formats agent (memory image containers).
@@ -49,6 +53,7 @@ pub mod lzma;
 pub(crate) mod lzma_enc;
 pub mod lznt1;
 pub mod png;
+pub mod sink;
 pub mod snappy;
 #[cfg(test)]
 mod testdata;

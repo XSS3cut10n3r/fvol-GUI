@@ -1,4 +1,6 @@
 #!/bin/bash
+# Each invocation writes to its own dir (concurrent runs used to clobber a shared bench/out).
+export OUTDIR=${OUTDIR:-/home/user/rs-vol/testdata/scratch/gates/run-$$/main}; mkdir -p $OUTDIR; find /home/user/rs-vol/testdata/scratch/gates -maxdepth 1 -name "run-*" -mmin +360 -exec rm -rf {} + 2>/dev/null
 # Run every plugin in a list against its python reference; summary of OK/DIFF/MISSING.
 # Usage: check_all.sh [-b BIN] [LIST]   (default list: bench/win_noarg.txt)
 BIN=/home/user/rs-vol/target/fast/vol

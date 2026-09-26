@@ -173,6 +173,12 @@ pub struct StackOptions<'a> {
     /// Path of the input file (needed by the VMware stacker to find the .vmss/.vmsn next to
     /// a .vmem). When None it is recovered from /proc/self/maps.
     pub location: Option<&'a Path>,
+    /// python's location of the input (the `file:` or remote URL). When it is remote, the
+    /// VMware stacker downloads the .vmss/.vmsn next to it (python opens them through its
+    /// `ResourceAccessor` too); the `.vmem` test is made on it, as python does.
+    pub url: Option<&'a str>,
+    /// `--offline` (no downloads).
+    pub offline: bool,
     /// python `automagic.LayerStacker.stackers`: only stackers whose class name is listed run.
     pub stackers: Option<&'a [String]>,
 }
@@ -187,6 +193,9 @@ pub struct StackEntry {
     pub name: String,
     /// python class name ("LimeLayer", "FileLayer", ...).
     pub class: &'static str,
+    /// python `location` of a FileLayer that is not the input file (the VMware metadata
+    /// file); None for the input and for other layers.
+    pub location: Option<String>,
 }
 
 /// Result of [`stack_with`].
@@ -209,6 +218,8 @@ struct Node {
     class: &'static str,
     /// (requirement name, node index)
     deps: Vec<(&'static str, usize)>,
+    /// python location of a FileLayer other than the input (VMware metadata)
+    location: Option<String>,
 }
 
 pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> {
@@ -225,12 +236,13 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
         })
         .collect();
     let mut top = Base::from_file(&file);
-    let mut nodes = vec![Node { class: "FileLayer", deps: vec![] }];
+    let mut nodes = vec![Node { class: "FileLayer", deps: vec![], location: None }];
     let mut top_node = 0usize;
     let mut used = Vec::new();
     'outer: loop {
         for k in 0..remaining.len() {
             let st = remaining[k];
+            let mut meta_location = None;
             let got: Result<SegmentedLayer> = match st {
                 Stacker::Avml => avml::stack(&top),
                 Stacker::Elf64 => elf::stack_elf64(&top),
@@ -240,20 +252,22 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
                 Stacker::WindowsCrashDump => crash::stack(&top),
                 // python: only on the FileLayer itself, and it needs the file location
                 Stacker::Vmware => match (&location, top_node) {
-                    (Some(loc), 0) => vmware::stack(&top, loc),
+                    (Some(loc), 0) => vmware::stack(&top, loc, opts.url, opts.offline).map(|(l, meta)| {
+                        meta_location = Some(meta);
+                        l
+                    }),
                     _ => Err(Error::Layer("vmware: not a file layer / unknown location".into())),
                 },
             };
             if let Ok(layer) = got {
                 let class = layer.class_name();
-                let has_meta = st == Stacker::Vmware;
                 let layer: Arc<dyn Layer> = Arc::new(layer);
                 let mut deps = vec![("base_layer", top_node)];
-                if has_meta {
-                    nodes.push(Node { class: "FileLayer", deps: vec![] });
+                if meta_location.is_some() {
+                    nodes.push(Node { class: "FileLayer", deps: vec![], location: meta_location });
                     deps.push(("meta_layer", nodes.len() - 1));
                 }
-                nodes.push(Node { class, deps });
+                nodes.push(Node { class, deps, location: None });
                 top_node = nodes.len() - 1;
                 top = Base { layer, file: None };
                 used.push(st);
@@ -284,7 +298,12 @@ fn describe(nodes: &[Node], top: usize) -> Vec<StackEntry> {
         names[n] = Some(name);
     }
     fn list(nodes: &[Node], n: usize, depth: usize, names: &[Option<String>], out: &mut Vec<StackEntry>) {
-        out.push(StackEntry { depth, name: names[n].clone().unwrap_or_default(), class: nodes[n].class });
+        out.push(StackEntry {
+            depth,
+            name: names[n].clone().unwrap_or_default(),
+            class: nodes[n].class,
+            location: nodes[n].location.clone(),
+        });
         for &(_, d) in &nodes[n].deps {
             list(nodes, d, depth + 1, names, out);
         }

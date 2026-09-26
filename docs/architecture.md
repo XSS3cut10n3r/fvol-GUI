@@ -41,6 +41,12 @@ stacks with the same names, because layer names appear in output such as `window
 
 - **The file layer** maps the image read-only with `mmap`. Reads are a bounds check and a copy,
   and `slice()` returns the mapped bytes themselves when a range is contiguous in the file.
+  python reads a `.gz`, `.bz2` or `.xz` image through a decompressing file object, where every
+  backwards seek decompresses again from the start of the file. rsvol decompresses such an image
+  once into its cache and maps the result, so the file layer stays a mapping. The decoders
+  stream to disk with bounded memory: xz blocks, bzip2 blocks and gzip members decode on all
+  cores and a single DEFLATE stream decodes on one, with a writer thread copying the output
+  into the page cache meanwhile (`src/util/resource.rs`, `src/codecs/sink.rs`).
 - **Container layers** describe where physical memory lives inside an image format: LiME, ELF
   cores including QEMU and VirtualBox dumps, Xen cores, Windows crash dumps, VMware `.vmem` files
   with their `.vmss` or `.vmsn` metadata, QEMU savevm streams and AVML. They are detected in
