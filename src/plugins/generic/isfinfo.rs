@@ -9,14 +9,9 @@
 //! iteration (hash-randomized) when the rows were inserted. So the only way to reproduce
 //! python's output is to read python's own database (`util::sqlite`). Before the plugin runs,
 //! python's `SymbolCacheMagic` automagic calls `SqliteCache.update()`, which we emulate in
-//! memory (python's database is never written):
-//!   * local rows whose location is no longer found on the symbol path are dropped;
-//!   * rows cached before `date('now', '-3 days')` whose file (local mtime) is newer than the
-//!     row's `cached` timestamp, and locations not in the table yet, are (re)inserted at the
-//!     end (`INSERT OR REPLACE` = new rowid), in our deterministic order instead of python's
-//!     random set order, with the identifier and `len()` statistics python would store;
-//!   * `-u` remote identifier-list rows are re-inserted at the end.
-//! Without a readable python database (absent, corrupt, other schema version) python starts
+//! memory (`symbols::pycache`; python's database is never written), reading new / stale ISFs
+//! here with python's JSON semantics to get the identifier and `len()` statistics python
+//! would store. Without a readable python database (absent, corrupt, other schema version) python starts
 //! from an empty table, so every ISF is "new" and listed in our order.
 //!
 //! `--live` walks `symbols.__path__` like python's `os.walk` (readdir order) and parses every
@@ -32,13 +27,14 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{RowSink, Value};
+use crate::symbols::pycache::{self, CacheRow, location_of};
 use crate::symbols::store::{ISF_EXTENSIONS, IsfLocation, Root};
 use crate::util::fxhash::FxHasher;
 use crate::util::sqlite;
 use crate::util::{FxHashMap, FxHashSet, paths};
 use std::borrow::Cow;
 use std::hash::Hasher;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub struct IsfInfo;
 
@@ -60,15 +56,15 @@ impl Plugin for IsfInfo {
         ]
     }
     fn run(&self, ctx: &Context, cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
-        let roots = python_symbol_roots(ctx);
-        let db_path = paths::vol3_cache_dir(ctx.opts.cache_path.as_deref()).join("identifier.cache");
+        let roots = pycache::python_symbol_roots(ctx.symbol_path());
+        let db_path = pycache::db_path(ctx.opts.cache_path.as_deref());
         let mut summaries = SummaryCache::load();
         let mut table = if ctx.opts.clear_cache {
             // python's --clear-cache deletes identifier.cache before SymbolCacheMagic runs
             Vec::new()
         } else {
             let _t = crate::util::trace::span("isfinfo read identifier.cache");
-            read_identifier_cache(&db_path)
+            pycache::read(&db_path).unwrap_or_default()
         };
         {
             let _t = crate::util::trace::span("isfinfo SqliteCache.update");
@@ -98,10 +94,10 @@ impl Plugin for IsfInfo {
 /// banner / PDB identifier python loads -- its choice depends on the history of its SQLite cache.
 /// `None` when python's database has no such identifier.
 pub fn python_identifier_location(ctx: &Context, identifier: &[u8]) -> Option<String> {
-    let db_path = paths::vol3_cache_dir(ctx.opts.cache_path.as_deref()).join("identifier.cache");
-    let mut table = if ctx.opts.clear_cache { Vec::new() } else { read_identifier_cache(&db_path) };
+    let db_path = pycache::db_path(ctx.opts.cache_path.as_deref());
+    let mut table = if ctx.opts.clear_cache { Vec::new() } else { pycache::read(&db_path).unwrap_or_default() };
     let mut summaries = SummaryCache::load();
-    symbol_cache_update(&mut table, &python_symbol_roots(ctx), &mut summaries);
+    symbol_cache_update(&mut table, &pycache::python_symbol_roots(ctx.symbol_path()), &mut summaries);
     summaries.save();
     table
         .iter()
@@ -113,98 +109,6 @@ pub fn python_identifier_location(ctx: &Context, identifier: &[u8]) -> Option<St
 // ---------------------------------------------------------------------------------------------
 // symbol path
 // ---------------------------------------------------------------------------------------------
-
-/// python `volatility3.symbols.__path__` (`-s` dirs, volatility3/symbols,
-/// volatility3/framework/symbols, CACHE_PATH/symbols) from rsvol's search path: the python
-/// install directories stand in for the embedded copies when python is installed.
-fn python_symbol_roots(ctx: &Context) -> Vec<Root> {
-    let have_python = crate::symbols::store::python_install().is_some();
-    ctx.symbol_path()
-        .roots
-        .iter()
-        .filter(|r| !(have_python && matches!(r, Root::Embedded { .. })))
-        .map(|r| match r {
-            Root::Dir(d) => Root::Dir(abspath(d)),
-            r => r.clone(),
-        })
-        .collect()
-}
-
-/// python `os.path.abspath` for an absolute path: lexical `.`/`..` removal, no symlinks.
-fn abspath(p: &Path) -> PathBuf {
-    let mut out = PathBuf::from("/");
-    for c in p.components() {
-        match c {
-            Component::Normal(x) => out.push(x),
-            Component::ParentDir => {
-                out.pop();
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Recursively list the files under `dir` (sorted; symlinked directories are not followed,
-/// like pathlib's `rglob`).
-fn walk_sorted(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
-        match e.file_type() {
-            Ok(t) if t.is_dir() => walk_sorted(&e.path(), out),
-            Ok(_) => out.push(e.path()),
-            Err(_) => {}
-        }
-    }
-}
-
-/// python `IntermediateSymbolTable.file_symbol_url("")` (what `SqliteCache.update()` treats as
-/// "on disk"), deduplicated, in a deterministic order (python iterates it as a set). Root
-/// directories are `resolve()`d like python. `None` when python would raise (unreadable zip).
-fn file_symbol_urls(roots: &[Root]) -> Option<Vec<(String, IsfLocation)>> {
-    let mut out: Vec<(String, IsfLocation)> = Vec::new();
-    let mut seen = FxHashSet::default();
-    let mut push = |loc: IsfLocation, out: &mut Vec<(String, IsfLocation)>| {
-        let u = loc.url();
-        if seen.insert(u.clone()) {
-            out.push((u, loc));
-        }
-    };
-    for root in roots {
-        match root {
-            Root::Dir(d) => {
-                let Ok(d) = std::fs::canonicalize(d) else { continue };
-                let mut files = Vec::new();
-                walk_sorted(&d, &mut files);
-                for ext in ISF_EXTENSIONS {
-                    for f in files.iter().filter(|f| f.as_os_str().as_encoded_bytes().ends_with(ext.as_bytes())) {
-                        push(IsfLocation::File(f.clone()), &mut out);
-                    }
-                }
-                for f in files.iter().filter(|f| f.as_os_str().as_encoded_bytes().ends_with(b".zip")) {
-                    let names = crate::symbols::zipfile::list(f).ok()?;
-                    for name in names {
-                        for ext in ISF_EXTENSIONS {
-                            if name.ends_with(ext) {
-                                push(IsfLocation::Zip { zip: f.clone(), member: name.clone() }, &mut out);
-                            }
-                        }
-                    }
-                }
-            }
-            Root::Embedded { top } => {
-                for &(rel, is_top, data) in crate::symbols::embedded::FILES {
-                    if is_top == *top {
-                        push(IsfLocation::Embedded { rel, top: *top, data }, &mut out);
-                    }
-                }
-            }
-        }
-    }
-    Some(out)
-}
 
 /// python `IsfInfo.list_all_isf_files()`: `os.walk(path, followlinks=True)` over every symbol
 /// directory (top-down, entries in readdir order), a URI per matching extension.
@@ -269,282 +173,34 @@ fn list_all_isf_files(roots: &[Root]) -> Vec<String> {
     out
 }
 
-/// The ISF a URI points at (python `ResourceAccessor().open(url)`).
-fn location_of(url: &str) -> IsfLocation {
-    if let Some(rest) = url.strip_prefix("jar:file:") {
-        let parts: Vec<&str> = rest.split('!').collect();
-        if parts.len() == 2 {
-            return IsfLocation::Zip { zip: PathBuf::from(parts[0]), member: parts[1].to_string() };
-        }
-    }
-    if url.starts_with("embedded:") {
-        for &(rel, top, data) in crate::symbols::embedded::FILES {
-            let loc = IsfLocation::Embedded { rel, top, data };
-            if loc.url() == url {
-                return loc;
-            }
-        }
-    }
-    IsfLocation::Url(url.to_string())
-}
-
 // ---------------------------------------------------------------------------------------------
 // python's identifier cache (SqliteCache)
 // ---------------------------------------------------------------------------------------------
 
-/// One row of python's `cache` table.
-#[derive(Clone, Debug)]
-struct CacheRow {
-    location: String,
-    identifier: sqlite::Value<'static>,
-    hash: sqlite::Value<'static>,
-    /// stats_base_types, stats_types, stats_enums, stats_symbols
-    stats: [sqlite::Value<'static>; 4],
-    /// `local = 1`
-    local: bool,
-    cached: sqlite::Value<'static>,
-}
-
-/// Rows of python's `cache` table in rowid order; empty when python would (re)create the
-/// database (missing, corrupt, unknown schema version).
-fn read_identifier_cache(path: &Path) -> Vec<CacheRow> {
-    let Ok(db) = sqlite::Database::open(path) else { return Vec::new() };
-    // SqliteCache._connect_storage: a schema_version other than 1 recreates the database
-    if let Ok(info) = db.table("database_info") {
-        let mut first: Option<sqlite::Value<'static>> = None;
-        let r = db.for_each_row(&info, |_, v| {
-            first = Some(v[0].clone().into_owned());
-            false
-        });
-        if r.is_err() || first.is_some_and(|v| !matches!(v, sqlite::Value::Int(1)) && v != sqlite::Value::Float(1.0)) {
-            return Vec::new();
-        }
-    }
-    let Ok(t) = db.table("cache") else { return Vec::new() };
-    let cols: Vec<Option<usize>> = [
-        "location",
-        "identifier",
-        "hash",
-        "stats_base_types",
-        "stats_types",
-        "stats_enums",
-        "stats_symbols",
-        "local",
-        "cached",
-    ]
-    .iter()
-    .map(|c| t.column(c))
-    .collect();
-    if cols.iter().any(|c| c.is_none()) {
-        return Vec::new();
-    }
-    let c: Vec<usize> = cols.into_iter().flatten().collect();
-    let mut rows = Vec::new();
-    let r = db.for_each_row(&t, |_, v| {
-        let own = |i: usize| v[c[i]].clone().into_owned();
-        let location = match &v[c[0]] {
-            sqlite::Value::Text(t) | sqlite::Value::Blob(t) => String::from_utf8_lossy(t).into_owned(),
-            sqlite::Value::Int(i) => i.to_string(),
-            _ => String::new(),
-        };
-        let local = matches!(v[c[7]], sqlite::Value::Int(1)) || v[c[7]] == sqlite::Value::Float(1.0);
-        rows.push(CacheRow {
-            location,
-            identifier: own(1),
-            hash: own(2),
-            stats: [own(3), own(4), own(5), own(6)],
-            local,
-            cached: own(8),
-        });
-        true
-    });
-    if r.is_err() {
-        return Vec::new();
-    }
-    rows
-}
-
-/// A python `datetime` as (days since 1970-01-01, microseconds of the day), naive.
-type NaiveTime = (i64, i64);
-
-/// python `datetime.datetime.fromisoformat` for the forms sqlite's `datetime()` writes
-/// (`YYYY-MM-DD[ HH:MM[:SS[.ffffff]]]`, `T` separator allowed). `None` = python raises.
-fn fromisoformat(s: &[u8]) -> Option<NaiveTime> {
-    let num = |b: &[u8]| -> Option<i64> {
-        if b.is_empty() || !b.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        Some(b.iter().fold(0i64, |a, &c| a * 10 + (c - b'0') as i64))
-    };
-    let date = s.get(..10)?;
-    if date[4] != b'-' || date[7] != b'-' {
-        return None;
-    }
-    let (y, m, d) = (num(&date[..4])?, num(&date[5..7])?, num(&date[8..10])?);
-    if !(1..=12).contains(&m) || d < 1 || d > crate::util::time::days_in_month(y, m as u32) as i64 || y < 1 {
-        return None;
-    }
-    let days = crate::util::time::days_from_civil(y, m as u32, d as u32);
-    let rest = &s[10..];
-    if rest.is_empty() {
-        return Some((days, 0));
-    }
-    if !matches!(rest[0], b' ' | b'T') {
-        return None;
-    }
-    let t = &rest[1..];
-    let (hms, frac) = match t.iter().position(|&c| c == b'.') {
-        Some(p) => (&t[..p], Some(&t[p + 1..])),
-        None => (t, None),
-    };
-    let parts: Vec<&[u8]> = hms.split(|&c| c == b':').collect();
-    if !(parts.len() == 2 || parts.len() == 3) || parts.iter().any(|p| p.len() != 2) {
-        return None;
-    }
-    let h = num(parts[0])?;
-    let mi = num(parts[1])?;
-    let sec = if parts.len() == 3 { num(parts[2])? } else { 0 };
-    if h > 23 || mi > 59 || sec > 59 {
-        return None;
-    }
-    let mut us = 0;
-    if let Some(f) = frac {
-        if !(f.len() == 3 || f.len() == 6) || (parts.len() != 3) {
-            return None;
-        }
-        us = num(f)? * if f.len() == 3 { 1000 } else { 1 };
-    }
-    Some((days, ((h * 60 + mi) * 60 + sec) * 1_000_000 + us))
-}
-
-/// python `datetime.datetime.fromtimestamp(os.stat(p).st_mtime)` (local time, naive).
-fn mtime_local(p: &Path) -> Option<NaiveTime> {
-    use std::os::unix::fs::MetadataExt;
-    let md = std::fs::metadata(p).ok()?;
-    let t = md.mtime() as f64 + md.mtime_nsec() as f64 * 1e-9;
-    let dt = crate::util::time::fromtimestamp_local(t).ok()?;
-    Some((dt.secs.div_euclid(86400), dt.secs.rem_euclid(86400) * 1_000_000 + dt.micros as i64))
-}
-
-/// The local file behind a cache location, as `SqliteCache.update()` derives it
-/// (`url2pathname` for file:, the zip path for jar:file:).
-fn update_pathname(location: &str) -> Option<PathBuf> {
-    // urlparse: optional //netloc, then the path up to ?query / #fragment
-    fn url_path(rest: &str) -> &str {
-        let rest = match rest.strip_prefix("//") {
-            Some(r) => r.find('/').map(|i| &r[i..]).unwrap_or(""),
-            None => rest,
-        };
-        rest.split(['?', '#']).next().unwrap_or("")
-    }
-    let scheme_end = location.find(':')?;
-    let scheme = location[..scheme_end].to_ascii_lowercase();
-    let rest = &location[scheme_end + 1..];
-    match scheme.as_str() {
-        "file" => Some(PathBuf::from(paths::unquote(url_path(rest)))),
-        "jar" => {
-            let inner = rest.get(..5).filter(|s| s.eq_ignore_ascii_case("file:")).map(|_| &rest[5..])?;
-            Some(PathBuf::from(url_path(inner).split('!').next().unwrap_or("")))
-        }
-        _ => None,
-    }
-}
-
-/// sqlite `x < date('now', '-3 days')` for a NUMERIC-affinity column value `x`.
-fn cached_before(v: &sqlite::Value<'_>, cutoff: &str) -> bool {
-    match v {
-        sqlite::Value::Null | sqlite::Value::Blob(_) => false,
-        sqlite::Value::Int(_) | sqlite::Value::Float(_) => true,
-        sqlite::Value::Text(t) => t.as_ref() < cutoff.as_bytes(),
-    }
-}
-
-fn utc_now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
-
-/// sqlite `date(t)`.
-fn sql_date(t: i64) -> String {
-    let (y, m, d) = crate::util::time::civil_from_days(t.div_euclid(86400));
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// sqlite `datetime(t)`.
-fn sql_datetime(t: i64) -> String {
-    let s = t.rem_euclid(86400);
-    format!("{} {:02}:{:02}:{:02}", sql_date(t), s / 3600, s / 60 % 60, s % 60)
-}
-
 /// Emulate python's `SqliteCache.update()` (run by `SymbolCacheMagic` before every plugin) on
-/// the in-memory table.
+/// the in-memory table (see `symbols::pycache`), reading new / stale ISFs with python's JSON
+/// semantics (and statistics).
 fn symbol_cache_update(rows: &mut Vec<CacheRow>, roots: &[Root], summaries: &mut SummaryCache) {
-    let Some(on_disk) = file_symbol_urls(roots) else { return };
-    let on_disk_set: FxHashSet<&str> = on_disk.iter().map(|(u, _)| u.as_str()).collect();
-    let cached_local: FxHashSet<String> = rows.iter().filter(|r| r.local).map(|r| r.location.clone()).collect();
-    // missing entries
-    rows.retain(|r| !(cached_local.contains(&r.location) && !on_disk_set.contains(r.location.as_str())));
-    // entries not updated for 3 days whose file changed since
-    let now = utc_now();
-    let mut stale: FxHashSet<&str> = FxHashSet::default();
-    if on_disk.iter().any(|(u, _)| cached_local.contains(u)) {
-        let cutoff = sql_date(now - 3 * 86400);
-        for r in rows.iter().filter(|r| r.local && cached_before(&r.cached, &cutoff)) {
-            let stored = match &r.cached {
-                sqlite::Value::Text(t) => fromisoformat(t),
+    let remote = crate::symbols::remote_isf_url();
+    pycache::update(rows, roots, pycache::utc_now(), remote.as_deref(), |todo| {
+        summaries
+            .get(todo)
+            .into_iter()
+            .map(|s| match s {
+                Summary::Json { stats: Some(st), row: Some((identifier, os)) } => Some(pycache::Scanned {
+                    identifier,
+                    os: match os {
+                        OS_WINDOWS => Some("windows"),
+                        OS_MAC => Some("mac"),
+                        OS_LINUX => Some("linux"),
+                        _ => None,
+                    },
+                    stats: st.map(|v| v as i64),
+                }),
                 _ => None,
-            };
-            // python: fromisoformat raising aborts the rest of update()
-            let Some(stored) = stored else { return };
-            let ts = update_pathname(&r.location).and_then(|p| mtime_local(&p)).unwrap_or(stored);
-            if let Some(&u) = on_disk_set.get(r.location.as_str()) {
-                if stored < ts {
-                    stale.insert(u);
-                }
-            }
-        }
-    }
-    let todo: Vec<usize> =
-        (0..on_disk.len()).filter(|&i| !cached_local.contains(&on_disk[i].0) || stale.contains(on_disk[i].0.as_str())).collect();
-    let locs: Vec<(&str, &IsfLocation)> = todo.iter().map(|&i| (on_disk[i].0.as_str(), &on_disk[i].1)).collect();
-    let sums = summaries.get(&locs);
-    let cached = sqlite::Value::Text(Cow::Owned(sql_datetime(now).into_bytes()));
-    fn replace(rows: &mut Vec<CacheRow>, row: CacheRow) {
-        // INSERT OR REPLACE: the old row (UNIQUE location) goes, the new one gets a new rowid
-        if let Some(p) = rows.iter().position(|r| r.location == row.location) {
-            rows.remove(p);
-        }
-        rows.push(row);
-    }
-    for ((url, _), s) in locs.iter().zip(sums) {
-        let Summary::Json { stats: Some(st), row: Some((ident, _os)) } = s else { continue };
-        let local = url.starts_with("file:") || url.starts_with("jar:");
-        replace(rows, CacheRow {
-            location: url.to_string(),
-            identifier: ident.map_or(sqlite::Value::Null, |i| sqlite::Value::Blob(Cow::Owned(i))),
-            hash: sqlite::Value::Null,
-            stats: [0, 1, 2, 3].map(|k| sqlite::Value::Int(st[k] as i64)),
-            local,
-            cached: cached.clone(),
-        });
-    }
-    // remote identifier lists (-u), unless --offline
-    if let Some(url) = crate::symbols::remote_isf_url() {
-        match crate::symbols::store::remote_identifiers(&url) {
-            Ok(list) => {
-                for (_os, ident, location) in list {
-                    replace(rows, CacheRow {
-                        location,
-                        identifier: sqlite::Value::Blob(Cow::Owned(ident)),
-                        hash: sqlite::Value::Null,
-                        stats: [0, 1, 2, 3].map(|_| sqlite::Value::Int(0)),
-                        local: false,
-                        cached: cached.clone(),
-                    });
-                }
-            }
-            Err(e) => eprintln!("rsvol: remote ISF list {url}: {e}"),
-        }
-    }
+            })
+            .collect()
+    });
 }
 
 /// A python dict key built from an `identifier` column value.
@@ -1692,21 +1348,6 @@ mod tests {
         assert_eq!(p("TG=x="), Some(b"Ll".to_vec()));
         assert_eq!(p("AB=C="), Some(b"\x00\x10".to_vec()));
         assert_eq!(p("A="), None);
-    }
-
-    #[test]
-    fn isoformat_and_paths() {
-        assert_eq!(fromisoformat(b"1970-01-02 00:00:01"), Some((1, 1_000_000)));
-        assert_eq!(fromisoformat(b"2026-09-26"), Some((crate::util::time::days_from_civil(2026, 9, 26), 0)));
-        assert_eq!(fromisoformat(b"2026-02-30 00:00:00"), None);
-        assert_eq!(fromisoformat(b"garbage"), None);
-        assert_eq!(update_pathname("file:///a%20b/c.json"), Some(PathBuf::from("/a b/c.json")));
-        assert_eq!(update_pathname("jar:file:/z/p.zip!x/y.json"), Some(PathBuf::from("/z/p.zip")));
-        assert_eq!(update_pathname("https://x/y"), None);
-        assert!(cached_before(&sqlite::Value::Text(Cow::Borrowed(b"2026-09-21 23:59:59")), "2026-09-22"));
-        assert!(!cached_before(&sqlite::Value::Text(Cow::Borrowed(b"2026-09-22 00:00:00")), "2026-09-22"));
-        assert_eq!(sql_datetime(86400 + 3661), "1970-01-02 01:01:01");
-        assert_eq!(abspath(Path::new("/a/./b/../c/")), PathBuf::from("/a/c"));
     }
 
     #[test]
