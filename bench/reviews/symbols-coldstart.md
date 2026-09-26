@@ -240,14 +240,14 @@ identical.
 ## 5. What cannot be beaten (and why), answering the specific questions
 
 - **Decode only the needed ranges of a `.json.xz`?** No.
-  - LZMA2 in python/xz-written ISFs is one block of 0x80 chunks: no dictionary or state resets, so no random
-    access.
+  - LZMA2 in python/xz-written ISFs is one block: one 0xE0 chunk, then only 0x80 chunks (the Windows ISF:
+    1 + 10, checked). There are no dictionary or state resets, so no random access.
   - Prefix decoding does not help either. The types a plugin needs are late in the file: `_EPROCESS` sits at
-    ~75% of the Windows ISF (`user_types` is 51-100%); `linux_banner` sits at 86% of Linux ISFs.
+    59% of the Windows ISF (`user_types` is 51-100%); `linux_banner` sits at 86% of Linux ISFs.
   - Python's dict semantics (a later duplicate key wins; invalid JSON means no table) require the whole
     document before any answer is final.
 - **Start plugin work before the decode ends?** Only with buffered output and a rollback. The overlap is at most
-  the last ~25% of the decode, against a plugin that takes 2 ms for pslist. Not worth it.
+  the last ~40% of the decode (from `_EPROCESS` at 59%), against a plugin that takes 2 ms for pslist. Not worth it.
 - **Parallel LZMA for single-block files?** Impossible: adaptive probabilities chain every decision. The asm loop
   already carries a ~6-cycle chain, loads both children of a node and uses a table update. The remaining gap to
   the estimated floor (mispredicts on symbol type) is 15-25% at very high effort (`libraries.md` agrees).
