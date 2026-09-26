@@ -1,3 +1,8 @@
 # Plugins whose python output order is nondeterministic run-to-run (python iterates sets keyed by id()/hash).
 # compare.sh accepts these when the sorted outputs are identical ("OK~ ... (order)").
 windows.windows.Windows
+# Nondeterministic only with some options or in the files they write, so sorting lines does not help;
+# bench/scripts/sweep.py compares them normalized (SET_ORDER, tar_members):
+#   linux.mountinfo.MountInfo --mount-format   options joined from a python set of strings
+#   windows.strings.Strings                    each string's mappings come from a set of (name, offset)
+#   linux.pagecache.RecoverFs                  tar members / gzip header stamped with time.time()

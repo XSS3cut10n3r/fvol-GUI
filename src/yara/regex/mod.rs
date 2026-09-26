@@ -62,6 +62,39 @@ impl Error {
     pub fn new(msg: impl Into<String>, pos: usize) -> Error {
         Error { msg: msg.into(), pos }
     }
+
+    /// python `str(re.error)` for a bytes `pattern`: "msg at position N", plus
+    /// " (line L, column C)" when the pattern contains a newline.
+    pub fn py_str(&self, pattern: &[u8]) -> String {
+        let mut s = format!("{} at position {}", self.msg, self.pos);
+        if pattern.contains(&b'\n') {
+            let pos = self.pos.min(pattern.len());
+            let line = pattern[..pos].iter().filter(|&&b| b == b'\n').count() + 1;
+            let col = match pattern[..pos].iter().rposition(|&b| b == b'\n') {
+                Some(nl) => pos - nl,
+                None => pos + 1,
+            };
+            s.push_str(&format!(" (line {line}, column {col})"));
+        }
+        s
+    }
+
+    /// [`Error::py_str`] for a python **str** pattern: positions count characters.
+    pub fn py_str_for_str(&self, pattern: &str) -> String {
+        let pos = char_offset(pattern.as_bytes(), self.pos);
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut s = format!("{} at position {}", self.msg, pos);
+        if chars.contains(&'\n') {
+            let pos = pos.min(chars.len());
+            let line = chars[..pos].iter().filter(|&&c| c == '\n').count() + 1;
+            let col = match chars[..pos].iter().rposition(|&c| c == '\n') {
+                Some(nl) => pos - nl,
+                None => pos + 1,
+            };
+            s.push_str(&format!(" (line {line}, column {col})"));
+        }
+        s
+    }
 }
 
 impl fmt::Display for Error {
@@ -563,4 +596,21 @@ pub fn multi_string_pattern(needles: &[&[u8]]) -> Option<Vec<u8>> {
         cur.end = true;
     }
     Some(render(&root, 0))
+}
+
+#[cfg(test)]
+mod error_text_tests {
+    use super::Regex;
+
+    /// python 3.14 `str(re.error)` for bytes patterns (regexscan's "Invalid regex pattern: ...")
+    #[test]
+    fn py_str_matches_python() {
+        let e = Regex::new(b"(unclosed", 0).err().unwrap();
+        assert_eq!(e.py_str(b"(unclosed"), "missing ), unterminated subpattern at position 0");
+        let e = Regex::new(b"[a-", 0).err().unwrap();
+        assert_eq!(e.py_str(b"[a-"), "unterminated character set at position 0");
+        let p = b"ab\ncd(";
+        let e = Regex::new(p, 0).err().unwrap();
+        assert_eq!(e.py_str(p), "missing ), unterminated subpattern at position 5 (line 2, column 3)");
+    }
 }

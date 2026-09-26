@@ -755,10 +755,27 @@ enum Frame {
 
 impl Regex {
     pub fn new(pattern: &str) -> Result<Regex, ReError> {
+        Self::new_flags(pattern, false)
+    }
+
+    /// python `re.compile(pattern, re.I if icase else 0)`. A pattern python rejects reports
+    /// python's `str(re.error)` ("msg at position N"), taken from the python-exact parser of
+    /// `yara::regex` (this engine's own error positions are approximate).
+    pub fn new_flags(pattern: &str, icase: bool) -> Result<Regex, ReError> {
+        Self::compile(pattern, icase).map_err(|own| {
+            let flags = if icase { crate::yara::regex::FLAG_IGNORECASE } else { 0 };
+            match crate::yara::regex::Regex::new_str(pattern, flags) {
+                Err(e) => ReError(e.py_str_for_str(pattern)),
+                Ok(_) => own,
+            }
+        })
+    }
+
+    fn compile(pattern: &str, icase: bool) -> Result<Regex, ReError> {
         let chars: Vec<char> = pattern.chars().collect();
         let mut p = Parser { s: &chars, i: 0, ngroups: 0, names: Vec::new(), open: Vec::new() };
         // global flags must be at the very start
-        let mut flags = Flags::default();
+        let mut flags = Flags { icase, ..Flags::default() };
         while p.peek() == Some('(') && p.peek_at(1) == Some('?') && p.peek_at(2).is_some_and(|c| "aiLmsux".contains(c)) {
             let save = p.i;
             p.i += 2;
@@ -971,6 +988,17 @@ mod tests {
 
     fn m(p: &str, s: &str) -> bool {
         Regex::new(p).unwrap().is_match(s)
+    }
+
+    /// python 3.14 `str(re.error)` (dumpfiles --filter, --filters): the position is where
+    /// python's parser reports it (this engine said "position 9" for "(unclosed").
+    #[test]
+    fn errors_read_like_python() {
+        let e = |p: &str, icase: bool| Regex::new_flags(p, icase).err().unwrap().0;
+        assert_eq!(e("(unclosed", false), "missing ), unterminated subpattern at position 0");
+        assert_eq!(e("ab[c-", true), "unterminated character set at position 2");
+        assert_eq!(e("é(", false), "missing ), unterminated subpattern at position 1");
+        assert!(Regex::new_flags("NTDLL", true).unwrap().is_match("ntdll.dll"));
     }
 
     #[test]

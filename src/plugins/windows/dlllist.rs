@@ -129,8 +129,7 @@ fn rows(ctx: &Context, cfg: &Config, dump: bool, emit: &mut dyn FnMut(Vec<Value>
     let kuser = super::info::get_kuser_structure(k)?;
     let (major, minor) = (kuser.m("NtMajorVersion")?.int()?, kuser.m("NtMinorVersion")?.int()?);
     let name = cfg.get_str("name").filter(|n| !n.is_empty()).map(|n| {
-        let pat = if cfg.get_bool("ignore-case") { format!("(?i){n}") } else { n.to_string() };
-        Regex::new(&pat).map_err(|_| ())
+        Regex::new_flags(n, cfg.get_bool("ignore-case")).map_err(|_| ())
     });
     let o = Opts {
         name,

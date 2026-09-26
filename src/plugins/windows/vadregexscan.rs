@@ -71,8 +71,10 @@ impl Plugin for VadRegExScan {
                 }
             }
             if compiled.is_none() {
-                let scan_re = Regex::new(&pattern, Flags::S).map_err(|e| Error::msg(format!("re.error: {}", e.msg)))?;
-                let match_re = Regex::new(&pattern, 0).map_err(|e| Error::msg(format!("re.error: {}", e.msg)))?;
+                // an uncaught re.error: python 3.13+ names the class re.PatternError
+                let py_err = |e: crate::yara::regex::Error| Error::msg(format!("re.PatternError: {}", e.py_str(&pattern)));
+                let scan_re = Regex::new(&pattern, Flags::S).map_err(py_err)?;
+                let match_re = Regex::new(&pattern, 0).map_err(py_err)?;
                 compiled = Some((scan_re, match_re));
             }
             let (scan_re, match_re) = compiled.as_ref().unwrap();

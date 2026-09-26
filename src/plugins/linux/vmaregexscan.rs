@@ -109,7 +109,7 @@ impl Plugin for VmaRegExScan {
         let pattern = cfg.get_str("pattern").unwrap_or("").as_bytes();
         let pats = Regex::new(pattern, Flags::S)
             .and_then(|scan| Ok(Patterns { scan, rematch: Regex::new(pattern, 0)? }))
-            .map_err(|e| format!("re.error: {e}"));
+            .map_err(|e| format!("re.PatternError: {}", e.py_str(pattern)));
         let (tasks, tail) = collect_tasks(k, &filter, false);
         let per_task = crate::util::par::par_map(tasks.len(), |i| task_rows(&tasks[i], &pats));
         for (rows, err) in per_task {

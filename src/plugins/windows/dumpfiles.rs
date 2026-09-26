@@ -788,7 +788,7 @@ fn build_jobs(cands: Vec<Step>, dedupe: bool) -> (Vec<Job>, Option<Error>) {
 /// TypeError, re.error, the "Vad tree is too deep" RuntimeError, ...) crash python with a
 /// traceback, which is a panic here; volatility exceptions are returned.
 fn raise(e: Error) -> Result<()> {
-    const PY: [&str; 8] = ["ValueError", "TypeError", "NameError", "RuntimeError", "re.error", "AttributeError", "ZeroDivisionError", "IndexError"];
+    const PY: [&str; 8] = ["ValueError", "TypeError", "NameError", "RuntimeError", "re.PatternError", "AttributeError", "ZeroDivisionError", "IndexError"];
     let m = match &e {
         Error::Msg(m) | Error::Symbol(m) => m.as_str(),
         _ => "",
@@ -846,10 +846,10 @@ impl Plugin for DumpFiles {
         } else {
             let re = match &filter {
                 Some(f) => {
-                    let pat = if cfg.get_bool("ignore-case") { format!("(?i){f}") } else { f.clone() };
-                    match Regex::new(&pat) {
+                    // re.compile(filter, re.I if ignore-case else 0)
+                    match Regex::new_flags(f, cfg.get_bool("ignore-case")) {
                         Ok(r) => Some(r),
-                        Err(e) => return raise(Error::msg(format!("re.error: {}", e.0))),
+                        Err(e) => return raise(Error::msg(format!("re.PatternError: {}", e.0))),
                     }
                 }
                 None => None,

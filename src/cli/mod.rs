@@ -495,30 +495,47 @@ fn load_system_defaults() -> Result<Vec<(String, PyVal)>, String> {
     })
 }
 
-/// Plugin errors whose message names a python builtin exception (`"AttributeError: ..."`,
-/// `"ValueError: ..."`, ...): python does not catch those as `VolatilityException`s, so the
-/// CLI reports them as a traceback (see `report_error`). Returns the message.
+/// Plugin errors whose message names a python exception that is not a `VolatilityException`
+/// (`"AttributeError: ..."`, `"RuntimeError: ..."`, `"yara.SyntaxError: ..."`, ...): the CLI
+/// only catches `VolatilityException`s, so python dies with a traceback (see `report_error`).
+/// Returns the message.
 pub fn python_builtin_exception(e: &Error) -> Option<&str> {
-    const NAMES: [&str; 13] = [
-        "AttributeError",
-        "ValueError",
-        "TypeError",
-        "KeyError",
-        "IndexError",
-        "AssertionError",
-        "OverflowError",
-        "RecursionError",
-        "ZeroDivisionError",
-        "UnicodeDecodeError",
-        "struct.error",
-        "re.error",
-        "NotImplementedError",
-    ];
     let m = match e {
         Error::Msg(m) | Error::Symbol(m) => m.as_str(),
         _ => return None,
     };
-    NAMES.iter().any(|n| m.strip_prefix(n).is_some_and(|r| r.is_empty() || r.starts_with(':'))).then_some(m)
+    let name = m.split_once(':').map_or(m, |(n, _)| n);
+    // volatility3.framework.exceptions: VolatilityException and its subclasses
+    let volatility = (name.ends_with("Exception") && name != "Exception") || name == "SymbolError" || name == "SymbolSpaceError";
+    (is_python_exception_line(m) && !volatility).then_some(m)
+}
+
+/// `Name: message` (or a bare `Name`) where `Name` is a python exception class, possibly
+/// qualified (`ValueError`, `yara.SyntaxError`, `re.PatternError`, `struct.error`).
+fn is_python_exception_line(msg: &str) -> bool {
+    let name = msg.split_once(':').map_or(msg, |(n, _)| n);
+    let last = name.rsplit('.').next().unwrap_or(name);
+    name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        && (["Error", "Exception", "Exit", "Interrupt", "Iteration"].iter().any(|s| last.ends_with(s)) || last == "error")
+}
+
+/// python's exception line for a failed `open(path)`: the OSError subclass python picks by
+/// errno, `[Errno N] strerror: 'path'`.
+fn py_oserror(e: &std::io::Error, path: &str) -> String {
+    let errno = e.raw_os_error().unwrap_or(0);
+    let class = match errno {
+        2 => "FileNotFoundError",
+        1 | 13 => "PermissionError",
+        17 => "FileExistsError",
+        20 => "NotADirectoryError",
+        21 => "IsADirectoryError",
+        _ => "OSError",
+    };
+    // io::Error displays as "<strerror> (os error N)"
+    let text = e.to_string();
+    let strerror = text.strip_suffix(&format!(" (os error {errno})")).unwrap_or(&text);
+    format!("{class}: [Errno {errno}] {strerror}: '{path}'")
 }
 
 fn traceback(err: &mut dyn Write, msg: &str) -> i32 {
@@ -562,6 +579,18 @@ fn run_inner(
     if partial.str("plugin_dirs").is_some_and(|p| !p.is_empty()) {
         let _ = writeln!(err, "WARNING  rsvol: plugin directories (-p) are not supported, ignoring");
     }
+    // python lists the automagics next (before the banner, and before --help): SymbolCacheMagic
+    // opens CACHE_PATH/identifier.cache, so with a --cache-path directory that does not exist
+    // sqlite3.connect fails and the os.unlink() in its error handler raises
+    // (python creates its default cache directory when it is imported)
+    if let Some(cp) = partial.str("cache_path").filter(|c| !c.is_empty() && *c != cache_default) {
+        let db = if cp.ends_with('/') { format!("{cp}identifier.cache") } else { format!("{cp}/identifier.cache") };
+        match std::fs::metadata(abspath(cp, &cwd)) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(traceback(err, &format!("NotADirectoryError: [Errno 20] Not a directory: '{db}'"))),
+            Err(_) => return Ok(traceback(err, &format!("FileNotFoundError: [Errno 2] No such file or directory: '{db}'"))),
+        }
+    }
 
     add_late_arguments(&mut parser, &prog, plugins);
 
@@ -604,9 +633,7 @@ fn run_inner(
     if let Some(c) = args.str("config").filter(|c| !c.is_empty()) {
         let text = match std::fs::read(abspath(c, &cwd)) {
             Ok(t) => t,
-            Err(e) => {
-                return Ok(traceback(err, &format!("FileNotFoundError: [Errno 2] {e}: '{c}'")));
-            }
+            Err(e) => return Ok(traceback(err, &py_oserror(&e, c))),
         };
         let j = match json::parse(&String::from_utf8_lossy(&text)) {
             Ok(j) => j,
@@ -792,6 +819,7 @@ fn run_inner(
         target: abspath(&sc, &cwd),
         exists: parser.error(&format!("Cannot write configuration: file {sc} already exists")),
         user: user_cfg,
+        name: sc,
     });
 
     let filters: Vec<String> = match args.get("filters") {
@@ -813,6 +841,8 @@ struct SaveConfig {
     exists: Exit,
     /// the plugin options as configured (command line, `-c`, `-e`), without rsvol's defaults
     user: Config,
+    /// the file name as given (python's `open()` error messages)
+    name: String,
 }
 
 /// python's `json.dump(dict(constructed.build_configuration()), f, sort_keys=True, indent=2)`
@@ -828,12 +858,13 @@ fn save_config(ctx: &Context, plugin: &dyn Plugin, class: &str, sc: SaveConfig, 
         return Err(code);
     }
     if let Err(e) = std::fs::write(&sc.target, format!("{}\n", Json::Obj(items).dump(Some(2)))) {
-        return Err(traceback(err, &format!("OSError: {e}")));
+        return Err(traceback(err, &py_oserror(&e, &sc.name)));
     }
     Ok(())
 }
 
 /// Construct the context, run the plugin into the renderer and report failures like python.
+#[allow(clippy::too_many_arguments)]
 fn execute(
     plugin: &dyn Plugin,
     class: &str,
@@ -872,7 +903,11 @@ fn execute(
                     .unwrap_or_else(|| "plugin panicked".into());
                 let _ = r.abort(false);
                 drop(r);
-                return traceback(err, &format!("RuntimeError: {msg}"));
+                // plugins panic with python's exception line where python dies with an
+                // uncaught exception (mac.pslist's "ValueError: year must be in 1..9999, not
+                // -15438", yarascan's "yara.SyntaxError: ..."): reported as is
+                let msg = if is_python_exception_line(&msg) { msg } else { format!("RuntimeError: {msg}") };
+                return traceback(err, &msg);
             }
         };
         match res {
