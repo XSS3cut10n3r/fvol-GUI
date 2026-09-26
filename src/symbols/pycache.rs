@@ -15,8 +15,8 @@
 //!
 //! `update()` as emulated by [`update`]:
 //!   * "on disk" = `IntermediateSymbolTable.file_symbol_url("")` over `symbols.__path__`: each
-//!     root `resolve()`d, an rglob per ISF extension, zip members as `jar:file:` URLs
-//!     ([`file_symbol_urls`]);
+//!     root `resolve()`d, an rglob per ISF extension (python's scandir / stack order), zip
+//!     members as `jar:file:` URLs ([`file_symbol_urls`]);
 //!   * local rows (`local = 1`) whose location is not on disk are deleted;
 //!   * when some on-disk location has a local row: rows with `cached < date('now', '-3 days')`
 //!     (a string comparison; `cached` is sqlite `datetime('now')`, UTC) whose file's
@@ -25,8 +25,10 @@
 //!     `datetime.fromisoformat` rejects makes python's update() raise right there (the
 //!     deletions stay, nothing else happens);
 //!   * new and rescanned locations are read (`json.load` + the identifier processors) and
-//!     `INSERT OR REPLACE`d at the end, in our deterministic order (python: set order). A file
-//!     python fails to read keeps its old row (a new one gets none);
+//!     `INSERT OR REPLACE`d at the end, in the iteration order of python's set
+//!     `new_locations.union(cache_update)` under `PYTHONHASHSEED=0` (CPython's set tables are
+//!     emulated by `util::pyset`; with randomized string hashes python's order varies from run
+//!     to run). A file python fails to read keeps its old row (a new one gets none);
 //!   * `-u` remote identifier lists (unless `--offline`) are `INSERT OR REPLACE`d at the end.
 //!
 //! A database python cannot open, or of another schema version, is recreated empty by python;
@@ -34,6 +36,7 @@
 
 use super::store::{ISF_EXTENSIONS, IsfLocation, Root, SymbolPath};
 use crate::util::sqlite;
+use crate::util::pyset::PySet;
 use crate::util::{FxHashMap, FxHashSet, paths};
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -170,24 +173,36 @@ pub fn abspath(p: &Path) -> PathBuf {
     out
 }
 
-/// Recursively list the files under `dir` (sorted; symlinked directories are not followed,
-/// like pathlib's `rglob`).
-fn walk_sorted(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
-        match e.file_type() {
-            Ok(t) if t.is_dir() => walk_sorted(&e.path(), out),
-            Ok(_) => out.push(e.path()),
-            Err(_) => {}
+/// The directories of the tree under `root` in the order python 3.14's
+/// `Path.rglob("*<suffix>")` scans them for matches, each with its entries (name, is a
+/// directory without following symlinks) in `os.scandir` order: the root, then, directory by
+/// directory from a stack (last pushed first), each subdirectory in scandir order as it is
+/// found (`glob._StringGlobber.recursive_selector`: a subdirectory's matches are listed when
+/// it is found, its own subdirectories once it is popped). Symlinked directories are not
+/// entered (`recurse_symlinks=False`).
+pub fn rglob_dirs(root: &Path) -> Vec<(PathBuf, Vec<(std::ffi::OsString, bool)>)> {
+    let scan = |d: &Path| -> Vec<(std::ffi::OsString, bool)> {
+        let Ok(rd) = std::fs::read_dir(d) else { return Vec::new() };
+        rd.filter_map(|e| e.ok()).map(|e| (e.file_name(), e.file_type().is_ok_and(|t| t.is_dir()))).collect()
+    };
+    let mut out = vec![(root.to_path_buf(), scan(root))];
+    let mut stack = vec![0usize];
+    while let Some(i) = stack.pop() {
+        let dir = out[i].0.clone();
+        let subdirs: Vec<PathBuf> = out[i].1.iter().filter(|(_, is_dir)| *is_dir).map(|(n, _)| dir.join(n)).collect();
+        for d in subdirs {
+            let entries = scan(&d);
+            stack.push(out.len());
+            out.push((d, entries));
         }
     }
+    out
 }
 
 /// python `IntermediateSymbolTable.file_symbol_url("")` (what `SqliteCache.update()` treats as
-/// "on disk"), deduplicated, in a deterministic order (python iterates it as a set). Root
-/// directories are `resolve()`d like python. `None` when python would raise (unreadable zip).
+/// "on disk"), deduplicated, in python's order: per root (`resolve()`d like python), each ISF
+/// extension's `rglob` ([`rglob_dirs`] order), then the members of each `*.zip` (namelist
+/// order). `None` when python would raise (unreadable zip).
 pub fn file_symbol_urls(roots: &[Root]) -> Option<Vec<(String, IsfLocation)>> {
     let mut out: Vec<(String, IsfLocation)> = Vec::new();
     let mut seen = FxHashSet::default();
@@ -201,15 +216,20 @@ pub fn file_symbol_urls(roots: &[Root]) -> Option<Vec<(String, IsfLocation)>> {
         match root {
             Root::Dir(d) => {
                 let Ok(d) = std::fs::canonicalize(d) else { continue };
-                let mut files = Vec::new();
-                walk_sorted(&d, &mut files);
+                let dirs = rglob_dirs(&d);
+                // `*<ext>` matches any entry name ending in <ext> (dot files and directories too)
+                let matching = |suffix: &'static str| {
+                    dirs.iter().flat_map(move |(dir, entries)| {
+                        entries.iter().filter(move |(n, _)| n.as_encoded_bytes().ends_with(suffix.as_bytes())).map(move |(n, _)| dir.join(n))
+                    })
+                };
                 for ext in ISF_EXTENSIONS {
-                    for f in files.iter().filter(|f| f.as_os_str().as_encoded_bytes().ends_with(ext.as_bytes())) {
-                        push(IsfLocation::File(f.clone()), &mut out);
+                    for f in matching(ext) {
+                        push(IsfLocation::File(f), &mut out);
                     }
                 }
-                for f in files.iter().filter(|f| f.as_os_str().as_encoded_bytes().ends_with(b".zip")) {
-                    let names = super::zipfile::list(f).ok()?;
+                for f in matching(".zip") {
+                    let names = super::zipfile::list(&f).ok()?;
                     for name in names {
                         for ext in ISF_EXTENSIONS {
                             if name.ends_with(ext) {
@@ -417,6 +437,17 @@ where
     };
     let on_disk_set: FxHashSet<&str> = on_disk.iter().map(|(u, _)| u.as_str()).collect();
     let cached_local: FxHashSet<String> = rows.iter().filter(|r| r.local).map(|r| r.location.clone()).collect();
+    // python's sets of locations, iterated in CPython's order under PYTHONHASHSEED=0 (with
+    // randomized hashes python's order is a per-run accident)
+    let h = |s: &str| crate::util::pyset::py_hash_str_seed0(s);
+    let mut py_on_disk = PySet::new();
+    for (u, _) in &on_disk {
+        py_on_disk.add(h(u), u.clone());
+    }
+    let mut py_cached = PySet::new();
+    for r in rows.iter().filter(|r| r.local) {
+        py_cached.add(h(&r.location), r.location.clone());
+    }
     // missing entries
     rows.retain(|r| !(cached_local.contains(&r.location) && !on_disk_set.contains(r.location.as_str())));
     let finish = |rows: &Vec<CacheRow>, stale: &FxHashSet<&str>, mut info: Updated| {
@@ -424,8 +455,10 @@ where
         info.on_disk = on_disk.iter().map(|(u, l)| (u.clone(), l.clone())).collect();
         info
     };
-    // entries not updated for 3 days whose file changed since
+    // entries not updated for 3 days whose file changed since (python's `cache_update` set,
+    // filled in rowid order)
     let mut stale: FxHashSet<&str> = FxHashSet::default();
+    let mut py_stale = PySet::new();
     if on_disk.iter().any(|(u, _)| cached_local.contains(u)) {
         let cutoff = sql_date(now - 3 * 86400);
         for r in rows.iter().filter(|r| r.local && cached_before(&r.cached, &cutoff)) {
@@ -439,12 +472,16 @@ where
             if let Some(&u) = on_disk_set.get(r.location.as_str()) {
                 if stored < ts {
                     stale.insert(u);
+                    py_stale.add(h(u), u.to_string());
                 }
             }
         }
     }
-    let todo: Vec<(&str, &IsfLocation)> =
-        on_disk.iter().filter(|(u, _)| !cached_local.contains(u) || stale.contains(u.as_str())).map(|(u, l)| (u.as_str(), l)).collect();
+    // files_to_process = new_locations.union(cache_update), processed (and so INSERTed, which
+    // decides the rowids) in set order
+    let by_url: FxHashMap<&str, &IsfLocation> = on_disk.iter().map(|(u, l)| (u.as_str(), l)).collect();
+    let to_process = py_on_disk.difference(&py_cached).union(&py_stale);
+    let todo: Vec<(&str, &IsfLocation)> = to_process.iter().filter_map(|u| by_url.get_key_value(u.as_str()).map(|(k, l)| (*k, *l))).collect();
     let scanned = if todo.is_empty() { Vec::new() } else { process(&todo) };
     let cached = sqlite::Value::Text(Cow::Owned(sql_datetime(now).into_bytes()));
     let text = |s: Option<&str>| s.map_or(sqlite::Value::Null, |s| sqlite::Value::Text(Cow::Owned(s.as_bytes().to_vec())));

@@ -26,6 +26,12 @@ if cmp -s $OUTDIR/$P.txt $REF; then
   echo "OK $P ${secs}ms"
 elif grep -qx "$P" /home/user/rs-vol/bench/nondeterministic.txt && cmp -s <(sort $OUTDIR/$P.txt) <(sort $REF); then
   echo "OK~ $P ${secs}ms (order; python order is nondeterministic)"
+elif [ "$P" = windows.info.Info ] && [ -z "$NO_LIVE_SYMBOLS" ] && cmp -s <(grep -v '^Symbols	' $OUTDIR/$P.txt) <(grep -v '^Symbols	' $REF) \
+     && /home/user/rs-vol/bench/scripts/limit.sh -m 4G /home/user/rs-vol/bench/venv/bin/python /home/user/rs-vol/volatility3/vol.py -q $GLOBAL_ARGS -f $IMG $P > $OUTDIR/$P.live.ref 2>/dev/null \
+     && cmp -s $OUTDIR/$P.txt $OUTDIR/$P.live.ref; then
+  # the Symbols line names the kernel ISF python's identifier cache lists last: with the same ISF in several
+  # symbol dirs it depends on the cache's history, which a stored reference cannot capture
+  echo "OK~ $P ${secs}ms (Symbols line checked against a live python run: duplicate ISFs, python's identifier cache decides)"
 else
   echo "DIFF $P rc=$rc ${secs}ms  (ours: $OUTDIR/$P.txt  ref: $REF)"
   diff $REF $OUTDIR/$P.txt | head -${DIFFLINES:-15}

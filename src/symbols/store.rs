@@ -1056,56 +1056,119 @@ fn static_os(os: &str) -> Option<&'static str> {
 
 /// The identifier index over a symbol path: which ISF an identifier (banner, PDB) resolves to.
 ///
-/// When python volatility3's own identifier cache exists (`~/.cache/volatility3/identifier.cache`,
-/// or `--cache-path`), the index is SEEDED from it (see [`IdentifierIndex::build`]): python's
-/// rows are taken exactly as python's `SqliteCache.update()` would keep them, in python's rowid
-/// order, so every identifier resolves to the ISF python would load (python's choice among ISFs
-/// sharing an identifier depends on its database's history); only the ISFs python would (re)scan
-/// are read, through rsvol's own per-file index. Otherwise (`RSVOL_NO_PY_IDENT_SEED=1`,
-/// `--clear-cache`, no readable python database) rsvol indexes every ISF itself, in search-path
-/// order. rsvol's per-file results persist in `~/.cache/rsvol/identifiers.cache`.
+/// The index is python's identifier cache (`~/.cache/volatility3/identifier.cache`, or the one
+/// under `--cache-path`) as python's `SqliteCache.update()` leaves it before a plugin runs (see
+/// [`IdentifierIndex::build`]): python's rows in rowid order, then the ISFs python would (re)scan
+/// in the order python inserts them, so every identifier resolves to the ISF python would load
+/// (python takes the last row with the identifier; among ISFs sharing an identifier that
+/// depends on its database's history). Without a usable python database (none yet, or
+/// `--clear-cache`, which deletes it) the index is the database python would build from
+/// scratch: every ISF on the search path, inserted in python's set order (see
+/// [`super::pycache::update`]). Only the ISFs python would read are read, through rsvol's own
+/// per-file index (`~/.cache/rsvol/identifiers.cache`). With `RSVOL_NO_PY_IDENT_SEED=1` rsvol
+/// indexes every ISF itself, in search-path order.
 pub struct IdentifierIndex {
     pub entries: Vec<IdentEntry>,
     locations: Vec<IsfLocation>,
     /// [`seed_state`] when the index was built
     seed_state: String,
-    /// per entry, for an index seeded from python's database: python's `cached` time of a row
-    /// python keeps as it is (not rescanned this time)
+    /// per entry, for an index built from python's database (or python's fresh one): python's
+    /// `cached` time of a row python keeps as it is (not rescanned this time)
     py_cached: Option<Vec<Option<super::pycache::NaiveTime>>>,
+    /// [`tree_stamps`] of the search path, taken before the index read it
+    tree: Vec<u8>,
+}
+
+/// Where python's identifier rows come from.
+#[derive(Clone, Debug)]
+enum PySeed {
+    /// python's database at this path (python creates it empty when missing or unusable)
+    Db(PathBuf),
+    /// python starts from an empty database (`--clear-cache` deletes it first)
+    Fresh,
 }
 
 /// python's identifier cache as set by [`set_python_identifier_cache`] (unset: python's default).
-static PY_DB: std::sync::RwLock<Option<Option<PathBuf>>> = std::sync::RwLock::new(None);
+static PY_DB: std::sync::RwLock<Option<PySeed>> = std::sync::RwLock::new(None);
 
-/// The python identifier cache to seed the identifier index from (python's `CACHE_PATH` after
-/// `--cache-path`), or `None` never to seed (`--clear-cache`: python deletes its cache first).
-/// Set by `Context::new`.
+/// The python identifier cache the identifier index starts from (python's `CACHE_PATH` after
+/// `--cache-path`), or `None` for an empty one (`--clear-cache`: python deletes its cache
+/// first). Set by `Context::new`.
 pub fn set_python_identifier_cache(db: Option<PathBuf>) {
-    *PY_DB.write().unwrap_or_else(|e| e.into_inner()) = Some(db);
+    *PY_DB.write().unwrap_or_else(|e| e.into_inner()) = Some(db.map_or(PySeed::Fresh, PySeed::Db));
 }
 
-/// The python database the identifier index is seeded from, or `None` (seeding disabled:
-/// `RSVOL_NO_PY_IDENT_SEED=1`, `--clear-cache`).
-fn py_seed_db() -> Option<PathBuf> {
+/// Where the identifier index takes python's rows from, or `None` (`RSVOL_NO_PY_IDENT_SEED=1`:
+/// rsvol's own index in search-path order).
+fn py_seed() -> Option<PySeed> {
     if std::env::var_os("RSVOL_NO_PY_IDENT_SEED").is_some_and(|v| !v.is_empty() && v != "0") {
         return None;
     }
     match &*PY_DB.read().unwrap_or_else(|e| e.into_inner()) {
-        Some(db) => db.clone(),
-        None => Some(super::pycache::db_path(None)),
+        Some(s) => Some(s.clone()),
+        None => Some(PySeed::Db(super::pycache::db_path(None))),
     }
 }
 
-/// What seeding the identifier index depends on: off, python's database absent, or its path
-/// and (size, mtime) -- python rewrites the file whenever its update() changes a row.
+/// What the identifier index's python rows depend on: off, an empty database (`--clear-cache`,
+/// or python's database absent), or the database's path and (size, mtime) -- python rewrites
+/// the file whenever its update() changes a row.
 fn seed_state() -> String {
-    match py_seed_db() {
+    match py_seed() {
         None => "off".into(),
-        Some(p) => match paths::file_stamp(&p) {
+        Some(PySeed::Fresh) => "fresh".into(),
+        Some(PySeed::Db(p)) => match paths::file_stamp(&p) {
             Some((s, m)) => format!("db\0{}\0{s}\0{m}", p.display()),
             None => "absent".into(),
         },
     }
+}
+
+/// Stamps of everything that decides which ISFs python finds on the search path: every
+/// directory python's `rglob` enters under each directory root (a file added, removed or
+/// renamed there changes its directory's mtime) and every `.zip` pack. Items as in
+/// `idcands` (length, path, 24-byte stamp).
+fn tree_stamps(path: &SymbolPath) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = Vec::new();
+    let push = |p: &Path, out: &mut Vec<u8>| {
+        let b = p.as_os_str().as_bytes();
+        out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        out.extend_from_slice(b);
+        out.extend_from_slice(&stamp_bytes(p));
+    };
+    for root in super::pycache::python_symbol_roots(path) {
+        let Root::Dir(d) = root else { continue };
+        let Ok(d) = std::fs::canonicalize(&d) else {
+            // a root that appears later changes the answer too
+            push(&d, &mut out);
+            continue;
+        };
+        for (dir, entries) in super::pycache::rglob_dirs(&d) {
+            push(&dir, &mut out);
+            for (n, _) in entries.iter().filter(|(n, is_dir)| !is_dir && n.as_bytes().ends_with(b".zip")) {
+                push(&dir.join(n), &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Whether every (path, stamp) item of a hex `idcands` / `idtree` value is unchanged.
+fn stamps_hold(hex: &str) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Some(b) = unhex(hex) else { return false };
+    let mut rest = b.as_slice();
+    while !rest.is_empty() {
+        let Some(n) = rest.get(..4).map(|l| u32::from_le_bytes(l.try_into().unwrap()) as usize) else { return false };
+        let Some(item) = rest.get(4..4 + n + 24) else { return false };
+        let p = Path::new(std::ffi::OsStr::from_bytes(&item[..n]));
+        if stamp_bytes(p) != item[n..] {
+            return false;
+        }
+        rest = &rest[4 + n + 24..];
+    }
+    true
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
@@ -1126,30 +1189,24 @@ fn stamp_bytes(p: &Path) -> Vec<u8> {
 }
 
 /// Whether a choice cached with [`IdentifierIndex::choice_deps`] still holds: the same seeding
-/// state (python's database unchanged), every candidate ISF of the identifier unchanged, and
-/// no row python trusts due for a rescan yet.
+/// state (python's database unchanged), the same ISFs on the search path (no directory of it
+/// changed), every candidate ISF of the identifier unchanged, and no row python trusts due for
+/// a rescan yet.
 pub fn choice_deps_hold(kv: &[(String, String)]) -> bool {
     choice_deps_hold_at(kv, &seed_state(), super::pycache::utc_now())
 }
 
 /// [`choice_deps_hold`] for seeding state `state` at time `now`.
 fn choice_deps_hold_at(kv: &[(String, String)], state: &str, now: i64) -> bool {
-    use std::os::unix::ffi::OsStrExt;
     let get = |k: &str| kv.iter().find(|(a, _)| a == k).map(|(_, b)| b.as_str());
     if get("idseed") != Some(paths::hex(state.as_bytes()).as_str()) {
         return false;
     }
-    if let Some(c) = get("idcands") {
-        let Some(b) = unhex(c) else { return false };
-        let mut rest = b.as_slice();
-        while !rest.is_empty() {
-            let Some(n) = rest.get(..4).map(|l| u32::from_le_bytes(l.try_into().unwrap()) as usize) else { return false };
-            let Some(item) = rest.get(4..4 + n + 24) else { return false };
-            let p = Path::new(std::ffi::OsStr::from_bytes(&item[..n]));
-            if stamp_bytes(p) != item[n..] {
-                return false;
-            }
-            rest = &rest[4 + n + 24..];
+    for k in ["idcands", "idtree"] {
+        if let Some(c) = get(k)
+            && !stamps_hold(c)
+        {
+            return false;
         }
     }
     if let Some(u) = get("iduntil") {
@@ -1221,6 +1278,8 @@ impl IdentifierIndex {
     /// first when ISFs other than the shipped ones must be read.
     pub fn build(path: &SymbolPath, remote: Option<&str>, on_work: &dyn Fn()) -> IdentifierIndex {
         let state = seed_state();
+        // before the index reads the tree: a change while it does invalidates what it decides
+        let tree = tree_stamps(path);
         let mut index = match Self::seeded(path, remote, on_work) {
             Some(i) => i,
             None => {
@@ -1242,19 +1301,23 @@ impl IdentifierIndex {
             }
         };
         index.seed_state = state;
+        index.tree = tree;
         index
     }
 
-    /// The index seeded from python's identifier cache (`None`: seeding disabled, or no
-    /// readable python database): python's rows after an emulated `SqliteCache.update()`
-    /// (`symbols::pycache`), in rowid order. The ISFs that update() would (re)scan are read
-    /// through rsvol's per-file index ([`scan_for_python`]).
+    /// The index from python's identifier cache (`None`: `RSVOL_NO_PY_IDENT_SEED=1`): python's
+    /// rows after an emulated `SqliteCache.update()` (`symbols::pycache`), in rowid order; an
+    /// empty database where python starts from one (`--clear-cache`; a database that is
+    /// missing, unreadable or of another schema, which python recreates). The ISFs that
+    /// update() would (re)scan are read through rsvol's per-file index ([`scan_for_python`]).
     fn seeded(path: &SymbolPath, remote: Option<&str>, on_work: &dyn Fn()) -> Option<IdentifierIndex> {
         use super::pycache;
-        let db = py_seed_db()?;
-        let rows = {
-            let _t = crate::util::trace::span("identifier index: read python identifier.cache");
-            pycache::read(&db)?
+        let rows = match py_seed()? {
+            PySeed::Fresh => Vec::new(),
+            PySeed::Db(db) => {
+                let _t = crate::util::trace::span("identifier index: read python identifier.cache");
+                pycache::read(&db).unwrap_or_default()
+            }
         };
         let _t = crate::util::trace::span("identifier index: seeded from python's cache");
         let roots = pycache::python_symbol_roots(path);
@@ -1288,23 +1351,26 @@ impl IdentifierIndex {
             entries.push(IdentEntry { url: r.location.clone(), stamp: 0, os: os.to_string(), identifier: ident.to_vec() });
             locations.push(loc);
         }
-        IdentifierIndex { entries, locations, seed_state: String::new(), py_cached: Some(cached) }
+        IdentifierIndex { entries, locations, seed_state: String::new(), py_cached: Some(cached), tree: Vec::new() }
     }
 
-    /// Whether the index was seeded from python's identifier cache.
+    /// Whether the index is python's identifier cache (as it is, or as python would build it
+    /// from scratch).
     pub fn is_seeded(&self) -> bool {
         self.py_cached.is_some()
     }
 
     /// Key material a cached choice for `identifier` (made from this index) depends on beyond
     /// the symbol path fingerprint, as `key=value` pairs for the automagic caches (checked by
-    /// [`choice_deps_hold`]): the seeding state; for a seeded index also the candidate ISFs
-    /// (every location with the identifier: python rescans a modified one once its row is 3
-    /// days old, which moves it to the end) and when python would first rescan a candidate it
-    /// trusts now although the file is newer than its row.
+    /// [`choice_deps_hold`]): the seeding state and the directories of the search path (a new
+    /// or removed ISF anywhere can change python's choice: its rows are inserted in set order);
+    /// for an index from python's database also the candidate ISFs (every location with the
+    /// identifier: python rescans a modified one once its row is 3 days old, which moves it to
+    /// the end) and when python would first rescan a candidate it trusts now although the file
+    /// is newer than its row.
     pub fn choice_deps(&self, os: &str, identifier: &[u8]) -> Vec<(&'static str, String)> {
         use super::pycache;
-        let mut out = vec![("idseed", paths::hex(self.seed_state.as_bytes()))];
+        let mut out = vec![("idseed", paths::hex(self.seed_state.as_bytes())), ("idtree", paths::hex(&self.tree))];
         let Some(py_cached) = &self.py_cached else { return out };
         let mut cands: Vec<u8> = Vec::new();
         let mut until: Option<i64> = None;
@@ -1400,7 +1466,7 @@ impl IdentifierIndex {
             // off the critical path (joined before exit)
             crate::util::bg::spawn(move || write_ident_cache(&cache_path, &all));
         }
-        IdentifierIndex { entries, locations, seed_state: String::new(), py_cached: None }
+        IdentifierIndex { entries, locations, seed_state: String::new(), py_cached: None, tree: Vec::new() }
     }
 
     /// python `SqliteCache.find_location(identifier, os)`: the LAST matching location.
@@ -1717,18 +1783,75 @@ pub fn find_windows_isf_local(path: &SymbolPath, pdb_name: &str, guid: &str, age
     path.find_first("windows", &filter)
 }
 
-/// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
-/// by name `windows/<pdb>/<GUID>-<AGE>.json*`, then by identifier, then download + convert).
+/// Bump when what a cached [`find_location_cached`] answer means changes.
+const CHOICE_CACHE_VERSION: u32 = 1;
+
+/// The cache file of the [`find_location_cached`] answer for (`path`, `identifier`, `os`) and
+/// its full key material.
+fn choice_file(path: &SymbolPath, identifier: &[u8], os: &str) -> (PathBuf, String) {
+    let remote = super::remote_isf_url();
+    let mut k: Vec<u8> = CHOICE_CACHE_VERSION.to_le_bytes().to_vec();
+    for part in [os.as_bytes(), identifier, format!("{:?}", path.roots).as_bytes(), remote.as_deref().unwrap_or("").as_bytes()] {
+        k.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        k.extend_from_slice(part);
+    }
+    let h = crate::layers::scancache::key_hash(&k);
+    (paths::rsvol_cache_dir().join("isfchoice").join(format!("{h:016x}.{os}")), paths::hex(&k))
+}
+
+/// python `SqliteCache(CACHE_PATH/identifier.cache).find_location(identifier, os)` right after
+/// the `SymbolCacheMagic` update: the location of the last row with the identifier in the
+/// identifier index (see [`IdentifierIndex`]), `None` without one. The answer is kept in
+/// `~/.cache/rsvol/isfchoice/` with its dependencies ([`IdentifierIndex::choice_deps`]), so a
+/// later run with the same python database and search path skips building the index.
+pub fn find_location_cached(path: &SymbolPath, identifier: &[u8], os: &str) -> Option<IsfLocation> {
+    let (file, key) = choice_file(path, identifier, os);
+    if let Ok(s) = std::fs::read_to_string(&file) {
+        let mut lines = s.lines();
+        if lines.next().and_then(|l| l.strip_prefix("key=")) == Some(key.as_str()) {
+            let kv: Vec<(String, String)> = lines.filter_map(|l| l.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect();
+            if let Some(loc) = kv.iter().find(|(k, _)| k == "loc").map(|(_, v)| v.clone())
+                && choice_deps_hold(&kv)
+            {
+                return (!loc.is_empty()).then(|| super::pycache::location_of(&unhex(&loc).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()));
+            }
+        }
+    }
+    let idx = {
+        // an index that has to read ISFs decompresses the one the caller loads next: it builds
+        // the tables of exactly the ISFs with this identifier on the way (the load finds them)
+        set_banner_hint(Some(identifier.to_vec()));
+        *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner()) = static_os(os);
+        let idx = identifier_index(path);
+        *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        set_banner_hint(None);
+        idx
+    };
+    let found = idx.find(identifier, os);
+    let mut s = format!("key={key}\nloc={}\n", found.as_ref().map(|l| paths::hex(l.url().as_bytes())).unwrap_or_default());
+    for (k, v) in idx.choice_deps(os, identifier) {
+        s.push_str(&format!("{k}={v}\n"));
+    }
+    // off the critical path (joined before exit)
+    crate::util::bg::spawn(move || {
+        let _ = paths::write_atomic(&file, s.as_bytes());
+    });
+    found
+}
+
+/// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table`): the location
+/// python's identifier cache gives `<pdb>|<GUID>|<age>` (the last row: with the same ISF in
+/// several symbol directories, the one python's database lists last), else an ISF named
+/// `windows/<pdb>/<GUID>-<AGE>.json*`, else download + convert.
 pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<IsfLocation> {
+    let ident = format!("{}|{}|{}", pdb_name.trim_matches('\0'), guid.to_uppercase(), age);
+    if let Some(l) = find_location_cached(path, ident.as_bytes(), "windows") {
+        return Ok(l);
+    }
     if let Some(l) = find_windows_isf_local(path, pdb_name, guid, age) {
         return Ok(l);
     }
     let pdb_name = pdb_name.trim_matches('\0');
-    let idx = identifier_index(path);
-    let ident = format!("{}|{}|{}", pdb_name, guid.to_uppercase(), age);
-    if let Some(l) = idx.find(ident.as_bytes(), "windows") {
-        return Ok(l);
-    }
     // download + convert into the first writable directory of the search path, like python's
     // `download_pdb_isf` over `symbols.__path__` (the embedded roots are not directories)
     let dirs: Vec<PathBuf> = path.roots.iter().filter_map(|r| if let Root::Dir(d) = r { Some(d.clone()) } else { None }).collect();
@@ -2241,10 +2364,10 @@ mod tests {
         // a candidate touched (python may rescan it, the choice may change)
         set_mtime(&pb, now - 29 * 86400);
         assert!(!choice_deps_hold_at(&kv, "state-1", now));
-        // unseeded: only the seeding state matters
-        let own = IdentifierIndex { entries: Vec::new(), locations: Vec::new(), seed_state: "off".into(), py_cached: None };
+        // unseeded: only the seeding state and the search path's directories matter
+        let own = IdentifierIndex { entries: Vec::new(), locations: Vec::new(), seed_state: "off".into(), py_cached: None, tree: Vec::new() };
         let kv: Vec<(String, String)> = own.choice_deps("linux", b"x").into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        assert_eq!(kv.len(), 1);
+        assert_eq!(kv.len(), 2);
         assert!(choice_deps_hold_at(&kv, "off", now) && !choice_deps_hold_at(&kv, "absent", now));
         let _ = std::fs::remove_dir_all(&d);
     }

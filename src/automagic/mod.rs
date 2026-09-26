@@ -92,7 +92,7 @@ pub mod cache {
     }
 
     /// Bump when the cached automagic semantics change.
-    const CACHE_VERSION: u32 = 2;
+    const CACHE_VERSION: u32 = 3;
 
     /// Read cached `key=value` pairs for `image` / `kind` (None: absent, or another key).
     pub fn load(image: &Path, kind: &str) -> Option<Vec<(String, String)>> {

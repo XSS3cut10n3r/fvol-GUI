@@ -11,7 +11,8 @@
 //!
 //! Mirrors `Objects/setobject.c` (CPython 3.14): `PySet_MINSIZE` 8, `LINEAR_PROBES` 9,
 //! `PERTURB_SHIFT` 5, grow when `fill*5 >= mask*3` to the smallest power of two > `used*4`
-//! (`used*2` above 50000 elements). Only insertion is supported (no removal).
+//! (`used*2` above 50000 elements); removal leaves dummies; `copy` / `update` / `difference` /
+//! `union` follow `set_merge` / `set_difference` (table sizes and slot order included).
 
 const MINSIZE: usize = 8;
 const LINEAR_PROBES: usize = 9;
@@ -105,12 +106,24 @@ pub fn py_hash_tuple(items: &[u64]) -> u64 {
     if acc == u64::MAX { 1546275796 } else { acc }
 }
 
-/// An insertion-only python `set` of values with caller-supplied python hashes.
+/// One slot of a CPython set table.
+#[derive(Clone, Debug)]
+enum Slot<T> {
+    Empty,
+    /// a removed entry (`dummy`, hash -1)
+    Dummy,
+    Full(u64, T),
+}
+
+/// A python `set` of values with caller-supplied python hashes: CPython's table (slots,
+/// dummies left by removals, `fill` / `used`), so iteration order is python's.
 #[derive(Clone, Debug)]
 pub struct PySet<T> {
-    /// slots: Some((hash, value))
-    table: Vec<Option<(u64, T)>>,
+    table: Vec<Slot<T>>,
+    /// active entries
     used: usize,
+    /// active + dummy entries
+    fill: usize,
 }
 
 impl<T: PartialEq> Default for PySet<T> {
@@ -119,9 +132,32 @@ impl<T: PartialEq> Default for PySet<T> {
     }
 }
 
+/// `set_insert_clean`: `h` into the first free slot of its probe sequence (the table has no
+/// dummies and does not contain the value).
+fn insert_clean<T>(table: &mut [Slot<T>], h: u64, v: T) {
+    let mask = table.len() - 1;
+    let mut i = (h as usize) & mask;
+    let mut perturb = h;
+    let slot = 'outer: loop {
+        if matches!(table[i], Slot::Empty) {
+            break i;
+        }
+        if i + LINEAR_PROBES <= mask {
+            for j in 1..=LINEAR_PROBES {
+                if matches!(table[i + j], Slot::Empty) {
+                    break 'outer i + j;
+                }
+            }
+        }
+        perturb >>= PERTURB_SHIFT;
+        i = (i.wrapping_mul(5).wrapping_add(1).wrapping_add(perturb as usize)) & mask;
+    };
+    table[slot] = Slot::Full(h, v);
+}
+
 impl<T: PartialEq> PySet<T> {
     pub fn new() -> PySet<T> {
-        PySet { table: (0..MINSIZE).map(|_| None).collect(), used: 0 }
+        PySet { table: (0..MINSIZE).map(|_| Slot::Empty).collect(), used: 0, fill: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -132,7 +168,8 @@ impl<T: PartialEq> PySet<T> {
         self.used == 0
     }
 
-    pub fn contains(&self, h: u64, v: &T) -> bool {
+    /// `set_lookkey`: the slot holding `v`, or `None`.
+    fn find(&self, h: u64, v: &T) -> Option<usize> {
         let mask = self.table.len() - 1;
         let mut i = (h as usize) & mask;
         let mut perturb = h;
@@ -140,8 +177,8 @@ impl<T: PartialEq> PySet<T> {
             let probes = if i + LINEAR_PROBES <= mask { LINEAR_PROBES } else { 0 };
             for j in 0..=probes {
                 match &self.table[i + j] {
-                    None => return false,
-                    Some((eh, ev)) if *eh == h && ev == v => return true,
+                    Slot::Empty => return None,
+                    Slot::Full(eh, ev) if *eh == h && ev == v => return Some(i + j),
                     _ => {}
                 }
             }
@@ -150,26 +187,41 @@ impl<T: PartialEq> PySet<T> {
         }
     }
 
-    /// python `s.add(v)` where `h == hash(v)`.
+    pub fn contains(&self, h: u64, v: &T) -> bool {
+        self.find(h, v).is_some()
+    }
+
+    /// python `s.add(v)` where `h == hash(v)` (`set_add_entry`: the first dummy of the probe
+    /// sequence is reused).
     pub fn add(&mut self, h: u64, v: T) {
         let mask = self.table.len() - 1;
         let mut i = (h as usize) & mask;
         let mut perturb = h;
+        let mut freeslot: Option<usize> = None;
         loop {
             let probes = if i + LINEAR_PROBES <= mask { LINEAR_PROBES } else { 0 };
             for j in 0..=probes {
                 match &self.table[i + j] {
-                    None => {
-                        self.table[i + j] = Some((h, v));
-                        self.used += 1;
-                        // no removals: fill == used
-                        if self.used * 5 >= mask * 3 {
-                            let minused = if self.used > 50000 { self.used * 2 } else { self.used * 4 };
-                            self.resize(minused);
+                    Slot::Empty => {
+                        match freeslot {
+                            Some(f) => {
+                                self.table[f] = Slot::Full(h, v);
+                                self.used += 1;
+                            }
+                            None => {
+                                self.table[i + j] = Slot::Full(h, v);
+                                self.used += 1;
+                                self.fill += 1;
+                                if self.fill * 5 >= mask * 3 {
+                                    let minused = if self.used > 50000 { self.used * 2 } else { self.used * 4 };
+                                    self.resize(minused);
+                                }
+                            }
                         }
                         return;
                     }
-                    Some((eh, ev)) if *eh == h && *ev == v => return,
+                    Slot::Full(eh, ev) if *eh == h && *ev == v => return,
+                    Slot::Dummy if freeslot.is_none() => freeslot = Some(i + j),
                     _ => {}
                 }
             }
@@ -178,38 +230,114 @@ impl<T: PartialEq> PySet<T> {
         }
     }
 
+    /// python `s.discard(v)` (`set_discard_entry`: the slot becomes a dummy; sets never
+    /// shrink).
+    pub fn discard(&mut self, h: u64, v: &T) -> bool {
+        match self.find(h, v) {
+            Some(i) => {
+                self.table[i] = Slot::Dummy;
+                self.used -= 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `set_table_resize`: a table of the smallest power of two > `minused`, the active entries
+    /// re-inserted in slot order.
     fn resize(&mut self, minused: usize) {
         let mut newsize = MINSIZE;
         while newsize <= minused {
             newsize <<= 1;
         }
-        let old = std::mem::replace(&mut self.table, (0..newsize).map(|_| None).collect());
-        let mask = newsize - 1;
-        for (h, v) in old.into_iter().flatten() {
-            // set_insert_clean
-            let mut i = (h as usize) & mask;
-            let mut perturb = h;
-            let slot = 'outer: loop {
-                if self.table[i].is_none() {
-                    break i;
-                }
-                if i + LINEAR_PROBES <= mask {
-                    for j in 1..=LINEAR_PROBES {
-                        if self.table[i + j].is_none() {
-                            break 'outer i + j;
-                        }
-                    }
-                }
-                perturb >>= PERTURB_SHIFT;
-                i = (i.wrapping_mul(5).wrapping_add(1).wrapping_add(perturb as usize)) & mask;
-            };
-            self.table[slot] = Some((h, v));
+        let old = std::mem::replace(&mut self.table, (0..newsize).map(|_| Slot::Empty).collect());
+        for s in old {
+            if let Slot::Full(h, v) = s {
+                insert_clean(&mut self.table, h, v);
+            }
         }
+        self.fill = self.used;
     }
 
     /// Elements in python iteration order.
     pub fn iter(&self) -> impl Iterator<Item = &T> + '_ {
-        self.table.iter().filter_map(|e| e.as_ref().map(|(_, v)| v))
+        self.table.iter().filter_map(|e| match e {
+            Slot::Full(_, v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// (hash, element) in python iteration order.
+    fn entries(&self) -> impl Iterator<Item = (u64, &T)> + '_ {
+        self.table.iter().filter_map(|e| match e {
+            Slot::Full(h, v) => Some((*h, v)),
+            _ => None,
+        })
+    }
+}
+
+impl<T: PartialEq + Clone> PySet<T> {
+    /// `set_merge` (`s.update(other)` for a set `other`).
+    pub fn update(&mut self, other: &PySet<T>) {
+        if other.used == 0 {
+            return;
+        }
+        // one big resize first
+        if (self.fill + other.used) * 5 >= (self.table.len() - 1) * 3 {
+            self.resize((self.used + other.used) * 2);
+        }
+        if self.fill == 0 && self.table.len() == other.table.len() && other.fill == other.used {
+            // empty table of the same size, no dummies to drop: the slots are copied
+            self.table.clone_from(&other.table);
+            self.fill = other.fill;
+            self.used = other.used;
+            return;
+        }
+        if self.fill == 0 {
+            self.fill = other.used;
+            self.used = other.used;
+            for (h, v) in other.entries() {
+                insert_clean(&mut self.table, h, v.clone());
+            }
+            return;
+        }
+        for (h, v) in other.entries() {
+            self.add(h, v.clone());
+        }
+    }
+
+    /// `set.copy()` (`make_new_set` from a set).
+    pub fn copy(&self) -> PySet<T> {
+        let mut s = PySet::new();
+        s.update(self);
+        s
+    }
+
+    /// python `self.difference(other)` (`set_difference`: a copy with `other`'s elements
+    /// discarded when `self` is more than four times larger, else the elements not in `other`
+    /// added to a new set in iteration order).
+    pub fn difference(&self, other: &PySet<T>) -> PySet<T> {
+        if (self.used >> 2) > other.used {
+            let mut r = self.copy();
+            for (h, v) in other.entries() {
+                r.discard(h, v);
+            }
+            return r;
+        }
+        let mut r = PySet::new();
+        for (h, v) in self.entries() {
+            if !other.contains(h, v) {
+                r.add(h, v.clone());
+            }
+        }
+        r
+    }
+
+    /// python `self.union(other)` (`set_union`: a copy updated with `other`).
+    pub fn union(&self, other: &PySet<T>) -> PySet<T> {
+        let mut r = self.copy();
+        r.update(other);
+        r
     }
 }
 
@@ -308,5 +436,58 @@ mod tests {
             s.add(th(&b), b);
         }
         assert_eq!(order_hash(&s, th), 2667392356262095263);
+    }
+
+    /// `set(L).difference(C).union(U)` (the shape of volatility3's `SqliteCache.update()`), as
+    /// computed by CPython 3.14 with PYTHONHASHSEED=0 (the generator is mirrored from the python
+    /// script that produced the expected `hash(tuple(result))`).
+    #[test]
+    fn difference_union_orders_match_cpython() {
+        let urls = |n: u64, salt: u64| -> Vec<String> {
+            (0..n)
+                .map(|i| format!("file:///home/u/sym{salt}/windows/k{}.pdb/{:08X}-{salt}.json.xz", (i * 7919 + salt) % 100003, i * 2654435761 % (1 << 32)))
+                .collect()
+        };
+        let h = |s: &String| py_hash_str_seed0(s);
+        for (n, salt, cstep, gone, ustep, want) in [
+            (3u64, 1u64, 0usize, 0u64, 0usize, 3263309288474546317i64),
+            (7, 2, 0, 0, 0, -56865205525427900),
+            (40, 3, 0, 0, 0, -5652103069197437542),
+            (400, 4, 0, 0, 0, -5122057115771434288),
+            (400, 5, 1, 3, 7, -2192519192994327067),
+            (400, 6, 2, 0, 5, 4977396002853528967),
+            (400, 7, 9, 2, 3, -6104756580497946410),
+            (1500, 8, 1, 10, 50, -1771148622409251340),
+            (1500, 9, 13, 0, 2, 9026973223313870464),
+            (60, 10, 1, 200, 4, 910200117382248944),
+            (100, 11, 3, 500, 2, 5086794661487369987),
+            (12, 12, 2, 0, 0, 3033697607877991129),
+            (9, 13, 3, 0, 1, -128141301043832703),
+            (5000, 14, 5, 7, 11, -5082319151765759809),
+        ] {
+            let l = urls(n, salt);
+            let mut all = PySet::new();
+            for s in &l {
+                all.add(h(s), s.clone());
+            }
+            let mut c = PySet::new();
+            if cstep > 0 {
+                for s in l.iter().step_by(cstep) {
+                    c.add(h(s), s.clone());
+                }
+            }
+            for g in 0..gone {
+                let s = format!("file:///gone/{salt}/{g}.json");
+                c.add(h(&s), s);
+            }
+            let mut u = PySet::new();
+            if ustep > 0 && cstep > 0 {
+                for s in l.iter().step_by(cstep * ustep) {
+                    u.add(h(s), s.clone());
+                }
+            }
+            let f = all.difference(&c).union(&u);
+            assert_eq!(order_hash(&f, h), want, "n={n} salt={salt}");
+        }
     }
 }
