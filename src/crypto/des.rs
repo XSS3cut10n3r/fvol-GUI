@@ -44,6 +44,7 @@
 //!   through each round together; the 4 dependency chains (xor -> mask -> load ->
 //!   xor, ~10 cycles) overlap and the loop becomes throughput-bound.
 
+use super::gpr;
 use crate::error::{Error, Result};
 
 // --- Standard FIPS 46-3 permutation / selection tables (1-indexed bit positions,
@@ -292,42 +293,6 @@ fn f(r: u32, k: u64) -> u32 {
     a ^ b
 }
 
-/// Identity that pins `x` to a general-purpose register (an empty `asm!`, no
-/// instructions). Without it LLVM's SLP vectorizer turns the 8 independent table
-/// lookups of a round (and of IP/FP) into AVX2 gathers plus a horizontal XOR
-/// reduction, which measured ~3x slower than 8 plain loads on Alder Lake.
-#[inline(always)]
-fn gpr<T: Gpr>(x: T) -> T {
-    x.pin()
-}
-
-trait Gpr: Copy {
-    fn pin(self) -> Self;
-}
-
-macro_rules! impl_gpr {
-    ($t:ty, $x86:literal, $arm:literal) => {
-        impl Gpr for $t {
-            #[inline(always)]
-            #[allow(unused_mut)]
-            fn pin(mut self) -> Self {
-                // Safety: empty asm (a comment); it only claims to read and write
-                // the register.
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    std::arch::asm!($x86, inout(reg) self, options(pure, nomem, nostack, preserves_flags));
-                }
-                #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    std::arch::asm!($arm, inout(reg) self, options(pure, nomem, nostack, preserves_flags));
-                }
-                self
-            }
-        }
-    };
-}
-impl_gpr!(u32, "/* {0:e} */", "/* {0:w} */");
-impl_gpr!(u64, "/* {0:r} */", "/* {0:x} */");
 
 /// Encrypts (`DEC = false`) or decrypts `N` independent blocks together, one
 /// round at a time across all of them so their dependency chains overlap.
