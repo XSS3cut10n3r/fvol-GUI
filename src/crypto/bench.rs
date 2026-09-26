@@ -233,6 +233,20 @@ fn bench_all() {
                 black_box(d.ecb_decrypt(black_box(&small)).unwrap());
             }
         });
+        let mut buf = bulk.clone();
+        b.bulk("DES-ECB*", || {
+            for _ in 0..BULK_REP_ITERS {
+                des.ecb_decrypt_in_place(black_box(&mut buf)).unwrap();
+            }
+        });
+        b.small("DES-ECB*", "in place, incl. key schedule", || {
+            for _ in 0..SMALL_REP_ITERS {
+                let d = Des::new(black_box(&key));
+                let mut s: [u8; SMALL_SIZE] = black_box(&small[..]).try_into().unwrap();
+                d.ecb_decrypt_in_place(&mut s).unwrap();
+                black_box(&s);
+            }
+        });
     }
 
     // --- AES ECB/CBC decrypt, 128 and 256 bit ---
