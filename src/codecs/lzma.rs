@@ -401,31 +401,32 @@ impl LzmaDecoder {
                         return Err(corrupt("distance"));
                     }
                     // SAFETY: rep0 < p.
-                    let mut match_byte = ((unsafe { *outp.add(p - rep0 - 1) }) as usize) << 1;
-                    let mut offs = 0x100usize;
-                    // SAFETY: offs + match_bit + sym < 0x300 for every visited node.
+                    let mb = (unsafe { *outp.add(p - rep0 - 1) }) as usize;
+                    // While the decoded bits equal the match byte's bits ("matching"), node
+                    // `sym` of bit i lives at 0x100 + (match bit i) * 0x100 + sym, otherwise
+                    // at sym. Candidate children only need `matching` (an all-ones/zero mask)
+                    // and per-position offsets known from the match byte up front.
+                    // SAFETY: every index is < 2 * 0x100 + 0x100 = 0x300 (the literal coder).
                     let lp = unsafe { probs.add(lit) };
-                    let mut match_bit = match_byte & offs;
-                    let mut pp = unsafe { lp.add(offs + match_bit + sym) };
-                    let mut pr = unsafe { *pp } as u32;
-                    for _ in 0..8 {
-                        // Candidate next nodes for a 0 bit and a 1 bit.
-                        let nmb = match_byte << 1;
-                        let offs0 = offs & !match_bit;
-                        let offs1 = offs & match_bit;
-                        let mb0 = nmb & offs0;
-                        let mb1 = nmb & offs1;
-                        let pp0 = unsafe { lp.add(offs0 + mb0 + 2 * sym) };
-                        let pp1 = unsafe { lp.add(offs1 + mb1 + 2 * sym + 1) };
-                        let p0 = unsafe { *pp0 } as u32;
-                        let p1 = unsafe { *pp1 } as u32;
-                        let b = bitnb_loaded!(pp, pr);
+                    let mut matching = !0usize;
+                    let mut idx = 0x100 + (((mb >> 7) & 1) << 8) + 1;
+                    let mut pr = unsafe { *lp.add(idx) } as u32;
+                    for i in 0..8 {
+                        let mbit = (mb >> (7 - i)) & 1;
+                        let mo_next = if i < 7 { 0x100 + (((mb >> (6 - i)) & 1) << 8) } else { 0 };
+                        // Offset of the child if the decoded bit is 0 / 1 and we still match.
+                        let mo0 = mo_next & mbit.wrapping_sub(1);
+                        let mo1 = mo_next & 0usize.wrapping_sub(mbit);
+                        let idx0 = 2 * sym + (matching & mo0);
+                        let idx1 = 2 * sym + 1 + (matching & mo1);
+                        let p0 = unsafe { *lp.add(idx0) } as u32;
+                        let p1 = unsafe { *lp.add(idx1) } as u32;
+                        let b = bitnb_loaded!(lp.add(idx), pr);
                         sym = 2 * sym + b as usize;
-                        offs = std::hint::select_unpredictable(b, offs1, offs0);
-                        match_bit = std::hint::select_unpredictable(b, mb1, mb0);
-                        pp = std::hint::select_unpredictable(b, pp1, pp0);
+                        let keep = std::hint::select_unpredictable(b, 0usize.wrapping_sub(mbit), mbit.wrapping_sub(1));
+                        matching &= keep;
+                        idx = std::hint::select_unpredictable(b, idx1, idx0);
                         pr = std::hint::select_unpredictable(b, p1, p0);
-                        match_byte = nmb;
                     }
                 }
                 // SAFETY: p < limit <= out_len.
