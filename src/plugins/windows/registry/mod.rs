@@ -5,6 +5,8 @@
 use crate::plugins::Plugin;
 
 pub mod cachedump;
+pub mod certificates;
+pub mod getcellroutine;
 pub mod hashdump;
 pub mod hivelist;
 pub mod hivescan;
@@ -21,4 +23,6 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&lsadump::LsadumpDeprecated);
     v.push(&cachedump::Cachedump);
     v.push(&cachedump::CachedumpDeprecated);
+    v.push(&certificates::Certificates);
+    v.push(&getcellroutine::GetCellRoutine);
 }
