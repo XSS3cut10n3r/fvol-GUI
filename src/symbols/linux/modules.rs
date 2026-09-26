@@ -414,6 +414,13 @@ fn scan_self_referential(vm: &Module, lo: u64, hi: u64, align: u64, off: u64, mo
 /// python `Modules.get_kset_modules(context, vmlinux_name)`: `/sys/module` entries with a
 /// reference count > 2, as an insertion-ordered map name -> `module_kobject.mod` pointer value.
 pub fn get_kset_modules(vm: &Module) -> Result<Vec<(String, u64)>> {
+    Ok(get_kset_modules_ptrs(vm)?.into_iter().map(|(n, _, v)| (n, v)).collect())
+}
+
+/// [`get_kset_modules`] keeping python's dict values as they are: the `module_kobject.mod`
+/// pointer objects (python code that uses `module.vol.offset` on them sees the pointer's own
+/// address) and their values: name -> (pointer, value).
+pub fn get_kset_modules_ptrs(vm: &Module) -> Result<Vec<(String, Obj, u64)>> {
     let module_kset = match vm.object_from_symbol("module_kset") {
         Ok(k) => Some(k),
         Err(Error::Symbol(_)) => None,
@@ -427,13 +434,14 @@ pub fn get_kset_modules(vm: &Module) -> Result<Vec<(String, u64)>> {
             ));
         }
     };
-    let mut ret: Vec<(String, u64)> = Vec::new();
+    let mut ret: Vec<(String, Obj, u64)> = Vec::new();
     let kobj_off = vm.offset_of("module_kobject", "kobj")?;
     let sym = format!("{}!kobject", vm.symbol_table_name());
     for kobj in module_kset.m("list")?.to_list(&sym, "entry", true, true, None) {
         let kobj = kobj?;
         let mod_kobj = vm.object_abs("module_kobject", kobj.addr.wrapping_sub(kobj_off))?;
-        let modv = mod_kobj.m("mod")?.u64()?;
+        let modp = mod_kobj.m("mod")?;
+        let modv = modp.u64()?;
         let name_ptr = kobj.m("name")?;
         let name = match pointer_to_string(&name_ptr, 32) {
             Ok(n) => n,
@@ -441,9 +449,12 @@ pub fn get_kset_modules(vm: &Module) -> Result<Vec<(String, u64)>> {
             Err(e) => return Err(e),
         };
         if name_ptr.u64()? != 0 && kobj.reference_count()? > 2 {
-            match ret.iter_mut().find(|(n, _)| *n == name) {
-                Some(e) => e.1 = modv,
-                None => ret.push((name, modv)),
+            match ret.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(e) => {
+                    e.1 = modp;
+                    e.2 = modv;
+                }
+                None => ret.push((name, modp, modv)),
             }
         }
     }
