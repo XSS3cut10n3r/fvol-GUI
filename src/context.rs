@@ -523,6 +523,73 @@ mod bench {
         check("linux ELF kernel", lk.layer, 7);
     }
 
+    /// The Linux walkers and class helpers on a corrupted (segmented ELF-core) physical layer:
+    /// task lists with threads, task fields, creds, create times, VMAs (maple tree on 6.8)
+    /// and mapped file paths must never panic.
+    #[test]
+    #[ignore]
+    fn smear_robustness_linux() {
+        use crate::automagic::linux::LinuxKernel;
+        use crate::symbols::linux::LinuxExt;
+        for img in ["rsvol-noble-6.8.0-139.elf", "rsvol-jammy-5.15.0-191.lime"] {
+            let ctx = Context::new(GlobalOptions {
+                file: Some(format!("/home/user/rs-vol/testdata/images/linux/{img}")),
+                symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+                ..Default::default()
+            })
+            .unwrap();
+            let k = ctx.linux_kernel().unwrap();
+            let (phys, _) = ctx.physical_arc().unwrap();
+            for (rate, seed) in [0u64, 1, 2, 5, 10, 20, 50].into_iter().flat_map(|r| (1..=4u64).map(move |s| (r, s * 0x9e37_79b9))) {
+                let smear: Arc<dyn Layer> = Arc::new(Smear { inner: phys.clone(), rate, seed });
+                let vl = IntelLayer::new("layer_name", smear, k.dtb, k.layer.mode(), k.layer.flavor())
+                    .with_os("linux")
+                    .with_kernel_virtual_offset(Some(k.aslr_shift));
+                let vl: &'static IntelLayer = Box::leak(Box::new(vl));
+                let kk = LinuxKernel {
+                    module: Module::new(vl, k.table, k.aslr_shift),
+                    layer: vl,
+                    vlayer: vl,
+                    phys: k.phys,
+                    table: k.table,
+                    kaslr_shift: k.kaslr_shift,
+                    aslr_shift: k.aslr_shift,
+                    dtb: k.dtb,
+                    banner: k.banner.clone(),
+                    stacker: k.stacker,
+                };
+                let (mut tasks, mut vmas, mut files, mut errs) = (0, 0, 0, 0);
+                let r = crate::plugins::linux::pslist::list_tasks(&kk, &|_| Ok(false), true, &mut |t| {
+                    tasks += 1;
+                    if crate::plugins::linux::pslist::get_task_fields(&t, true).is_err() {
+                        errs += 1;
+                    }
+                    let _ = (t.is_valid(), t.state(), t.get_threads().len(), t.get_boottime(true));
+                    let _ = t.add_process_layer();
+                    if let Ok(mm) = t.m("mm").and_then(|m| m.deref()) {
+                        for v in mm.get_vma_iter().into_iter().take(256) {
+                            let Ok(v) = v else {
+                                errs += 1;
+                                continue;
+                            };
+                            vmas += 1;
+                            let _ = (v.vma_is_valid(), v.get_protection(), v.get_flags(), v.get_page_offset());
+                            if let Ok(f) = v.m("vm_file").and_then(|f| f.deref()) {
+                                files += 1;
+                                let _ = (f.get_dentry(), f.get_vfsmnt(), f.get_inode());
+                            }
+                        }
+                    }
+                    Ok(true)
+                });
+                if r.is_err() {
+                    errs += 1;
+                }
+                println!("{img} smear {rate}% seed {seed:#x}: {tasks} tasks, {vmas} vmas, {files} files, {errs} errors, no panic");
+            }
+        }
+    }
+
     /// The Mac walkers and class helpers on a corrupted physical layer: every list method,
     /// process layers, map entries, fileglob types and vnode paths must never panic.
     #[test]
