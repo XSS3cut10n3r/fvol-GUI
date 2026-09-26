@@ -812,6 +812,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
     // symbols
     {
         let mut ss = Vec::with_capacity(parsed_ref.symbols.len() * SYMBOL_SZ);
+        let mut cdata: Vec<u8> = Vec::new();
         let mut hashes = Vec::with_capacity(parsed_ref.symbols.len());
         for (s, t) in parsed_ref.symbols.iter().zip(&sym_ty) {
             let (no, nl) = w.raw(s.name.as_bytes());
@@ -823,7 +824,8 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
             match (sym_cdata, &s.constant_data) {
                 (true, Some(cd)) => {
                     let bytes = b64decode(cd);
-                    let (co, cl) = w.raw(&bytes);
+                    let (co, cl) = (cdata.len() as u32, bytes.len() as u32);
+                    cdata.extend_from_slice(&bytes);
                     put32(&mut ss, 1);
                     put32(&mut ss, co);
                     put32(&mut ss, cl);
@@ -835,6 +837,7 @@ pub fn build_blob(json: &[u8], opts: &BuildOptions) -> Result<Vec<u8>> {
             }
         }
         sections[sec::SYMBOLS] = ss;
+        sections[sec::CDATA] = cdata;
         index_into(&hashes, &mut sections[sec::H_SYMBOLS]);
     }
     // natives / base types

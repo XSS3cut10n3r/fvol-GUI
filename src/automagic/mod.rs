@@ -16,17 +16,26 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Open the image and stack container layers on it (python LayerStacker minus the OS
-/// stackers). The result is python's `memory_layer`; a raw image is the file layer itself.
-pub fn stack_physical(path: &Path) -> Result<Arc<dyn Layer>> {
-    let file = FileLayer::open(path)?;
-    let base = Arc::new(file.with_name("base_layer"));
-    let stacked = crate::layers::containers::stack(base.clone())?;
-    let same = Arc::as_ptr(&stacked) as *const u8 == Arc::as_ptr(&base) as *const u8;
-    if same {
-        // raw image: the file itself is the memory layer
-        return Ok(Arc::new(file.with_name("memory_layer")));
+/// stackers; `stackers` = python `--stackers`). Returns python's `memory_layer` (the file layer
+/// itself for raw images) and the python `get_depends` listing of it (names after
+/// construction magic: memory_layer, base_layer, ...; depth 0 = the physical layer).
+pub fn stack_physical(path: &Path, stackers: Option<&[String]>) -> Result<(Arc<dyn Layer>, Vec<StackEntry>)> {
+    let _t = crate::util::trace::span("container stacking");
+    let file = Arc::new(FileLayer::open(path)?);
+    let s = crate::layers::containers::stack_with(file, &StackOptions { location: Some(path), stackers })?;
+    Ok((s.layer, s.layers))
+}
+
+pub use crate::layers::containers::StackEntry;
+use crate::layers::containers::StackOptions;
+
+/// python `--stackers` filter for an OS stacker (e.g. "WindowsIntelStacker"): true when it may
+/// run.
+pub fn stacker_enabled(stackers: Option<&[String]>, class: &str) -> bool {
+    match stackers {
+        Some(list) if !list.is_empty() => list.iter().any(|n| n == class),
+        _ => true,
     }
-    Ok(stacked)
 }
 
 /// Per-image automagic cache (tiny `key=value` text files).

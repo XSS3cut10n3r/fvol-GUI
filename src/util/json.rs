@@ -218,6 +218,8 @@ pub struct Parser<'a> {
     pos: usize,
     /// the whole buffer is valid UTF-8 (checked once), so string slices need no validation
     utf8: bool,
+    /// DOM nesting depth (guards the recursive `value()` against hostile input)
+    depth: u32,
 }
 
 #[inline(always)]
@@ -232,7 +234,7 @@ impl<'a> Parser<'a> {
         // one validation pass for the whole document (std's ASCII fast path runs at many
         // GB/s); string slices cut at '"' boundaries of valid UTF-8 are then valid too
         let utf8 = std::str::from_utf8(buf).is_ok();
-        Parser { buf, pos, utf8 }
+        Parser { buf, pos, utf8, depth: 0 }
     }
 
     #[inline(always)]
@@ -701,23 +703,33 @@ impl<'a> Parser<'a> {
             Kind::Number => self.number()?,
             Kind::Str => Json::Str(self.str()?),
             Kind::Arr => {
+                self.enter()?;
                 let mut v = Vec::new();
                 self.array(|p| {
                     v.push(p.value()?);
                     Ok(())
                 })?;
+                self.depth -= 1;
                 Json::Arr(v)
             }
             Kind::Obj => {
+                self.enter()?;
                 let mut v = Vec::new();
                 self.object(|p, k| {
                     let val = p.value()?;
                     v.push((k, val));
                     Ok(())
                 })?;
+                self.depth -= 1;
                 Json::Obj(v)
             }
         })
+    }
+
+    #[inline]
+    fn enter(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > 1000 { Err(self.err("nesting too deep")) } else { Ok(()) }
     }
 }
 

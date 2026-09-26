@@ -89,6 +89,7 @@ type Lazy<T> = OnceLock<std::result::Result<T, String>>;
 pub struct Context {
     pub opts: GlobalOptions,
     physical: Lazy<(Arc<dyn Layer>, LayerRef)>,
+    physical_listing: OnceLock<Vec<crate::automagic::StackEntry>>,
     win: Lazy<WinKernel>,
     linux: Lazy<crate::automagic::linux::LinuxKernel>,
     mac: Lazy<crate::automagic::mac::MacKernel>,
@@ -102,10 +103,19 @@ fn keep_err<T>(r: &std::result::Result<T, String>) -> Result<&T> {
 impl Context {
     /// Cheap: records options and sets the symbol search path. Nothing is opened or scanned.
     pub fn new(opts: GlobalOptions) -> Result<Context> {
+        if opts.clear_cache {
+            // python --clear-cache wipes its identifier cache and cached data; ours are the
+            // identifier index, the automagic results and the binary symbol tables
+            let dir = crate::util::paths::rsvol_cache_dir();
+            let _ = std::fs::remove_file(dir.join("identifiers.cache"));
+            let _ = std::fs::remove_dir_all(dir.join("automagic"));
+            let _ = std::fs::remove_dir_all(dir.join("isf"));
+        }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         Ok(Context {
             opts,
             physical: OnceLock::new(),
+            physical_listing: OnceLock::new(),
             win: OnceLock::new(),
             linux: OnceLock::new(),
             mac: OnceLock::new(),
@@ -141,10 +151,19 @@ impl Context {
     pub fn physical_arc(&self) -> Result<&(Arc<dyn Layer>, LayerRef)> {
         keep_err(self.physical.get_or_init(|| {
             let path = self.image_path().map_err(|e| e.to_string())?;
-            let l = crate::automagic::stack_physical(&path).map_err(|e| e.to_string())?;
+            let (l, listing) = crate::automagic::stack_physical(&path, self.opts.stackers.as_deref()).map_err(|e| e.to_string())?;
+            let _ = self.physical_listing.set(listing);
             let r = leak_layer(l.clone());
             Ok((l, r))
         }))
+    }
+
+    /// python `get_depends(memory_layer)`: (depth, python layer name, python class name) of the
+    /// physical layer stack (depth 0 = `memory_layer`). A kernel translation layer sits on top
+    /// at depth 0, so callers listing it add 1 to these depths (see windows.info).
+    pub fn physical_listing(&self) -> Result<&[crate::automagic::StackEntry]> {
+        self.physical_arc()?;
+        Ok(self.physical_listing.get().map(|v| v.as_slice()).unwrap_or(&[]))
     }
 
     /// The Windows kernel (runs the Windows automagic on first use; cached per image).
@@ -165,6 +184,9 @@ impl Context {
     fn init_windows(&self) -> Result<WinKernel> {
         let _t = crate::util::trace::span("windows kernel init (total)");
         let (phys_arc, phys) = self.physical_arc()?;
+        if !crate::automagic::stacker_enabled(self.opts.stackers.as_deref(), "WindowsIntelStacker") {
+            return Err(Error::Unsatisfied("WindowsIntelStacker disabled by --stackers".into()));
+        }
         let image = self.image_path()?;
         let cached = crate::automagic::cache::load(&image, "win").and_then(|kv| {
             use crate::automagic::cache::get;
@@ -289,4 +311,55 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::layers::LayerExt;
+    use crate::layers::scan::{BytesScanner, scan};
+
+    /// `RSVOL_BENCH_IMG=... cargo test --release translation_bench -- --ignored --nocapture`
+    /// (run through bench/scripts/limit.sh): page-walk / mapping / virtual-scan throughput.
+    #[test]
+    #[ignore]
+    fn translation_bench() {
+        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
+        let k = ctx.windows_kernel().unwrap();
+        let t = std::time::Instant::now();
+        let runs = k.vlayer.mappings(0, (1 << 48) - 1);
+        let bytes: u64 = runs.iter().map(|m| m.len).sum();
+        let d = t.elapsed();
+        println!("kernel layer mapping(0, 2^48): {} runs, {} MiB mapped, {:.2} ms", runs.len(), bytes >> 20, d.as_secs_f64() * 1e3);
+        let t = std::time::Instant::now();
+        let mut pages = 0u64;
+        let mut buf = vec![0u8; 0x1000];
+        for m in &runs {
+            let mut a = m.offset;
+            while a < m.offset + m.len {
+                let n = 0x1000.min(m.offset + m.len - a) as usize;
+                k.vlayer.read_padded(a, &mut buf[..n]);
+                pages += 1;
+                a += n as u64;
+            }
+        }
+        let d = t.elapsed();
+        println!("read_padded of every mapped kernel page: {pages} pages, {:.2} ms ({:.0} ns/page)", d.as_secs_f64() * 1e3, d.as_nanos() as f64 / pages as f64);
+        let t = std::time::Instant::now();
+        let hits = scan(k.vlayer, &BytesScanner::new(b"RSDS"), None);
+        let d = t.elapsed();
+        println!("virtual scan of the kernel layer for RSDS: {} hits, {:.2} ms", hits.len(), d.as_secs_f64() * 1e3);
+        let procs: Vec<_> = crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)).into_iter().filter_map(|p| p.ok()).collect();
+        let t = std::time::Instant::now();
+        let mut ubytes = 0u64;
+        for p in &procs {
+            use crate::symbols::windows::WinExt;
+            if let Ok(l) = p.add_process_layer() {
+                ubytes += l.mappings(0, 0x7FFF_FFFF_FFFF).iter().map(|m| m.len).sum::<u64>();
+            }
+        }
+        let d = t.elapsed();
+        println!("user-space mapping of {} processes: {} MiB, {:.2} ms", procs.len(), ubytes >> 20, d.as_secs_f64() * 1e3);
+    }
 }
