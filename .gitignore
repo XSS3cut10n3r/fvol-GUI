@@ -5,3 +5,5 @@
 /volatility3/
 /bench/venv/
 /testdata/
+__pycache__/
+/.claude/
