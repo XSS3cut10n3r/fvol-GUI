@@ -85,6 +85,19 @@ pub fn symbol_path() -> &'static SymbolPath {
     *w.get_or_insert_with(|| Box::leak(Box::new(SymbolPath::new(&[]))))
 }
 
+static REMOTE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// python `constants.REMOTE_ISF_URL` (`-u/--remote-isf-url`); python ignores it when
+/// `--offline`, so `offline` clears it.
+pub fn set_remote_isf_url(url: Option<String>, offline: bool) {
+    *REMOTE.write().unwrap_or_else(|e| e.into_inner()) = url.filter(|_| !offline);
+}
+
+/// The remote identifier list URL in effect (None when unset or offline).
+pub fn remote_isf_url() -> Option<String> {
+    REMOTE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 static LOADED: Mutex<Option<FxHashMap<String, TableRef>>> = Mutex::new(None);
 
 /// python `IntermediateSymbolTable.create(context, config_path, sub_path, filename,

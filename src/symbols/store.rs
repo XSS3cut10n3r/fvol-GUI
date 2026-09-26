@@ -18,6 +18,7 @@ use super::isf::{BuildOptions, build_blob};
 use super::table::{Blob, SymbolTable};
 use crate::error::{Error, Result};
 use crate::util::fxhash::{FxHasher, hash_bytes};
+use crate::util::json::Json;
 use crate::util::mmap::Mmap;
 use crate::util::paths;
 use std::hash::Hasher;
@@ -35,6 +36,10 @@ pub enum IsfLocation {
     Zip { zip: PathBuf, member: String },
     /// Shipped with volatility3 and embedded in the binary.
     Embedded { rel: &'static str, top: bool, data: &'static [u8] },
+    /// A location from a remote identifier list (python `-u/--remote-isf-url`), kept verbatim:
+    /// `file://...` is read in place, anything else (http/https/ftp) is downloaded once and
+    /// cached in `~/.cache/rsvol/remote` (python: `CACHE_PATH/data_<sha512>.cache`).
+    Url(String),
 }
 
 impl IsfLocation {
@@ -44,6 +49,7 @@ impl IsfLocation {
         match self {
             IsfLocation::File(p) => paths::path_to_file_uri(p),
             IsfLocation::Zip { zip, member } => format!("jar:file:{}!{}", zip.display(), member),
+            IsfLocation::Url(u) => u.clone(),
             IsfLocation::Embedded { rel, top, .. } => {
                 if *top {
                     format!("embedded:///volatility3/symbols/{rel}")
@@ -66,6 +72,12 @@ impl IsfLocation {
                 let raw = super::zipfile::read_member(zip, member)?;
                 Ok(std::borrow::Cow::Owned(decompress_by_name(member, raw)?))
             }
+            IsfLocation::Url(u) => {
+                let raw = std::fs::read(url_local_path(u)?)?;
+                // python without python-magic: decompress by the URL path's extension
+                let path = u.split(['?', '#']).next().unwrap_or(u);
+                Ok(std::borrow::Cow::Owned(decompress_by_name(path, raw)?))
+            }
         }
     }
 
@@ -84,6 +96,11 @@ impl IsfLocation {
                 h.write_u64(s);
                 h.write_u64(m as u64);
             }
+            IsfLocation::Url(u) => {
+                let (s, m) = paths::file_stamp(&url_local_path(u).ok()?)?;
+                h.write_u64(s);
+                h.write_u64(m as u64);
+            }
             IsfLocation::Embedded { data, .. } => {
                 // embedded data only changes with the executable: its (size, mtime) is one stat
                 // for all ~170 entries instead of hashing 6 MB on every index check
@@ -93,6 +110,85 @@ impl IsfLocation {
         }
         Some(h.finish())
     }
+}
+
+/// The local file behind a URL: the path of a `file://` URL, else the download cache file
+/// (fetched with curl on first use, like python's `ResourceAccessor` cache it never expires).
+pub fn url_local_path(url: &str) -> Result<PathBuf> {
+    if let Some(p) = paths::file_uri_to_path(url) {
+        return Ok(p);
+    }
+    if !["http://", "https://", "ftp://"].iter().any(|s| url.starts_with(s)) {
+        return Err(Error::msg(format!("URL does not reference an openable file: {url}")));
+    }
+    let cache = paths::rsvol_cache_dir().join("remote").join(format!("{:016x}-{}.cache", hash_bytes(url.as_bytes()), url.len()));
+    if cache.is_file() {
+        return Ok(cache);
+    }
+    let out = std::process::Command::new("curl")
+        .args(["--fail", "--silent", "--show-error", "--location", "--globoff", "--connect-timeout", "30", "--output", "-", "--", url])
+        .output()
+        .map_err(|e| Error::msg(format!("cannot run curl: {e}")))?;
+    if !out.status.success() {
+        return Err(Error::msg(format!("download of {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    paths::write_atomic(&cache, &out.stdout)?;
+    Ok(cache)
+}
+
+/// python `RemoteIdentifierFormat(url).process({}, os)` for every `constants.OS_CATEGORIES`
+/// entry: (os, identifier, location) in python's insertion order. Identifiers are
+/// `rstrip()`ped and lose one trailing NUL (dwarf2json banners end in "\0\n"). `additional`
+/// lists are followed (unreadable ones skipped, like python's `OSError` handler).
+pub fn remote_identifiers(url: &str) -> Result<Vec<(String, Vec<u8>, String)>> {
+    fn load(url: &str) -> Result<Vec<u8>> {
+        let path = url_local_path(url)?;
+        let raw = std::fs::read(&path)?;
+        let name = url.split(['?', '#']).next().unwrap_or(url);
+        decompress_by_name(name, raw)
+    }
+    fn walk(url: &str, os: &str, depth: u32, out: &mut Vec<(String, Vec<u8>, String)>) -> Result<()> {
+        let data = load(url)?;
+        let j = Json::parse(&data)?;
+        // python `_verify`: version in [1] (True and 1.0 compare equal to 1)
+        let v1 = match j.get("version") {
+            Some(Json::Int(1)) | Some(Json::Bool(true)) => true,
+            Some(Json::Float(f)) => *f == 1.0,
+            _ => false,
+        };
+        if !v1 {
+            return Err(Error::msg("Unsupported version for remote identifier list format"));
+        }
+        if let Some(ids) = j.get(os).and_then(|o| o.as_object()) {
+            for (ident, locs) in ids {
+                let mut b = super::isf::b64decode(ident);
+                while b.last().is_some_and(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)) {
+                    b.pop();
+                }
+                if b.last() == Some(&0) {
+                    b.pop();
+                }
+                for l in locs.as_array().unwrap_or(&[]) {
+                    if let Some(l) = l.as_str() {
+                        out.push((os.to_string(), b.clone(), l.to_string()));
+                    }
+                }
+            }
+        }
+        if depth < 8
+            && let Some(more) = j.get("additional").and_then(|a| a.as_array())
+        {
+            for m in more.iter().filter_map(|m| m.as_str()) {
+                let _ = walk(m, os, depth + 1, out);
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    for os in ["windows", "mac", "linux"] {
+        walk(url, os, 0, &mut out)?;
+    }
+    Ok(out)
 }
 
 /// Identity of the embedded ISF data: the running executable's (size, mtime); a content hash
@@ -607,14 +703,30 @@ fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
 /// `identifier_index(p).dictionary("linux")` = python `get_identifier_dictionary("linux")`.
 pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
     // one index per distinct search path (a process normally has exactly one)
-    static INDEX: std::sync::Mutex<Vec<(SymbolPath, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
+    type Key = (SymbolPath, Option<String>);
+    static INDEX: std::sync::Mutex<Vec<(Key, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
+    let remote = super::remote_isf_url();
     let mut all = INDEX.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, i)) = all.iter().find(|(p, _)| p == path) {
+    if let Some((_, i)) = all.iter().find(|((p, r), _)| p == path && *r == remote) {
         return i;
     }
     let _t = crate::util::trace::span("identifier index update");
-    let i: &'static IdentifierIndex = Box::leak(Box::new(IdentifierIndex::update(path)));
-    all.push((path.clone(), i));
+    let mut index = IdentifierIndex::update(path);
+    // python SymbolCacheMagic: remote rows are (re)inserted after the local scan, so they come
+    // last and win `find_location` / `get_identifier_dictionary` ties
+    if let Some(url) = &remote {
+        match remote_identifiers(url) {
+            Ok(list) => {
+                for (os, identifier, location) in list {
+                    index.entries.push(IdentEntry { url: location.clone(), stamp: 0, os, identifier });
+                    index.locations.push(IsfLocation::Url(location));
+                }
+            }
+            Err(e) => eprintln!("rsvol: remote ISF list {url}: {e}"),
+        }
+    }
+    let i: &'static IdentifierIndex = Box::leak(Box::new(index));
+    all.push(((path.clone(), remote), i));
     i
 }
 

@@ -358,6 +358,7 @@ fn isf_key(loc: &IsfLocation) -> Option<(String, String, String, String)> {
         IsfLocation::File(p) => Some(("file".into(), p.to_string_lossy().into_owned(), String::new(), st(p)?)),
         IsfLocation::Zip { zip, member } => Some(("zip".into(), zip.to_string_lossy().into_owned(), member.clone(), st(zip)?)),
         IsfLocation::Embedded { rel, top, data } => Some(("embedded".into(), rel.to_string(), top.to_string(), data.len().to_string())),
+        IsfLocation::Url(u) => Some(("url".into(), u.clone(), String::new(), st(&crate::symbols::store::url_local_path(u).ok()?)?)),
     }
 }
 
@@ -365,6 +366,7 @@ fn isf_from_key(kind: &str, a: &str, b: &str, stamp: &str) -> Option<IsfLocation
     let loc = match kind {
         "file" => IsfLocation::File(a.into()),
         "zip" => IsfLocation::Zip { zip: a.into(), member: b.to_string() },
+        "url" => IsfLocation::Url(a.to_string()),
         "embedded" => {
             let top = b == "true";
             let &(rel, _, data) = crate::symbols::embedded::FILES.iter().find(|(r, t, _)| *r == a && *t == top)?;

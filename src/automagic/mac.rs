@@ -532,6 +532,7 @@ fn loc_encode(loc: &IsfLocation) -> Option<String> {
             (ok(z) && ok(member)).then(|| format!("zip\t{z}\t{member}"))
         }
         IsfLocation::Embedded { rel, top, .. } => ok(rel).then(|| format!("emb\t{}\t{rel}", *top as u8)),
+        IsfLocation::Url(u) => ok(u).then(|| format!("url\t{u}")),
     }
 }
 
@@ -546,6 +547,10 @@ fn loc_decode(s: &str) -> Option<IsfLocation> {
             let zip = std::path::PathBuf::from(it.next()?);
             let member = it.next()?.to_string();
             zip.is_file().then_some(IsfLocation::Zip { zip, member })
+        }
+        "url" => {
+            let u = it.next()?.to_string();
+            symbols::store::url_local_path(&u).is_ok_and(|p| p.is_file()).then_some(IsfLocation::Url(u))
         }
         "emb" => {
             let top = it.next()? == "1";

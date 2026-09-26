@@ -121,6 +121,7 @@ impl Context {
             let _ = std::fs::remove_dir_all(dir.join("isf"));
         }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
+        symbols::set_remote_isf_url(opts.remote_isf_url.clone(), opts.offline);
         Ok(Context {
             opts,
             physical: OnceLock::new(),
@@ -144,7 +145,7 @@ impl Context {
         }
         if let Some(loc) = &self.opts.single_location {
             if let Some(p) = loc.strip_prefix("file://") {
-                return Ok(PathBuf::from(percent_decode(p)));
+                return Ok(PathBuf::from(crate::util::paths::unquote(p)));
             }
             return Ok(PathBuf::from(loc));
         }
@@ -264,7 +265,7 @@ impl Context {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
-                let p = s.strip_prefix("file://").map(percent_decode).unwrap_or_else(|| s.clone());
+                let p = s.strip_prefix("file://").map(crate::util::paths::unquote).unwrap_or_else(|| s.clone());
                 crate::layers::FileLayer::open(Path::new(&p)).ok().map(|f| Arc::new(f.with_name(&format!("swap_layers{i}"))) as Arc<dyn Layer>)
             })
             .collect();
@@ -354,40 +355,6 @@ impl Context {
     pub fn create_output_file(&self, preferred_name: &str) -> Result<(File, String)> {
         let _g = self.output_lock.lock().unwrap();
         crate::cli::files::create(&self.opts.output_dir, preferred_name)
-    }
-}
-
-fn percent_decode(s: &str) -> String {
-    // python `urllib.parse.unquote`: only `%` + two hex digits is decoded (bytewise, so a
-    // multi-byte char after `%` can never split a str slice), then UTF-8 with replacement
-    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|&c| hex(c)), b.get(i + 2).and_then(|&c| hex(c)))
-        {
-            out.push(h << 4 | l);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-#[cfg(test)]
-mod percent_tests {
-    #[test]
-    fn percent_decode_like_python() {
-        use super::percent_decode;
-        assert_eq!(percent_decode("/a%20b%2Fc"), "/a b/c");
-        assert_eq!(percent_decode("%+5%zz%4"), "%+5%zz%4");
-        assert_eq!(percent_decode("%é%%41"), "%é%A");
-        assert_eq!(percent_decode("%ff"), "\u{fffd}");
-        assert_eq!(percent_decode("%"), "%");
     }
 }
 
