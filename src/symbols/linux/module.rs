@@ -68,15 +68,20 @@ impl ElfSym {
     pub fn st_name(&self) -> Result<u64> {
         Ok(self.layer.read_u32(self.addr)? as u64)
     }
-    /// python `st_value`.
+    /// python `st_value`. python's `linux/elf.json` declares `Elf32_Sym.st_value` (offset 4)
+    /// as `unsigned long long`, so on 32-bit kernels it is `st_value | st_size << 32` (python
+    /// masks it with the layer's address mask where it wants the address).
     #[inline]
     pub fn st_value(&self) -> Result<u64> {
-        if self.is64 { self.layer.read_u64(self.addr.wrapping_add(8)) } else { Ok(self.layer.read_u32(self.addr.wrapping_add(4))? as u64) }
+        self.layer.read_u64(self.addr.wrapping_add(if self.is64 { 8 } else { 4 }))
     }
-    /// python `st_size`.
+    /// python `st_size`. `Elf32_Sym.st_size` (offset 8) is also an `unsigned long long` in
+    /// python's `linux/elf.json`: on 32-bit kernels it is `st_size | st_info << 32 | st_other <<
+    /// 40 | st_shndx << 48` (the garbage kallsyms sizes and the huge symbol ranges of python's
+    /// module address lookups).
     #[inline]
     pub fn st_size(&self) -> Result<u64> {
-        if self.is64 { self.layer.read_u64(self.addr.wrapping_add(16)) } else { Ok(self.layer.read_u32(self.addr.wrapping_add(8))? as u64) }
+        self.layer.read_u64(self.addr.wrapping_add(if self.is64 { 16 } else { 8 }))
     }
     /// python `st_info`.
     #[inline]

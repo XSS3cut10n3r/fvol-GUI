@@ -235,7 +235,8 @@ impl Plugin for PsList {
             list_tasks(k, &filter, true, &mut |t| {
                 let tf = get_task_fields(&t, false)?;
                 let description = format!("Process {}/{} {} ({})", tf.user_pid, tf.user_tid, tf.name, tf.offset);
-                ev.push(TimelineEvent { description, kind: TimeKind::Created, time: tf.creation_time.map_or(Value::NotAvailable, Value::DateTime) });
+                // python yields `task_fields.creation_time` itself: None when the create time is unknown
+                ev.push(TimelineEvent { description, kind: TimeKind::Created, time: tf.creation_time.map_or(Value::None, Value::DateTime) });
                 Ok(true)
             })
         })();

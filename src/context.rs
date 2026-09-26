@@ -92,6 +92,8 @@ pub struct Context {
     image: Lazy<PathBuf>,
     physical: Lazy<(Arc<dyn Layer>, LayerRef)>,
     physical_listing: OnceLock<Vec<crate::automagic::StackEntry>>,
+    /// python's native symbol tables appended while stacking (see [`Context::stacking_native_tables`])
+    native_tables: OnceLock<Vec<&'static str>>,
     win: Lazy<WinKernel>,
     linux: Lazy<crate::automagic::linux::LinuxKernel>,
     mac: Lazy<crate::automagic::mac::MacKernel>,
@@ -134,6 +136,7 @@ impl Context {
             image: OnceLock::new(),
             physical: OnceLock::new(),
             physical_listing: OnceLock::new(),
+            native_tables: OnceLock::new(),
             win: OnceLock::new(),
             linux: OnceLock::new(),
             mac: OnceLock::new(),
@@ -198,9 +201,11 @@ impl Context {
         keep_err(self.physical.get_or_init(|| {
             let path = self.image_path().map_err(err_text)?;
             let url = self.image_url();
-            let (l, listing) =
+            let st =
                 crate::automagic::stack_physical(&path, url.as_deref(), self.opts.offline, self.opts.stackers.as_deref()).map_err(err_text)?;
-            let _ = self.physical_listing.set(listing);
+            let _ = self.physical_listing.set(st.layers);
+            let _ = self.native_tables.set(st.native_tables);
+            let l = st.layer;
             let r = leak_layer(l.clone());
             Ok((l, r))
         }))
@@ -212,6 +217,27 @@ impl Context {
     pub fn physical_listing(&self) -> Result<&[crate::automagic::StackEntry]> {
         self.physical_arc()?;
         Ok(self.physical_listing.get().map(|v| v.as_slice()).unwrap_or(&[]))
+    }
+
+    /// Names of the native symbol tables (python `NativeTable`, no `producer` metadata) that
+    /// python's container layers put into the symbol space while stacking, before any kernel
+    /// table (only VMware's `vmware`). python's `symbol_space.verify_table_versions` raises
+    /// `AttributeError` on the first of them.
+    pub fn stacking_native_tables(&self) -> Result<&[&'static str]> {
+        self.physical_arc()?;
+        Ok(self.native_tables.get().map(|v| v.as_slice()).unwrap_or(&[]))
+    }
+
+    /// The part of python's `symbol_space.verify_table_versions(producer, validator)` that runs
+    /// before the kernel table is reached: the stacking-time native tables come first in the
+    /// symbol space and `table.producer` raises on them (python bug; e.g. linux.kmsg on a
+    /// VMware .vmem). `Ok(())` when there are none.
+    pub fn verify_stacking_tables(&self) -> Result<()> {
+        if self.stacking_native_tables()?.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::msg("AttributeError: 'NativeTable' object has no attribute 'producer'"))
+        }
     }
 
     /// The Windows kernel (runs the Windows automagic on first use; cached per image).

@@ -774,7 +774,7 @@ mod tests {
         use crate::layers::scan::{BytesScanner, find};
         use crate::symbols::linux::vmcoreinfo::VMCOREINFO_MAGIC_ALIGNED;
         let path = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
-        let (phys, _) = crate::automagic::stack_physical(std::path::Path::new(&path), None, false, None).unwrap();
+        let phys = crate::automagic::stack_physical(std::path::Path::new(&path), None, false, None).unwrap().layer;
         let total = phys.max_address() as f64;
         for round in 0..2 {
             let t = std::time::Instant::now();

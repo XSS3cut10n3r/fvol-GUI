@@ -20,8 +20,11 @@ const GROUP: u64 = 80; // "64sQQ"
 /// `location` is the local file of the `.vmem`, `url` python's location of it (tested for
 /// the `.vmem` suffix, as python does; when remote, the metadata file next to it is
 /// downloaded into the rsvol cache like the image). Returns the layer and python's location
-/// of the metadata file (the meta_layer's `location` in configurations).
-pub(crate) fn stack(base: &Base, location: &Path, url: Option<&str>, offline: bool) -> Result<(SegmentedLayer, String)> {
+/// of the metadata file (the meta_layer's `location` in configurations). `native_table` is set
+/// once the metadata file is open: python then constructs the `VmwareLayer`, whose
+/// `_read_header` first appends a native `vmware` symbol table to the symbol space (it stays
+/// there even when the header turns out to be invalid).
+pub(crate) fn stack(base: &Base, location: &Path, url: Option<&str>, offline: bool, native_table: &mut bool) -> Result<(SegmentedLayer, String)> {
     let not_vmem = || Error::Layer("vmware: not a .vmem file".into());
     let url_stem = match url {
         Some(u) => Some(u.strip_suffix(".vmem").ok_or_else(not_vmem)?),
@@ -47,6 +50,7 @@ pub(crate) fn stack(base: &Base, location: &Path, url: Option<&str>, offline: bo
     let (meta, meta_loc) = open_meta(".vmss")
         .or_else(|_| open_meta(".vmsn"))
         .map_err(|_| Error::Layer("vmware: no .vmss/.vmsn metadata next to the .vmem".into()))?;
+    *native_table = true;
     let meta = Arc::new(meta);
     let segs = read_regions(&Base::from_file(&meta))?;
     Ok((SegmentedLayer::new("VmwareLayer", base, segs)?, meta_loc))

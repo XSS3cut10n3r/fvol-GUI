@@ -503,6 +503,7 @@ impl Plugin for Kmsg {
     }
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         let k = ctx.linux_kernel()?;
+        ctx.verify_stacking_tables()?;
         if !verify_table_versions(k.table)? {
             // python: vollog.info("Invalid symbol table, ...") and run() returns None, which the
             // CLI renderer then fails on
