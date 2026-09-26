@@ -43,10 +43,12 @@ enum ListState {
 }
 
 impl ListIter {
-    fn failed(e: Error) -> ListIter {
+    /// An iterator that yields `e` once (python raised before yielding anything).
+    pub fn failed(e: Error) -> ListIter {
         ListIter { state: ListState::Failed(e) }
     }
-    fn done() -> ListIter {
+    /// An empty iterator.
+    pub fn done() -> ListIter {
         ListIter { state: ListState::Done }
     }
 }
@@ -185,6 +187,20 @@ pub trait LinuxExt {
     fn get_time_namespace_monotonic_offset(&self) -> Result<Option<Obj>>;
     /// python `task_struct._get_time_namespace_boottime_offset()`.
     fn get_time_namespace_boottime_offset(&self) -> Result<Option<Obj>>;
+    /// python `task_struct.get_process_memory_sections(heap_only)`: `(start, size)` of each
+    /// valid VMA (only the heap VMA(s) with `heap_only`). `Err` where python raises.
+    fn get_process_memory_sections(&self, heap_only: bool) -> Result<Vec<(u64, u64)>>;
+    /// python `task_struct.is_being_ptraced` (`ptrace != 0`).
+    fn is_being_ptraced(&self) -> Result<bool>;
+    /// python `task_struct.is_ptracing` (the `ptraced` list is not empty).
+    fn is_ptracing(&self) -> Result<bool>;
+    /// python `task_struct.get_ptrace_tracer_tid()` (`parent.pid` when being traced).
+    fn get_ptrace_tracer_tid(&self) -> Result<Option<i128>>;
+    /// python `task_struct.get_ptrace_tracee_tids()` (pids on the `ptraced` list).
+    fn get_ptrace_tracee_tids(&self) -> Result<Vec<i128>>;
+    /// python `task_struct.get_ptrace_tracee_flags()` (`PT_FLAGS(ptrace).flags`, e.g.
+    /// `"PT_PTRACED|PT_SEIZED"`; `Err` for bits outside PT_FLAGS like python's ValueError).
+    fn get_ptrace_tracee_flags(&self) -> Result<Option<String>>;
 
     // ---- mm_struct / maple_tree / vm_area_struct / file
     /// python `mm_struct.get_vma_iter()`: the valid VMAs (`mmap` list on kernels < 6.1, the
@@ -201,11 +217,19 @@ pub trait LinuxExt {
     fn get_flags(&self) -> Result<String>;
     /// python `vm_area_struct.get_page_offset()`.
     fn get_page_offset(&self) -> Result<u64>;
+    /// python `vm_area_struct.get_name(context, task)` (see [`super::utilities::vma_get_name`]).
+    fn vma_get_name(&self, task: &Obj) -> Result<Option<String>>;
+    /// python `vm_area_struct.get_malicious_pages(proclayer)`: executable (`r-x`), file-backed
+    /// VMA pages that are dirty.
+    fn get_malicious_pages(&self, proclayer: Option<LayerRef>) -> Result<Vec<u64>>;
+    /// python `vm_area_struct.is_suspicious(proclayer)`.
+    fn is_suspicious(&self, proclayer: Option<LayerRef>) -> Result<bool>;
     /// python `struct_file.get_dentry()` (a `dentry *` pointer object).
     fn get_dentry(&self) -> Result<Obj>;
     /// python `struct_file.get_vfsmnt()` (a `vfsmount *` pointer object).
     fn get_vfsmnt(&self) -> Result<Obj>;
-    /// python `struct_file.get_inode()` (the `inode` struct), `None` where python returns None.
+    /// python `struct_file.get_inode()` / `dentry.get_inode()` (dispatch on the struct name;
+    /// pointers are followed): the `inode` struct, `None` where python returns None.
     fn get_inode(&self) -> Result<Option<Obj>>;
 
     // ---- cred
@@ -313,10 +337,16 @@ impl LinuxExt for Obj {
     }
 
     fn is_valid(&self) -> bool {
+        if self.is_pointer() {
+            // python forwards `ptr.is_valid()` to the target
+            return self.deref().is_ok_and(|t| t.is_valid());
+        }
         match self.struct_name() {
             Some("task_struct") => task_is_valid(self).unwrap_or(false),
             Some("inode") => inode_is_valid(self).unwrap_or(false),
             Some("vm_area_struct") => self.vma_is_valid().unwrap_or(false),
+            Some("vfsmount") => vfsmount_is_valid(self).unwrap_or(false),
+            Some("page") => super::fs::FsExt::page_is_valid(self).unwrap_or(false),
             _ => true,
         }
     }
@@ -502,6 +532,56 @@ impl LinuxExt for Obj {
         })
     }
 
+    fn get_process_memory_sections(&self, heap_only: bool) -> Result<Vec<(u64, u64)>> {
+        let mm = self.m("mm")?;
+        let mut out = Vec::new();
+        for vma in mm.deref()?.get_vma_iter() {
+            let vma = vma?;
+            let start = vma.m("vm_start")?.u64()?;
+            let end = vma.m("vm_end")?.u64()?;
+            if heap_only && !(start <= mm.m("brk")?.u64()? && end >= mm.m("start_brk")?.u64()?) {
+                continue;
+            }
+            if !heap_only {
+                // python logs `self.mm.brk` / `self.mm.start_brk` here (reads them)
+                mm.m("brk")?.u64()?;
+                mm.m("start_brk")?.u64()?;
+            }
+            out.push((start, end.wrapping_sub(start)));
+        }
+        Ok(out)
+    }
+
+    fn is_being_ptraced(&self) -> Result<bool> {
+        Ok(self.m("ptrace")?.int()? != 0)
+    }
+
+    fn is_ptracing(&self) -> Result<bool> {
+        let ptraced = self.m("ptraced")?;
+        let next = ptraced.m("next")?;
+        Ok(next.is_readable() && next.deref()?.addr != ptraced.addr)
+    }
+
+    fn get_ptrace_tracer_tid(&self) -> Result<Option<i128>> {
+        if self.is_being_ptraced()? { Ok(Some(self.m("parent")?.m("pid")?.int()?)) } else { Ok(None) }
+    }
+
+    fn get_ptrace_tracee_tids(&self) -> Result<Vec<i128>> {
+        let sym = format!("{}!task_struct", self.table().name());
+        let mut out = Vec::new();
+        for t in self.m("ptraced")?.list_of(&sym, "ptrace_entry") {
+            out.push(t?.m("pid")?.int()?);
+        }
+        Ok(out)
+    }
+
+    fn get_ptrace_tracee_flags(&self) -> Result<Option<String>> {
+        if !self.is_being_ptraced()? {
+            return Ok(None);
+        }
+        pt_flags(self.m("ptrace")?.int()?).map(Some)
+    }
+
     fn get_vma_iter(&self) -> Vec<Result<Obj>> {
         let mut out = Vec::new();
         let raw = if self.has_member("mmap") {
@@ -587,6 +667,67 @@ impl LinuxExt for Obj {
         Ok(self.m("vm_pgoff")?.u64()?.wrapping_shl(12))
     }
 
+    fn vma_get_name(&self, task: &Obj) -> Result<Option<String>> {
+        super::utilities::vma_get_name(self, task)
+    }
+
+    fn get_malicious_pages(&self, proclayer: Option<LayerRef>) -> Result<Vec<u64>> {
+        let mut out = Vec::new();
+        let flags = self.get_protection()?;
+        let Some(pl) = proclayer else { return Ok(out) };
+        if !flags.contains("r-x") || self.m("vm_file")?.deref()?.addr == 0 {
+            return Ok(out);
+        }
+        let start = self.m("vm_start")?.u64()?;
+        let end = self.m("vm_end")?.u64()?;
+        let intel = pl.as_intel();
+        let mut a = start;
+        while a < end {
+            match intel.map(|i| i.is_dirty(a)) {
+                Some(Ok(true)) => out.push(a),
+                Some(Ok(false)) => {}
+                // python: abort on the first translation failure (or a layer without is_dirty)
+                _ => break,
+            }
+            a = match a.checked_add(0x1000) {
+                Some(n) => n,
+                None => break,
+            };
+        }
+        Ok(out)
+    }
+
+    fn is_suspicious(&self, proclayer: Option<LayerRef>) -> Result<bool> {
+        let flags = self.get_protection()?;
+        if flags == "rwx" {
+            return Ok(true);
+        }
+        if flags == "r-x" && self.m("vm_file")?.deref()?.addr == 0 {
+            return Ok(true);
+        }
+        let Some(pl) = proclayer else { return Ok(false) };
+        if !flags.contains('x') {
+            return Ok(false);
+        }
+        let start = self.m("vm_start")?.u64()?;
+        let end = self.m("vm_end")?.u64()?;
+        let Some(intel) = pl.as_intel() else { return Err(Error::msg("AttributeError: layer has no attribute 'is_dirty'")) };
+        let mut a = start;
+        while a < end {
+            match intel.is_dirty(a) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(e) if e.is_invalid_address() => return Ok(false),
+                Err(e) => return Err(e),
+            }
+            a = match a.checked_add(0x1000) {
+                Some(n) => n,
+                None => break,
+            };
+        }
+        Ok(false)
+    }
+
     fn get_dentry(&self) -> Result<Obj> {
         if self.has_member("f_path") { self.m("f_path")?.m("dentry") } else { Err(Error::msg("AttributeError: Unable to find file -> dentry")) }
     }
@@ -596,6 +737,17 @@ impl LinuxExt for Obj {
     }
 
     fn get_inode(&self) -> Result<Option<Obj>> {
+        if self.is_pointer() {
+            return self.deref()?.get_inode();
+        }
+        if self.struct_name() == Some("dentry") {
+            // python `dentry.get_inode()`
+            let p = self.m("d_inode")?;
+            if !(p.u64()? != 0 && p.is_readable() && inode_is_valid(&p.deref()?)?) {
+                return Ok(None);
+            }
+            return Ok(Some(p.deref()?));
+        }
         // `inode_ptr and inode_ptr.is_readable() and inode_ptr.is_valid()`
         let usable = |p: &Obj| -> Result<bool> { Ok(p.u64()? != 0 && p.is_readable() && inode_is_valid(&p.deref()?)?) };
         let mut inode_ptr = None;
@@ -642,6 +794,42 @@ impl LinuxExt for Obj {
     fn timespec(&self) -> Result<Timespec> {
         Ok(Timespec::from_ints(self.m("tv_sec")?.int()?, self.m("tv_nsec")?.int()?))
     }
+}
+
+/// python `linux_constants.PT_FLAGS` members in definition order (python's `enum.Flag` lists a
+/// composite value's names in definition order).
+pub const PT_FLAGS: [(i128, &str); 12] = [
+    (0x00001, "PT_PTRACED"),
+    (0x10000, "PT_SEIZED"),
+    (1 << 3, "PT_TRACESYSGOOD"),
+    (1 << (3 + 1), "PT_TRACE_FORK"),
+    (1 << (3 + 2), "PT_TRACE_VFORK"),
+    (1 << (3 + 3), "PT_TRACE_CLONE"),
+    (1 << (3 + 4), "PT_TRACE_EXEC"),
+    (1 << (3 + 5), "PT_TRACE_VFORK_DONE"),
+    (1 << (3 + 6), "PT_TRACE_EXIT"),
+    (1 << (3 + 7), "PT_TRACE_SECCOMP"),
+    ((1 << 20) << 3, "PT_EXITKILL"),
+    ((1 << 21) << 3, "PT_SUSPEND_SECCOMP"),
+];
+
+/// python `PT_FLAGS(value).flags` (`enum.Flag` with STRICT boundary: unknown bits raise
+/// ValueError).
+pub fn pt_flags(value: i128) -> Result<String> {
+    let all: i128 = PT_FLAGS.iter().map(|f| f.0).fold(0, |a, b| a | b);
+    if value & !all != 0 || value < 0 {
+        return Err(Error::msg(format!("ValueError: <flag 'PT_FLAGS'> invalid value {value}")));
+    }
+    if value == 0 {
+        return Ok("PT_FLAGS(0)".into());
+    }
+    Ok(PT_FLAGS.iter().filter(|f| value & f.0 != 0).map(|f| f.1).collect::<Vec<_>>().join("|"))
+}
+
+/// python `vfsmount.is_valid()`.
+fn vfsmount_is_valid(v: &Obj) -> Result<bool> {
+    use super::fs::FsExt;
+    Ok(v.get_mnt_sb()?.u64()? != 0 && v.get_mnt_root()?.u64()? != 0 && v.get_mnt_parent()?.u64()? != 0)
 }
 
 /// python `inode.is_valid()` (exceptions kept).
