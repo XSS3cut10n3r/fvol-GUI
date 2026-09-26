@@ -2,8 +2,8 @@
 
 use crate::plugins::Plugin;
 
-pub mod dumpfiles;
 pub mod crashinfo;
+pub mod dumpfiles;
 pub mod etwpatch;
 pub mod iat;
 pub mod info;
@@ -13,13 +13,14 @@ pub mod pedump;
 pub mod poolscanner;
 pub mod pslist;
 pub mod psscan;
+pub mod registry;
 pub mod truecrypt;
 pub mod vadinfo;
 pub mod verinfo;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
-    v.push(&dumpfiles::DumpFiles);
     v.push(&crashinfo::Crashinfo);
+    v.push(&dumpfiles::DumpFiles);
     v.push(&etwpatch::EtwPatch);
     v.push(&iat::IAT);
     v.push(&info::Info);
@@ -32,4 +33,5 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&truecrypt::Passphrase);
     v.push(&vadinfo::VadInfo);
     v.push(&verinfo::VerInfo);
+    registry::register(v);
 }
