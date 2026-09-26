@@ -135,6 +135,17 @@ pub fn permission_flags_name(v: u8) -> Option<&'static str> {
     })
 }
 
+/// python `str(MFTEntry.get_signature())` of raw signature bytes (latin-1, cut at NUL) without
+/// allocating for the signatures the MFT scan finds: `Ok("FILE")` / `Ok("BAAD")`, `Err(string)`
+/// for anything else.
+pub fn signature_str(raw: [u8; 4]) -> std::result::Result<&'static str, String> {
+    match &raw {
+        b"FILE" => Ok("FILE"),
+        b"BAAD" => Ok("BAAD"),
+        _ => Err(raw.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect()),
+    }
+}
+
 /// python `MFTAttribute` resident-content cutoff (4 MiB, "format /L" volumes).
 pub const RESIDENT_CUTOFF: u64 = 0x400000;
 
@@ -172,15 +183,9 @@ impl<'a> MftEntry<'a> {
         decode_cstring(&b, StrEnc::Latin1, StrErrors::Strict)
     }
 
-    /// [`MftEntry::get_signature`] without allocating, for the signatures the MFT scan finds
-    /// ("FILE" / "BAAD"); `None` for anything else (use `get_signature` then).
-    pub fn signature_static(&self) -> Result<Option<&'static str>> {
-        let b: [u8; 4] = self.layer.read_array(at(self.offset, off::SIGNATURE)?)?;
-        Ok(match &b {
-            b"FILE" => Some("FILE"),
-            b"BAAD" => Some("BAAD"),
-            _ => None,
-        })
+    /// The 4 raw signature bytes [`MftEntry::get_signature`] decodes (see [`signature_str`]).
+    pub fn signature_raw(&self) -> Result<[u8; 4]> {
+        self.layer.read_array(at(self.offset, off::SIGNATURE)?)
     }
 
     /// `MFT_ENTRY.Flags` (raw 1-byte `MFTFlagsEnum` value).
@@ -524,8 +529,33 @@ impl MftFileName<'_> {
     }
     /// python `get_full_name()`: `NameLength` UTF-16 characters (errors replaced, cut at NUL).
     pub fn get_full_name(&self) -> Result<String> {
-        let n = self.name_length()? as u64;
-        read_utf16_name(self.layer, at(self.offset, off::FN_NAME)?, n * 2)
+        let mut s = String::new();
+        self.get_full_name_into(&mut s)?;
+        Ok(s)
+    }
+
+    /// [`MftFileName::get_full_name`] appended to `out` (plain ASCII names are copied without
+    /// allocating); nothing is appended on error.
+    pub fn get_full_name_into(&self, out: &mut String) -> Result<()> {
+        let n = self.name_length()? as usize;
+        if n == 0 {
+            return Ok(());
+        }
+        let mut buf = [0u8; 512];
+        let b = &mut buf[..2 * n];
+        self.layer.read(at(self.offset, off::FN_NAME)?, b)?;
+        if b.chunks_exact(2).all(|u| u[1] == 0 && u[0] < 0x80) {
+            // ASCII code units (no BOM, no surrogates): the same characters, cut at NUL
+            for u in b.chunks_exact(2) {
+                if u[0] == 0 {
+                    break;
+                }
+                out.push(u[0] as char);
+            }
+            return Ok(());
+        }
+        out.push_str(&decode_cstring(b, StrEnc::Utf16, StrErrors::Replace)?);
+        Ok(())
     }
 }
 

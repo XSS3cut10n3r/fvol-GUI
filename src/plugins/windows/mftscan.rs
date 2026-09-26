@@ -1,7 +1,8 @@
 //! windows.mftscan.MFTScan / ADS / ResidentData (python `plugins/windows/mftscan.py`): MFT
 //! `FILE` records found by a yara scan of the physical layer, their STANDARD_INFORMATION /
 //! FILE_NAME attributes, alternate data streams and resident data, plus the reusable
-//! [`enumerate_mft_records`] (python `MFTScan.enumerate_mft_records`).
+//! [`enumerate_mft_records`] / [`enumerate_mft_batches`] (python
+//! `MFTScan.enumerate_mft_records`).
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 //!
@@ -10,9 +11,14 @@
 //! chunk (16 MiB + 4 KiB overlap) is matched whole and every string instance is reported --
 //! including those in the overlap, which the next chunk reports again (python prints those
 //! records twice). The three literals cannot overlap each other or themselves, so yara's
-//! instances are exactly all their occurrences, in ascending offset order. Here the search is
-//! the core Teddy multi-literal kernel, and the records are parsed on the scan's worker threads
-//! (the `finish` phase of each chunk) into ready-made rows; the calling thread only renders.
+//! instances are exactly all their occurrences, in ascending offset order (at most a million per
+//! chunk, yara-python's cap). Here the search is the core Teddy multi-literal kernel.
+//!
+//! Speed: the records of a chunk are parsed on the scan's worker threads into one batch of
+//! compact POD rows (strings / bytes in per-batch arenas); the rendering thread turns each row
+//! into `Value`s right before handing it to the renderer, so row memory stays cache-hot and is
+//! allocated and freed on one thread. The main image (5 GiB, 480k hits, 1.39M rows, 280 MB of
+//! text) renders in about the time of the renderer alone.
 
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -20,7 +26,7 @@ use crate::layers::Layer;
 use crate::layers::scan::{MultiStringScanner, Scanner, scan_each};
 use crate::plugins::{Config, Plugin, TimeKind, TimelineEvent};
 use crate::renderers::{ColType, Column, RowSink, Value};
-use crate::symbols::windows::mft::{MftEntry, mft_flags_name, permission_flags_name};
+use crate::symbols::windows::mft::{MftEntry, mft_flags_name, permission_flags_name, signature_str};
 use crate::util::time::wintime_to_datetime;
 use std::marker::PhantomData;
 
@@ -31,29 +37,49 @@ pub struct ResidentData;
 /// The yara rule's literals (`/FILE0|FILE\*|BAAD/`).
 pub const MFT_SIGNATURES: [&[u8]; 3] = [b"FILE0", b"FILE*", b"BAAD"];
 
-/// yara-python + volatility `YaraScanner` for `/FILE0|FILE\*|BAAD/` over one chunk, with the
-/// per-hit work `parse` done on the scan's worker threads. Hits are NOT limited to the first
-/// `chunk_size` bytes of a chunk (YaraScanner reports the overlap too).
-struct MftYaraScanner<'a, T, F> {
-    ms: MultiStringScanner,
-    layer: &'a dyn Layer,
-    parse: F,
-    _t: PhantomData<fn() -> T>,
-}
-
 /// libyara `YR_MAX_STRING_MATCHES`: yara-python keeps the first million instances of a string
 /// per `match()` call (one chunk here) and warns about the rest.
 const YR_MAX_STRING_MATCHES: usize = 1_000_000;
 
-impl<'a, T: Send, F: Fn(MftEntry<'a>) -> T + Sync> Scanner for MftYaraScanner<'a, T, F> {
-    type Hit = T;
-    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<T>) {
-        let mut n = 0;
-        self.ms.search(data, |p, _| {
-            hits.push((self.parse)(MftEntry::new(self.layer, data_offset + p as u64)));
-            n += 1;
-            n < YR_MAX_STRING_MATCHES
-        });
+/// yara-python + volatility `YaraScanner` for `/FILE0|FILE\*|BAAD/` over one chunk: every
+/// occurrence, NOT limited to the first `chunk_size` bytes of the chunk (YaraScanner reports the
+/// overlap too). The records of a chunk are parsed on the scan's worker threads into one batch.
+struct MftYaraScanner<'a, B, N, A> {
+    ms: MultiStringScanner,
+    layer: &'a dyn Layer,
+    new: N,
+    add: A,
+    _b: PhantomData<fn() -> B>,
+}
+
+impl<'a, B, N, A> MftYaraScanner<'a, B, N, A>
+where
+    B: Send,
+    N: Fn() -> B + Sync,
+    A: Fn(&mut B, MftEntry<'a>) -> bool + Sync,
+{
+    fn batch(&self, offsets: impl Iterator<Item = u64>) -> B {
+        let mut b = (self.new)();
+        for off in offsets.take(YR_MAX_STRING_MATCHES) {
+            if !(self.add)(&mut b, MftEntry::new(self.layer, off)) {
+                break;
+            }
+        }
+        b
+    }
+}
+
+impl<'a, B, N, A> Scanner for MftYaraScanner<'a, B, N, A>
+where
+    B: Send,
+    N: Fn() -> B + Sync,
+    A: Fn(&mut B, MftEntry<'a>) -> bool + Sync,
+{
+    type Hit = B;
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<B>) {
+        let mut offs = Vec::new();
+        self.prescan(data, &mut offs);
+        hits.push(self.batch(offs.iter().map(|m| data_offset + m.0)));
     }
     fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
         let start = out.len();
@@ -63,12 +89,8 @@ impl<'a, T: Send, F: Fn(MftEntry<'a>) -> T + Sync> Scanner for MftYaraScanner<'a
         });
         true
     }
-    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<T>) {
-        let matches = &matches[..matches.len().min(YR_MAX_STRING_MATCHES)];
-        hits.reserve(matches.len());
-        for &(p, _) in matches {
-            hits.push((self.parse)(MftEntry::new(self.layer, data_offset + p)));
-        }
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<B>) {
+        hits.push(self.batch(matches.iter().map(|m| data_offset + m.0)));
     }
     fn stream_window(&self) -> Option<usize> {
         Some(5)
@@ -90,27 +112,36 @@ impl<'a, T: Send, F: Fn(MftEntry<'a>) -> T + Sync> Scanner for MftYaraScanner<'a
     }
 }
 
-/// python `MFTScan.enumerate_mft_records(context, config_path, primary_layer_name)`: an
-/// `MFT_ENTRY` at every yara hit of `/FILE0|FILE\*|BAAD/` in `layer` (the kernel's physical
-/// layer), in python's order (records in chunk overlaps come twice, like python).
-/// `parse` runs on the scan's worker threads, in parallel; `consume` gets its results on the
-/// calling thread in python order and returns `false` to stop.
-pub fn enumerate_mft_records<'a, T: Send>(layer: &'a dyn Layer, parse: impl Fn(MftEntry<'a>) -> T + Sync, consume: impl FnMut(T) -> bool) {
-    let scanner = MftYaraScanner { ms: MultiStringScanner::new(&MFT_SIGNATURES), layer, parse, _t: PhantomData };
+/// python `MFTScan.enumerate_mft_records(context, config_path, primary_layer_name)`, batched:
+/// an `MFT_ENTRY` at every yara hit of `/FILE0|FILE\*|BAAD/` in `layer` (the kernel's physical
+/// layer), in python's order (records in chunk overlaps come twice, like python). The records
+/// of each scan chunk are handed to `add` in order on a worker thread (chunks in parallel), into
+/// a batch made by `new`; `add` returns `false` to end the batch (python raised: nothing after
+/// that record matters). `consume` gets the batches on the calling thread in python order and
+/// returns `false` to stop the scan.
+pub fn enumerate_mft_batches<'a, B: Send>(
+    layer: &'a dyn Layer,
+    new: impl Fn() -> B + Sync,
+    add: impl Fn(&mut B, MftEntry<'a>) -> bool + Sync,
+    consume: impl FnMut(B) -> bool,
+) {
+    let scanner = MftYaraScanner { ms: MultiStringScanner::new(&MFT_SIGNATURES), layer, new, add, _b: PhantomData };
     scan_each(layer, &scanner, None, consume);
 }
 
-/// The rows python's generator yields for one record, and the exception it raised after them
-/// (a python crash: nothing follows).
-pub struct RecordRows {
-    pub rows: Vec<(usize, Vec<Value>)>,
-    pub err: Option<Error>,
-}
-
-impl RecordRows {
-    fn new(rows: Vec<(usize, Vec<Value>)>, r: Result<()>) -> RecordRows {
-        RecordRows { rows, err: r.err() }
-    }
+/// python `MFTScan.enumerate_mft_records(...)` one record at a time: `parse` runs on the scan's
+/// worker threads, `consume` gets the results on the calling thread in python order (`false`
+/// stops).
+pub fn enumerate_mft_records<'a, T: Send>(layer: &'a dyn Layer, parse: impl Fn(MftEntry<'a>) -> T + Sync, mut consume: impl FnMut(T) -> bool) {
+    enumerate_mft_batches(
+        layer,
+        Vec::new,
+        |b: &mut Vec<T>, e| {
+            b.push(parse(e));
+            true
+        },
+        |b| b.into_iter().all(&mut consume),
+    );
 }
 
 /// python `enum.lookup()` falling back to `hex(value)`.
@@ -124,16 +155,11 @@ fn enum_or_hex(name: Option<&'static str>, v: u8) -> Value {
 
 /// `str(mft_record.get_signature())`.
 #[inline]
-fn signature_value(e: &MftEntry) -> Result<Value> {
-    Ok(match e.signature_static()? {
-        Some(s) => Value::SStr(s),
-        None => Value::Str(e.get_signature()?),
-    })
-}
-
-#[inline]
-fn times(t: [u64; 4]) -> [Value; 4] {
-    t.map(|x| wintime_to_datetime(x as i128))
+fn signature_value(raw: [u8; 4]) -> Value {
+    match signature_str(raw) {
+        Ok(s) => Value::SStr(s),
+        Err(s) => Value::Str(s),
+    }
 }
 
 /// Swallow invalid-address errors (python `except InvalidAddressException`).
@@ -145,200 +171,319 @@ fn caught(r: Result<()>) -> Result<()> {
     }
 }
 
-/// python `MFTScan.parse_standard_information_records(record)` (level 0 rows).
-pub fn parse_standard_information_records(e: &MftEntry, out: &mut Vec<(usize, Vec<Value>)>) -> Result<()> {
-    let flag = e.flags()?;
-    let mft_type = enum_or_hex(mft_flags_name(flag), flag);
+/// A `(start, len)` range of a batch arena.
+type Span = (u32, u32);
+
+#[inline]
+fn span_of(start: usize, end: usize) -> Span {
+    (start as u32, (end - start) as u32)
+}
+
+#[inline]
+fn text(arena: &str, s: Span) -> &str {
+    &arena[s.0 as usize..(s.0 + s.1) as usize]
+}
+
+// ------------------------------------------------------------------------------------------
+// MFTScan
+
+/// One MFTScan row (a STANDARD_INFORMATION or FILE_NAME attribute of a record).
+#[derive(Clone, Copy)]
+pub struct MftScanRow {
+    /// `Offset`: the attribute data (`STANDARD_INFORMATION_ENTRY` / `FILE_NAME_ENTRY`)
+    pub offset: u64,
+    /// Created, Modified, Updated, Accessed (FILETIME)
+    pub times: [u64; 4],
+    pub record_number: u32,
+    /// FILE_NAME rows: the name in the batch's `names`
+    pub name: Span,
+    pub link_count: u16,
+    /// raw `MFT_ENTRY.Signature`
+    pub signature: [u8; 4],
+    /// `MFT_ENTRY.Flags`
+    pub flags: u8,
+    /// FILE_NAME rows: `FILE_NAME_ENTRY.Flags`
+    pub permissions: u8,
+    /// FILE_NAME row (tree level 1) or STANDARD_INFORMATION row (level 0)
+    pub file_name: bool,
+}
+
+/// The MFTScan rows of the records of one scan chunk, and the exception python raised after them.
+#[derive(Default)]
+pub struct MftScanBatch {
+    pub rows: Vec<MftScanRow>,
+    pub names: String,
+    pub err: Option<Error>,
+}
+
+impl MftScanBatch {
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.names.clear();
+    }
+}
+
+/// python `MFTScan.parse_standard_information_records(record)`.
+pub fn parse_standard_information_records(b: &mut MftScanBatch, e: &MftEntry) -> Result<()> {
+    let flags = e.flags()?;
     caught((|| {
         for si in e.standard_information_entries()? {
-            let sig = signature_value(e)?;
-            let rn = e.record_number()?;
-            let lc = e.link_count()?;
-            let [c, m, u, a] = times(si.times()?);
-            out.push((
-                0,
-                vec![
-                    Value::Int(si.offset as i128),
-                    sig,
-                    Value::Int(rn as i128),
-                    Value::Int(lc as i128),
-                    mft_type.clone(),
-                    Value::NotApplicable,
-                    Value::SStr("STANDARD_INFORMATION"),
-                    c,
-                    m,
-                    u,
-                    a,
-                    Value::NotApplicable,
-                ],
-            ));
+            let signature = e.signature_raw()?;
+            let record_number = e.record_number()?;
+            let link_count = e.link_count()?;
+            let times = si.times()?;
+            b.rows.push(MftScanRow { offset: si.offset, times, record_number, name: (0, 0), link_count, signature, flags, permissions: 0, file_name: false });
         }
         Ok(())
     })())
 }
 
-/// python `MFTScan.parse_filename_records(record)` (level 1 rows).
-pub fn parse_filename_records(e: &MftEntry, out: &mut Vec<(usize, Vec<Value>)>) -> Result<()> {
-    let flag = e.flags()?;
-    let mft_type = enum_or_hex(mft_flags_name(flag), flag);
+/// python `MFTScan.parse_filename_records(record)`.
+pub fn parse_filename_records(b: &mut MftScanBatch, e: &MftEntry) -> Result<()> {
+    let flags = e.flags()?;
     caught((|| {
         for f in e.filename_entries()? {
-            let p = f.flags()?;
-            let permissions = enum_or_hex(permission_flags_name(p), p);
-            let sig = signature_value(e)?;
-            let rn = e.record_number()?;
-            let lc = e.link_count()?;
-            let [c, m, u, a] = times(f.times()?);
-            let name = f.get_full_name()?;
-            out.push((
-                1,
-                vec![
-                    Value::Int(f.offset as i128),
-                    sig,
-                    Value::Int(rn as i128),
-                    Value::Int(lc as i128),
-                    mft_type.clone(),
-                    permissions,
-                    Value::SStr("FILE_NAME"),
-                    c,
-                    m,
-                    u,
-                    a,
-                    Value::Str(name),
-                ],
-            ));
+            let permissions = f.flags()?;
+            let signature = e.signature_raw()?;
+            let record_number = e.record_number()?;
+            let link_count = e.link_count()?;
+            let times = f.times()?;
+            let start = b.names.len();
+            f.get_full_name_into(&mut b.names)?;
+            let name = span_of(start, b.names.len());
+            b.rows.push(MftScanRow { offset: f.offset, times, record_number, name, link_count, signature, flags, permissions, file_name: true });
         }
         Ok(())
     })())
 }
 
-/// MFTScan's rows for one record (python `parse_mft_records` for one `mft_record`).
-pub fn mftscan_rows(e: MftEntry) -> RecordRows {
-    let mut rows = Vec::new();
-    let r = parse_standard_information_records(&e, &mut rows).and_then(|_| parse_filename_records(&e, &mut rows));
-    RecordRows::new(rows, r)
+/// python `MFTScan.parse_mft_records` for one record, into `b` (false = python raised).
+pub fn add_mftscan_record(b: &mut MftScanBatch, e: MftEntry) -> bool {
+    let r = parse_standard_information_records(b, &e).and_then(|_| parse_filename_records(b, &e));
+    match r {
+        Ok(()) => true,
+        Err(err) => {
+            b.err = Some(err);
+            false
+        }
+    }
 }
 
-/// python `MFTScan.generate_timeline()` for one record: the events, and the exception python
-/// raised after them.
-fn timeline_events(e: MftEntry) -> (Vec<TimelineEvent>, Option<Error>) {
-    let mut ev = Vec::new();
-    let fname = match e.longest_filename() {
-        Ok(f) => f,
-        Err(err) => return (ev, Some(err)),
+/// MFTScan's `Value`s of one row (python `_generator`).
+pub fn mftscan_values(b: &MftScanBatch, r: &MftScanRow) -> Vec<Value> {
+    let mut v = Vec::with_capacity(12);
+    v.push(Value::Int(r.offset as i128));
+    v.push(signature_value(r.signature));
+    v.push(Value::Int(r.record_number as i128));
+    v.push(Value::Int(r.link_count as i128));
+    v.push(enum_or_hex(mft_flags_name(r.flags), r.flags));
+    if r.file_name {
+        v.push(enum_or_hex(permission_flags_name(r.permissions), r.permissions));
+        v.push(Value::SStr("FILE_NAME"));
+    } else {
+        v.push(Value::NotApplicable);
+        v.push(Value::SStr("STANDARD_INFORMATION"));
+    }
+    for t in r.times {
+        v.push(wintime_to_datetime(t as i128));
+    }
+    v.push(if r.file_name { Value::Str(text(&b.names, r.name).to_owned()) } else { Value::NotApplicable });
+    v
+}
+
+fn emit_mftscan(b: MftScanBatch, out: &mut dyn RowSink) -> Result<()> {
+    for r in &b.rows {
+        out.row(r.file_name as usize, mftscan_values(&b, r))?;
+    }
+    b.err.map_or(Ok(()), Err)
+}
+
+/// python `MFTScan.generate_timeline()` for one record: its events are appended to `ev`; `Err`
+/// = python raised after them.
+fn timeline_record(ev: &mut Vec<TimelineEvent>, tmp: &mut MftScanBatch, e: &MftEntry) -> Result<()> {
+    let fname = e.longest_filename()?;
+    let push = |ev: &mut Vec<TimelineEvent>, desc: String, times: [u64; 4]| {
+        let [c, m, u, a] = times.map(|t| wintime_to_datetime(t as i128));
+        ev.push(TimelineEvent { description: desc.clone(), kind: TimeKind::Created, time: c });
+        ev.push(TimelineEvent { description: desc.clone(), kind: TimeKind::Modified, time: m });
+        ev.push(TimelineEvent { description: desc.clone(), kind: TimeKind::Changed, time: u });
+        ev.push(TimelineEvent { description: desc, kind: TimeKind::Accessed, time: a });
     };
-    let mut push = |desc: String, row: &[Value]| {
-        for (kind, i) in [(TimeKind::Created, 7), (TimeKind::Modified, 8), (TimeKind::Changed, 9), (TimeKind::Accessed, 10)] {
-            ev.push(TimelineEvent { description: desc.clone(), kind, time: row[i].clone() });
-        }
-    };
-    let mut rows = Vec::new();
-    let r = parse_standard_information_records(&e, &mut rows);
+    tmp.clear();
+    let r = parse_standard_information_records(tmp, e);
     let fname = fname.as_deref().unwrap_or("None");
-    for (_, row) in &rows {
-        push(format!("MFT STANDARD_INFORMATION entry for {fname}"), row);
+    for row in &tmp.rows {
+        push(ev, format!("MFT STANDARD_INFORMATION entry for {fname}"), row.times);
     }
-    if let Err(err) = r {
-        return (ev, Some(err));
+    r?;
+    tmp.clear();
+    let r = parse_filename_records(tmp, e);
+    for row in &tmp.rows {
+        push(ev, format!("MFT FILE_NAME entry for {}", text(&tmp.names, row.name)), row.times);
     }
-    rows.clear();
-    let r = parse_filename_records(&e, &mut rows);
-    for (_, row) in &rows {
-        let name = match &row[11] {
-            Value::Str(s) => s.as_str(),
-            _ => "",
+    r
+}
+
+// ------------------------------------------------------------------------------------------
+// ADS / ResidentData
+
+/// One ADS / ResidentData row.
+#[derive(Clone, Copy)]
+pub struct DataRow {
+    /// `Offset`: the attribute's `Attr_Data`
+    pub offset: u64,
+    pub record_number: u32,
+    /// raw `MFT_ENTRY.Signature`
+    pub signature: [u8; 4],
+    /// `Attr_Header.AttrType`
+    pub attr_type: &'static str,
+    /// `longest_filename()` in the batch's `text` (None / empty = python's absent value)
+    pub filename: Span,
+    /// ADS: `get_resident_filename()` in `text`
+    pub stream_name: Span,
+    /// `get_resident_filecontent()` in `bytes` (empty = python's absent value)
+    pub content: Span,
+}
+
+/// The ADS / ResidentData rows of one scan chunk, and the exception python raised after them.
+#[derive(Default)]
+pub struct DataBatch {
+    pub rows: Vec<DataRow>,
+    pub text: String,
+    pub bytes: Vec<u8>,
+    pub err: Option<Error>,
+}
+
+impl DataBatch {
+    fn push_text(&mut self, s: Option<String>) -> Span {
+        let start = self.text.len();
+        if let Some(s) = s {
+            self.text.push_str(&s);
+        }
+        span_of(start, self.text.len())
+    }
+    fn push_bytes(&mut self, c: Option<(u64, Vec<u8>)>) -> Span {
+        let start = self.bytes.len();
+        if let Some((_, d)) = c {
+            self.bytes.extend_from_slice(&d);
+        }
+        (start as u32, (self.bytes.len() - start) as u32)
+    }
+    fn fail(&mut self, r: Result<()>) -> bool {
+        match r {
+            Ok(()) => true,
+            Err(e) => {
+                self.err = Some(e);
+                false
+            }
+        }
+    }
+}
+
+/// python `ADS.parse_ads_data_records(record)` into `b` (false = python raised).
+pub fn add_ads_record(b: &mut DataBatch, e: MftEntry) -> bool {
+    let r = (|| -> Result<()> {
+        for attr in e.alternate_data_streams() {
+            let attr = attr?;
+            let filename = e.longest_filename()?;
+            let content = attr.get_resident_filecontent()?;
+            let stream_name = attr.get_resident_filename()?;
+            let signature = e.signature_raw()?;
+            let record_number = e.record_number()?;
+            let filename = b.push_text(filename);
+            let stream_name = b.push_text(stream_name);
+            let content = b.push_bytes(content);
+            b.rows.push(DataRow { offset: attr.attr_data_offset(), record_number, signature, attr_type: attr.attr_type_name(), filename, stream_name, content });
+        }
+        Ok(())
+    })();
+    b.fail(r)
+}
+
+/// python `ResidentData.parse_resident_data(record)` into `b` (false = python raised).
+pub fn add_resident_data_record(b: &mut DataBatch, e: MftEntry) -> bool {
+    let r = (|| -> Result<()> {
+        let attr = match e.resident_data_attributes().next() {
+            None => return Ok(()),
+            Some(a) => a?,
         };
-        push(format!("MFT FILE_NAME entry for {name}"), row);
-    }
-    (ev, r.err())
+        let content = attr.get_resident_filecontent()?;
+        let filename = e.longest_filename()?;
+        let signature = e.signature_raw()?;
+        let record_number = e.record_number()?;
+        let filename = b.push_text(filename);
+        let content = b.push_bytes(content);
+        b.rows.push(DataRow { offset: attr.attr_data_offset(), record_number, signature, attr_type: attr.attr_type_name(), filename, stream_name: (0, 0), content });
+        Ok(())
+    })();
+    b.fail(r)
 }
 
 /// `renderers.LayerData.from_object(content)` for resident content python read successfully:
 /// the renderer's padded re-read returns the same bytes, and its hole map (translation layers
 /// only) finds no hole in a fully readable range.
 #[inline]
-fn content_value(content: Option<(u64, Vec<u8>)>) -> Value {
-    match content {
-        Some((_, data)) if !data.is_empty() => Value::LayerBytes { data, errors: Vec::new() },
-        _ => Value::NotAvailable,
+fn content_value(b: &DataBatch, s: Span) -> Value {
+    if s.1 == 0 {
+        return Value::NotAvailable;
     }
+    Value::LayerBytes { data: b.bytes[s.0 as usize..(s.0 + s.1) as usize].to_vec(), errors: Vec::new() }
 }
 
-/// python `ADS.parse_ads_data_records(record)` rows.
-pub fn ads_rows(e: MftEntry) -> RecordRows {
-    let mut rows = Vec::new();
-    let r = (|| -> Result<()> {
-        for attr in e.alternate_data_streams() {
-            let attr = attr?;
-            let filename = match e.longest_filename()? {
-                Some(s) if !s.is_empty() => Value::Str(s),
-                _ => Value::NotAvailable,
-            };
-            let content = content_value(attr.get_resident_filecontent()?);
-            let ads_name = match attr.get_resident_filename()? {
-                Some(s) if !s.is_empty() => Value::Str(s),
-                _ => Value::NotAvailable,
-            };
-            let sig = signature_value(&e)?;
-            let rn = e.record_number()?;
-            rows.push((
-                0,
-                vec![
-                    Value::Int(attr.attr_data_offset() as i128),
-                    sig,
-                    Value::Int(rn as i128),
-                    Value::SStr(attr.attr_type_name()),
-                    filename,
-                    ads_name,
-                    content,
-                ],
-            ));
-        }
-        Ok(())
-    })();
-    RecordRows::new(rows, r)
+/// `x or NotAvailableValue()` for a string.
+#[inline]
+fn str_or_na(b: &DataBatch, s: Span) -> Value {
+    if s.1 == 0 { Value::NotAvailable } else { Value::Str(text(&b.text, s).to_owned()) }
 }
 
-/// python `ResidentData.parse_resident_data(record)` row (if any).
-pub fn resident_data_rows(e: MftEntry) -> RecordRows {
-    let mut rows = Vec::new();
-    let r = (|| -> Result<()> {
-        let attr = match e.resident_data_attributes().next() {
-            None => return Ok(()),
-            Some(a) => a?,
-        };
-        let content = content_value(attr.get_resident_filecontent()?);
-        // str(filename): NotAvailableValue() stringifies as "N/A"
-        let filename = match e.longest_filename()? {
-            Some(s) if !s.is_empty() => Value::Str(s),
-            _ => Value::SStr("N/A"),
-        };
-        let sig = signature_value(&e)?;
-        let rn = e.record_number()?;
-        rows.push((
+fn emit_ads(b: DataBatch, out: &mut dyn RowSink) -> Result<()> {
+    for r in &b.rows {
+        out.row(
             0,
-            vec![Value::Int(attr.attr_data_offset() as i128), sig, Value::Int(rn as i128), Value::SStr(attr.attr_type_name()), filename, content],
-        ));
-        Ok(())
-    })();
-    RecordRows::new(rows, r)
+            vec![
+                Value::Int(r.offset as i128),
+                signature_value(r.signature),
+                Value::Int(r.record_number as i128),
+                Value::SStr(r.attr_type),
+                str_or_na(&b, r.filename),
+                str_or_na(&b, r.stream_name),
+                content_value(&b, r.content),
+            ],
+        )?;
+    }
+    b.err.map_or(Ok(()), Err)
 }
 
-/// Scan the kernel's physical layer and render `rows(record)` of every record in order.
-fn run_rows<'a>(layer: &'a dyn Layer, rows: fn(MftEntry<'a>) -> RecordRows, out: &mut dyn RowSink) -> Result<()> {
+fn emit_resident_data(b: DataBatch, out: &mut dyn RowSink) -> Result<()> {
+    for r in &b.rows {
+        // str(filename): NotAvailableValue() stringifies as "N/A"
+        let filename = if r.filename.1 == 0 { Value::SStr("N/A") } else { Value::Str(text(&b.text, r.filename).to_owned()) };
+        out.row(
+            0,
+            vec![
+                Value::Int(r.offset as i128),
+                signature_value(r.signature),
+                Value::Int(r.record_number as i128),
+                Value::SStr(r.attr_type),
+                filename,
+                content_value(&b, r.content),
+            ],
+        )?;
+    }
+    b.err.map_or(Ok(()), Err)
+}
+
+/// Scan the physical layer, build batches with `add`, render them with `emit`.
+fn run_batches<'a, B: Default + Send>(
+    layer: &'a dyn Layer,
+    add: fn(&mut B, MftEntry<'a>) -> bool,
+    emit: fn(B, &mut dyn RowSink) -> Result<()>,
+    out: &mut dyn RowSink,
+) -> Result<()> {
     let mut res = Ok(());
-    enumerate_mft_records(layer, rows, |rr| {
-        for (depth, values) in rr.rows {
-            if let Err(e) = out.row(depth, values) {
-                res = Err(e);
-                return false;
-            }
-        }
-        if let Some(e) = rr.err {
-            res = Err(e);
-            return false;
-        }
-        true
+    enumerate_mft_batches(layer, B::default, add, |b| {
+        res = emit(b, out);
+        res.is_ok()
     });
     res
 }
@@ -366,7 +511,7 @@ impl Plugin for MFTScan {
             Column::new("Accessed", ColType::DateTime),
             Column::new("Filename", ColType::Str),
         ])?;
-        run_rows(layer, mftscan_rows, out)
+        run_batches(layer, add_mftscan_record, emit_mftscan, out)
     }
     /// python `generate_timeline()`. If python raises midway (an unreadable FILE_NAME name or
     /// record flags) the events generated before stay in python's timeline, so they are
@@ -376,11 +521,25 @@ impl Plugin for MFTScan {
             Ok(k) => k.phys,
             Err(e) => return Some(Err(e)),
         };
+        #[derive(Default)]
+        struct Batch {
+            ev: Vec<TimelineEvent>,
+            tmp: MftScanBatch,
+            failed: bool,
+        }
         let mut all = Vec::new();
-        enumerate_mft_records(layer, timeline_events, |(ev, err)| {
-            all.extend(ev);
-            err.is_none()
-        });
+        enumerate_mft_batches(
+            layer,
+            Batch::default,
+            |b: &mut Batch, e| {
+                b.failed = timeline_record(&mut b.ev, &mut b.tmp, &e).is_err();
+                !b.failed
+            },
+            |b| {
+                all.extend(b.ev);
+                !b.failed
+            },
+        );
         Some(Ok(all))
     }
 }
@@ -403,7 +562,7 @@ impl Plugin for ADS {
             Column::new("ADS Filename", ColType::Str),
             Column::new("Hexdump", ColType::LayerData),
         ])?;
-        run_rows(layer, ads_rows, out)
+        run_batches(layer, add_ads_record, emit_ads, out)
     }
 }
 
@@ -424,7 +583,7 @@ impl Plugin for ResidentData {
             Column::new("Filename", ColType::Str),
             Column::new("Hexdump", ColType::LayerData),
         ])?;
-        run_rows(layer, resident_data_rows, out)
+        run_batches(layer, add_resident_data_record, emit_resident_data, out)
     }
 }
 
@@ -447,5 +606,12 @@ mod tests {
         };
         assert_eq!(hits(b"BAADBAADFILE0FILE*FILE1FILEBAAD"), vec![0, 4, 8, 13, 27]);
         assert_eq!(hits(b"FILFILE0xBAABAAD"), vec![3, 12]);
+    }
+
+    #[test]
+    fn signatures() {
+        assert_eq!(signature_str(*b"FILE"), Ok("FILE"));
+        assert_eq!(signature_str(*b"BAAD"), Ok("BAAD"));
+        assert_eq!(signature_str(*b"AB\0C"), Err("AB".to_string()));
     }
 }
