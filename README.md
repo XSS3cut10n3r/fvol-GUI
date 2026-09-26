@@ -309,6 +309,12 @@ gates.
   unless `RSVOL_THREADS` says otherwise.
 - **YARA.** Rules that `import` a module such as `pe` fail with "modules are not supported", and
   `--yara-compiled-file` is not supported. Plain rules, strings and conditions work.
+- **Compressed images that do not decompress.** A `.gz`, `.bz2` or `.xz` image that is corrupt,
+  truncated or not compressed despite its name stops rsvol before the plugin runs, with the
+  decoder's error on stderr and python's "Unsatisfied requirement" message. python opens such a
+  file lazily and fails while reading it, so plugins that accept the bare file, such as
+  `layerwriter.LayerWriter`, print the decoder's error or a traceback instead. Valid compressed
+  images give python's output.
 - **Corrupt circular lists.** Where python would loop forever on a smeared structure, such as a
   cyclic subsection list in `windows.dumpfiles.DumpFiles`, rsvol stops with an error.
 - **`isfinfo.IsfInfo`** leaves the `hash` column empty for rows it adds to python's identifier
