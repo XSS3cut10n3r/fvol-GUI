@@ -221,6 +221,52 @@ pub fn module_lookup_by_address(vm: &Module, modules: &[ModuleInfo], target_addr
     Ok((Some(matched.clone()), symbol_name))
 }
 
+/// [`module_lookup_by_address`] for many addresses at once (same results, in order): kernel
+/// symbols are resolved with one pass over the symbol table instead of one lookup each. The
+/// returned Vec stops at the first `Err` (where python's per-address calls would have raised).
+pub fn module_lookup_by_addresses(vm: &Module, modules: &[ModuleInfo], addrs: &[u64]) -> Vec<Result<(Option<ModuleInfo>, Option<String>)>> {
+    let mask = vm.layer().address_mask();
+    if modules.is_empty() {
+        return if addrs.is_empty() { Vec::new() } else { vec![Err(Error::msg("ValueError: Empty list sent to `module_lookup_by_address`"))] };
+    }
+    if !addrs.is_empty() && modules.iter().any(|m| m.start != m.start & mask) {
+        return vec![Err(Error::msg("ValueError: Modules list must be gathered from `run_modules_scanners` to be used in this function"))];
+    }
+    let mut out: Vec<Result<(Option<ModuleInfo>, Option<String>)>> = Vec::with_capacity(addrs.len());
+    // (index in `out`, table-relative offset) of the kernel matches
+    let mut kernel: Vec<(usize, u64)> = Vec::new();
+    for &a in addrs {
+        let Some(matched) = modules.iter().find(|m| m.start <= a && a < m.end) else {
+            out.push(Ok((None, None)));
+            continue;
+        };
+        if matched.name == KERNEL_NAME {
+            kernel.push((out.len(), a.wrapping_sub(vm.offset)));
+            out.push(Ok((Some(matched.clone()), None)));
+            continue;
+        }
+        let r = vm.object_abs("module", modules.last().unwrap().offset).and_then(|m| m.get_symbol_by_address(a));
+        match r {
+            Ok(s) => out.push(Ok((Some(matched.clone()), s.map(|s| if s.contains('!') { s.split('!').nth(1).unwrap_or("").to_string() } else { s })))),
+            Err(e) => {
+                out.push(Err(e));
+                break;
+            }
+        }
+    }
+    if !kernel.is_empty() {
+        let offs: Vec<u64> = kernel.iter().map(|k| k.1).collect();
+        let names = vm.table().symbols_at_exact_many(&offs);
+        for ((i, _), n) in kernel.into_iter().zip(names) {
+            if let (Some(first), Ok((_, sym))) = (n.first(), out[i].as_mut()) {
+                // python: "<table>!<name>".split("!")[1]
+                *sym = Some(first.split('!').next().unwrap_or("").to_string());
+            }
+        }
+    }
+    out
+}
+
 /// python `Modules.mask_mods_list(context, layer_name, mods)` (deprecated): (name, start, end).
 pub fn mask_mods_list(mask: u64, mods: &[Obj]) -> Result<Vec<(String, u64, u64)>> {
     let mut out = Vec::with_capacity(mods.len());
