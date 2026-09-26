@@ -429,13 +429,14 @@ macro_rules! mlit_last {
 /// them to set up the distance slot tree, whose choice depends only on min(len - 2, 3)).
 #[cfg(target_arch = "x86_64")]
 macro_rules! len_dec {
-    ($c:literal, $l1:literal, $l2:literal, $l3:literal, $low:expr, $hi:expr) => {
+    ($pm:expr, $c:literal, $l1:literal, $l2:literal, $l3:literal, $low:expr, $hi:expr) => {
         concat!(
             bit!(concat!("{probs} + ", $c), concat!($l1, "f")),
             // low: base = probs + c + 4 + pos_state * 16
             "mov {t1}, {op}\n",
             "sub {t1}, qword ptr [{ctx} + 16]\n",
-            "and {t1:e}, 3\n",
+            $pm,
+            "\n",
             "shl {t1:e}, 4\n",
             "lea {t2}, [{probs} + {t1} + ", $c, " + 4]\n",
             tree3a!("{t2}", "5"),
@@ -447,7 +448,8 @@ macro_rules! len_dec {
             bit!(concat!("{probs} + ", $c, " + 2"), concat!($l2, "f")),
             "mov {t1}, {op}\n",
             "sub {t1}, qword ptr [{ctx} + 16]\n",
-            "and {t1:e}, 3\n",
+            $pm,
+            "\n",
             "shl {t1:e}, 4\n",
             "lea {t2}, [{probs} + {t1} + ", $c, " + 260]\n",
             tree3a!("{t2}", "-3"),
@@ -547,6 +549,33 @@ macro_rules! rev_lasta {
     };
 }
 
+/// Picks the template text of mode `fixed` (lc=3 lp=0 pb=2) or `generic`.
+#[cfg(target_arch = "x86_64")]
+macro_rules! sel {
+    (fixed, $a:expr, $b:expr) => {
+        $a
+    };
+    (generic, $a:expr, $b:expr) => {
+        $b
+    };
+}
+
+/// Generic mode: {base} = literal coder of the next literal from the previous byte ({t3})
+/// and the position: hioff[byte] + looff[p & 15] (byte offsets, see `AsmCtx`).
+#[cfg(target_arch = "x86_64")]
+macro_rules! litbase {
+    () => {
+        concat!(
+            "mov {t3:e}, dword ptr [{ctx} + {t3}*4 + 184]\n",
+            "mov {t1}, {op}\n",
+            "sub {t1}, qword ptr [{ctx} + 16]\n",
+            "and {t1:e}, 15\n",
+            "add {t3:e}, dword ptr [{ctx} + {t1}*4 + 1208]\n",
+            "lea {base}, [{probs} + {t3} + 3692]\n",
+        )
+    };
+}
+
 /// Per-decoder scratch for the asm loop (field offsets are hard-coded in the template).
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
@@ -564,6 +593,9 @@ struct AsmCtx {
     next: [u8; 48],       // 104: state after literal / match / rep / short rep (12 each)
     dbase: [u8; 16],      // 152: distance base of slots 4..13
     scratch: u64,         // 168
+    pbmask: u64,          // 176: (1 << pb) - 1
+    hioff: [u32; 256],    // 184: (byte >> (8 - lc)) * 0x600, literal coder offset of a byte
+    looff: [u32; 16],     // 1208: ((p & lp_mask) << lc) * 0x600 for p & 15
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -578,16 +610,17 @@ const ASM_DBASE: [u8; 16] = [4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 0, 0, 0, 0, 0,
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: decode lc=3 lp=0 pb=2 streams with the generic loop instead of the fast path.
-    static FORCE_GENERIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests: decode with the portable Rust loop instead of the x86-64 asm loop.
+    static FORCE_PORTABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Use the portable loop on x86-64 too (tests; statistics builds count in the Rust loop).
 #[inline(always)]
-fn force_generic() -> bool {
+fn force_portable() -> bool {
     #[cfg(test)]
-    return FORCE_GENERIC.with(|f| f.get());
+    return FORCE_PORTABLE.with(|f| f.get()) || cfg!(lzma_stats);
     #[cfg(not(test))]
-    false
+    cfg!(lzma_stats)
 }
 
 /// LZMA decoder state: probabilities, state machine, rep distances.
@@ -660,7 +693,7 @@ impl LzmaDecoder {
                 return Ok(Stop::Limit);
             }
         }
-        let fixed = self.props == Props { lc: 3, lp: 0, pb: 2 } && !force_generic() && !cfg!(lzma_stats);
+        let fixed = self.props == Props { lc: 3, lp: 0, pb: 2 };
         // Main part: read the input in place while at least INPUT_MARGIN bytes remain (a
         // single symbol never reads more than ~50 bytes), so reads need no bounds checks.
         if input.len() >= INPUT_MARGIN && rc.ip <= input.len() - INPUT_MARGIN {
@@ -701,6 +734,9 @@ impl LzmaDecoder {
     /// The decoding loop. Reads `inp[ip]` without bounds checks; stops with
     /// `Stop::InputExhausted` at a symbol boundary once `ip > ip_limit`.
     ///
+    /// On x86-64 this is the asm loop (`decode_asm`); the Rust loop below is the portable
+    /// implementation and, in tests, the independent reference the asm is checked against.
+    ///
     /// # Safety
     /// `inp` must be readable up to `ip_limit + INPUT_MARGIN`.
     /// `FIXED` = the properties are lc=3 lp=0 pb=2 (compile-time constants).
@@ -708,16 +744,16 @@ impl LzmaDecoder {
     unsafe fn decode_inner<const FIXED: bool>(
         &mut self,
         rc: &mut RangeDecoder,
-        inp0: *const u8,
+        inp: *const u8,
         ip_limit: usize,
         out: &mut [u8],
         pos: &mut usize,
         limit: usize,
     ) -> Result<Stop> {
         #[cfg(target_arch = "x86_64")]
-        if FIXED {
+        if !force_portable() {
             // SAFETY: same contract.
-            return unsafe { self.decode_fixed_asm(rc, inp0, ip_limit, out, pos, limit) };
+            return unsafe { self.decode_asm::<FIXED>(rc, inp, ip_limit, out, pos, limit) };
         }
         let out_len = out.len();
         let outp = out.as_mut_ptr();
@@ -731,9 +767,7 @@ impl LzmaDecoder {
             (self.props.lc as usize, (1usize << self.props.lp) - 1, (1usize << self.props.pb) - 1)
         };
 
-        // SAFETY: rc.ip <= ip_limit + INPUT_MARGIN (callers), inside the readable input.
-        let mut inp = unsafe { inp0.add(rc.ip) };
-        let in_limit = inp0.wrapping_add(ip_limit);
+        let mut ip = rc.ip;
         let mut range = rc.range;
         let mut code = rc.code;
         let mut state = self.state;
@@ -750,214 +784,44 @@ impl LzmaDecoder {
                 if range < TOP {
                     stat!(13, 1);
                     range <<= 8;
-                    // SAFETY: inp <= in_limit + INPUT_MARGIN (see decode_inner).
-                    code = (code << 8) | unsafe { *inp } as u32;
-                    inp = unsafe { inp.add(1) };
+                    // SAFETY: ip <= ip_limit + INPUT_MARGIN (see decode_inner).
+                    let b = unsafe { *inp.add(ip) };
+                    ip += 1;
+                    code = (code << 8) | b as u32;
                 }
             };
         }
-        // Decodes one bit with the probability at `$pp`; evaluates to true for a 0 bit.
-        // (Branchy, like the reference decoder: the caller branches on the bit anyway.)
-        macro_rules! is0 {
-            ($pp:expr) => {{
-                let pp: *mut u16 = $pp;
-                // SAFETY: every index is below LITERAL + 0x300 << (lc + lp) by construction.
+        // Decodes one bit with the probability at `probs[$i]`; evaluates to 0 or 1 (usize).
+        macro_rules! bit {
+            ($i:expr) => {{
+                // SAFETY: every index is below LITERAL + 0x300 << (lc + lp) by construction
+                // (fixed layout offsets plus bounded tree indices).
+                let pp = unsafe { probs.add($i) };
                 let pr = unsafe { *pp } as u32;
                 normalize!();
                 let bound = (range >> 11) * pr;
                 if code < bound {
                     range = bound;
                     unsafe { *pp = (pr + ((2048 - pr) >> 5)) as u16 };
-                    true
+                    0usize
                 } else {
                     range -= bound;
                     code -= bound;
                     unsafe { *pp = (pr - (pr >> 5)) as u16 };
-                    false
+                    1usize
                 }
             }};
         }
-        // Bit trees: 3, 6 or 8 bits MSB first under the node array at `$base` (node 1 is the
-        // root), result = final node + $fa. x86-64: the reference decoder's branchless asm
-        // (both children loaded before the bit is known, node index advanced with sbb).
-        #[cfg(target_arch = "x86_64")]
-        macro_rules! tree {
-            ($base:expr, $steps:expr) => {{
-                let base: *mut u16 = $base;
-                let sym: usize;
-                // SAFETY: tree nodes lie inside the probability array (the update table in
-                // front of it); input reads stay within the INPUT_MARGIN slack.
-                unsafe {
-                    core::arch::asm!(
-                        $steps,
-                        range = inout(reg) range,
-                        code = inout(reg) code,
-                        inp = inout(reg) inp,
-                        base = in(reg) base,
-                        probs = in(reg) probs,
-                        sym = out(reg) sym,
-                        t0 = out(reg) _,
-                        t1 = out(reg) _,
-                        a = out(reg) _,
-                        b = out(reg) _,
-                        options(nostack),
-                    )
-                };
-                sym
-            }};
-        }
-        // Trees of 3, 6, 8 bits under the node array at $base, result = final node + $fa;
-        // $sbb = -1 - $fa as a literal for the asm (the last step's sbb folds the offset in).
-        #[cfg(target_arch = "x86_64")]
-        macro_rules! tree3 {
-            ($base:expr, $sbb:literal, $fa:expr) => {
-                tree!($base, tree3a!("{base}", $sbb))
-            };
-        }
-        #[cfg(target_arch = "x86_64")]
-        macro_rules! tree6 {
-            ($base:expr, $sbb:literal, $fa:expr) => {
-                tree!($base, tree6a!("{base}", $sbb))
-            };
-        }
-        #[cfg(target_arch = "x86_64")]
-        macro_rules! tree8 {
-            ($base:expr, $sbb:literal, $fa:expr) => {
-                tree!($base, tree8a!("{base}", $sbb, ""))
-            };
-        }
-        // Portable bit trees: same node walk in plain Rust.
-        #[cfg(not(target_arch = "x86_64"))]
-        macro_rules! tree_n {
-            ($base:expr, $fa:expr, $n:expr) => {{
-                let tp: *mut u16 = $base;
-                let mut m = 1usize;
-                for _ in 0..$n {
-                    m = 2 * m + (!is0!(unsafe { tp.add(m) })) as usize;
-                }
-                (m as isize + ($fa) as isize) as usize
-            }};
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        macro_rules! tree3 {
-            ($base:expr, $sbb:literal, $fa:expr) => {
-                tree_n!($base, $fa, 3)
-            };
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        macro_rules! tree6 {
-            ($base:expr, $sbb:literal, $fa:expr) => {
-                tree_n!($base, $fa, 6)
-            };
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        macro_rules! tree8 {
-            ($base:expr, $sbb:literal, $fa:expr) => {
-                tree_n!($base, $fa, 8)
-            };
-        }
-        // 4-bit reverse tree (align bits), LSB first; nodes are numbered 2^depth + (bits so
-        // far), the reference decoder's layout (any per-prefix layout is equivalent).
-        #[cfg(target_arch = "x86_64")]
-        macro_rules! rev4 {
-            ($base:expr) => {{
-                let base: *mut u16 = $base;
-                let sym: usize;
-                // SAFETY: nodes 1..16 of the align array; input within the margin.
-                unsafe {
-                    core::arch::asm!(
-                        rev4a!("{base}"),
-                        range = inout(reg) range,
-                        code = inout(reg) code,
-                        inp = inout(reg) inp,
-                        base = in(reg) base,
-                        sym = out(reg) sym,
-                        t0 = out(reg) _,
-                        t1 = out(reg) _,
-                        a = out(reg) _,
-                        b = out(reg) _,
-                        options(nostack),
-                    )
-                };
-                sym
-            }};
-        }
-        // Reverse tree of $n (1..=5) bits, LSB first, same node layout as rev4.
-        macro_rules! rev_n {
-            ($base:expr, $n:expr) => {{
-                let tp: *mut u16 = $base;
-                let mut sym = 0usize;
-                for i in 0..$n {
-                    // SAFETY: node (1 << i) + sym < 2^n, inside this slot's range.
-                    if !is0!(unsafe { tp.add((1 << i) + sym) }) {
-                        sym += 1 << i;
-                    }
-                }
-                sym
-            }};
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        macro_rules! rev4 {
-            ($base:expr) => {
-                rev_n!($base, 4)
-            };
-        }
-        // $n (>= 1) direct bits appended to $d.
-        #[cfg(target_arch = "x86_64")]
-        macro_rules! direct {
-            ($d:expr, $n:expr) => {{
-                let mut d: u32 = $d;
-                let mut cnt: u32 = $n;
-                // SAFETY: input within the margin.
-                unsafe {
-                    core::arch::asm!(
-                        "3:",
-                        "add {d:e}, {d:e}",
-                        "lea {t1:e}, [{d:r} + 1]",
-                        norm!(),
-                        "shr {range:e}, 1",
-                        "mov {t0:e}, {code:e}",
-                        "sub {code:e}, {range:e}",
-                        "cmovns {d:e}, {t1:e}",
-                        "cmovs {code:e}, {t0:e}",
-                        "dec {cnt:e}",
-                        "jnz 3b",
-                        range = inout(reg) range,
-                        code = inout(reg) code,
-                        inp = inout(reg) inp,
-                        d = inout(reg) d,
-                        cnt = inout(reg) cnt,
-                        t0 = out(reg) _,
-                        t1 = out(reg) _,
-                        options(nostack),
-                    )
-                };
-                let _ = cnt;
-                d
-            }};
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        macro_rules! direct {
-            ($d:expr, $n:expr) => {{
-                let mut d: u32 = $d;
-                for _ in 0..$n {
-                    normalize!();
-                    range >>= 1;
-                    code = code.wrapping_sub(range);
-                    let t = 0u32.wrapping_sub(code >> 31);
-                    code = code.wrapping_add(range & t);
-                    d = (d << 1).wrapping_add(t.wrapping_add(1));
-                }
-                d
-            }};
-        }
-        // Branchless bit with an already-loaded probability `$pr` stored at `$pp` (used by
-        // the matched literal): evaluates to the bit as a bool.
+        // Branchless bit with an already-loaded probability `$pr` stored at `$pp`: range/code
+        // are selected with cmov and the probability update is a single subtraction
+        // (p -= (p - adj) >> 5 with adj = 0 for a 1 bit and 2048 - 31 for a 0 bit).
+        // Evaluates to the bit as a bool.
         macro_rules! bitnb_loaded {
             ($pp:expr, $pr:expr) => {{
                 let pr = $pr;
                 normalize!();
                 let bound = (range >> 11) * pr;
+                // One subtraction yields both the bit (no borrow = 1) and the new code.
                 let (c2, borrow) = code.overflowing_sub(bound);
                 let r2 = range.wrapping_sub(bound);
                 code = std::hint::select_unpredictable(borrow, code, c2);
@@ -968,16 +832,44 @@ impl LzmaDecoder {
                 !borrow
             }};
         }
+        // Bit-tree walk of $n bits rooted at probs[$base + 1]. Both children of the current
+        // node are loaded before the bit is known, so the probability load is off the
+        // critical path. (Child indices < 2^($n+1) stay inside the probability array for
+        // every tree of the layout.) Evaluates to (final node m in [2^n, 2^(n+1)), the bits
+        // in reverse order).
+        macro_rules! walk {
+            ($base:expr, $n:expr) => {{
+                // SAFETY: see above; all indices are bounded by the tree size.
+                let tp = unsafe { probs.add($base) };
+                let mut m = 1usize;
+                let mut pr = unsafe { *tp.add(1) } as u32;
+                let mut rev = 0usize;
+                for _i in 0..$n {
+                    let p0 = unsafe { *tp.add(2 * m) } as u32;
+                    let p1 = unsafe { *tp.add(2 * m + 1) } as u32;
+                    let b = bitnb_loaded!(tp.add(m), pr);
+                    rev |= (b as usize) << _i;
+                    m = 2 * m + b as usize;
+                    pr = std::hint::select_unpredictable(b, p1, p0);
+                }
+                (m, rev)
+            }};
+        }
+        macro_rules! tree {
+            ($base:expr, $n:expr) => {{ walk!($base, $n).0 - (1usize << $n) }};
+        }
+        macro_rules! rev_tree {
+            ($base:expr, $n:expr) => {{ walk!($base, $n).1 }};
+        }
         macro_rules! len {
             ($coder:expr, $ps:expr) => {{
-                // SAFETY: fixed layout offsets.
-                let c = unsafe { probs.add($coder) };
-                if is0!(unsafe { c.add(LEN_CHOICE) }) {
-                    tree3!(unsafe { c.add(LEN_LOW + ($ps << 3)) }, "5", 2 - 8)
-                } else if is0!(unsafe { c.add(LEN_CHOICE2) }) {
-                    tree3!(unsafe { c.add(LEN_MID + ($ps << 3)) }, "-3", 10 - 8)
+                let c = $coder;
+                if bit!(c + LEN_CHOICE) == 0 {
+                    tree!(c + LEN_LOW + ($ps << 3), 3) + 2
+                } else if bit!(c + LEN_CHOICE2) == 0 {
+                    tree!(c + LEN_MID + ($ps << 3), 3) + 10
                 } else {
-                    tree8!(unsafe { c.add(LEN_HIGH) }, "237", 18 - 256)
+                    tree!(c + LEN_HIGH, 8) + 18
                 }
             }};
         }
@@ -987,21 +879,19 @@ impl LzmaDecoder {
                 stop = Stop::Limit;
                 break;
             }
-            if inp > in_limit {
+            if ip > ip_limit {
                 stop = Stop::InputExhausted;
                 break;
             }
             let pos_state = p & pb_mask;
-            // SAFETY: fixed layout offsets (state < 12, pos_state < 16).
-            if is0!(unsafe { probs.add(IS_MATCH + (state << 4) + pos_state) }) {
+            if bit!(IS_MATCH + (state << 4) + pos_state) == 0 {
                 // ---- literal ----
+                // SAFETY: p < limit <= out_len; p - 1 valid when p > 0.
                 let lit = LITERAL + 0x300 * (((p & lp_mask) << lc) + (prev >> (8 - lc)));
-                // SAFETY: lit + 0x300 <= probs.len().
-                let lp = unsafe { probs.add(lit) };
-                let sym;
+                let mut sym = 1usize;
                 if state < 7 {
                     stat!(0, 1);
-                    sym = tree8!(lp, "255", -0x100);
+                    sym = walk!(lit, 8).0;
                 } else {
                     stat!(1, 1);
                     if rep0 >= p {
@@ -1010,35 +900,35 @@ impl LzmaDecoder {
                     // SAFETY: rep0 < p.
                     let mb = (unsafe { *outp.add(p - rep0 - 1) }) as usize;
                     // While the decoded bits equal the match byte's bits ("matching"), node
-                    // `s` of bit i lives at 0x100 + (match bit i) * 0x100 + s, otherwise
-                    // at s. Candidate children only need `matching` (an all-ones/zero mask)
+                    // `sym` of bit i lives at 0x100 + (match bit i) * 0x100 + sym, otherwise
+                    // at sym. Candidate children only need `matching` (an all-ones/zero mask)
                     // and per-position offsets known from the match byte up front.
                     // SAFETY: every index is < 2 * 0x100 + 0x100 = 0x300 (the literal coder).
-                    let mut s = 1usize;
+                    let lp = unsafe { probs.add(lit) };
                     let mut matching = !0usize;
                     let mut idx = 0x100 + (((mb >> 7) & 1) << 8) + 1;
                     let mut pr = unsafe { *lp.add(idx) } as u32;
                     for i in 0..8 {
                         let mbit = (mb >> (7 - i)) & 1;
                         let mo_next = if i < 7 { 0x100 + (((mb >> (6 - i)) & 1) << 8) } else { 0 };
+                        // Offset of the child if the decoded bit is 0 / 1 and we still match.
                         let mo0 = mo_next & mbit.wrapping_sub(1);
                         let mo1 = mo_next & 0usize.wrapping_sub(mbit);
-                        let idx0 = 2 * s + (matching & mo0);
-                        let idx1 = 2 * s + 1 + (matching & mo1);
+                        let idx0 = 2 * sym + (matching & mo0);
+                        let idx1 = 2 * sym + 1 + (matching & mo1);
                         let p0 = unsafe { *lp.add(idx0) } as u32;
                         let p1 = unsafe { *lp.add(idx1) } as u32;
                         let b = bitnb_loaded!(lp.add(idx), pr);
-                        s = 2 * s + b as usize;
+                        sym = 2 * sym + b as usize;
                         let keep = std::hint::select_unpredictable(b, 0usize.wrapping_sub(mbit), mbit.wrapping_sub(1));
                         matching &= keep;
                         idx = std::hint::select_unpredictable(b, idx1, idx0);
                         pr = std::hint::select_unpredictable(b, p1, p0);
                     }
-                    sym = s & 0xFF;
                 }
                 // SAFETY: p < limit <= out_len.
                 unsafe { *outp.add(p) = sym as u8 };
-                prev = sym;
+                prev = sym & 0xFF;
                 p += 1;
                 // 0..3 -> 0, 4..9 -> state - 3, 10..11 -> state - 6
                 state = state.saturating_sub(std::hint::select_unpredictable(state >= 10, 6, 3));
@@ -1046,23 +936,30 @@ impl LzmaDecoder {
             }
 
             let len;
-            if is0!(unsafe { probs.add(IS_REP + state) }) {
+            if bit!(IS_REP + state) == 0 {
                 // ---- simple match ----
                 len = len!(LEN_CODER, pos_state);
                 state = if state < 7 { 7 } else { 10 };
                 let len_state = if len < 6 { len - 2 } else { 3 };
-                let slot = tree6!(unsafe { probs.add(DIST_SLOT + (len_state << 6)) }, "63", -64);
+                let slot = tree!(DIST_SLOT + (len_state << 6), 6);
                 let dist: u32 = if slot < 4 {
                     slot as u32
                 } else {
                     let nbits = (slot >> 1) - 1;
                     let base = (2 | (slot & 1)) << nbits;
                     if slot < 14 {
-                        // SAFETY: DIST_SPECIAL + base - slot - 1 + node < DIST_SPECIAL + 114.
-                        (base + rev_n!(unsafe { probs.add(DIST_SPECIAL + base - slot - 1) }, nbits)) as u32
+                        (base + rev_tree!(DIST_SPECIAL + base - slot - 1, nbits)) as u32
                     } else {
-                        let d = direct!((2 | (slot & 1)) as u32, (nbits - 4) as u32);
-                        (d << 4).wrapping_add(rev4!(unsafe { probs.add(ALIGN) }) as u32)
+                        let mut d = (2 | (slot & 1)) as u32;
+                        for _ in 0..nbits - 4 {
+                            normalize!();
+                            range >>= 1;
+                            code = code.wrapping_sub(range);
+                            let t = 0u32.wrapping_sub(code >> 31);
+                            code = code.wrapping_add(range & t);
+                            d = (d << 1).wrapping_add(t.wrapping_add(1));
+                        }
+                        (d << 4).wrapping_add(rev_tree!(ALIGN, 4) as u32)
                     }
                 };
                 if dist == END_MARKER {
@@ -1077,8 +974,8 @@ impl LzmaDecoder {
                 stat!(10, (slot >= 14) as u64);
             } else {
                 // ---- rep match ----
-                if is0!(unsafe { probs.add(IS_REP0 + state) }) {
-                    if is0!(unsafe { probs.add(IS_REP0_LONG + (state << 4) + pos_state) }) {
+                if bit!(IS_REP0 + state) == 0 {
+                    if bit!(IS_REP0_LONG + (state << 4) + pos_state) == 0 {
                         // short rep: one byte at distance rep0
                         stat!(4, 1);
                         if rep0 >= p {
@@ -1093,10 +990,10 @@ impl LzmaDecoder {
                     }
                 } else {
                     let d;
-                    if is0!(unsafe { probs.add(IS_REP1 + state) }) {
+                    if bit!(IS_REP1 + state) == 0 {
                         d = rep1;
                     } else {
-                        if is0!(unsafe { probs.add(IS_REP2 + state) }) {
+                        if bit!(IS_REP2 + state) == 0 {
                             d = rep2;
                         } else {
                             d = rep3;
@@ -1137,7 +1034,7 @@ impl LzmaDecoder {
             }
         }
 
-        rc.ip = inp as usize - inp0 as usize;
+        rc.ip = ip;
         rc.range = range;
         rc.code = code;
         self.state = state;
@@ -1148,13 +1045,15 @@ impl LzmaDecoder {
 }
 
 impl LzmaDecoder {
-    /// `decode_inner::<true>` on x86-64: the symbol loop as one asm block.
+    /// `decode_inner` on x86-64: the symbol loop as one asm block. `FIXED`: lc=3 lp=0 pb=2
+    /// (the next literal's coder is taken from three bits in the middle of the previous
+    /// literal); otherwise the literal coder comes from two small tables in `AsmCtx`.
     ///
     /// # Safety
     /// As `decode_inner`.
     #[cfg(target_arch = "x86_64")]
     #[inline(never)]
-    unsafe fn decode_fixed_asm(
+    unsafe fn decode_asm<const FIXED: bool>(
         &mut self,
         rc: &mut RangeDecoder,
         inp0: *const u8,
@@ -1172,14 +1071,26 @@ impl LzmaDecoder {
             out_end: outp.wrapping_add(out.len()),
             reps: self.reps.map(|r| r as u64),
             state: self.state as u64,
-            lctx: if p > 0 { (out[p - 1] >> 5) as u64 } else { 0 },
+            lctx: 0,
             pending: 0,
             status: 0,
             len: 0,
             next: ASM_NEXT,
             dbase: ASM_DBASE,
             scratch: 0,
+            pbmask: (1u64 << self.props.pb) - 1,
+            hioff: [0; 256],
+            looff: [0; 16],
         };
+        let (lc, lp_mask) = (self.props.lc, (1usize << self.props.lp) - 1);
+        if !FIXED {
+            for (b, v) in ctx.hioff.iter_mut().enumerate() {
+                *v = ((b >> (8 - lc)) * 0x600) as u32;
+            }
+            for (k, v) in ctx.looff.iter_mut().enumerate() {
+                *v = (((k & lp_mask) << lc) * 0x600) as u32;
+            }
+        }
         let mut range = rc.range;
         let mut code = rc.code;
         // SAFETY: rc.ip <= ip_limit + INPUT_MARGIN; p <= limit <= out.len().
@@ -1189,9 +1100,12 @@ impl LzmaDecoder {
         let probs = unsafe { self.probs.as_mut_ptr().add(PROBS_OFF) };
         let ctxp: *mut AsmCtx = &mut ctx;
         // Carried in registers across symbols: the literal coder of the next literal (from
-        // the previous byte) and the match byte of a literal after a match (state >= 7).
-        // SAFETY: lctx < 8, LITERAL + 0x300 * 8 <= probability count for lc = 3.
-        let lit_base = unsafe { probs.add(LITERAL + 0x300 * ctx.lctx as usize) };
+        // the previous byte and the position) and the match byte of a literal after a match
+        // (state >= 7).
+        let prev = if p > 0 { out[p - 1] as usize } else { 0 };
+        let lit = ((p & lp_mask) << lc) + (prev >> (8 - lc));
+        // SAFETY: lit < 2^(lc + lp): the probability array holds 0x300 << (lc + lp) literals.
+        let lit_base = unsafe { probs.add(LITERAL + 0x300 * lit) };
         let rep0 = self.reps[0];
         let match_byte: usize = if self.state >= 7 && rep0 < p { out[p - rep0 - 1] as usize } else { 0 };
         // SAFETY: probability indices are bounded by the layout (literal contexts < 8, pos
@@ -1199,420 +1113,451 @@ impl LzmaDecoder {
         // INPUT_MARGIN of in_limit (checked at every symbol); output writes are checked
         // against out_limit (symbol starts, match cut) and out_end (copy over-write);
         // match sources are checked against the dictionary start (rep0 < p).
+        macro_rules! asm_loop {
+            ($mode:ident) => {
+                    core::arch::asm!(
+                        // ---- symbol loop ----
+                        "20:",
+                        mark!("01"),
+                        "cmp {op}, qword ptr [{ctx} + 8]",
+                        "jae 90f",
+                        "cmp {inp}, qword ptr [{ctx}]",
+                        "ja 91f",
+                        "mov {t1}, {op}",
+                        "sub {t1}, qword ptr [{ctx} + 16]",
+                        sel!($mode, "and {t1:e}, 3", "and {t1:e}, dword ptr [{ctx} + 176]"),
+                        "mov {t2}, qword ptr [{ctx} + 64]",
+                        "shl {t2:e}, 4",
+                        "add {t1:e}, {t2:e}",
+                        bit!("{probs} + {t1}*2", "40f"),
+                        // ---- literal ----
+                        mark!("02"),
+                        "mov {t2}, qword ptr [{ctx} + 64]",
+                        "cmp {t2:e}, 7",
+                        "jae 30f",
+                        // 8-bit tree; labels 31..37: entry at depth 1..7 (node in {sym}, its
+                        // probability in {b} for odd depths, {a} for even ones), used by the
+                        // literal with match byte once a bit differs from the match byte.
+                        tfirst!("{base}"),
+                        tstep!("{base}", "a", "b"),
+                        "31:",
+                        tstep!("{base}", "b", "a"),
+                        "32:",
+                        tstep!("{base}", "a", "b"),
+                        "33:",
+                        // the next literal's context: this byte's top three bits
+                        "mov {t3:e}, {sym:e}",
+                        "and {t3:e}, 7",
+                        tstep!("{base}", "b", "a"),
+                        "34:",
+                        tstep!("{base}", "a", "b"),
+                        "35:",
+                        tstep!("{base}", "b", "a"),
+                        "36:",
+                        tstep!("{base}", "a", "b"),
+                        "37:",
+                        tlast!("{base}", "b", "255"),
+                        "38:",
+                        "mov byte ptr [{op}], {sym:l}",
+                        "inc {op}",
+                        sel!(
+                            $mode,
+                            concat!("imul {t3:e}, {t3:e}, 0x600\n", "lea {base}, [{probs} + {t3} + 3692]\n"),
+                            concat!("movzx {t3:e}, {sym:l}\n", litbase!())
+                        ),
+                        "mov {t2}, qword ptr [{ctx} + 64]",
+                        "movzx {t2:e}, byte ptr [{ctx} + {t2} + 104]",
+                        "mov qword ptr [{ctx} + 64], {t2}",
+                        "jmp 20b",
+                        // ---- literal with match byte ----
+                        "30:",
+                        mark!("03"),
+                        "mov {t0}, qword ptr [{ctx} + 32]",
+                        "mov {t1}, {op}",
+                        "sub {t1}, qword ptr [{ctx} + 16]",
+                        "cmp {t0}, {t1}",
+                        "jae 95f",
+                        // the match byte was read by the previous symbol (in {b})
+                        "mov {t2:e}, {b:e}",
+                        // While the decoded bits equal the match byte's, the nodes follow the match
+                        // byte: their addresses do not depend on the decoding, so the loads run
+                        // ahead. The top three bits usually match (context of the next literal).
+                        "mov {sym:e}, 1",
+                        mlit!("7", "80"),
+                        mlit!("6", "81"),
+                        mlit!("5", "82"),
+                        mlit!("4", "83"),
+                        mlit!("3", "84"),
+                        mlit!("2", "85"),
+                        mlit!("1", "86"),
+                        mlit_last!(),
+                        "mov {t3:e}, {t2:e}",
+                        "shr {t3:e}, 5",
+                        "jmp 38b",
+                        // first differing bit at position i: continue the plain tree at depth i + 1
+                        "80:",
+                        "xor {sym:e}, 1",
+                        "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                        "jmp 31b",
+                        "81:",
+                        "xor {sym:e}, 1",
+                        "movzx {a:e}, word ptr [{base} + {sym}*2]",
+                        "jmp 32b",
+                        "82:",
+                        "xor {sym:e}, 1",
+                        "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                        "jmp 33b",
+                        "83:",
+                        "xor {sym:e}, 1",
+                        "movzx {a:e}, word ptr [{base} + {sym}*2]",
+                        "mov {t3:e}, {t2:e}",
+                        "shr {t3:e}, 5",
+                        "jmp 34b",
+                        "84:",
+                        "xor {sym:e}, 1",
+                        "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                        "mov {t3:e}, {t2:e}",
+                        "shr {t3:e}, 5",
+                        "jmp 35b",
+                        "85:",
+                        "xor {sym:e}, 1",
+                        "movzx {a:e}, word ptr [{base} + {sym}*2]",
+                        "mov {t3:e}, {t2:e}",
+                        "shr {t3:e}, 5",
+                        "jmp 36b",
+                        "86:",
+                        "xor {sym:e}, 1",
+                        "movzx {b:e}, word ptr [{base} + {sym}*2]",
+                        "mov {t3:e}, {t2:e}",
+                        "shr {t3:e}, 5",
+                        "jmp 37b",
+                        // ---- match ----
+                        "40:",
+                        mark!("04"),
+                        bit1!("{probs} + {t1}*2"),
+                        "mov {t2}, qword ptr [{ctx} + 64]",
+                        bit!("{probs} + {t2}*2 + 384", "50f"),
+                        "movzx {t0:e}, byte ptr [{ctx} + {t2} + 116]",
+                        "mov qword ptr [{ctx} + 64], {t0}",
+                        // distance slot tree at DIST_SLOT + min(len - 2, 3) * 64 (bytes: 864 + 128 *
+                        // min(len - 2, 3)); fixed for lengths >= 10, set up before their length tree
+                        len_dec!(
+                            sel!($mode, "and {t1:e}, 3", "and {t1:e}, dword ptr [{ctx} + 176]"),
+                            "1636",
+                            "41",
+                            "42",
+                            "43",
+                            concat!(
+                                "mov {t0:e}, 5\n",
+                                "cmp {sym:e}, 5\n",
+                                "cmovb {t0:e}, {sym:e}\n",
+                                "shl {t0:e}, 7\n",
+                                "lea {base}, [{probs} + {t0} + 608]\n",
+                            ),
+                            "lea {base}, [{probs} + 1248]\n"
+                        ),
+                        "mov qword ptr [{ctx} + 96], {sym}",
+                        mark!("05"),
+                        tree6a!("{base}", "63"),
+                        "cmp {sym:e}, 4",
+                        "jb 48f",
+                        "cmp {sym:e}, 14",
+                        "jb 46f",
+                        // slot >= 14: (slot >> 1) - 5 direct bits, then 4 align bits
+                        "mov {t2:e}, {sym:e}",
+                        "shr {t2:e}, 1",
+                        "sub {t2:e}, 5",
+                        "mov {t3:e}, {sym:e}",
+                        "and {t3:e}, 1",
+                        "or {t3:e}, 2",
+                        mark!("06"),
+                        "44:",
+                        "add {t3:e}, {t3:e}",
+                        "lea {t1:e}, [{t3} + 1]",
+                        norm!(),
+                        "shr {range:e}, 1",
+                        "mov {t0:e}, {code:e}",
+                        "sub {code:e}, {range:e}",
+                        "cmovns {t3:e}, {t1:e}",
+                        "cmovs {code:e}, {t0:e}",
+                        "dec {t2:e}",
+                        "jnz 44b",
+                        "shl {t3:e}, 4",
+                        // the match source is known to within 16 bytes: prefetch it during the
+                        // align bits (far matches miss L1/L2 and the next literal waits on them)
+                        "mov {t0}, {op}",
+                        "sub {t0}, {t3}",
+                        "prefetcht0 byte ptr [{t0} - 16]",
+                        "prefetcht0 byte ptr [{t0} + 48]",
+                        mark!("07"),
+                        rev4a!("{probs} + 1604"),
+                        "add {sym:e}, {t3:e}",
+                        "cmp {sym:e}, -1",
+                        "je 92f",
+                        "jmp 48f",
+                        // slot 4..13: reverse tree of (slot >> 1) - 1 bits
+                        "46:",
+                        mark!("08"),
+                        "mov {t2:e}, {sym:e}",
+                        "shr {t2:e}, 1",
+                        "dec {t2:e}",
+                        "movzx {t3:e}, byte ptr [{ctx} + {sym} + 148]",
+                        "mov qword ptr [{ctx} + 168], {t3}",
+                        "sub {t3:e}, {sym:e}",
+                        "lea {base}, [{probs} + {t3}*2 + 1374]",
+                        "xor {sym:e}, {sym:e}",
+                        "mov {t3:e}, 1",
+                        "47:",
+                        "lea {b:e}, [{sym} + {t3}]",
+                        "movzx {a:e}, word ptr [{base} + {b}*2]",
+                        norm!(),
+                        "mov {t0:e}, {range:e}",
+                        "shr {range:e}, 11",
+                        "imul {range:e}, {a:e}",
+                        "sub {t0:e}, {range:e}",
+                        "mov {t1:e}, {code:e}",
+                        "sub {code:e}, {range:e}",
+                        "cmovae {range:e}, {t0:e}",
+                        "cmovb {code:e}, {t1:e}",
+                        "lea {t0:e}, [{sym} + {t3}]",
+                        "cmovae {sym:e}, {t0:e}",
+                        "lea {t0:e}, [{a} - 2017]",
+                        "cmovae {t0:e}, {a:e}",
+                        "shr {t0:e}, 5",
+                        "sub {a:e}, {t0:e}",
+                        "mov word ptr [{base} + {b}*2], {a:x}",
+                        "add {t3:e}, {t3:e}",
+                        "dec {t2:e}",
+                        "jnz 47b",
+                        "add {sym:e}, dword ptr [{ctx} + 168]",
+                        // rep3..rep1 shift, rep0 = distance
+                        "48:",
+                        mark!("09"),
+                        "mov {t0}, qword ptr [{ctx} + 48]",
+                        "mov qword ptr [{ctx} + 56], {t0}",
+                        "mov {t0}, qword ptr [{ctx} + 40]",
+                        "mov qword ptr [{ctx} + 48], {t0}",
+                        "mov {t0}, qword ptr [{ctx} + 32]",
+                        "mov qword ptr [{ctx} + 40], {t0}",
+                        "mov {t0:e}, {sym:e}",
+                        "mov qword ptr [{ctx} + 32], {t0}",
+                        "jmp 60f",
+                        // ---- rep match ----
+                        "50:",
+                        mark!("10"),
+                        bit1!("{probs} + {t2}*2 + 384"),
+                        bit!("{probs} + {t2}*2 + 408", "52f"),
+                        "mov {t1}, {op}",
+                        "sub {t1}, qword ptr [{ctx} + 16]",
+                        sel!($mode, "and {t1:e}, 3", "and {t1:e}, dword ptr [{ctx} + 176]"),
+                        "mov {t0:e}, {t2:e}",
+                        "shl {t0:e}, 4",
+                        "add {t1:e}, {t0:e}",
+                        bit!("{probs} + {t1}*2 + 480", "51f"),
+                        // short rep: one byte at distance rep0
+                        "movzx {t0:e}, byte ptr [{ctx} + {t2} + 140]",
+                        "mov qword ptr [{ctx} + 64], {t0}",
+                        "mov {t0}, qword ptr [{ctx} + 32]",
+                        "mov {t1}, {op}",
+                        "sub {t1}, qword ptr [{ctx} + 16]",
+                        "cmp {t0}, {t1}",
+                        "jae 95f",
+                        "neg {t0}",
+                        "movzx {t3:e}, byte ptr [{op} + {t0} - 1]",
+                        "mov byte ptr [{op}], {t3:l}",
+                        "movzx {b:e}, byte ptr [{op} + {t0}]",
+                        "inc {op}",
+                        sel!(
+                            $mode,
+                            concat!(
+                                "shr {t3:e}, 5\n",
+                                "imul {t3:e}, {t3:e}, 0x600\n",
+                                "lea {base}, [{probs} + {t3} + 3692]\n"
+                            ),
+                            litbase!()
+                        ),
+                        "jmp 20b",
+                        "51:",
+                        bit1!("{probs} + {t1}*2 + 480"),
+                        "jmp 55f",
+                        "52:",
+                        bit1!("{probs} + {t2}*2 + 408"),
+                        bit!("{probs} + {t2}*2 + 432", "53f"),
+                        "mov {t0}, qword ptr [{ctx} + 40]",
+                        "mov {t1}, qword ptr [{ctx} + 32]",
+                        "mov qword ptr [{ctx} + 32], {t0}",
+                        "mov qword ptr [{ctx} + 40], {t1}",
+                        "jmp 55f",
+                        "53:",
+                        bit1!("{probs} + {t2}*2 + 432"),
+                        bit!("{probs} + {t2}*2 + 456", "54f"),
+                        "mov {t0}, qword ptr [{ctx} + 48]",
+                        "jmp 56f",
+                        "54:",
+                        bit1!("{probs} + {t2}*2 + 456"),
+                        "mov {t0}, qword ptr [{ctx} + 56]",
+                        "mov {t1}, qword ptr [{ctx} + 48]",
+                        "mov qword ptr [{ctx} + 56], {t1}",
+                        "56:",
+                        "mov {t1}, qword ptr [{ctx} + 40]",
+                        "mov qword ptr [{ctx} + 48], {t1}",
+                        "mov {t1}, qword ptr [{ctx} + 32]",
+                        "mov qword ptr [{ctx} + 40], {t1}",
+                        "mov qword ptr [{ctx} + 32], {t0}",
+                        "55:",
+                        "mov {t0}, {op}",
+                        "sub {t0}, qword ptr [{ctx} + 32]",
+                        "prefetcht0 byte ptr [{t0} - 1]",
+                        "prefetcht0 byte ptr [{t0} + 63]",
+                        "movzx {t0:e}, byte ptr [{ctx} + {t2} + 128]",
+                        "mov qword ptr [{ctx} + 64], {t0}",
+                        mark!("11"),
+                        len_dec!(sel!($mode, "and {t1:e}, 3", "and {t1:e}, dword ptr [{ctx} + 176]"), "2664", "57", "58", "59", "", ""),
+                        "mov qword ptr [{ctx} + 96], {sym}",
+                        // ---- copy len ([ctx + 96]) bytes from distance rep0 + 1 ----
+                        "60:",
+                        mark!("12"),
+                        "mov {t0}, qword ptr [{ctx} + 32]",
+                        "mov {t1}, {op}",
+                        "sub {t1}, qword ptr [{ctx} + 16]",
+                        "cmp {t0}, {t1}",
+                        "jae 95f",
+                        "mov {t2}, qword ptr [{ctx} + 96]",
+                        "mov {t1}, qword ptr [{ctx} + 8]",
+                        "sub {t1}, {op}",
+                        "cmp {t2}, {t1}",
+                        "ja 70f",
+                        "mov {sym}, {op}",
+                        "sub {sym}, {t0}",
+                        // the next literal's context byte and match byte: from the source (old
+                        // data, loads issue now) unless the match overlaps itself
+                        "cmp {t2}, {t0}",
+                        "ja 65f",
+                        "movzx {t3:e}, byte ptr [{sym} + {t2} - 2]",
+                        "movzx {b:e}, byte ptr [{sym} + {t2} - 1]",
+                        "65:",
+                        "lea {t1}, [{op} + {t2} + 64]",
+                        "cmp {t1}, qword ptr [{ctx} + 24]",
+                        "ja 75f",
+                        "cmp {t0}, 15",
+                        "jb 75f",
+                        // distance >= 16: 16-byte chunks (each chunk's source is complete); 64
+                        // bytes unconditionally (~85% of the matches in text are shorter)
+                        "movdqu xmm0, xmmword ptr [{sym} - 1]",
+                        "movdqu xmmword ptr [{op}], xmm0",
+                        "movdqu xmm1, xmmword ptr [{sym} + 15]",
+                        "movdqu xmmword ptr [{op} + 16], xmm1",
+                        "movdqu xmm0, xmmword ptr [{sym} + 31]",
+                        "movdqu xmmword ptr [{op} + 32], xmm0",
+                        "movdqu xmm1, xmmword ptr [{sym} + 47]",
+                        "movdqu xmmword ptr [{op} + 48], xmm1",
+                        "cmp {t2}, 64",
+                        "jbe 63f",
+                        "mov {t1}, 64",
+                        "62:",
+                        "movdqu xmm0, xmmword ptr [{sym} + {t1} - 1]",
+                        "movdqu xmmword ptr [{op} + {t1}], xmm0",
+                        "movdqu xmm1, xmmword ptr [{sym} + {t1} + 15]",
+                        "movdqu xmmword ptr [{op} + {t1} + 16], xmm1",
+                        "add {t1}, 32",
+                        "cmp {t1}, {t2}",
+                        "jb 62b",
+                        "63:",
+                        "add {op}, {t2}",
+                        "cmp {t2}, {t0}",
+                        "jbe 66f",
+                        "movzx {t3:e}, byte ptr [{op} - 1]",
+                        "mov {b}, {op}",
+                        "sub {b}, {t0}",
+                        "movzx {b:e}, byte ptr [{b} - 1]",
+                        "66:",
+                        sel!(
+                            $mode,
+                            concat!(
+                                "shr {t3:e}, 5\n",
+                                "imul {t3:e}, {t3:e}, 0x600\n",
+                                "lea {base}, [{probs} + {t3} + 3692]\n"
+                            ),
+                            litbase!()
+                        ),
+                        "jmp 20b",
+                        // short distance or near the end of the buffer: byte by byte
+                        "75:",
+                        "movzx {t1:e}, byte ptr [{sym} - 1]",
+                        "mov byte ptr [{op}], {t1:l}",
+                        "inc {sym}",
+                        "inc {op}",
+                        "dec {t2}",
+                        "jnz 75b",
+                        "movzx {t3:e}, byte ptr [{op} - 1]",
+                        "mov {b}, {op}",
+                        "sub {b}, {t0}",
+                        "movzx {b:e}, byte ptr [{b} - 1]",
+                        sel!(
+                            $mode,
+                            concat!(
+                                "shr {t3:e}, 5\n",
+                                "imul {t3:e}, {t3:e}, 0x600\n",
+                                "lea {base}, [{probs} + {t3} + 3692]\n"
+                            ),
+                            litbase!()
+                        ),
+                        "jmp 20b",
+                        // the match crosses the output limit: copy up to it, keep the rest pending
+                        "70:",
+                        "sub {t2}, {t1}",
+                        "mov qword ptr [{ctx} + 80], {t2}",
+                        "mov {t2}, {t1}",
+                        "mov {sym}, {op}",
+                        "sub {sym}, {t0}",
+                        "76:",
+                        "movzx {t1:e}, byte ptr [{sym} - 1]",
+                        "mov byte ptr [{op}], {t1:l}",
+                        "inc {sym}",
+                        "inc {op}",
+                        "dec {t2}",
+                        "jnz 76b",
+                        // ---- exits: status 0 limit, 1 input, 2 end marker, 3 bad distance ----
+                        "90:",
+                        mark!("13"),
+                        "xor {t0:e}, {t0:e}",
+                        "jmp 99f",
+                        "91:",
+                        "mov {t0:e}, 1",
+                        "jmp 99f",
+                        "92:",
+                        "mov {t0:e}, 2",
+                        "jmp 99f",
+                        "95:",
+                        "mov {t0:e}, 3",
+                        "99:",
+                        "mov qword ptr [{ctx} + 88], {t0}",
+                        range = inout(reg) range,
+                        code = inout(reg) code,
+                        inp = inout(reg) inp,
+                        op = inout(reg) op,
+                        probs = in(reg) probs,
+                        ctx = in(reg) ctxp,
+                        base = inout(reg) lit_base => _,
+                        sym = out(reg) _,
+                        a = out(reg) _,
+                        b = inout(reg) match_byte => _,
+                        t0 = out(reg) _,
+                        t1 = out(reg) _,
+                        t2 = out(reg) _,
+                        t3 = out(reg) _,
+                        out("xmm0") _,
+                        out("xmm1") _,
+                        options(nostack),
+                    )
+            };
+        }
         unsafe {
-            core::arch::asm!(
-                // ---- symbol loop ----
-                "20:",
-                mark!("01"),
-                "cmp {op}, qword ptr [{ctx} + 8]",
-                "jae 90f",
-                "cmp {inp}, qword ptr [{ctx}]",
-                "ja 91f",
-                "mov {t1}, {op}",
-                "sub {t1}, qword ptr [{ctx} + 16]",
-                "and {t1:e}, 3",
-                "mov {t2}, qword ptr [{ctx} + 64]",
-                "shl {t2:e}, 4",
-                "add {t1:e}, {t2:e}",
-                bit!("{probs} + {t1}*2", "40f"),
-                // ---- literal ----
-                mark!("02"),
-                "mov {t2}, qword ptr [{ctx} + 64]",
-                "cmp {t2:e}, 7",
-                "jae 30f",
-                // 8-bit tree; labels 31..37: entry at depth 1..7 (node in {sym}, its
-                // probability in {b} for odd depths, {a} for even ones), used by the
-                // literal with match byte once a bit differs from the match byte.
-                tfirst!("{base}"),
-                tstep!("{base}", "a", "b"),
-                "31:",
-                tstep!("{base}", "b", "a"),
-                "32:",
-                tstep!("{base}", "a", "b"),
-                "33:",
-                // the next literal's context: this byte's top three bits
-                "mov {t3:e}, {sym:e}",
-                "and {t3:e}, 7",
-                tstep!("{base}", "b", "a"),
-                "34:",
-                tstep!("{base}", "a", "b"),
-                "35:",
-                tstep!("{base}", "b", "a"),
-                "36:",
-                tstep!("{base}", "a", "b"),
-                "37:",
-                tlast!("{base}", "b", "255"),
-                "38:",
-                "mov byte ptr [{op}], {sym:l}",
-                "inc {op}",
-                "imul {t3:e}, {t3:e}, 0x600",
-                "lea {base}, [{probs} + {t3} + 3692]",
-                "mov {t2}, qword ptr [{ctx} + 64]",
-                "movzx {t2:e}, byte ptr [{ctx} + {t2} + 104]",
-                "mov qword ptr [{ctx} + 64], {t2}",
-                "jmp 20b",
-                // ---- literal with match byte ----
-                "30:",
-                mark!("03"),
-                "mov {t0}, qword ptr [{ctx} + 32]",
-                "mov {t1}, {op}",
-                "sub {t1}, qword ptr [{ctx} + 16]",
-                "cmp {t0}, {t1}",
-                "jae 95f",
-                // the match byte was read by the previous symbol (in {b})
-                "mov {t2:e}, {b:e}",
-                // While the decoded bits equal the match byte's, the nodes follow the match
-                // byte: their addresses do not depend on the decoding, so the loads run
-                // ahead. The top three bits usually match (context of the next literal).
-                "mov {sym:e}, 1",
-                mlit!("7", "80"),
-                mlit!("6", "81"),
-                mlit!("5", "82"),
-                mlit!("4", "83"),
-                mlit!("3", "84"),
-                mlit!("2", "85"),
-                mlit!("1", "86"),
-                mlit_last!(),
-                "mov {t3:e}, {t2:e}",
-                "shr {t3:e}, 5",
-                "jmp 38b",
-                // first differing bit at position i: continue the plain tree at depth i + 1
-                "80:",
-                "xor {sym:e}, 1",
-                "movzx {b:e}, word ptr [{base} + {sym}*2]",
-                "jmp 31b",
-                "81:",
-                "xor {sym:e}, 1",
-                "movzx {a:e}, word ptr [{base} + {sym}*2]",
-                "jmp 32b",
-                "82:",
-                "xor {sym:e}, 1",
-                "movzx {b:e}, word ptr [{base} + {sym}*2]",
-                "jmp 33b",
-                "83:",
-                "xor {sym:e}, 1",
-                "movzx {a:e}, word ptr [{base} + {sym}*2]",
-                "mov {t3:e}, {t2:e}",
-                "shr {t3:e}, 5",
-                "jmp 34b",
-                "84:",
-                "xor {sym:e}, 1",
-                "movzx {b:e}, word ptr [{base} + {sym}*2]",
-                "mov {t3:e}, {t2:e}",
-                "shr {t3:e}, 5",
-                "jmp 35b",
-                "85:",
-                "xor {sym:e}, 1",
-                "movzx {a:e}, word ptr [{base} + {sym}*2]",
-                "mov {t3:e}, {t2:e}",
-                "shr {t3:e}, 5",
-                "jmp 36b",
-                "86:",
-                "xor {sym:e}, 1",
-                "movzx {b:e}, word ptr [{base} + {sym}*2]",
-                "mov {t3:e}, {t2:e}",
-                "shr {t3:e}, 5",
-                "jmp 37b",
-                // ---- match ----
-                "40:",
-                mark!("04"),
-                bit1!("{probs} + {t1}*2"),
-                "mov {t2}, qword ptr [{ctx} + 64]",
-                bit!("{probs} + {t2}*2 + 384", "50f"),
-                "movzx {t0:e}, byte ptr [{ctx} + {t2} + 116]",
-                "mov qword ptr [{ctx} + 64], {t0}",
-                // distance slot tree at DIST_SLOT + min(len - 2, 3) * 64 (bytes: 864 + 128 *
-                // min(len - 2, 3)); fixed for lengths >= 10, set up before their length tree
-                len_dec!(
-                    "1636",
-                    "41",
-                    "42",
-                    "43",
-                    concat!(
-                        "mov {t0:e}, 5\n",
-                        "cmp {sym:e}, 5\n",
-                        "cmovb {t0:e}, {sym:e}\n",
-                        "shl {t0:e}, 7\n",
-                        "lea {base}, [{probs} + {t0} + 608]\n",
-                    ),
-                    "lea {base}, [{probs} + 1248]\n"
-                ),
-                "mov qword ptr [{ctx} + 96], {sym}",
-                mark!("05"),
-                tree6a!("{base}", "63"),
-                "cmp {sym:e}, 4",
-                "jb 48f",
-                "cmp {sym:e}, 14",
-                "jb 46f",
-                // slot >= 14: (slot >> 1) - 5 direct bits, then 4 align bits
-                "mov {t2:e}, {sym:e}",
-                "shr {t2:e}, 1",
-                "sub {t2:e}, 5",
-                "mov {t3:e}, {sym:e}",
-                "and {t3:e}, 1",
-                "or {t3:e}, 2",
-                mark!("06"),
-                "44:",
-                "add {t3:e}, {t3:e}",
-                "lea {t1:e}, [{t3} + 1]",
-                norm!(),
-                "shr {range:e}, 1",
-                "mov {t0:e}, {code:e}",
-                "sub {code:e}, {range:e}",
-                "cmovns {t3:e}, {t1:e}",
-                "cmovs {code:e}, {t0:e}",
-                "dec {t2:e}",
-                "jnz 44b",
-                "shl {t3:e}, 4",
-                // the match source is known to within 16 bytes: prefetch it during the
-                // align bits (far matches miss L1/L2 and the next literal waits on them)
-                "mov {t0}, {op}",
-                "sub {t0}, {t3}",
-                "prefetcht0 byte ptr [{t0} - 16]",
-                "prefetcht0 byte ptr [{t0} + 48]",
-                mark!("07"),
-                rev4a!("{probs} + 1604"),
-                "add {sym:e}, {t3:e}",
-                "cmp {sym:e}, -1",
-                "je 92f",
-                "jmp 48f",
-                // slot 4..13: reverse tree of (slot >> 1) - 1 bits
-                "46:",
-                mark!("08"),
-                "mov {t2:e}, {sym:e}",
-                "shr {t2:e}, 1",
-                "dec {t2:e}",
-                "movzx {t3:e}, byte ptr [{ctx} + {sym} + 148]",
-                "mov qword ptr [{ctx} + 168], {t3}",
-                "sub {t3:e}, {sym:e}",
-                "lea {base}, [{probs} + {t3}*2 + 1374]",
-                "xor {sym:e}, {sym:e}",
-                "mov {t3:e}, 1",
-                "47:",
-                "lea {b:e}, [{sym} + {t3}]",
-                "movzx {a:e}, word ptr [{base} + {b}*2]",
-                norm!(),
-                "mov {t0:e}, {range:e}",
-                "shr {range:e}, 11",
-                "imul {range:e}, {a:e}",
-                "sub {t0:e}, {range:e}",
-                "mov {t1:e}, {code:e}",
-                "sub {code:e}, {range:e}",
-                "cmovae {range:e}, {t0:e}",
-                "cmovb {code:e}, {t1:e}",
-                "lea {t0:e}, [{sym} + {t3}]",
-                "cmovae {sym:e}, {t0:e}",
-                "lea {t0:e}, [{a} - 2017]",
-                "cmovae {t0:e}, {a:e}",
-                "shr {t0:e}, 5",
-                "sub {a:e}, {t0:e}",
-                "mov word ptr [{base} + {b}*2], {a:x}",
-                "add {t3:e}, {t3:e}",
-                "dec {t2:e}",
-                "jnz 47b",
-                "add {sym:e}, dword ptr [{ctx} + 168]",
-                // rep3..rep1 shift, rep0 = distance
-                "48:",
-                mark!("09"),
-                "mov {t0}, qword ptr [{ctx} + 48]",
-                "mov qword ptr [{ctx} + 56], {t0}",
-                "mov {t0}, qword ptr [{ctx} + 40]",
-                "mov qword ptr [{ctx} + 48], {t0}",
-                "mov {t0}, qword ptr [{ctx} + 32]",
-                "mov qword ptr [{ctx} + 40], {t0}",
-                "mov {t0:e}, {sym:e}",
-                "mov qword ptr [{ctx} + 32], {t0}",
-                "jmp 60f",
-                // ---- rep match ----
-                "50:",
-                mark!("10"),
-                bit1!("{probs} + {t2}*2 + 384"),
-                bit!("{probs} + {t2}*2 + 408", "52f"),
-                "mov {t1}, {op}",
-                "sub {t1}, qword ptr [{ctx} + 16]",
-                "and {t1:e}, 3",
-                "mov {t0:e}, {t2:e}",
-                "shl {t0:e}, 4",
-                "add {t1:e}, {t0:e}",
-                bit!("{probs} + {t1}*2 + 480", "51f"),
-                // short rep: one byte at distance rep0
-                "movzx {t0:e}, byte ptr [{ctx} + {t2} + 140]",
-                "mov qword ptr [{ctx} + 64], {t0}",
-                "mov {t0}, qword ptr [{ctx} + 32]",
-                "mov {t1}, {op}",
-                "sub {t1}, qword ptr [{ctx} + 16]",
-                "cmp {t0}, {t1}",
-                "jae 95f",
-                "neg {t0}",
-                "movzx {t3:e}, byte ptr [{op} + {t0} - 1]",
-                "mov byte ptr [{op}], {t3:l}",
-                "movzx {b:e}, byte ptr [{op} + {t0}]",
-                "inc {op}",
-                "shr {t3:e}, 5",
-                "imul {t3:e}, {t3:e}, 0x600",
-                "lea {base}, [{probs} + {t3} + 3692]",
-                "jmp 20b",
-                "51:",
-                bit1!("{probs} + {t1}*2 + 480"),
-                "jmp 55f",
-                "52:",
-                bit1!("{probs} + {t2}*2 + 408"),
-                bit!("{probs} + {t2}*2 + 432", "53f"),
-                "mov {t0}, qword ptr [{ctx} + 40]",
-                "mov {t1}, qword ptr [{ctx} + 32]",
-                "mov qword ptr [{ctx} + 32], {t0}",
-                "mov qword ptr [{ctx} + 40], {t1}",
-                "jmp 55f",
-                "53:",
-                bit1!("{probs} + {t2}*2 + 432"),
-                bit!("{probs} + {t2}*2 + 456", "54f"),
-                "mov {t0}, qword ptr [{ctx} + 48]",
-                "jmp 56f",
-                "54:",
-                bit1!("{probs} + {t2}*2 + 456"),
-                "mov {t0}, qword ptr [{ctx} + 56]",
-                "mov {t1}, qword ptr [{ctx} + 48]",
-                "mov qword ptr [{ctx} + 56], {t1}",
-                "56:",
-                "mov {t1}, qword ptr [{ctx} + 40]",
-                "mov qword ptr [{ctx} + 48], {t1}",
-                "mov {t1}, qword ptr [{ctx} + 32]",
-                "mov qword ptr [{ctx} + 40], {t1}",
-                "mov qword ptr [{ctx} + 32], {t0}",
-                "55:",
-                "mov {t0}, {op}",
-                "sub {t0}, qword ptr [{ctx} + 32]",
-                "prefetcht0 byte ptr [{t0} - 1]",
-                "prefetcht0 byte ptr [{t0} + 63]",
-                "movzx {t0:e}, byte ptr [{ctx} + {t2} + 128]",
-                "mov qword ptr [{ctx} + 64], {t0}",
-                mark!("11"),
-                len_dec!("2664", "57", "58", "59", "", ""),
-                "mov qword ptr [{ctx} + 96], {sym}",
-                // ---- copy len ([ctx + 96]) bytes from distance rep0 + 1 ----
-                "60:",
-                mark!("12"),
-                "mov {t0}, qword ptr [{ctx} + 32]",
-                "mov {t1}, {op}",
-                "sub {t1}, qword ptr [{ctx} + 16]",
-                "cmp {t0}, {t1}",
-                "jae 95f",
-                "mov {t2}, qword ptr [{ctx} + 96]",
-                "mov {t1}, qword ptr [{ctx} + 8]",
-                "sub {t1}, {op}",
-                "cmp {t2}, {t1}",
-                "ja 70f",
-                "mov {sym}, {op}",
-                "sub {sym}, {t0}",
-                // the next literal's context byte and match byte: from the source (old
-                // data, loads issue now) unless the match overlaps itself
-                "cmp {t2}, {t0}",
-                "ja 65f",
-                "movzx {t3:e}, byte ptr [{sym} + {t2} - 2]",
-                "movzx {b:e}, byte ptr [{sym} + {t2} - 1]",
-                "65:",
-                "lea {t1}, [{op} + {t2} + 64]",
-                "cmp {t1}, qword ptr [{ctx} + 24]",
-                "ja 75f",
-                "cmp {t0}, 15",
-                "jb 75f",
-                // distance >= 16: 16-byte chunks (each chunk's source is complete); 64
-                // bytes unconditionally (~85% of the matches in text are shorter)
-                "movdqu xmm0, xmmword ptr [{sym} - 1]",
-                "movdqu xmmword ptr [{op}], xmm0",
-                "movdqu xmm1, xmmword ptr [{sym} + 15]",
-                "movdqu xmmword ptr [{op} + 16], xmm1",
-                "movdqu xmm0, xmmword ptr [{sym} + 31]",
-                "movdqu xmmword ptr [{op} + 32], xmm0",
-                "movdqu xmm1, xmmword ptr [{sym} + 47]",
-                "movdqu xmmword ptr [{op} + 48], xmm1",
-                "cmp {t2}, 64",
-                "jbe 63f",
-                "mov {t1}, 64",
-                "62:",
-                "movdqu xmm0, xmmword ptr [{sym} + {t1} - 1]",
-                "movdqu xmmword ptr [{op} + {t1}], xmm0",
-                "movdqu xmm1, xmmword ptr [{sym} + {t1} + 15]",
-                "movdqu xmmword ptr [{op} + {t1} + 16], xmm1",
-                "add {t1}, 32",
-                "cmp {t1}, {t2}",
-                "jb 62b",
-                "63:",
-                "add {op}, {t2}",
-                "cmp {t2}, {t0}",
-                "jbe 66f",
-                "movzx {t3:e}, byte ptr [{op} - 1]",
-                "mov {b}, {op}",
-                "sub {b}, {t0}",
-                "movzx {b:e}, byte ptr [{b} - 1]",
-                "66:",
-                "shr {t3:e}, 5",
-                "imul {t3:e}, {t3:e}, 0x600",
-                "lea {base}, [{probs} + {t3} + 3692]",
-                "jmp 20b",
-                // short distance or near the end of the buffer: byte by byte
-                "75:",
-                "movzx {t1:e}, byte ptr [{sym} - 1]",
-                "mov byte ptr [{op}], {t1:l}",
-                "inc {sym}",
-                "inc {op}",
-                "dec {t2}",
-                "jnz 75b",
-                "movzx {t3:e}, byte ptr [{op} - 1]",
-                "mov {b}, {op}",
-                "sub {b}, {t0}",
-                "movzx {b:e}, byte ptr [{b} - 1]",
-                "shr {t3:e}, 5",
-                "imul {t3:e}, {t3:e}, 0x600",
-                "lea {base}, [{probs} + {t3} + 3692]",
-                "jmp 20b",
-                // the match crosses the output limit: copy up to it, keep the rest pending
-                "70:",
-                "sub {t2}, {t1}",
-                "mov qword ptr [{ctx} + 80], {t2}",
-                "mov {t2}, {t1}",
-                "mov {sym}, {op}",
-                "sub {sym}, {t0}",
-                "76:",
-                "movzx {t1:e}, byte ptr [{sym} - 1]",
-                "mov byte ptr [{op}], {t1:l}",
-                "inc {sym}",
-                "inc {op}",
-                "dec {t2}",
-                "jnz 76b",
-                // ---- exits: status 0 limit, 1 input, 2 end marker, 3 bad distance ----
-                "90:",
-                mark!("13"),
-                "xor {t0:e}, {t0:e}",
-                "jmp 99f",
-                "91:",
-                "mov {t0:e}, 1",
-                "jmp 99f",
-                "92:",
-                "mov {t0:e}, 2",
-                "jmp 99f",
-                "95:",
-                "mov {t0:e}, 3",
-                "99:",
-                "mov qword ptr [{ctx} + 88], {t0}",
-                range = inout(reg) range,
-                code = inout(reg) code,
-                inp = inout(reg) inp,
-                op = inout(reg) op,
-                probs = in(reg) probs,
-                ctx = in(reg) ctxp,
-                base = inout(reg) lit_base => _,
-                sym = out(reg) _,
-                a = out(reg) _,
-                b = inout(reg) match_byte => _,
-                t0 = out(reg) _,
-                t1 = out(reg) _,
-                t2 = out(reg) _,
-                t3 = out(reg) _,
-                out("xmm0") _,
-                out("xmm1") _,
-                options(nostack),
-            )
+            if FIXED {
+                asm_loop!(fixed)
+            } else {
+                asm_loop!(generic)
+            }
         };
         rc.range = range;
         rc.code = code;
@@ -1939,9 +1884,9 @@ mod tests {
     /// Decodes with the lc=3 lp=0 pb=2 fast path and with the generic loop.
     fn both<T: PartialEq + std::fmt::Debug>(f: impl Fn() -> T) -> (T, T) {
         let fast = f();
-        FORCE_GENERIC.with(|g| g.set(true));
+        FORCE_PORTABLE.with(|g| g.set(true));
         let generic = f();
-        FORCE_GENERIC.with(|g| g.set(false));
+        FORCE_PORTABLE.with(|g| g.set(false));
         (fast, generic)
     }
 
@@ -1957,10 +1902,11 @@ mod tests {
         r.map_err(|e| format!("{e:?}"))
     }
 
-    /// The fast path (x86-64: the asm symbol loop) and the generic Rust loop must agree on
-    /// every input: valid streams from our encoder over varied data (text, binary, runs,
-    /// short and long distances, chunk and output-limit crossings) and thousands of mutated
-    /// and truncated versions of them (same output, or the same error).
+    /// The x86-64 asm loop and the portable Rust loop (an independent implementation) must
+    /// agree on every input: valid streams from our encoder over varied data (text, binary,
+    /// runs, short and long distances, chunk and output-limit crossings) and thousands of
+    /// mutated and truncated versions of them (same output, or the same error), raw LZMA1
+    /// with every properties byte, and the xz fixtures (lc1 lp3 pb1, BCJ, delta, multi-block).
     #[test]
     fn codecs_lzma_fast_path_matches_generic() {
         use crate::codecs::lzma_enc::{Lzma2Encoder, LzmaParams};
@@ -2045,8 +1991,39 @@ mod tests {
                 assert!(f1 == g1, "mutation {round}: lzma1 paths differ");
                 let (f2, g2) = both(|| outcome(decompress_lzma1_raw(&v[6..], 93, Some(size))));
                 assert!(f2 == g2, "mutation {round}: sized lzma1 paths differ");
+                // any lc/lp/pb (the asm loop's generic mode)
+                let props = (xorshift(&mut s) % 225) as u8;
+                let (f3, g3) = both(|| outcome(decompress_lzma1_raw(&v[6..], props, Some(size))));
+                assert!(f3 == g3, "mutation {round}: lzma1 props {props} paths differ");
             }
         }
         assert!(n_ok > 20, "{n_ok}");
+        // xz fixtures, whole and mutated
+        let fixtures: [&[u8]; 8] = [
+            include_bytes!("testdata/text.xz"),
+            include_bytes!("testdata/text.e9.xz"),
+            include_bytes!("testdata/text.props.xz"),
+            include_bytes!("testdata/text.blocks.xz"),
+            include_bytes!("testdata/noise.xz"),
+            include_bytes!("testdata/x86.bin.xz"),
+            include_bytes!("testdata/samples.bin.xz"),
+            include_bytes!("testdata/multi.xz"),
+        ];
+        for (i, f) in fixtures.iter().enumerate() {
+            let (fast, generic) = both(|| outcome(crate::codecs::xz::decompress(f)));
+            assert!(fast.is_ok() && fast == generic, "xz fixture {i}");
+        }
+        for round in 0..3000 {
+            let mut v = fixtures[round % fixtures.len()].to_vec();
+            for _ in 0..(round % 3) + 1 {
+                let i = (xorshift(&mut s) as usize) % v.len();
+                v[i] ^= 1 << (xorshift(&mut s) % 8);
+            }
+            let (fast, generic) = both(|| outcome(crate::codecs::xz::decompress(&v)));
+            assert!(fast == generic, "xz mutation {round}: paths differ");
+            // the lc1 lp3 pb1 fixture's LZMA2 payload with its checks out of the way
+            let (f1, g1) = both(|| outcome(decompress_lzma2(&v[24..])));
+            assert!(f1 == g1, "xz mutation {round}: raw lzma2 paths differ");
+        }
     }
 }
