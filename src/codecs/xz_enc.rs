@@ -8,8 +8,10 @@
 //! headers carry both sizes (like `xz -T`), followed by the index and footer. `xz -d`,
 //! python's `lzma` and [`super::xz::decompress`] read it.
 //!
-//! Memory: about 6 x block_size per worker thread (match finder chains + buffers) plus two
-//! blocks per job in flight (18 MB per thread with the default 3 MiB blocks).
+//! Memory: per worker thread about 6 MB of match finder tables plus an LZMA2 scratch
+//! buffer, and one input block per job in flight (at most threads + 1 jobs): roughly
+//! 25 MB per worker with the default 8 MiB blocks (12 workers by default: ~300 MB; lower
+//! [`XzOptions::threads`] to trade speed for memory).
 
 use std::io::{self, Write};
 
@@ -31,14 +33,14 @@ pub struct XzOptions {
     /// Worker threads (0 = min(all logical CPUs, 12)).
     pub threads: usize,
     /// Uncompressed bytes per xz block (each block is compressed independently, with the
-    /// block as its dictionary). Default 3 MiB.
+    /// block as its dictionary). Default 8 MiB (the dictionary size of preset 6).
     pub block_size: usize,
 }
 
 impl XzOptions {
     /// Default settings for `preset`.
     pub fn preset(preset: u32) -> XzOptions {
-        XzOptions { preset: preset.min(9), threads: 0, block_size: 3 << 20 }
+        XzOptions { preset: preset.min(9), threads: 0, block_size: 8 << 20 }
     }
 }
 
@@ -120,7 +122,6 @@ fn index_and_footer(records: &[(u64, u64)]) -> Vec<u8> {
 
 struct Job {
     data: Vec<u8>,
-    out: Vec<u8>,
 }
 
 struct Done {
@@ -131,16 +132,19 @@ struct Done {
     data: Vec<u8>,
 }
 
-fn encode_job(enc: &mut (Lzma2Encoder, u8), j: Job) -> Done {
-    let (lz, dict_byte) = enc;
-    let mut lzma2 = j.out;
+/// Per-thread worker state: the compressor, the dictionary-size byte and an LZMA2 scratch
+/// buffer.
+type Worker = (Lzma2Encoder, u8, Vec<u8>);
+
+fn encode_job(enc: &mut Worker, j: Job) -> Done {
+    let (lz, dict_byte, lzma2) = enc;
     lzma2.clear();
-    lz.encode_block(&j.data, &mut lzma2);
+    lz.encode_block(&j.data, lzma2);
     let check = crc64(&j.data);
     let header = block_header(lzma2.len() as u64, j.data.len() as u64, *dict_byte);
     let mut block = Vec::with_capacity(header.len() + lzma2.len() + 3 + CHECK_SIZE);
     block.extend_from_slice(&header);
-    block.extend_from_slice(&lzma2);
+    block.extend_from_slice(lzma2);
     // Block padding: the header is a multiple of 4 bytes, so pad header + data.
     while !block.len().is_multiple_of(4) {
         block.push(0);
@@ -159,9 +163,10 @@ pub struct XzEncoder<W: Write + Send> {
     header_written: bool,
     block_size: usize,
     cur: Vec<u8>,
-    pipe: Pipeline<(Lzma2Encoder, u8), Job, Done>,
+    pipe: Pipeline<Worker, Job, Done>,
     max_in_flight: usize,
     records: Vec<(u64, u64)>,
+    /// Recycled input buffers (block_size capacity).
     free: Vec<Vec<u8>>,
 }
 
@@ -178,14 +183,14 @@ impl<W: Write + Send> XzEncoder<W> {
         let block_size = opts.block_size.clamp(4096, 1 << 30);
         let params = LzmaParams::preset(opts.preset);
         let dict_byte = dict_size_byte(block_size);
-        let pipe = Pipeline::new(threads, move || (Lzma2Encoder::new(params), dict_byte), encode_job);
+        let pipe = Pipeline::new(threads, move || (Lzma2Encoder::new(params), dict_byte, Vec::new()), encode_job);
         XzEncoder {
             w,
             header_written: false,
             block_size,
             cur: Vec::new(),
             pipe,
-            max_in_flight: if threads <= 1 { 1 } else { threads + 2 },
+            max_in_flight: if threads <= 1 { 1 } else { threads + 1 },
             records: Vec::new(),
             free: Vec::new(),
         }
@@ -204,8 +209,7 @@ impl<W: Write + Send> XzEncoder<W> {
             return Ok(());
         }
         let data = std::mem::take(&mut self.cur);
-        let out = self.free.pop().unwrap_or_default();
-        let job = Job { data, out };
+        let job = Job { data };
         if last && self.pipe.submitted() == 0 {
             self.pipe.run_inline(job);
         } else {
@@ -229,8 +233,9 @@ impl<W: Write + Send> XzEncoder<W> {
         self.write_header()?;
         self.w.write_all(&d.block)?;
         self.records.push((d.unpadded, d.uncompressed));
-        self.free.push(d.block);
-        self.free.push(d.data);
+        if self.free.len() < 2 {
+            self.free.push(d.data);
+        }
         Ok(true)
     }
 

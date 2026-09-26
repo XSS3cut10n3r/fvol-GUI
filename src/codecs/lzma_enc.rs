@@ -151,6 +151,9 @@ impl RangeEncoder {
 const EMPTY: u32 = u32::MAX;
 const HASH2_BITS: u32 = 16;
 const HASH3_BITS: u32 = 16;
+/// The hash chains link positions within the last CHAIN_WINDOW bytes (a ring buffer: 4 MB
+/// whatever the block size); older candidates are still found through the hash heads.
+const CHAIN_WINDOW: usize = 1 << 20;
 
 /// A match: length and distance - 1 (LZMA's convention).
 #[derive(Clone, Copy, Default, Debug)]
@@ -163,7 +166,9 @@ struct MatchFinder {
     head2: Vec<u32>,
     head3: Vec<u32>,
     head4: Vec<u32>,
+    /// chain[p & cmask] = previous position with the same 4-byte hash as p.
     chain: Vec<u32>,
+    cmask: usize,
     shift4: u32,
     depth: u32,
     nice: usize,
@@ -199,6 +204,7 @@ impl MatchFinder {
             head3: Vec::new(),
             head4: Vec::new(),
             chain: Vec::new(),
+            cmask: 0,
             shift4: 0,
             depth: 16,
             nice: 64,
@@ -206,14 +212,22 @@ impl MatchFinder {
     }
 
     fn reset(&mut self, n: usize, depth: u32, nice: usize) {
-        let bits4 = ((n.max(1) as u64).next_power_of_two().trailing_zeros()).clamp(12, 20);
+        let bits4 = ((n.max(1) as u64).next_power_of_two().trailing_zeros()).clamp(12, 18);
         self.shift4 = 32 - bits4;
         for (v, bits) in [(&mut self.head2, HASH2_BITS), (&mut self.head3, HASH3_BITS), (&mut self.head4, bits4)] {
             v.clear();
             v.resize(1 << bits, EMPTY);
         }
+        #[allow(unused_mut)]
+        let mut window = CHAIN_WINDOW;
+        #[cfg(test)]
+        if let Some(w) = std::env::var("RSVOL_LZMA_WINDOW").ok().and_then(|v| v.parse::<usize>().ok()) {
+            window = w.next_power_of_two();
+        }
+        let size = n.max(1).next_power_of_two().min(window);
+        self.cmask = size - 1;
         self.chain.clear();
-        self.chain.resize(n, EMPTY);
+        self.chain.resize(size, EMPTY);
         self.depth = depth.max(1);
         self.nice = nice.clamp(MATCH_LEN_MIN + 1, MATCH_LEN_MAX);
     }
@@ -232,7 +246,7 @@ impl MatchFinder {
         let (h2, h3, h4) = self.hashes(ld32(b, pos));
         self.head2[h2] = pos as u32;
         self.head3[h3] = pos as u32;
-        self.chain[pos] = self.head4[h4];
+        self.chain[pos & self.cmask] = self.head4[h4];
         self.head4[h4] = pos as u32;
     }
 
@@ -255,7 +269,7 @@ impl MatchFinder {
         let (c2, c3, mut c) = (self.head2[h2], self.head3[h3], self.head4[h4]);
         self.head2[h2] = pos as u32;
         self.head3[h3] = pos as u32;
-        self.chain[pos] = c;
+        self.chain[pos & self.cmask] = c;
         self.head4[h4] = pos as u32;
         let nice = self.nice.min(avail);
         let mut n = 0;
@@ -296,10 +310,11 @@ impl MatchFinder {
                 }
             }
             depth -= 1;
-            if depth == 0 {
+            // A candidate beyond the ring may have had its link overwritten: stop there.
+            if depth == 0 || pos - cu > self.cmask {
                 break;
             }
-            c = self.chain[cu];
+            c = self.chain[cu & self.cmask];
         }
         n
     }
@@ -331,6 +346,14 @@ impl LzmaParams {
             8 => (128, 273),
             _ => (256, 273),
         };
+        #[cfg(test)]
+        if let Ok(s) = std::env::var("RSVOL_LZMA_PARAMS") {
+            // Benchmark-only override: "depth,nice".
+            let v: Vec<usize> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.len() == 2 {
+                return LzmaParams { depth: v[0] as u32, nice: v[1] };
+            }
+        }
         LzmaParams { depth, nice }
     }
 }
