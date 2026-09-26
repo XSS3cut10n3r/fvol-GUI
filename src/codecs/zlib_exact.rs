@@ -1399,7 +1399,7 @@ impl Deflater {
     }
 
     /// longest_match (non-FASTEST). Sets match_start, returns the length.
-    #[inline(always)]
+    #[inline(never)]
     fn longest_match(&mut self, mut cur_match: usize) -> usize {
         let mut chain_length = self.max_chain_length;
         let scan = self.strstart;
