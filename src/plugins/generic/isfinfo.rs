@@ -63,7 +63,10 @@ impl Plugin for IsfInfo {
         let roots = python_symbol_roots(ctx);
         let db_path = paths::vol3_cache_dir(ctx.opts.cache_path.as_deref()).join("identifier.cache");
         let mut summaries = SummaryCache::load();
-        let mut table = {
+        let mut table = if ctx.opts.clear_cache {
+            // python's --clear-cache deletes identifier.cache before SymbolCacheMagic runs
+            Vec::new()
+        } else {
             let _t = crate::util::trace::span("isfinfo read identifier.cache");
             read_identifier_cache(&db_path)
         };
@@ -722,9 +725,10 @@ fn summarize_location(loc: &IsfLocation) -> Summary {
     }
 }
 
-/// `~/.cache/rsvol/isfinfo.cache`: URL -> (file stamp, summary).
+/// `~/.cache/rsvol/isfinfo.cache`: URL -> (file stamp, summary). Read on first use only (a
+/// default run with an up-to-date python database needs no summaries at all).
 struct SummaryCache {
-    map: FxHashMap<String, (u64, Summary)>,
+    map: Option<FxHashMap<String, (u64, Summary)>>,
     dirty: bool,
 }
 
@@ -736,7 +740,7 @@ impl SummaryCache {
     }
 
     fn load() -> SummaryCache {
-        Self::load_from(&Self::path())
+        SummaryCache { map: None, dirty: false }
     }
 
     fn save(&self) {
@@ -745,7 +749,7 @@ impl SummaryCache {
         }
     }
 
-    fn load_from(path: &Path) -> SummaryCache {
+    fn read(path: &Path) -> FxHashMap<String, (u64, Summary)> {
         let mut map = FxHashMap::default();
         if let Ok(b) = std::fs::read(path) {
             if b.starts_with(CACHE_MAGIC) {
@@ -755,12 +759,17 @@ impl SummaryCache {
                 }
             }
         }
-        SummaryCache { map, dirty: false }
+        map
+    }
+
+    #[cfg(test)]
+    fn load_from(path: &Path) -> SummaryCache {
+        SummaryCache { map: Some(Self::read(path)), dirty: false }
     }
 
     fn save_to(&self, path: &Path) {
         let mut b = CACHE_MAGIC.to_vec();
-        for (url, (stamp, s)) in &self.map {
+        for (url, (stamp, s)) in self.map.iter().flatten() {
             put_bytes(&mut b, url.as_bytes());
             b.extend_from_slice(&stamp.to_le_bytes());
             match s {
@@ -799,11 +808,15 @@ impl SummaryCache {
 
     /// Summaries for `locs` (url, location), computing the missing / outdated ones in parallel.
     fn get(&mut self, locs: &[(&str, &IsfLocation)]) -> Vec<Summary> {
+        if locs.is_empty() {
+            return Vec::new();
+        }
+        let map = self.map.get_or_insert_with(|| Self::read(&Self::path()));
         let stamps: Vec<Option<u64>> = locs.iter().map(|(u, l)| stamp(u, l)).collect();
         let mut out: Vec<Option<Summary>> = locs
             .iter()
             .zip(&stamps)
-            .map(|((u, _), st)| match (self.map.get(*u), st) {
+            .map(|((u, _), st)| match (map.get(*u), st) {
                 (Some((s0, sum)), Some(s)) if s0 == s => Some(sum.clone()),
                 _ => None,
             })
@@ -813,7 +826,7 @@ impl SummaryCache {
         let fresh = crate::util::par::par_map_bounded(todo.len(), 8, |k| summarize_location(locs[todo[k]].1));
         for (k, s) in todo.into_iter().zip(fresh) {
             if let Some(st) = stamps[k] {
-                self.map.insert(locs[k].0.to_string(), (st, s.clone()));
+                map.insert(locs[k].0.to_string(), (st, s.clone()));
                 self.dirty = true;
             }
             out[k] = Some(s);
@@ -1688,17 +1701,18 @@ mod tests {
             Summary::Json { stats: Some([1, 2, 3, u64::MAX]), row: Some((None, OS_NONE)) },
             Summary::Json { stats: Some([0; 4]), row: Some((Some(b"a\x00b".to_vec()), OS_LINUX)) },
         ];
-        let mut c = SummaryCache { map: FxHashMap::default(), dirty: true };
+        let mut map = FxHashMap::default();
         for (i, e) in entries.iter().enumerate() {
-            c.map.insert(format!("u{i}"), (i as u64, e.clone()));
+            map.insert(format!("u{i}"), (i as u64, e.clone()));
         }
+        let c = SummaryCache { map: Some(map), dirty: true };
         let tmp = std::env::temp_dir().join(format!("rsvol-isfinfo-test-{}.cache", std::process::id()));
         c.save_to(&tmp);
-        let back = SummaryCache::load_from(&tmp);
+        let back = SummaryCache::load_from(&tmp).map.unwrap();
         let _ = std::fs::remove_file(&tmp);
-        assert_eq!(back.map.len(), entries.len());
+        assert_eq!(back.len(), entries.len());
         for (i, e) in entries.iter().enumerate() {
-            assert_eq!(&back.map[&format!("u{i}")], &(i as u64, e.clone()));
+            assert_eq!(&back[&format!("u{i}")], &(i as u64, e.clone()));
         }
     }
 }
