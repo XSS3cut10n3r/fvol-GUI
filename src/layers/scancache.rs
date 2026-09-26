@@ -2055,7 +2055,7 @@ mod tests {
         }
         let (p, file) = file_with(&img);
         let l = crate::layers::containers::stack(file).unwrap();
-        assert_eq!(l.name(), "LimeLayer");
+        assert_eq!(l.class_name(), "LimeLayer");
         let root = scratch("root");
         for pats in [vec![b"Proc".to_vec()], vec![b"ab".to_vec(), b"abP".to_vec(), b"P".to_vec()]] {
             let ms = Chunked(MultiStringScanner::new(&pats), 4096, 1000);

@@ -105,7 +105,7 @@ fn name_matches(fo: &Obj, re: Option<&Regex>) -> Result<bool> {
 
 /// The file object behind a control area's `FilePointer` (python
 /// `FilePointer.dereference()`: `_EX_FAST_REF` since Windows 7, a plain pointer before).
-fn file_pointer_target(fp: &Obj) -> Result<Obj> {
+pub fn file_pointer_target(fp: &Obj) -> Result<Obj> {
     if fp.is_pointer() { fp.deref() } else { fp.fast_ref_dereference() }
 }
 

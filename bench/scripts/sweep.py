@@ -80,11 +80,36 @@ IMAGES = {
                      ref=REF + "/linux/bionic32-4.15-pae-elf", sym=True),
     "mac1012": dict(os="mac", path=ROOT + "/testdata/images/mac/securinets2019-contact_me-macos-10.12.6.raw",
                     ref=REF + "/mac/mac-10.12.6", sym=True),
+    # old Windows (options only, rank 3): XP / 2003 raw, XP / Vista crash dumps, 2008 PAE, 7 / 2012 R2 x64
+    "winxp": dict(os="windows", path=ROOT + "/testdata/images/windows/vol3-winxp-sp2-x86-laptop-2005-06-25.img",
+                  ref=REF + "/windows/winxp-sp2-x86", sym=True),
+    "xp3crash": dict(os="windows", path=ROOT + "/testdata/images/windows/m57-pat-xp-sp3-x86-2009-12-11.dmp",
+                     ref=REF + "/windows/winxp-sp3-x86-crash", sym=True),
+    # its kernel ISF is not on the MS symbol server: symbols-extra (see bench/images.tsv)
+    "win2003": dict(os="windows", path=ROOT + "/testdata/images/windows/nist-boomer-win2003-x86-2006-03-17.img",
+                    ref=REF + "/windows/win2003-x86", sym=["-s", SYM + ";" + ROOT + "/testdata/symbols-extra"]),
+    "vista": dict(os="windows", path=ROOT + "/testdata/images/windows/m57-terry-vista-sp2-x86-2009-12-11.dmp",
+                  ref=REF + "/windows/vista-sp2-x86-crash", sym=True),
+    "win2008": dict(os="windows", path=ROOT + "/testdata/images/windows/samsclass-win2008-sp1-x86-memdump.mem",
+                    ref=REF + "/windows/win2008-sp1-x86-pae", sym=True),
+    # pre-Windows-10 x64
+    "win7x64": dict(os="windows", path=ROOT + "/testdata/images/windows/memlabs-lab1-win7sp1-x64.raw",
+                    ref=REF + "/windows/win7sp1-x64", sym=True),
+    "win2012": dict(os="windows", path=ROOT + "/testdata/images/windows/dfirmadness-citadeldc01-win2012r2-x64.mem",
+                    ref=REF + "/windows/win2012r2-x64", sym=True),
 }
 # 0 = primary image of its OS (every case), 1 = second image, 2 = extra image: options only, run later
-IMAGE_RANK = {"win": 0, "noble": 0, "mac": 0, "win1809": 1, "jammy": 1, "win7x86": 2, "bionic32": 2, "mac1012": 2}
+IMAGE_RANK = {"win": 0, "noble": 0, "mac": 0, "win1809": 1, "jammy": 1, "win7x86": 2, "bionic32": 2, "mac1012": 2,
+              "winxp": 3, "xp3crash": 3, "win2003": 3, "vista": 3, "win2008": 3, "win7x64": 3, "win2012": 3}
 RENDERERS = ["quick", "csv", "json", "jsonl", "pretty", "none", "mermaid"]
-SECOND_IMAGES = ("win1809", "jammy", "win7x86", "bionic32", "mac1012")
+SECOND_IMAGES = ("win1809", "jammy", "win7x86", "bionic32", "mac1012", "winxp", "xp3crash", "win2003", "vista", "win2008",
+                 "win7x64", "win2012")
+
+
+def sym_args(img):
+    """The image's symbol arguments: `sym` is True (-s testdata/symbols), False, or an argv list."""
+    s = IMAGES[img]["sym"]
+    return list(s) if isinstance(s, list) else ["-s", SYM] if s else []
 PY_TIMEOUT = 600
 RS_TIMEOUT = 300
 
@@ -199,7 +224,7 @@ def write_inputs():
 def rsvol_json(binary, img, argv):
     """Run rsvol with -r json at harvest time (used only to find real argument values)."""
     im = IMAGES[img]
-    cmd = [binary, "-q", "-r", "json"] + (["-s", SYM] if im["sym"] else []) + ["-f", im["path"]] + argv
+    cmd = [binary, "-q", "-r", "json"] + sym_args(img) + ["-f", im["path"]] + argv
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=300, cwd=SCR)
         return json.loads(r.stdout.decode("utf-8", "replace").split("\n", 1)[1] or "[]")
@@ -892,7 +917,7 @@ def cache_args(img):
 
 def full_argv(img, case, run_dir, extra_first=None):
     im = IMAGES[img]
-    base = ["-q"] + cache_args(img) + (["-s", SYM] if im["sym"] else [])
+    base = ["-q"] + cache_args(img) + sym_args(img)
     if not case.get("nof"):
         base += ["-f", im["path"]]
     base += ["-o", run_dir + "/files"]
@@ -935,8 +960,7 @@ def run_one(cmd_prefix, img, case, run_dir, timeout):
         runs = [full_argv(img, case, run_dir)] * 2
     elif case["mode"] == "config":
         runs = [full_argv(img, case, run_dir, ["--save-config", "saved.json"])]
-        im = IMAGES[img]
-        runs.append(["-q"] + cache_args(img) + (["-s", SYM] if im["sym"] else []) + ["-o", run_dir + "/files", "-c", "saved.json", case["argv"][0]])
+        runs.append(["-q"] + cache_args(img) + sym_args(img) + ["-o", run_dir + "/files", "-c", "saved.json", case["argv"][0]])
     for i, argv in enumerate(runs):
         t0 = time.time()
         try:
@@ -963,10 +987,12 @@ def py_prefix(timeout):
 
 
 def rs_prefix_for(binary):
-    link_dir = SCR + "/bin"
+    target = os.path.abspath(binary)
+    # one link directory per binary: agents sweeping concurrently with their own builds must not
+    # retarget each other's link
+    link_dir = SCR + "/bin/" + hashlib.sha256(target.encode()).hexdigest()[:12]
     os.makedirs(link_dir, exist_ok=True)
     link = link_dir + "/vol.py"  # argparse messages use the program name: python's is vol.py
-    target = os.path.abspath(binary)
     try:
         if os.readlink(link) != target:
             os.unlink(link)

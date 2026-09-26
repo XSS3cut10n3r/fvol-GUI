@@ -41,10 +41,10 @@ fn open(p: &Path) -> Arc<FileLayer> {
 
 /// Class names of a physical stack, top first (as python's `stack_layer` result).
 fn chain(l: &Arc<dyn Layer>) -> Vec<String> {
-    let mut v = vec![l.name().to_string()];
+    let mut v = vec![l.class_name().to_string()];
     let mut cur = l.lower();
     while let Some(c) = cur {
-        v.push(c.name().to_string());
+        v.push(c.class_name().to_string());
         cur = c.lower();
     }
     v
@@ -69,7 +69,7 @@ fn check_expect(expect: &Path) -> usize {
     let layer = st.layer;
     if std::env::var_os("RSVOL_CONTAINER_VERBOSE").is_some() {
         let base = Base::from_file(&file);
-        let direct = match layer.name() {
+        let direct = match layer.class_name() {
             "LimeLayer" => lime::stack(&base).ok(),
             "Elf64Layer" => elf::stack_elf64(&base).ok(),
             "XenCoreDumpLayer" => elf::stack_xen(&base).ok(),
@@ -82,7 +82,7 @@ fn check_expect(expect: &Path) -> usize {
         let mode = direct.map_or("-".to_string(), |d| {
             format!("{} {} runs", if d.is_exact_mode() { "EXACT" } else { "fast" }, d.run_count())
         });
-        println!("{stem:24} {:>18} open {:>9.3} ms  {mode}", layer.name(), open_time.as_secs_f64() * 1e3);
+        println!("{stem:24} {:>18} open {:>9.3} ms  {mode}", layer.class_name(), open_time.as_secs_f64() * 1e3);
     }
     let text = std::fs::read_to_string(expect).unwrap();
     let mut n = 0;
@@ -183,7 +183,7 @@ fn stack_listing_names() {
     assert_eq!(meta(&st), vec![None, None, Some("file:///some/where/vmware.vmss".to_string())]);
     // python tests its location, not the local file: no VMware layer for x.vmem.gz
     let st = stack_with(open(&p), &StackOptions { location: Some(&p), url: Some("file:///x.vmem.gz"), ..Default::default() }).unwrap();
-    assert_eq!(st.layer.name(), "FileLayer");
+    assert_eq!(st.layer.class_name(), "FileLayer");
     // a .vmsn is used when there is no .vmss
     let vmsn = fixtures_dir().join("vmware_vmsn.vmem");
     let st = stack_with(open(&vmsn), &StackOptions { location: Some(&vmsn), ..Default::default() }).unwrap();
@@ -192,7 +192,9 @@ fn stack_listing_names() {
     // a raw file stays raw
     let raw = temp_file("raw", &vec![0x11u8; 3 * 4096]);
     let st = stack_with(open(&raw), &StackOptions::default()).unwrap();
-    assert_eq!(st.layer.name(), "FileLayer");
+    assert_eq!(st.layer.class_name(), "FileLayer");
+    // layers carry python's names (printed e.g. by windows.poolscanner)
+    assert_eq!(st.layer.name(), "memory_layer");
     assert_eq!(st.layers, vec![StackEntry { depth: 0, name: "memory_layer".into(), class: "FileLayer", location: None }]);
     std::fs::remove_file(raw).unwrap();
 
@@ -200,8 +202,10 @@ fn stack_listing_names() {
     let p = dir.join("lime.lime");
     let only_elf = vec!["Elf64Stacker".to_string()];
     let st = stack_with(open(&p), &StackOptions { location: Some(&p), stackers: Some(&only_elf), ..Default::default() }).unwrap();
-    assert_eq!(st.layer.name(), "FileLayer");
-    assert_eq!(stack(open(&p)).unwrap().name(), "LimeLayer");
+    assert_eq!(st.layer.class_name(), "FileLayer");
+    let lime = stack(open(&p)).unwrap();
+    assert_eq!(lime.class_name(), "LimeLayer");
+    assert_eq!((lime.name(), lime.lower().unwrap().name()), ("memory_layer", "base_layer"));
 }
 
 #[test]
@@ -210,7 +214,7 @@ fn vmem_location_from_proc_maps() {
     let p = fixtures_dir().join("vmware.vmem");
     let file = open(&p);
     assert_eq!(file_location(&file).as_deref(), Some(p.as_path()));
-    assert_eq!(stack(file).unwrap().name(), "VmwareLayer");
+    assert_eq!(stack(file).unwrap().class_name(), "VmwareLayer");
 }
 
 #[test]
@@ -504,7 +508,7 @@ fn truncated_file_reads() {
     img.extend((0..6144u32).map(|i| (i % 251) as u8));
     let p = temp_file("trunc", &img);
     let l = stack(open(&p)).unwrap();
-    assert_eq!(l.name(), "LimeLayer");
+    assert_eq!(l.class_name(), "LimeLayer");
     assert_eq!(l.max_address(), 0x1000 + 3 * 4096 - 1);
     assert_eq!(l.read_vec(0x1000, 16).unwrap(), (0..16).collect::<Vec<u8>>());
     match l.read(0x1000 + 6000, &mut [0u8; 400]) {
@@ -785,7 +789,7 @@ fn container_bench() {
             total as f64 / t_seq / 1e6,
             runs.len(),
             t_map * 1e6,
-            layer.name()
+            layer.class_name()
         );
     }
 }
@@ -837,8 +841,8 @@ fn container_compare() {
     let total: usize = pieces.iter().map(|p| p.1).sum();
     println!(
         "{} vs {}: {} bytes in {} runs compared in {:.2} s, {} differing MiB pieces",
-        layers[0].name(),
-        layers[1].name(),
+        layers[0].class_name(),
+        layers[1].class_name(),
         total,
         ca.len(),
         t.elapsed().as_secs_f64(),

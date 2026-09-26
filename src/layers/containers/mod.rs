@@ -17,8 +17,9 @@
 //!
 //! All container layers are [`SegmentedLayer`]s: a flat sorted run table over the lower layer
 //! (the mmapped file), so reads are a table lookup (binary search, or a bucket index for large
-//! tables) plus one memcpy, and `slice()` is zero-copy. Layer names (`Layer::name`) are the
-//! python class names.
+//! tables) plus one memcpy, and `slice()` is zero-copy. `Layer::class_name` is the python class
+//! name; [`stack_with`] names every layer of the finished stack as python's construction magic
+//! does (`Layer::name`: `memory_layer`, `base_layer`, ...; the class name before that).
 //!
 //! Notes for users of the layers:
 //!   * `mapping()` returns the valid runs; for raw runs `mapped` is the file offset. For
@@ -224,6 +225,14 @@ struct Node {
     deps: Vec<(&'static str, usize)>,
     /// python location of a FileLayer other than the input (VMware metadata)
     location: Option<String>,
+    /// The layer built for this node, to give it python's name once the stack is complete
+    /// (None: the VMware metadata file, which is not a layer of ours).
+    layer: Option<NodeLayer>,
+}
+
+enum NodeLayer {
+    File(Arc<FileLayer>),
+    Segmented(Arc<SegmentedLayer>),
 }
 
 pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> {
@@ -240,7 +249,7 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
         })
         .collect();
     let mut top = Base::from_file(&file);
-    let mut nodes = vec![Node { class: "FileLayer", deps: vec![], location: None }];
+    let mut nodes = vec![Node { class: "FileLayer", deps: vec![], location: None, layer: Some(NodeLayer::File(file.clone())) }];
     let mut top_node = 0usize;
     let mut used = Vec::new();
     let mut native_tables = Vec::new();
@@ -274,13 +283,14 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
             };
             if let Ok(layer) = got {
                 let class = layer.class_name();
-                let layer: Arc<dyn Layer> = Arc::new(layer);
+                let seg = Arc::new(layer);
+                let layer: Arc<dyn Layer> = seg.clone();
                 let mut deps = vec![("base_layer", top_node)];
                 if meta_location.is_some() {
-                    nodes.push(Node { class: "FileLayer", deps: vec![], location: meta_location });
+                    nodes.push(Node { class: "FileLayer", deps: vec![], location: meta_location, layer: None });
                     deps.push(("meta_layer", nodes.len() - 1));
                 }
-                nodes.push(Node { class, deps, location: None });
+                nodes.push(Node { class, deps, location: None, layer: Some(NodeLayer::Segmented(seg)) });
                 top_node = nodes.len() - 1;
                 top = Base { layer, file: None };
                 used.push(st);
@@ -290,13 +300,22 @@ pub fn stack_with(file: Arc<FileLayer>, opts: &StackOptions) -> Result<Stacked> 
         }
         break;
     }
-    let layers = describe(&nodes, top_node);
+    let (layers, names) = describe(&nodes, top_node);
+    // python plugins print these names (e.g. windows.poolscanner's Layer column when it scans
+    // the physical layer)
+    for (node, name) in nodes.iter().zip(&names) {
+        match (&node.layer, name) {
+            (Some(NodeLayer::File(f)), Some(n)) => f.set_python_name(n),
+            (Some(NodeLayer::Segmented(l)), Some(n)) => l.set_python_name(n),
+            _ => {}
+        }
+    }
     Ok(Stacked { layer: top.layer, stackers: used, layers, native_tables })
 }
 
 /// python layer names after ConstructionMagic (post-order construction, requirement name with
-/// a numeric suffix on collision), listed in `get_depends` pre-order.
-fn describe(nodes: &[Node], top: usize) -> Vec<StackEntry> {
+/// a numeric suffix on collision), listed in `get_depends` pre-order; and each node's name.
+fn describe(nodes: &[Node], top: usize) -> (Vec<StackEntry>, Vec<Option<String>>) {
     fn construct(nodes: &[Node], n: usize, req: &'static str, taken: &mut Vec<String>, names: &mut Vec<Option<String>>) {
         for &(r, d) in &nodes[n].deps {
             construct(nodes, d, r, taken, names);
@@ -326,7 +345,7 @@ fn describe(nodes: &[Node], top: usize) -> Vec<StackEntry> {
     construct(nodes, top, "memory_layer", &mut taken, &mut names);
     let mut out = Vec::new();
     list(nodes, top, 0, &names, &mut out);
-    out
+    (out, names)
 }
 
 /// Recover the path of the mmapped input file from /proc/self/maps (the FileLayer does not

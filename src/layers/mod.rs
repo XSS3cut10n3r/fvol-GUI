@@ -92,8 +92,10 @@ impl Metadata {
 }
 
 pub trait Layer: Send + Sync {
-    /// Layer name as volatility3 would name it where it matters for output
-    /// (e.g. "memory_layer", "layer_name", "FileLayer"). Informational otherwise.
+    /// Layer name as volatility3 names it (python plugins print it, e.g. windows.poolscanner):
+    /// "layer_name" for a kernel translation layer, "memory_layer" / "base_layer" / ... for the
+    /// physical stack (named by `containers::stack_with`); the class name for a container or
+    /// file layer that was not stacked that way. Use `class_name()` to identify the layer type.
     fn name(&self) -> &str;
 
     /// Highest valid address (inclusive).

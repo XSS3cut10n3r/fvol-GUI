@@ -88,7 +88,8 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
         return Err(unsatisfied(ctx, &Error::msg("MacIntelStacker disabled by --stackers"), LAYER));
     }
     let image = ctx.image_path().map_err(|e| unsatisfied(ctx, &e, LAYER))?;
-    let fp = symbol_path_fingerprint();
+    // the cached kernel belongs to the physical stack `--stackers` built
+    let fp = symbol_path_fingerprint() + &crate::automagic::stackers_key(ctx.opts.stackers.as_deref());
     let am = match cache_load(&image, &fp) {
         Some(a) => a,
         None => {
