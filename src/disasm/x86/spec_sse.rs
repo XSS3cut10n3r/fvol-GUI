@@ -42,7 +42,7 @@ pub(crate) const SPEC: &str = r#"
 0f 01 @df : invlpga aAX, ecx
 0f 01 @ee : rdpkru
 0f 01 @ef : wrpkru
-0f 01 @f8 mode64 : swapgs
+0f 01 @f8 : swapgs
 0f 01 @f9 : rdtscp
 0f 01 @fa : monitorx
 0f 01 @fb : mwaitx
@@ -96,14 +96,16 @@ pub(crate) const SPEC: &str = r#"
 0f 19 m : nop m:v/z
 0f 19 r : nop m:v, r:v
 0f 1a np m : bndldx r:bnd, M:
-0f 1a 66 : bndmov r:bnd, m:bnd/x
+0f 1a 66 mode64 : bndmov r:bnd, m:bnd/x
+0f 1a 66 mode32 : bndmov r:bnd, m:bnd/q
 0f 1a f3 : bndcl r:bnd, m:n/n
 0f 1a f2 : bndcu r:bnd, m:n/n
 0f 1b np m : bndstx M:, r:bnd
-0f 1b 66 : bndmov m:bnd/x, r:bnd
+0f 1b 66 mode64 : bndmov m:bnd/x, r:bnd
+0f 1b 66 mode32 : bndmov m:bnd/q, r:bnd
 0f 1b f3 m : bndmk r:bnd, M:
 0f 1b f2 : bndcn r:bnd, m:n/n
-0f 1c np|xf3|xf2 m /0 : cldemote M:/b
+0f 1c np|f3|f2 m /0 : cldemote M:/b
 0f 1c 66 m : nop m:v/z
 0f 1d m : nop m:v/z
 0f 1e m : nop m:v/z
@@ -312,7 +314,7 @@ pub(crate) const SPEC: &str = r#"
 0f 8d : jge j:z ; bnd f64 relq
 0f 8e : jle j:z ; bnd f64 relq
 0f 8f : jg j:z ; bnd f64 relq
-0f 82-8f mode64 6f3|6f2 : INVALID
+0f 82-8f mode64 f3|f2 p66 w0 : INVALID
 # ------------------------------------------------------------------ 0F 90-9F setcc
 0f 90 : seto m:b
 0f 91 : setno m:b
@@ -352,12 +354,12 @@ pub(crate) const SPEC: &str = r#"
 0f ab : bts m:v, r:v ; lock
 0f ac : shrd m:v, r:v, i:b
 0f ad : shrd m:v, r:v, cl
-0f ae m /0 np|66|xf3|xf2 w0 : fxsave M:
-0f ae m /0 np|66|xf3|xf2 w1 : fxsave64 M:/p
-0f ae m /1 np|66|xf3|xf2 w0 : fxrstor M:
-0f ae m /1 np|66|xf3|xf2 w1 : fxrstor64 M:/p
-0f ae m /2 np|66|xf3|xf2 : ldmxcsr M:/d
-0f ae m /3 np|66|xf3|xf2 : stmxcsr M:/d
+0f ae m /0 np|66|f3|f2 w0 : fxsave M:
+0f ae m /0 np|66|f3|f2 w1 : fxsave64 M:/p
+0f ae m /1 np|66|f3|f2 w0 : fxrstor M:
+0f ae m /1 np|66|f3|f2 w1 : fxrstor64 M:/p
+0f ae m /2 np|66|f3|f2 : ldmxcsr M:/d
+0f ae m /3 np|66|f3|f2 : stmxcsr M:/d
 0f ae np m /4 w0 : xsave M:/p
 0f ae np m /4 w1 : xsave64 M:/p
 0f ae np m /5 w0 : xrstor M:/p
@@ -373,10 +375,10 @@ pub(crate) const SPEC: &str = r#"
 0f ae 66 r /6 : tpause R:d
 0f ae f3 r /6 : umonitor R:A
 0f ae f2 r /6 : umwait R:d
-0f ae f3 r /0 : rdfsbase R:y
-0f ae f3 r /1 : rdgsbase R:y
-0f ae f3 r /2 : wrfsbase R:y
-0f ae f3 r /3 : wrgsbase R:y
+0f ae f3 mode64 r /0 : rdfsbase R:y
+0f ae f3 mode64 r /1 : rdgsbase R:y
+0f ae f3 mode64 r /2 : wrfsbase R:y
+0f ae f3 mode64 r /3 : wrgsbase R:y
 0f ae f3 /4 : ptwrite m:y
 0f ae f3 r /5 w0 : incsspd R:d
 0f ae f3 r /5 w1 : incsspq R:q
@@ -401,7 +403,7 @@ pub(crate) const SPEC: &str = r#"
 0f b5 m : lgs r:v, M:/p
 0f b6 : movzx r:v, m:b
 0f b7 : movzx r:v, m:w
-0f b8 f3 : popcnt r:v, m:v
+0f b8 f3|6f3 : popcnt r:v, m:v
 0f b9 : ud1
 0f ba /4 : bt m:v, i:b
 0f ba /5 : bts m:v, i:b ; lock
@@ -409,9 +411,9 @@ pub(crate) const SPEC: &str = r#"
 0f ba /7 : btc m:v, i:b ; lock
 0f bb : btc m:v, r:v ; lock
 0f bc np|66 : bsf r:v, m:v
-0f bc f3 : tzcnt r:v, m:v
+0f bc f3|6f3 : tzcnt r:v, m:v
 0f bd np|66 : bsr r:v, m:v
-0f bd f3 : lzcnt r:v, m:v
+0f bd f3|6f3 : lzcnt r:v, m:v
 0f be : movsx r:v, m:b
 0f bf : movsx r:v, m:w
 # ------------------------------------------------------------------ 0F C0-CF
@@ -430,12 +432,12 @@ pub(crate) const SPEC: &str = r#"
 0f c6 66 : shufpd r:x, m:x, i:b
 0f c7 m /1 o16|o32 : cmpxchg8b M:/q ; lock
 0f c7 m /1 o64 : cmpxchg16b M:/x ; lock
-0f c7 m /3 np|66|xf3|xf2 w0 : xrstors M:/p
-0f c7 m /3 np|66|xf3|xf2 w1 : xrstors64 M:/p
-0f c7 m /4 np|66|xf3|xf2 w0 : xsavec M:/p
-0f c7 m /4 np|66|xf3|xf2 w1 : xsavec64 M:/p
-0f c7 m /5 np|66|xf3|xf2 w0 : xsaves M:/p
-0f c7 m /5 np|66|xf3|xf2 w1 : xsaves64 M:/p
+0f c7 m /3 np|66|f3|f2 w0 : xrstors M:/p
+0f c7 m /3 np|66|f3|f2 w1 : xrstors64 M:/p
+0f c7 m /4 np|66|f3|f2 w0 : xsavec M:/p
+0f c7 m /4 np|66|f3|f2 w1 : xsavec64 M:/p
+0f c7 m /5 np|66|f3|f2 w0 : xsaves M:/p
+0f c7 m /5 np|66|f3|f2 w1 : xsaves64 M:/p
 0f c7 np m /6 : vmptrld M:/q
 0f c7 np m /7 : vmptrst M:/q
 0f c7 66 m /6 : vmclear M:/q
@@ -621,7 +623,7 @@ pub(crate) const SPEC: &str = r#"
 38 f0 np|66 m : movbe r:v, M:v
 38 f1 np|66 m : movbe M:v, r:v
 38 f0 f2 : crc32 r:y, m:b
-38 f1 f2 : crc32 r:y, m:v
+38 f1 f2|6f2 : crc32 r:y, m:v
 38 f8 66 m : movdir64b r:A, M:/zmm
 38 f9 m : movdiri M:y, r:y
 38 f6 66 : adcx r:y, m:y

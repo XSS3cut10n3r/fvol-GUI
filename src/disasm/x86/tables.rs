@@ -290,8 +290,8 @@ fn parse_sel(tok: &str, sel: &mut [u8; NSEL]) -> Result<(), String> {
         let mut kind = None;
         for p in tok.split('|') {
             let pm: Option<u8> = match p {
-                "f3" => Some(0b010100),
-                "f2" => Some(0b101000),
+                "f3" => Some(0b000100),
+                "f2" => Some(0b001000),
                 "xf3" => Some(0b000100),
                 "xf2" => Some(0b001000),
                 "6f3" => Some(0b010000),

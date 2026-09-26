@@ -153,6 +153,7 @@ pub(crate) const SPEC: &str = r#"
 1 90 rexb1 : xchg o:v, eAX
 1 90 f3 rexb0 o32 : pause
 1 90 f3 rexb0 o16 : INVALID
+1 90 f3 rexb0 mode32 a16 : INVALID
 1 90 f3 rexb0 o64 : xchg o:v, eAX
 1 91-97 : xchg o:v, eAX
 1 98 o16 : cbw
@@ -233,7 +234,7 @@ pub(crate) const SPEC: &str = r#"
 1 c6 /0 : mov m:b, i:b
 1 c6 @f8 : xabort i:bs
 1 c7 /0 : mov m:v, i:z ; immu
-1 c7 @f8 : xbegin j:z
+1 c7 @f8 : xbegin j:z ; relq
 1 c8 : enter i:ws, i:bs ; d64
 1 c9 : leave ; d64
 1 ca o16|o32 : retf i:w ; bnd
