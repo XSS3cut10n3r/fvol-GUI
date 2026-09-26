@@ -1,0 +1,12 @@
+os	plugin	flag	note
+windows	frameworkinfo.FrameworkInfo		python lists components in the readdir order of its install dir (ext4 here, btrfs where rsvol's references were made); rsvol also leaves out the 10 linux plugins it does not implement
+windows	isfinfo.IsfInfo		
+windows	vmscan.Vmscan		vol-rs ships no VMCS ISFs and returns the empty table without reading the image; python and rsvol scan the whole 5 GiB image
+windows	windows.crashinfo.Crashinfo		not a crash dump: every tool exits 1
+windows	windows.pe_symbols.PESymbols		needs arguments: usage error in every tool
+windows	windows.dumpfiles.DumpFiles		writes 1.48 GB of files per run (vol-rs: 4.5 GB, different set)
+windows	windows.windows.Windows	order	python's row order is nondeterministic (set iteration); sorted outputs identical
+windows	windows.statistics.Statistics		python's page walk is quadratic (re-walks every valid run per step); rsvol walks each page once
+windows	timeliner.Timeliner	refmachine	python's output depends on plugin discovery (readdir) order, see Checks; rsvol's output is byte-identical to python's on the reference machine
+linux	linux.kallsyms.Kallsyms		python raises TypeError after 204,803 rows; rsvol reproduces output and exit code
+linux	timeliner.Timeliner	excluded	not comparable: rsvol does not implement linux.pagecache.Files / linux.lsof.Lsof, which feed python's linux timeline (72k of python's 76k rows)
