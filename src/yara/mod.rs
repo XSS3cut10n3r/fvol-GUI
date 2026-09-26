@@ -11,6 +11,7 @@ pub mod regex;
 pub mod rules;
 pub mod scan;
 pub mod teddy;
+pub mod yre;
 
 #[cfg(test)]
 mod benchdrv;
