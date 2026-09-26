@@ -98,11 +98,10 @@ pub fn terminal_columns() -> usize {
     if let Some(c) = OVERRIDES.with(|o| o.get().0) {
         return c;
     }
-    if let Some(c) = std::env::var("COLUMNS").ok().and_then(|v| v.trim().parse::<i64>().ok()) {
-        if c > 0 {
+    if let Some(c) = std::env::var("COLUMNS").ok().and_then(|v| v.trim().parse::<i64>().ok())
+        && c > 0 {
             return c as usize;
         }
-    }
     #[repr(C)]
     #[derive(Default)]
     struct Winsize {
@@ -194,13 +193,12 @@ fn split_chunks(text: &str) -> Vec<String> {
             out.push(c[st..pos].iter().collect());
             continue;
         }
-        if pos > 0 && is_wordpunct(c[pos - 1]) {
-            if let Some(len) = emdash_at(pos) {
+        if pos > 0 && is_wordpunct(c[pos - 1])
+            && let Some(len) = emdash_at(pos) {
                 out.push(c[pos..pos + len].iter().collect());
                 pos += len;
                 continue;
             }
-        }
         // word, possibly hyphenated: \S+? followed by one of the alternatives
         let mut k = pos + 1;
         let end = loop {
@@ -278,20 +276,18 @@ pub fn wrap(text: &str, width: usize, initial_indent: &str, subsequent_indent: &
                 break;
             }
         }
-        if let Some(last) = chunks.last() {
-            if clen(last) as isize > width_left {
+        if let Some(last) = chunks.last()
+            && clen(last) as isize > width_left {
                 // _handle_long_word
                 let space_left = if width_left < 1 { 1 } else { width_left - cur_len as isize };
                 if space_left > 0 {
                     let chunk: Vec<char> = chunks.last().unwrap().chars().collect();
                     let mut end = space_left as usize;
-                    if chunk.len() > end {
-                        if let Some(h) = chunk[..end].iter().rposition(|&c| c == '-') {
-                            if h > 0 && chunk[..h].iter().any(|&c| c != '-') {
+                    if chunk.len() > end
+                        && let Some(h) = chunk[..end].iter().rposition(|&c| c == '-')
+                            && h > 0 && chunk[..h].iter().any(|&c| c != '-') {
                                 end = h + 1;
                             }
-                        }
-                    }
                     let end = end.min(chunk.len());
                     cur_line.push(chunk[..end].iter().collect());
                     *chunks.last_mut().unwrap() = chunk[end..].iter().collect();
@@ -300,7 +296,6 @@ pub fn wrap(text: &str, width: usize, initial_indent: &str, subsequent_indent: &
                 }
                 cur_len = cur_line.iter().map(|s| clen(s)).sum();
             }
-        }
         if cur_line.last().is_some_and(|s| s.trim().is_empty()) {
             let l = cur_line.pop().unwrap();
             cur_len -= clen(&l);

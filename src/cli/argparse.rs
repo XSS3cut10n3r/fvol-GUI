@@ -400,11 +400,10 @@ impl Parser {
     pub fn parse_known_args(&self, args: &[String]) -> Result<(Namespace, Vec<String>), Exit> {
         let mut ns = Namespace::default();
         for a in &self.actions {
-            if a.dest != "==SUPPRESS==" && !ns.has(a.dest) {
-                if let Some(d) = &a.default {
+            if a.dest != "==SUPPRESS==" && !ns.has(a.dest)
+                && let Some(d) = &a.default {
                     ns.set(a.dest, d.clone());
                 }
-            }
         }
         for (k, v) in &self.defaults {
             if !ns.has(k) {
@@ -432,8 +431,8 @@ impl Parser {
         if arg.chars().count() == 1 {
             return None;
         }
-        if let Some((opt, explicit)) = arg.split_once('=') {
-            if let Some(i) = self.find_option(opt) {
+        if let Some((opt, explicit)) = arg.split_once('=')
+            && let Some(i) = self.find_option(opt) {
                 return Some(vec![OptTuple {
                     action: Some(i),
                     option_string: opt.into(),
@@ -441,7 +440,6 @@ impl Parser {
                     explicit_arg: Some(explicit.into()),
                 }]);
             }
-        }
         let tuples = self.get_option_tuples(arg);
         if !tuples.is_empty() {
             return Some(tuples);
@@ -611,7 +609,7 @@ impl Parser {
         }
         if let Some(choices) = &a.choices {
             let sv = v.py_str();
-            if !choices.iter().any(|c| *c == sv) {
+            if !choices.contains(&sv) {
                 let list: Vec<String> = choices.iter().map(|c| str_repr(c)).collect();
                 return Err(ArgError::new(
                     Some(a),
@@ -928,12 +926,11 @@ impl Parser {
             }
             if a.required {
                 required.push(a.name().unwrap_or_default());
-            } else if let Some(PyVal::Str(d)) = &a.default {
-                if a.conv != Conv::Str && ns.get(a.dest) == Some(&PyVal::Str(d.clone())) {
+            } else if let Some(PyVal::Str(d)) = &a.default
+                && a.conv != Conv::Str && ns.get(a.dest) == Some(&PyVal::Str(d.clone())) {
                     let v = self.get_value(a, d)?;
                     ns.set(a.dest, v);
                 }
-            }
         }
         if !required.is_empty() {
             return Err(Fail::Arg(ArgError::new(

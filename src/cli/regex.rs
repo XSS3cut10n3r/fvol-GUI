@@ -552,8 +552,8 @@ impl<'a> Parser<'a> {
                     // octal escape (three octal digits) or group reference
                     let d2 = self.peek_at(1);
                     let d3 = self.peek_at(2);
-                    if let (Some(b @ '0'..='7'), Some(c3 @ '0'..='7')) = (d2, d3) {
-                        if d <= '7' {
+                    if let (Some(b @ '0'..='7'), Some(c3 @ '0'..='7')) = (d2, d3)
+                        && d <= '7' {
                             self.i += 3;
                             let v = (d as u32 - 48) * 64 + (b as u32 - 48) * 8 + (c3 as u32 - 48);
                             if v > 0o377 {
@@ -561,7 +561,6 @@ impl<'a> Parser<'a> {
                             }
                             return Ok(Node::Lit(char::from_u32(v).unwrap_or('\0'), f.icase));
                         }
-                    }
                     self.i += 1;
                     let mut g = d as usize - '0' as usize;
                     if let Some(e @ '0'..='9') = self.peek() {

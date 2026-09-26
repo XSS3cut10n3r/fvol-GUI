@@ -159,13 +159,12 @@ fn unquote(p: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&p[i + 1..i + 3], 16) {
+        if b[i] == b'%' && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&p[i + 1..i + 3], 16) {
                 out.push(v);
                 i += 3;
                 continue;
             }
-        }
         out.push(b[i]);
         i += 1;
     }
@@ -524,11 +523,10 @@ fn run_inner(
     // first partial parse: the whole argv (argv[0] included) without -h/--help
     let known: Vec<String> = argv.iter().filter(|a| *a != "-h" && *a != "--help").cloned().collect();
     let (partial, _) = parser.parse_known_args(&known)?;
-    if let Some(log) = partial.str("log").filter(|l| !l.is_empty()) {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(abspath(log, &cwd)) {
+    if let Some(log) = partial.str("log").filter(|l| !l.is_empty())
+        && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(abspath(log, &cwd)) {
             let _ = writeln!(f, "volatility3.cli INFO     Logging started");
         }
-    }
     if partial.str("plugin_dirs").is_some_and(|p| !p.is_empty()) {
         let _ = writeln!(err, "WARNING  rsvol: plugin directories (-p) are not supported, ignoring");
     }
@@ -685,19 +683,17 @@ fn run_inner(
     }
     // plugin defaults for everything not configured
     for r in &reqs {
-        if cfg.get(r.name).is_none() {
-            if let Some(d) = &r.default {
+        if cfg.get(r.name).is_none()
+            && let Some(d) = &r.default {
                 cfg.set(r.name, d.clone());
             }
-        }
     }
 
-    if location.is_none() {
-        if let Some(u) = config_location {
+    if location.is_none()
+        && let Some(u) = config_location {
             let path = if url_scheme(&u) == "file" { Some(file_url_path(&u)) } else { None };
             location = Some(Location { path, url: u });
         }
-    }
     if let Some(l) = location {
         opts.file = l.path;
         opts.single_location = Some(l.url);
@@ -807,11 +803,10 @@ fn execute(
 }
 
 fn report_error(e: &Error, failure: Option<&RenderFailure>, class: &str, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    if let Error::Io(io) = e {
-        if io.kind() == std::io::ErrorKind::BrokenPipe {
+    if let Error::Io(io) = e
+        && io.kind() == std::io::ErrorKind::BrokenPipe {
             return 1;
         }
-    }
     if let Some(RenderFailure::Crash(msg)) = failure {
         return traceback(err, msg);
     }

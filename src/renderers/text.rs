@@ -783,7 +783,7 @@ fn nth_line(s: &[u8], index: usize) -> &[u8] {
 
 impl RowSink for Pretty<'_> {
     fn begin(&mut self, columns: Vec<Column>) -> Result<()> {
-        eprint!("Formatting...\n");
+        eprintln!("Formatting...");
         self.b.set_columns(columns);
         self.widths = self.b.columns.iter().map(|c| char_len(&c.name)).collect();
         self.b.compute_hidden()?;
@@ -1159,7 +1159,7 @@ struct Mermaid<'a> {
 
 impl RowSink for Mermaid<'_> {
     fn begin(&mut self, columns: Vec<Column>) -> Result<()> {
-        eprint!("Formatting...\n");
+        eprintln!("Formatting...");
         self.b.columns = columns;
         self.b.begun = true;
         Ok(())
