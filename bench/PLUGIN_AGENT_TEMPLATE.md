@@ -43,6 +43,15 @@ in your tree yet, write a minimal private version inside your plugin file marked
 Don't refactor core APIs; if a core API is missing something small you need, add it additively and mention it in
 your final report. If you find a core bug, fix it minimally and report it.
 
+RESOURCES (MANDATORY, we were OOM-killed once): build/test ONLY via `/home/user/rs-vol/bench/scripts/cargo.sh ...`
+(global build-slot pool, memory-capped); run python volatility / big benchmarks via
+`/home/user/rs-vol/bench/scripts/limit.sh [-m 8G] ...`, at most one python volatility process at a time; never load
+memory images into RAM; files > 50 MB go in /home/user/rs-vol/testdata/scratch/<you>/ (never /tmp — it is RAM).
+
+WORKSPACE: if your working directory is not a git checkout of /home/user/rs-vol (check `git remote -v`/`ls Cargo.toml`),
+`git clone /home/user/rs-vol <somewhere under /home/user/rs-vol/testdata/scratch/>` and work there on a new branch.
+Paths to the python source, references and images are absolute (they are not in the git repo).
+
 GIT: commit often on your branch (conventional commits like `feat(windows): port psscan`), each commit message
 ending with the line "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>". Before finishing,
 `git merge main` (resolve conflicts) — actually, merge the latest /home/user/rs-vol main branch into yours:
