@@ -10,6 +10,7 @@ pub mod driverscan;
 pub mod filescan;
 pub mod handles;
 pub mod info;
+pub mod kpcrs;
 pub mod malware;
 pub mod modscan;
 pub mod modules;
@@ -19,6 +20,8 @@ pub mod pslist;
 pub mod psscan;
 pub mod ssdt;
 pub mod symlinkscan;
+pub mod timers;
+pub mod unloadedmodules;
 pub mod vadinfo;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
@@ -30,6 +33,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&filescan::FileScan);
     v.push(&handles::Handles);
     v.push(&info::Info);
+    v.push(&kpcrs::KPCRs);
     v.push(&malware::drivermodule::DriverModule);
     v.push(&modscan::ModScan);
     v.push(&modules::Modules);
@@ -39,5 +43,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&psscan::PsScan);
     v.push(&ssdt::Ssdt);
     v.push(&symlinkscan::SymlinkScan);
+    v.push(&timers::Timers);
+    v.push(&unloadedmodules::UnloadedModules);
     v.push(&vadinfo::VadInfo);
 }
