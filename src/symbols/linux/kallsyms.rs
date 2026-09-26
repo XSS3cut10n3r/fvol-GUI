@@ -271,8 +271,8 @@ pub struct Kallsyms {
     pub num_syms: Option<u64>,
     relative_base: Option<u64>,
     token_index: Vec<Option<u64>>,
-    /// flat `_get_symbol_address_by_index` table (u64::MAX = None)
-    addrs: OnceLock<Result<Vec<u64>>>,
+    /// flat `_get_symbol_address_by_index` table
+    addrs: OnceLock<Result<AddrTable>>,
     mod_bounds: OnceLock<Result<(u64, u64)>>,
     module_region: OnceLock<Result<Vec<(Obj, u64, u64)>>>,
     mod_tables: Mutex<FxHashMap<u64, Arc<ModSymTable>>>,
@@ -280,6 +280,49 @@ pub struct Kallsyms {
 }
 
 const NONE_ADDR: u64 = u64::MAX;
+
+/// Every `_get_symbol_address_by_index(i)` (`NONE_ADDR` = python None), plus, when all are
+/// readable, the alias-run starts and next-greater indices that make python's
+/// `_get_symbol_pos` O(log n).
+struct AddrTable {
+    addrs: Vec<u64>,
+    /// no `NONE_ADDR` entries (`run_start` / `next_greater` are valid)
+    complete: bool,
+    /// first index of the run of equal consecutive addresses containing `i`
+    run_start: Vec<u32>,
+    /// nearest `j > i` with `addrs[j] > addrs[i]` (`u32::MAX`: none)
+    next_greater: Vec<u32>,
+}
+
+impl AddrTable {
+    fn new(addrs: Vec<u64>) -> AddrTable {
+        let n = addrs.len();
+        let complete = !addrs.contains(&NONE_ADDR) && n < u32::MAX as usize;
+        let (mut run_start, mut next_greater) = (Vec::new(), Vec::new());
+        if complete {
+            run_start = vec![0u32; n];
+            for i in 1..n {
+                run_start[i] = if addrs[i - 1] == addrs[i] { run_start[i - 1] } else { i as u32 };
+            }
+            next_greater = vec![u32::MAX; n];
+            let mut stack: Vec<u32> = Vec::new();
+            for i in (0..n).rev() {
+                while let Some(&top) = stack.last() {
+                    if addrs[top as usize] <= addrs[i] {
+                        stack.pop();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(&top) = stack.last() {
+                    next_greater[i] = top;
+                }
+                stack.push(i as u32);
+            }
+        }
+        AddrTable { addrs, complete, run_start, next_greater }
+    }
+}
 
 static CACHE: Mutex<Vec<(usize, usize, &'static Kallsyms)>> = Mutex::new(Vec::new());
 
@@ -393,7 +436,7 @@ impl Kallsyms {
     }
 
     /// The flat address table (built once; `None` when `num_syms` is unknown or implausible).
-    fn addr_table(&self) -> Option<&Result<Vec<u64>>> {
+    fn addr_table(&self) -> Option<&Result<AddrTable>> {
         let n = self.num_syms?;
         if n > 16 << 20 {
             return None;
@@ -410,7 +453,7 @@ impl Kallsyms {
                         let x = i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64;
                         v[i] = if x < 0 { (rb - 1 - x as i128) as u64 } else { x as u64 & self.mask };
                     }
-                    return Ok(v);
+                    return Ok(AddrTable::new(v));
                 }
             }
             for (i, slot) in v.iter_mut().enumerate() {
@@ -418,7 +461,7 @@ impl Kallsyms {
                     *slot = a;
                 }
             }
-            Ok(v)
+            Ok(AddrTable::new(v))
         }))
     }
 
@@ -426,8 +469,8 @@ impl Kallsyms {
     pub fn get_symbol_address_by_index(&self, index: u64) -> Result<Option<u64>> {
         if let Some(t) = self.addr_table() {
             match t {
-                Ok(v) => {
-                    if let Some(&a) = v.get(index as usize) {
+                Ok(t) => {
+                    if let Some(&a) = t.addrs.get(index as usize) {
                         return Ok(if a == NONE_ADDR { None } else { Some(a) });
                     }
                 }
@@ -441,6 +484,31 @@ impl Kallsyms {
     /// `(None, None)`.
     pub fn get_symbol_pos(&self, address: u64) -> Result<Option<(u64, i128)>> {
         let n = self.num_syms()?;
+        if let Some(Ok(t)) = self.addr_table() {
+            if t.complete && t.addrs.len() as u64 == n && n > 0 {
+                // python's exact probe sequence, then the precomputed alias / next rules
+                let a = &t.addrs;
+                let (mut low, mut high) = (0usize, n as usize);
+                while high - low > 1 {
+                    let mid = low + (high - low) / 2;
+                    if a[mid] <= address {
+                        low = mid;
+                    } else {
+                        high = mid;
+                    }
+                }
+                let low = t.run_start[low] as usize;
+                let start = a[low];
+                let mut end = match t.next_greater[low] {
+                    u32::MAX => 0,
+                    j => a[j as usize],
+                };
+                if end == 0 {
+                    end = self.section_end(address)?;
+                }
+                return Ok(Some((low as u64, end as i128 - start as i128)));
+            }
+        }
         let at = |i: u64| self.get_symbol_address_by_index(i);
         let (mut low, mut high) = (0u64, n);
         while high.saturating_sub(low) > 1 && high > low {
@@ -477,16 +545,21 @@ impl Kallsyms {
             idx += 1;
         }
         if end == 0 {
-            let e = if self.is_kernel_inittext(address) {
-                self.cfg.einittext
-            } else if self.cfg.end.is_some() {
-                self.cfg.end
-            } else {
-                self.cfg.etext
-            };
-            end = e.ok_or_else(|| type_error("unsupported operand type(s) for -: 'NoneType' and 'int'"))?;
+            end = self.section_end(address)?;
         }
         Ok(Some((low, end as i128 - start as i128)))
+    }
+
+    /// `_get_symbol_pos`'s end of section when no next symbol exists.
+    fn section_end(&self, address: u64) -> Result<u64> {
+        let e = if self.is_kernel_inittext(address) {
+            self.cfg.einittext
+        } else if self.cfg.end.is_some() {
+            self.cfg.end
+        } else {
+            self.cfg.etext
+        };
+        e.ok_or_else(|| type_error("unsupported operand type(s) for -: 'NoneType' and 'int'"))
     }
 
     /// python `_get_symbol_offset(index)`: offset of the symbol in the compressed stream.
@@ -977,11 +1050,14 @@ impl Kallsyms {
     /// python `get_core_symbols()`: every kernel core symbol in kallsyms order (a trailing
     /// `Err` marks where python raised).
     pub fn get_core_symbols(&self) -> Vec<Result<KasSymbol>> {
-        let mut out = Vec::new();
         let n = match self.num_syms() {
             Ok(n) => n,
             Err(e) => return vec![Err(e)],
         };
+        if let Some(v) = self.core_symbols_parallel(n) {
+            return v;
+        }
+        let mut out = Vec::new();
         let mut names = PageReader::new(self.layer);
         let mut tokens = PageReader::new(self.layer);
         let mut off = 0u64;
@@ -999,6 +1075,58 @@ impl Kallsyms {
             }
         }
         out
+    }
+
+    /// Optimistic parallel `get_core_symbols`: stream offsets from the length bytes, expand the
+    /// symbols on all cores. `None` (caller falls back to the sequential walk) when any read
+    /// fails, since python's `continue` on InvalidAddress changes the offsets from there on.
+    fn core_symbols_parallel(&self, n: u64) -> Option<Vec<Result<KasSymbol>>> {
+        let names_base = self.cfg.names_address?;
+        if n > 16 << 20 {
+            return None;
+        }
+        let mut rd = PageReader::new(self.layer);
+        let mut offsets = Vec::with_capacity(n as usize);
+        let mut off = 0u64;
+        for _ in 0..n {
+            let mut len = rd.byte(names_base.wrapping_add(off)).ok()? as u64;
+            if len & 0x80 != 0 {
+                let upper = rd.byte(names_base.wrapping_add(off + 1)).ok()? as u64;
+                len = (upper << 7) | (len & 0x7F);
+            }
+            offsets.push(off);
+            off += len + 1;
+        }
+        const CHUNK: usize = 4096;
+        let chunks = offsets.len().div_ceil(CHUNK);
+        let parts = crate::util::par::par_map(chunks, |c| -> Option<Vec<Result<KasSymbol>>> {
+            let mut names = PageReader::new(self.layer);
+            let mut tokens = PageReader::new(self.layer);
+            let lo = c * CHUNK;
+            let hi = (lo + CHUNK).min(offsets.len());
+            let mut v = Vec::with_capacity(hi - lo);
+            for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
+                match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
+                    Ok((s, _)) => v.push(Ok(s)),
+                    Err(e) if e.is_invalid_address() => return None,
+                    Err(e) => {
+                        v.push(Err(e));
+                        break;
+                    }
+                }
+            }
+            Some(v)
+        });
+        let mut out = Vec::with_capacity(offsets.len());
+        for p in parts {
+            let p = p?;
+            let failed = p.last().is_some_and(|r| r.is_err());
+            out.extend(p);
+            if failed {
+                break;
+            }
+        }
+        Some(out)
     }
 
     /// python `_is_symbol_exported(name, address, module)`: `Ok(None)` where python returns None.
@@ -1284,3 +1412,99 @@ impl Kallsyms {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{Context, GlobalOptions};
+
+    fn ctx() -> Context {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap()
+    }
+
+    /// Render python's `linux.kallsyms.Kallsyms` (no options) text output from this API, to
+    /// diff against the python reference:
+    /// `RSVOL_BENCH_IMAGE=<img> RSVOL_TEST_OUT=<file> cargo test --profile fast
+    /// kallsyms_like_plugin -- --ignored`.
+    #[test]
+    #[ignore]
+    fn kallsyms_like_plugin() {
+        use std::io::Write;
+        let ctx = ctx();
+        let k = ctx.linux_kernel().unwrap();
+        let kas = Kallsyms::get(k).unwrap();
+        let t0 = std::time::Instant::now();
+        let mut f = std::io::BufWriter::new(std::fs::File::create(std::env::var("RSVOL_TEST_OUT").unwrap()).unwrap());
+        writeln!(f, "Volatility 3 Framework 2.28.2\n\nAddr\tType\tSize\tExported\tSubSystem\tModuleName\tSymbolName\tDescription\n").unwrap();
+        let mut n = 0;
+        'outer: for part in 0..4 {
+            let v = match part {
+                0 => kas.get_core_symbols(),
+                1 => kas.get_modules_symbols(None),
+                2 => kas.get_ftrace_symbols(),
+                _ => kas.get_bpf_symbols(),
+            };
+            eprintln!("part {part}: {} items at {:?}", v.len(), t0.elapsed());
+            for s in v {
+                let s = match s {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("python raised: {e}");
+                        break 'outer;
+                    }
+                };
+                let size = match s.size {
+                    Some(z) if z > 0 => z.to_string(),
+                    _ => "-".into(),
+                };
+                let exported = match s.exported {
+                    Some(true) => "True",
+                    Some(false) => "False",
+                    None => "-",
+                };
+                writeln!(
+                    f,
+                    "{:#x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    s.address,
+                    s.type_.as_deref().filter(|t| !t.is_empty()).unwrap_or("-"),
+                    size,
+                    exported,
+                    s.subsystem.unwrap_or("-"),
+                    s.module_name.as_deref().unwrap_or("-"),
+                    s.name,
+                    s.type_description().unwrap_or("-")
+                )
+                .unwrap();
+                n += 1;
+            }
+        }
+        eprintln!("{n} rows in {:?}", t0.elapsed());
+    }
+
+    /// Count "big" kallsyms names (2-byte lengths) in the image's kernel.
+    #[test]
+    #[ignore]
+    fn kallsyms_big_symbols() {
+        let ctx = ctx();
+        let k = ctx.linux_kernel().unwrap();
+        let kas = Kallsyms::get(k).unwrap();
+        let names = kas.cfg.names_address.unwrap();
+        let mut off = 0u64;
+        let mut big = 0;
+        for _ in 0..kas.num_syms.unwrap() {
+            let b = k.vlayer.read_u8(names + off).unwrap() as u64;
+            let len = if b & 0x80 != 0 {
+                big += 1;
+                let u = k.vlayer.read_u8(names + off + 1).unwrap() as u64;
+                off += 1;
+                (u << 7) | (b & 0x7f)
+            } else {
+                b
+            };
+            off += len + 1;
+        }
+        eprintln!("num_syms {} big {big}", kas.num_syms.unwrap());
+    }
+}
+

@@ -795,17 +795,25 @@ impl SymbolTable {
     pub fn symbols(&self) -> impl Iterator<Item = Symbol<'_>> + '_ {
         (0..self.symbol_count() as u32).map(move |i| self.sym_at(i))
     }
+    /// The (masked address, symbol index) list sorted by address only; runs of equal
+    /// addresses are ordered by name at query time (the kernel ISF has runs of 50k+ symbols at
+    /// one address, sorting those by name up front costs tens of ms).
+    fn build_by_addr(&self) -> Vec<(u64, u32)> {
+        let mask = if self.symbol_mask != 0 { self.symbol_mask } else { u64::MAX };
+        let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (rd64(self.sym_rec(i), 8) & mask, i)).collect();
+        v.sort_unstable_by_key(|e| e.0);
+        v
+    }
+
     /// Symbol names with `offset <= address <= offset + size` (python
     /// `get_symbols_by_location`), sorted by (address, name) like python.
     pub fn symbols_at(&self, offset: u64, size: u64) -> Vec<&str> {
-        let idx = self.by_addr.get_or_init(|| {
-            let mut v: Vec<(u64, u32)> = (0..self.symbol_count() as u32).map(|i| (self.sym_at(i).address, i)).collect();
-            v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1)))));
-            v
-        });
+        let idx = self.by_addr.get_or_init(|| self.build_by_addr());
         let start = idx.partition_point(|e| e.0 < offset);
         let end_addr = offset.saturating_add(size);
-        idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| self.sym_at(e.1).name).collect()
+        let mut v: Vec<(u64, &str)> = idx[start..].iter().take_while(|e| e.0 <= end_addr).map(|e| (e.0, self.rec_str(self.sym_rec(e.1)))).collect();
+        v.sort_unstable();
+        v.into_iter().map(|e| e.1).collect()
     }
 
     // ------------------------------------------------------------------ types by name

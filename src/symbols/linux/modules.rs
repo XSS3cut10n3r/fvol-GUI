@@ -617,3 +617,48 @@ pub fn get_load_parameters(vm: &Module, module: &Obj) -> Vec<Result<(String, Par
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{Context, GlobalOptions};
+
+    fn ctx() -> Context {
+        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap()
+    }
+
+    /// Time each module gatherer and print what it finds:
+    /// `RSVOL_BENCH_IMAGE=<img> cargo test --profile fast gatherers_report -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn gatherers_report() {
+        let ctx = ctx();
+        let k = ctx.linux_kernel().unwrap();
+        let t = std::time::Instant::now();
+        let n = k.symbols_at(k.symbol_addr("_text").unwrap(), 0).len();
+        eprintln!("symbols_at first call: {n} in {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let b = get_modules_memory_boundaries(k).unwrap();
+        eprintln!("bounds {:#x}..{:#x} ({} MiB)", b.0, b.1, (b.1 - b.0) >> 20);
+        for g in ALL_GATHERERS {
+            let t = std::time::Instant::now();
+            let r = g.gather_modules(k).unwrap();
+            eprintln!("{}: {} modules in {:?}", g.name(), r.len(), t.elapsed());
+        }
+        let t2 = std::time::Instant::now();
+        let all = run_modules_scanners(k, &ALL_GATHERERS).unwrap();
+        eprintln!("run_modules_scanners: {} in {:?} (total {:?})", all.len(), t2.elapsed(), t.elapsed());
+        for m in all.iter().take(3) {
+            eprintln!("  {:#x} {} {:#x}-{:#x}", m.offset, m.name, m.start, m.end);
+        }
+        let lsmod: Vec<Obj> = list_modules(k).into_iter().map(|m| m.unwrap()).collect();
+        for m in lsmod.iter().take(60) {
+            let params: Vec<String> = get_load_parameters(k, m).into_iter().map(|p| {
+                let (n, v) = p.unwrap();
+                format!("{n}={v}")
+            }).collect();
+            println!("LSMOD\t{:#x}\t{}\t{:#x}\t{}", m.addr, m.get_name().unwrap().unwrap(), m.get_core_size().unwrap() + m.get_init_size().unwrap(), params.join(", "));
+        }
+    }
+}
