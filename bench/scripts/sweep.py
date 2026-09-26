@@ -314,6 +314,9 @@ def filter_cases(C, plugin, col_a, pat_a, col_b, pat_b):
     C.add(plugin, "hide-prefix-lower", gopts=[f"--hide-columns={col_a[:3].lower()}"])
     C.add(plugin, "hide-csv", gopts=["-r", "csv", f"--hide-columns={col_b}"])
     C.add(plugin, "hide-json", gopts=["-r", "json", f"--hide-columns={col_a}"])
+    C.add(plugin, "hide-all", gopts=["--hide-columns="])  # "" prefixes every column: nothing visible
+    C.add(plugin, "hide-all-csv", gopts=["-r", "csv", "--hide-columns="])
+    C.add(plugin, "filter-int-regex", gopts=["--filters", f"+{col_b},^1"])
     C.add(plugin, "hide-pretty-filter", gopts=["-r", "pretty", f"--hide-columns={col_b}", "--filters", f"+{col_a},{pat_a}"])
 
 
@@ -814,6 +817,18 @@ def generic_plugins(C, os_name):
     C.add("isfinfo.IsfInfo", "r-json", gopts=["-r", "json"])
 
 
+# Cases left out because python needs minutes each and other cases cover the same code:
+# (image regex, case id regex).
+EXPENSIVE = [
+    (r"jammy", r"RecoverFs"),
+    (r"noble", r"RecoverFs~(r-|flag-)"),
+    (r".*", r"^timeliner\.Timeliner~(flag-|r-|savecfg)"),  # full timeliner runs; the pf-* cases filter
+    (r".*", r"PsCallStack~(pid3|pid-none|flag-unresolved|r-)"),
+    (r"win1809|jammy", r"^yarascan\.YaraScan~file"),
+    (r"jammy", r"pagecache\.(Files~(type-reg|type-2|find-none)|InodePages~(neither|flag-dump|find-none|find-dump))"),
+]
+
+
 def cmd_gen(args):
     plugins = load_plugins()
     inputs = write_inputs()
@@ -832,6 +847,7 @@ def cmd_gen(args):
             V = mac_values(img)
             gen_mac(C, V, inputs)
         generic_plugins(C, im["os"])
+        C.cases = [c for c in C.cases if not any(re.fullmatch(i, img) and re.search(x, c["id"]) for i, x in EXPENSIVE)]
         json.dump(V, open(f"{SCR}/harvest/{img}.json", "w"), indent=1, default=str)
         with open(f"{SCR}/cases/{img}.jsonl", "w") as f:
             for c in C.cases:
@@ -1052,6 +1068,19 @@ SET_ORDER = [
 ]
 
 
+def tar_members(path):
+    """linux.pagecache.RecoverFs stamps every tar member (and the gzip header) with
+    time.time() of the run: compare the members without their times."""
+    import tarfile  # noqa: PLC0415
+
+    out = []
+    with tarfile.open(path) as t:
+        for m in t.getmembers():
+            data = t.extractfile(m).read() if m.isfile() else b""
+            out.append((m.name, m.type, m.mode, m.size, m.linkname, m.uid, m.gid, hashlib.sha256(data).hexdigest()))
+    return out
+
+
 def compare(img, case, pd, rd):
     pm = json.load(open(pd + "/meta.json"))
     rm = json.load(open(rd + "/meta.json"))
@@ -1095,6 +1124,12 @@ def compare(img, case, pd, rd):
         probs.append(f"filenames(py {len(pf)} rs {len(rf)})")
     else:
         bad = [k for k in pf if pf[k] != rf[k]]
+        # python-nondeterministic file contents: compare them normalized
+        timed = [k for k in bad if re.search(r"recovered_fs\.tar\.(gz|bz2|xz)$", k)]
+        if timed and all(tar_members(f"{pd}/{k}") == tar_members(f"{rd}/{k}") for k in timed):
+            bad = [k for k in bad if k not in timed]
+            order = True
+            setnorm = setnorm or [None]
         if bad:
             probs.append(f"filedata({len(bad)}/{len(pf)})")
     if not probs:
