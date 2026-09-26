@@ -81,6 +81,48 @@ impl Tv {
 /// python `_sort_function` key element: absent -> 9999-12-01 00:00:00 UTC.
 const MAX_DATE_SECS: i64 = 253_399_622_400;
 
+/// One element of python's sort key, by comparability class (python raises `TypeError` for
+/// `<` across classes, where `==` is False). Microseconds since the epoch for datetimes,
+/// `Merge::others` indices for strings / bytes / unknown objects.
+#[derive(Clone, Copy, Debug)]
+enum SortElem {
+    Aware(i128),
+    Naive(i128),
+    None,
+    /// int / bool / float as (floor, fraction)
+    Num(i128, f64),
+    Str(u32),
+    Bytes(u32),
+    /// any other object: only equal to itself, never ordered
+    Unknown(u32),
+}
+
+impl SortElem {
+    fn class(self) -> u8 {
+        match self {
+            SortElem::Aware(_) => 0,
+            SortElem::Naive(_) => 1,
+            SortElem::None => 2,
+            SortElem::Num(..) => 3,
+            SortElem::Str(_) => 4,
+            SortElem::Bytes(_) => 5,
+            SortElem::Unknown(_) => 6,
+        }
+    }
+
+    /// python `type(x).__name__` as the comparison errors print it.
+    fn type_name(self) -> &'static str {
+        match self {
+            SortElem::Aware(_) | SortElem::Naive(_) => "datetime.datetime",
+            SortElem::None => "NoneType",
+            SortElem::Num(..) => "int",
+            SortElem::Str(_) => "str",
+            SortElem::Bytes(_) => "bytes",
+            SortElem::Unknown(_) => "object",
+        }
+    }
+}
+
 fn kind_index(k: TimeKind) -> usize {
     match k {
         TimeKind::Created => 0,
@@ -505,32 +547,57 @@ impl Merge {
         Ok(())
     }
 
-    /// python `sorted(data, key=self._sort_function)`: row order.
-    fn sorted_rows(&self) -> Vec<(u32, u32)> {
-        // sort key of one cell; naive datetimes / other values can't be compared with the
-        // aware max_date by python (TypeError)
-        let key = |t: Tv| -> (i64, u32) {
-            match t {
-                Tv::Dt(dt) => {
-                    if !dt.utc {
-                        panic!("TypeError: can't compare offset-naive and offset-aware datetimes");
-                    }
-                    (dt.secs, dt.micros)
-                }
-                Tv::Other(_) => panic!("TypeError: '<' not supported between instances"),
-                _ => (MAX_DATE_SECS, 0),
-            }
-        };
+    /// python `sorted(data, key=self._sort_function)`: row order, or python's `TypeError`.
+    ///
+    /// Key elements python cannot order against each other (None or other non-datetime values
+    /// yielded as timestamps, naive vs aware datetimes) make the sort raise exactly when two
+    /// keys first differ at such a pair: any comparison sort has to compare one such pair
+    /// (ordering those classes one way or the other would otherwise give it the same trace
+    /// and the same, then necessarily wrong, output). Without such a pair python's result is
+    /// the stable sort by any total order that agrees with python's `<` within each class.
+    fn sorted_rows(&self) -> Result<Vec<(u32, u32)>> {
         if self.rows.len() < 2 {
-            return self.rows.clone();
+            return Ok(self.rows.clone());
         }
-        let keys: Vec<[(i64, u32); 4]> = self.snaps.iter().map(|s| [key(s[0]), key(s[1]), key(s[2]), key(s[3])]).collect();
-        let mut order: Vec<u32> = (0..keys.len() as u32).collect();
-        order.sort_unstable_by(|&a, &b| keys[a as usize].cmp(&keys[b as usize]));
-        let mut rank = vec![0u32; keys.len()];
+        let general = self.snaps.iter().any(|s| s.iter().any(|t| matches!(t, Tv::Other(_) | Tv::Dt(DateTime { utc: false, .. }))));
+        let (order, same): (Vec<u32>, Box<dyn Fn(u32, u32) -> bool + '_>) = if general {
+            let keys: Vec<[SortElem; 4]> = self.snaps.iter().map(|s| s.map(|t| self.sort_elem(t))).collect();
+            let cmp = |a: u32, b: u32| {
+                let (ka, kb) = (&keys[a as usize], &keys[b as usize]);
+                (0..4).map(|i| self.elem_cmp(ka[i], kb[i])).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal)
+            };
+            let mut order: Vec<u32> = (0..keys.len() as u32).collect();
+            order.sort_unstable_by(|&a, &b| cmp(a, b));
+            // python's error for `ka < kb` (None when python can compare the two keys)
+            let error = |a: u32, b: u32| -> Option<String> {
+                let (ka, kb) = (&keys[a as usize], &keys[b as usize]);
+                let i = (0..4).find(|&i| self.elem_cmp(ka[i], kb[i]).is_ne())?;
+                self.incomparable(ka[i], kb[i])
+            };
+            if order.windows(2).any(|w| error(w[0], w[1]).is_some()) {
+                // (stderr only) the first comparison count_run makes: an element against the
+                // one before it
+                let msg = self.rows.windows(2).find_map(|w| error(w[1].1, w[0].1));
+                return Err(Error::msg(msg.or_else(|| order.windows(2).find_map(|w| error(w[1], w[0]))).unwrap_or_default()));
+            }
+            (order, Box::new(move |a, b| (0..4).all(|i| self.elem_cmp(keys[a as usize][i], keys[b as usize][i]).is_eq())))
+        } else {
+            // the common case: aware datetimes and absent values (= python's max_date) only
+            let key = |t: Tv| -> (i64, u32) {
+                match t {
+                    Tv::Dt(dt) => (dt.secs, dt.micros),
+                    _ => (MAX_DATE_SECS, 0),
+                }
+            };
+            let keys: Vec<[(i64, u32); 4]> = self.snaps.iter().map(|s| s.map(key)).collect();
+            let mut order: Vec<u32> = (0..keys.len() as u32).collect();
+            order.sort_unstable_by(|&a, &b| keys[a as usize].cmp(&keys[b as usize]));
+            (order, Box::new(move |a, b| keys[a as usize] == keys[b as usize]))
+        };
+        let mut rank = vec![0u32; self.snaps.len()];
         let mut r = 0u32;
         for (i, &s) in order.iter().enumerate() {
-            if i > 0 && keys[s as usize] != keys[order[i - 1] as usize] {
+            if i > 0 && !same(s, order[i - 1]) {
                 r += 1;
             }
             rank[s as usize] = r;
@@ -550,7 +617,65 @@ impl Merge {
             out[start[k] as usize] = row;
             start[k] += 1;
         }
-        out
+        Ok(out)
+    }
+
+    /// python's `_sort_function` element of a cell (absent values -> the aware max_date).
+    fn sort_elem(&self, t: Tv) -> SortElem {
+        match t {
+            Tv::Dt(dt) if dt.utc => SortElem::Aware(dt.secs as i128 * 1_000_000 + dt.micros as i128),
+            Tv::Dt(dt) => SortElem::Naive(dt.secs as i128 * 1_000_000 + dt.micros as i128),
+            Tv::Other(i) => match &self.others[i as usize] {
+                Value::None => SortElem::None,
+                Value::Int(v) => SortElem::Num(*v, 0.0),
+                Value::Bool(b) => SortElem::Num(*b as i128, 0.0),
+                // exact int/float ordering: (floor, fraction)
+                Value::Float(f) if f.is_finite() => SortElem::Num(f.floor() as i128, f - f.floor()),
+                Value::Float(f) if *f > 0.0 => SortElem::Num(i128::MAX, 0.0),
+                Value::Float(f) if *f < 0.0 => SortElem::Num(i128::MIN, 0.0),
+                Value::Str(_) | Value::SStr(_) => SortElem::Str(i),
+                Value::Bytes(_) => SortElem::Bytes(i),
+                _ => SortElem::Unknown(i),
+            },
+            _ => SortElem::Aware(MAX_DATE_SECS as i128 * 1_000_000),
+        }
+    }
+
+    /// A total order agreeing with python's `<` / `==` within each [`SortElem`] class (classes
+    /// in declaration order).
+    fn elem_cmp(&self, a: SortElem, b: SortElem) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let s = |i: u32| -> &[u8] {
+            match &self.others[i as usize] {
+                Value::Str(v) => v.as_bytes(),
+                Value::SStr(v) => v.as_bytes(),
+                Value::Bytes(v) => v,
+                _ => &[],
+            }
+        };
+        match (a, b) {
+            (SortElem::Aware(x), SortElem::Aware(y)) | (SortElem::Naive(x), SortElem::Naive(y)) => x.cmp(&y),
+            (SortElem::None, SortElem::None) => Ordering::Equal,
+            (SortElem::Num(x, fx), SortElem::Num(y, fy)) => x.cmp(&y).then(fx.partial_cmp(&fy).unwrap_or(Ordering::Equal)),
+            // python str order is code point order = UTF-8 byte order
+            (SortElem::Str(x), SortElem::Str(y)) | (SortElem::Bytes(x), SortElem::Bytes(y)) => s(x).cmp(s(y)),
+            (SortElem::Unknown(x), SortElem::Unknown(y)) => x.cmp(&y),
+            _ => a.class().cmp(&b.class()),
+        }
+    }
+
+    /// python's error for `a < b` on two unequal key elements it cannot order (None when it
+    /// can order them).
+    fn incomparable(&self, a: SortElem, b: SortElem) -> Option<String> {
+        match (a, b) {
+            (SortElem::Aware(_), SortElem::Naive(_)) | (SortElem::Naive(_), SortElem::Aware(_)) => {
+                Some("TypeError: can't compare offset-naive and offset-aware datetimes".into())
+            }
+            _ if a.class() != b.class() || matches!(a, SortElem::Unknown(_)) => {
+                Some(format!("TypeError: '<' not supported between instances of '{}' and '{}'", a.type_name(), b.type_name()))
+            }
+            _ => None,
+        }
     }
 
     fn cell(&self, t: Tv) -> Value {
@@ -686,7 +811,30 @@ impl Plugin for Timeliner {
         if let Some(w) = body.as_mut() {
             w.flush()?;
         }
-        let rows = m.sorted_rows();
+        let mut rows = m.sorted_rows()?;
+        // python's TreeGrid rejects the first row holding a non-datetime time (e.g. the None
+        // creation time of linux.pslist when the boot time is unknown): the rows before it
+        // are rendered, then the TypeError ends the run
+        let rejected = rows.iter().position(|&(_, s)| m.snaps[s as usize].iter().any(|t| matches!(t, Tv::Other(_)))).map(|i| {
+            let t = m.snaps[rows[i].1 as usize];
+            rows.truncate(i);
+            let (k, j) = t.iter().enumerate().find_map(|(k, t)| if let Tv::Other(j) = *t { Some((k, j)) } else { None }).unwrap_or((0, 0));
+            const NAMES: [&str; 4] = ["Created Date", "Modified Date", "Accessed Date", "Changed Date"];
+            let got = match &m.others[j as usize] {
+                Value::None => "NoneType",
+                Value::Int(_) => "int",
+                Value::Bool(_) => "bool",
+                Value::Float(_) => "float",
+                Value::Str(_) | Value::SStr(_) => "str",
+                Value::Bytes(_) => "bytes",
+                _ => "object",
+            };
+            Error::msg(format!(
+                "TypeError: Values item with index {} is the wrong type for column {} (got <class '{got}'> but expected <class 'datetime.datetime'>)",
+                k + 2,
+                NAMES[k]
+            ))
+        });
         let values = |&(e, s): &(u32, u32)| {
             let en = &m.entries[e as usize];
             let t = m.snaps[s as usize];
@@ -696,7 +844,7 @@ impl Plugin for Timeliner {
             for r in &rows {
                 out.row_ref(0, &values(r))?;
             }
-            return Ok(());
+            return rejected.map_or(Ok(()), Err);
         };
         // format blocks of rows on all cores, hand them to the renderer in order; the block
         // buffers are recycled (no fresh pages to fault in for every block)
@@ -724,7 +872,8 @@ impl Plugin for Timeliner {
                 result.is_ok()
             },
         );
-        result
+        result?;
+        rejected.map_or(Ok(()), Err)
     }
 }
 
@@ -783,7 +932,7 @@ mod tests {
             m.pass(&mut None).unwrap();
         }
         let t1 = t0.elapsed();
-        let rows = m.sorted_rows();
+        let rows = m.sorted_rows().unwrap();
         let t2 = t0.elapsed();
         let mut sink: Vec<u8> = Vec::new();
         {
@@ -893,7 +1042,7 @@ mod tests {
                 let rows: Vec<String> = if others {
                     Vec::new()
                 } else {
-                    m.sorted_rows().iter().map(|&(e, s)| format!("{e} {:?}", m.snaps[s as usize].map(show))).collect()
+                    m.sorted_rows().unwrap().iter().map(|&(e, s)| format!("{e} {:?}", m.snaps[s as usize].map(show))).collect()
                 };
                 (entries, m.cur, snaps, rows)
             };
@@ -901,6 +1050,45 @@ mod tests {
             assert_eq!(a.0.len(), b.0.len(), "round {round}");
             assert!(a == b, "round {round}");
         }
+    }
+
+    /// python's sort raises exactly when two keys first differ at elements it cannot order
+    /// (None / naive datetimes vs aware ones); otherwise it sorts, and the renderer stops at
+    /// the first row holding a None.
+    #[test]
+    fn sort_type_errors_like_python() {
+        let ev = |d: &str, k, t| TimelineEvent { description: d.into(), kind: k, time: t };
+        let run = |events: Vec<Vec<TimelineEvent>>| {
+            let mut m = Merge { classes: vec!["A", "B", "C"], ..Default::default() };
+            for (c, evs) in events.into_iter().enumerate() {
+                for e in evs {
+                    m.add_event(c as u16, e);
+                }
+                m.pass(&mut None).unwrap();
+            }
+            let r = m.sorted_rows().map(|rows| rows.iter().map(|&(e, s)| (e, m.snaps[s as usize])).collect::<Vec<_>>());
+            (r, m)
+        };
+        let naive = |secs| Value::DateTime(DateTime { secs, micros: 0, utc: false });
+        // a None created time (linux.pslist without boot time), then datetimes: TypeError
+        let (r, _) = run(vec![vec![ev("p", TimeKind::Created, Value::None)], vec![ev("x", TimeKind::Created, Value::DateTime(dt(5, 0)))]]);
+        assert_eq!(r.unwrap_err().to_string(), "TypeError: '<' not supported between instances of 'datetime.datetime' and 'NoneType'");
+        // None only: python sorts (equal keys); the rows keep their order
+        let (r, _) = run(vec![vec![ev("p", TimeKind::Created, Value::None), ev("q", TimeKind::Created, Value::None)]]);
+        assert_eq!(r.unwrap().iter().map(|x| x.0).collect::<Vec<_>>(), vec![0, 1]);
+        // None equal in the first element, the keys differ later at datetimes: sortable
+        let (r, _) = run(vec![
+            vec![ev("p", TimeKind::Created, Value::None), ev("p", TimeKind::Modified, Value::DateTime(dt(9, 0)))],
+            vec![ev("q", TimeKind::Created, Value::None), ev("q", TimeKind::Modified, Value::DateTime(dt(3, 0)))],
+        ]);
+        let rows = r.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].1[1], Tv::Dt(dt(3, 0)));
+        // naive datetimes sort among themselves, but not against absent values (aware max_date)
+        let (r, _) = run(vec![vec![ev("a", TimeKind::Created, naive(7)), ev("b", TimeKind::Created, naive(2))]]);
+        assert!(r.is_ok());
+        let (r, _) = run(vec![vec![ev("a", TimeKind::Created, naive(7))], vec![ev("b", TimeKind::Modified, Value::DateTime(dt(1, 0)))]]);
+        assert_eq!(r.unwrap_err().to_string(), "TypeError: can't compare offset-naive and offset-aware datetimes");
     }
 
     #[test]
@@ -913,7 +1101,7 @@ mod tests {
         m.add_event(1, ev("z", TimeKind::Modified, Value::DateTime(dt(1, 0))));
         m.pass(&mut None).unwrap();
         // pass 1: x,y with y's times; pass 2: x,y,z with z's times
-        let rows = m.sorted_rows();
+        let rows = m.sorted_rows().unwrap();
         let got: Vec<(u32, [Tv; 4])> = rows.iter().map(|&(e, s)| (e, m.snaps[s as usize])).collect();
         assert_eq!(got.len(), 5);
         assert_eq!(got[0].0, 0);

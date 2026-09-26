@@ -109,6 +109,11 @@ pub enum Value {
     Unparsable,
     NotApplicable,
     NotAvailable,
+    /// python `None` where a plugin hands one over as data (e.g. a `generate_timeline`
+    /// timestamp). python's TreeGrid rejects it in every column (`TypeError: Values item with
+    /// index .. is the wrong type ..`), so it never reaches a renderer; renderers print it like
+    /// python's default `f"{x}"`.
+    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
