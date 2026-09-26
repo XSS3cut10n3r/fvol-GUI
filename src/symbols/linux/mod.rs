@@ -46,6 +46,7 @@ pub mod fs;
 pub mod idstorage;
 pub mod kallsyms;
 pub mod module;
+pub mod module_extract;
 pub mod modules;
 pub mod search;
 pub mod timespec;
