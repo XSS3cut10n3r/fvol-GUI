@@ -39,7 +39,7 @@ const PAD: usize = 64;
 /// Segment start marker in `tt` entries.
 const MARK: u32 = 1 << 31;
 /// Concurrent inverse-BWT walkers.
-const LANES: usize = 8;
+const LANES: usize = 16;
 /// Column stride of the walkers' output (one column per lane).
 const COL: usize = MAX_BLOCK + PAD;
 /// Blocks shorter than this use a single walker.
@@ -239,6 +239,8 @@ struct BlockInfo {
     orig_ptr: usize,
     crc: u32,
     counts: [u32; 256],
+    /// Symbols produced by RUNA/RUNB runs (repeats of the preceding byte).
+    run_total: usize,
 }
 
 /// Segment bookkeeping of the multi-lane inverse BWT.
@@ -248,10 +250,10 @@ struct Segs {
     r0: Vec<u32>,
     r1: Vec<u32>,
     next: Vec<u32>,
+    /// Original `tt` entry at each segment start (the slot holds `MARK | segment`).
+    first: Vec<u32>,
     /// Segment each lane is walking.
     cur: [u32; LANES],
-    unassigned: usize,
-    active: usize,
     nseg: usize,
     step: usize,
     orig: usize,
@@ -280,7 +282,16 @@ struct Scratch {
     /// Pre-RLE1 bytes in output order; capacity MAX_BLOCK + PAD.
     pre: Vec<u8>,
     segs: Segs,
+    /// Histogram snapshots of `ll8[..snap_pos[k]]`, taken during entropy decoding every
+    /// max_block / SNAPS symbols (they let the scatter run several independent streams).
+    snap_pos: Vec<usize>,
+    snap_counts: Vec<[u32; 256]>,
 }
+
+/// Histogram snapshots per (full) block.
+const SNAPS: usize = 32;
+/// Independent scatter streams.
+const STREAMS: usize = 4;
 
 fn try_vec<T>(cap: usize) -> Result<Vec<T>> {
     let mut v = Vec::new();
@@ -302,14 +313,15 @@ impl Scratch {
                 r0: Vec::new(),
                 r1: Vec::new(),
                 next: Vec::new(),
+                first: Vec::new(),
                 cur: [0; LANES],
-                unassigned: 0,
-                active: 0,
                 nseg: 0,
                 step: 1,
                 orig: 0,
                 n: 0,
             },
+            snap_pos: Vec::with_capacity(SNAPS + 1),
+            snap_counts: Vec::with_capacity(SNAPS + 1),
         })
     }
 
@@ -406,8 +418,8 @@ impl Scratch {
 
         // MTF / RUNA-RUNB decoding. The MTF list holds the byte values themselves.
         let eob = (n_in_use + 1) as u32;
-        let mut mtf = [0u8; 256];
-        mtf[..n_in_use].copy_from_slice(&seq_to_unseq[..n_in_use]);
+        let mut mtf = MtfList([0u8; 256]);
+        mtf.0[..n_in_use].copy_from_slice(&seq_to_unseq[..n_in_use]);
         let mut counts = [0u32; 256];
         let ll = self.ll8.as_mut_ptr();
         debug_assert!(self.ll8.capacity() >= MAX_BLOCK + PAD && max_block <= MAX_BLOCK);
@@ -415,7 +427,21 @@ impl Scratch {
         let mut sel = 0usize;
         let mut run = 0usize;
         let mut run_bit = 0u32;
+        let mut run_total = 0usize;
         let mut b = *br;
+        self.snap_pos.clear();
+        self.snap_counts.clear();
+        let snap_every = (max_block / SNAPS).max(1);
+        let mut snap_next = snap_every;
+        macro_rules! snapshot {
+            () => {
+                if pos >= snap_next {
+                    self.snap_pos.push(pos);
+                    self.snap_counts.push(counts);
+                    snap_next = pos + snap_every;
+                }
+            };
+        }
         macro_rules! bail {
             ($what:expr) => {{
                 *br = b;
@@ -455,13 +481,15 @@ impl Scratch {
                     if pos + run > max_block {
                         bail!("block overflow");
                     }
-                    let v = mtf[0];
+                    let v = mtf.0[0];
                     counts[v as usize] += run as u32;
                     // SAFETY: pos + run <= MAX_BLOCK; the fill over-writes < 16 bytes into PAD.
                     unsafe { fill16(ll.add(pos), v, run) };
                     pos += run;
+                    run_total += run;
                     run = 0;
                     run_bit = 0;
+                    snapshot!();
                 }
                 if sym == eob {
                     break 'block;
@@ -475,6 +503,7 @@ impl Scratch {
                 // SAFETY: pos < max_block <= capacity.
                 unsafe { *ll.add(pos) = v };
                 pos += 1;
+                snapshot!();
             }
         }
         *br = b;
@@ -484,7 +513,7 @@ impl Scratch {
         if orig_ptr >= pos {
             return Err(corrupt("original pointer out of range").into());
         }
-        Ok(BlockInfo { n: pos, orig_ptr, crc, counts })
+        Ok(BlockInfo { n: pos, orig_ptr, crc, counts, run_total })
     }
 
     /// Inverse BWT + RLE1 of the block in `ll8`, appended to `out`; checks the block CRC.
@@ -495,7 +524,7 @@ impl Scratch {
         // below n is written exactly once with an index < n); buffer capacities are fixed at
         // construction (tt: MAX_BLOCK + 1, pre: MAX_BLOCK + PAD).
         unsafe {
-            scatter(self.ll8.as_ptr(), n, &info.counts, self.tt.as_mut_ptr());
+            scatter(self.ll8.as_ptr(), n, info, &self.snap_pos, &self.snap_counts, self.tt.as_mut_ptr());
             if n < LANES_MIN {
                 walk_single(self.tt.as_ptr(), n, info.orig_ptr, self.pre.as_mut_ptr());
             } else {
@@ -514,9 +543,67 @@ impl Scratch {
     }
 }
 
+/// The MTF list, 32-byte aligned for the vector moves.
+#[repr(C, align(32))]
+struct MtfList([u8; 256]);
+
 /// Moves `mtf[idx]` (idx >= 1) to the front; returns it.
+///
+/// AVX2: every 32-byte chunk at or below `idx` becomes the chunk shifted up by one byte
+/// (carrying in the previous chunk's last byte, or `v` for chunk 0), blended with the
+/// original above `idx`. Indices below 32 touch one chunk; larger ones process all eight
+/// chunks without branches (random data has uniformly spread indices, so a data-dependent
+/// loop length would mispredict on nearly every symbol).
+#[cfg(target_feature = "avx2")]
 #[inline(always)]
-fn mtf_move(mtf: &mut [u8; 256], idx: usize) -> u8 {
+fn mtf_move(mtf: &mut MtfList, idx: usize) -> u8 {
+    use std::arch::x86_64::*;
+    let idx = idx & 255;
+    let v = mtf.0[idx];
+    // SAFETY: AVX2 is enabled at compile time; all accesses are within the aligned 256 bytes.
+    unsafe {
+        let p = mtf.0.as_mut_ptr() as *mut __m256i;
+        // Byte j of chunk c is position 32c + j; biased by 0x80 for a signed compare.
+        let pos0 = _mm256_setr_epi8(
+            -128, -127, -126, -125, -124, -123, -122, -121, -120, -119, -118, -117, -116, -115, -114, -113, -112,
+            -111, -110, -109, -108, -107, -106, -105, -104, -103, -102, -101, -100, -99, -98, -97,
+        );
+        let lim = _mm256_set1_epi8((idx as u8 ^ 0x80) as i8);
+        let mut prev = _mm256_set1_epi8(v as i8);
+        macro_rules! chunk {
+            ($c:expr) => {{
+                let old = _mm256_load_si256(p.add($c));
+                let t = _mm256_permute2x128_si256(old, prev, 0x03);
+                let shifted = _mm256_alignr_epi8(old, t, 15);
+                let pos = _mm256_add_epi8(pos0, _mm256_set1_epi8((32 * $c) as i8));
+                // keep = position > idx
+                let keep = _mm256_cmpgt_epi8(pos, lim);
+                _mm256_store_si256(p.add($c), _mm256_blendv_epi8(shifted, old, keep));
+                #[allow(unused_assignments)]
+                {
+                    prev = old;
+                }
+            }};
+        }
+        chunk!(0);
+        if idx >= 32 {
+            chunk!(1);
+            chunk!(2);
+            chunk!(3);
+            chunk!(4);
+            chunk!(5);
+            chunk!(6);
+            chunk!(7);
+        }
+    }
+    v
+}
+
+/// Moves `mtf[idx]` (idx >= 1) to the front; returns it.
+#[cfg(not(target_feature = "avx2"))]
+#[inline(always)]
+fn mtf_move(mtf: &mut MtfList, idx: usize) -> u8 {
+    let mtf = &mut mtf.0;
     let v = mtf[idx & 255];
     if idx < 16 {
         let w = u128::from_le_bytes(mtf[..16].try_into().unwrap());
@@ -556,22 +643,92 @@ unsafe fn fill16(p: *mut u8, x: u8, c: usize) {
 
 /// `tt[cf[L[i]]++] = (i << 8) | L[i]` for i in 0..n, where cf starts at the bucket starts.
 ///
+/// A single pass is bound by store-to-load forwarding on `cf[b]` whenever bytes repeat
+/// (runs are common in BWT output of text), so run-heavy blocks are cut into STREAMS pieces
+/// at histogram snapshots and the pieces are scattered in lock-step, each with its own `cf`
+/// table. Run-poor blocks use one stream: several streams multiply the number of write
+/// positions (256 per stream, each in its own cache line) and thrash L1.
+///
 /// # Safety
-/// `ll8[..n]` readable with histogram `counts`; `tt[..n]` writable.
-unsafe fn scatter(ll8: *const u8, n: usize, counts: &[u32; 256], tt: *mut u32) {
-    let mut cf = [0u32; 256];
+/// `ll8[..n]` readable with histogram `counts`; `snaps` are exact histograms of
+/// `ll8[..pos]` at increasing positions; `tt[..n]` writable.
+unsafe fn scatter(ll8: *const u8, n: usize, info: &BlockInfo, snap_pos: &[usize], snap_counts: &[[u32; 256]], tt: *mut u32) {
+    unsafe {
+        if info.run_total * 4 >= n {
+            scatter_n::<STREAMS>(ll8, n, &info.counts, snap_pos, snap_counts, tt)
+        } else {
+            scatter_n::<1>(ll8, n, &info.counts, snap_pos, snap_counts, tt)
+        }
+    }
+}
+
+unsafe fn scatter_n<const S: usize>(
+    ll8: *const u8,
+    n: usize,
+    counts: &[u32; 256],
+    snap_pos: &[usize],
+    snap_counts: &[[u32; 256]],
+    tt: *mut u32,
+) {
+    let mut cf = [[0u32; 256]; S];
     let mut sum = 0u32;
-    for (c, &k) in cf.iter_mut().zip(counts.iter()) {
+    for (c, &k) in cf[0].iter_mut().zip(counts.iter()) {
         *c = sum;
         sum += k;
     }
     debug_assert_eq!(sum as usize, n);
-    unsafe {
-        for i in 0..n {
+    // Stream boundaries: the snapshots closest to n * k / S.
+    let mut bounds = [0usize; 5];
+    bounds[S] = n;
+    for k in 1..S {
+        let want = n * k / S;
+        let best = snap_pos
+            .iter()
+            .enumerate()
+            .filter(|&(_, &p)| p > bounds[k - 1] && p < n)
+            .min_by_key(|&(_, &p)| p.abs_diff(want));
+        match best {
+            Some((j, &p)) if p > bounds[k - 1] && p < n => {
+                bounds[k] = p;
+                for b in 0..256 {
+                    cf[k][b] = cf[0][b] + snap_counts[j][b];
+                }
+            }
+            // No usable snapshot: an empty stream.
+            _ => {
+                bounds[k] = bounds[k - 1];
+                cf[k] = cf[k - 1];
+            }
+        }
+    }
+    // Lock-step over the shortest stream (0 if any stream is empty), then the tails.
+    let mut len = usize::MAX;
+    for k in 0..S {
+        len = len.min(bounds[k + 1] - bounds[k]);
+    }
+    #[inline(always)]
+    unsafe fn one(ll8: *const u8, tt: *mut u32, cf: &mut [u32; 256], i: usize) {
+        unsafe {
             let b = *ll8.add(i);
             let d = *cf.get_unchecked(b as usize);
             *tt.add(d as usize) = ((i as u32) << 8) | b as u32;
             *cf.get_unchecked_mut(b as usize) = d + 1;
+        }
+    }
+    unsafe {
+        if S > 1 {
+            for i in 0..len {
+                for k in 0..S {
+                    one(ll8, tt, &mut cf[k], bounds[k] + i);
+                }
+            }
+        } else {
+            len = 0;
+        }
+        for (k, c) in cf.iter_mut().enumerate() {
+            for i in bounds[k] + len..bounds[k + 1] {
+                one(ll8, tt, c, i);
+            }
         }
     }
 }
@@ -591,30 +748,12 @@ unsafe fn walk_single(tt: *const u32, n: usize, orig: usize, pre: *mut u8) {
     }
 }
 
-/// A lane reached a marked entry at index `t`: closes its segment and hands it the next
-/// unassigned one (or parks it on the self-looping sentinel entry `tt[n]`). Returns the
-/// lane's new current entry.
-#[cold]
-#[inline(never)]
-unsafe fn seg_end(s: &mut Segs, tt: *const u32, w: usize, t: usize, r: usize) -> u32 {
-    let k = s.cur[w] as usize;
-    s.r1[k] = (r + 1) as u32;
-    let d = if t >= s.orig { t - s.orig } else { t + s.n - s.orig };
-    s.next[k] = (d / s.step) as u32;
-    if s.unassigned < s.nseg {
-        let j = s.unassigned;
-        s.unassigned += 1;
-        s.cur[w] = j as u32;
-        s.lane[j] = w as u8;
-        s.r0[j] = (r + 1) as u32;
-        unsafe { *tt.add(s.start(j)) & !MARK }
-    } else {
-        s.active -= 1;
-        (s.n as u32) << 8
-    }
-}
-
 /// Multi-lane inverse BWT into `pre[..n]`.
+///
+/// Segment `j` starts at index `start(j)`; its `tt` entry is replaced by `MARK | j` (the
+/// original is kept in `s.first[j]`), so a lane that loads a marked entry knows which
+/// segment follows its own. Lanes OR their loads into `any` and marks are handled after the
+/// round, which keeps the unrolled round free of calls (all lanes stay in registers).
 ///
 /// # Safety
 /// `tt[..n]` is the scatter output (indices < n) with room for `tt[n]`; `cols` has
@@ -625,7 +764,7 @@ unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *m
     s.step = n / nseg;
     s.orig = orig;
     s.n = n;
-    for v in [&mut s.r0, &mut s.r1, &mut s.next] {
+    for v in [&mut s.r0, &mut s.r1, &mut s.next, &mut s.first] {
         v.clear();
         v.resize(nseg, 0);
     }
@@ -634,17 +773,20 @@ unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *m
     unsafe {
         // Segment starts are distinct: j * step < n for j < nseg.
         for j in 0..nseg {
-            *tt.add(s.start(j)) |= MARK;
+            let p = tt.add(s.start(j));
+            s.first[j] = *p;
+            *p = MARK | j as u32;
         }
+        // Parked lanes loop on this entry forever.
         *tt.add(n) = (n as u32) << 8;
         let mut e = [0u32; LANES];
         for (w, x) in e.iter_mut().enumerate() {
-            *x = *tt.add(s.start(w)) & !MARK;
+            *x = s.first[w];
             s.cur[w] = w as u32;
             s.lane[w] = w as u8;
         }
-        s.unassigned = LANES;
-        s.active = LANES;
+        let mut unassigned = LANES;
+        let mut active = LANES;
         let mut r = 0usize;
         loop {
             // Rounds <= total steps <= n < COL, but never trust that with raw writes.
@@ -652,16 +794,38 @@ unsafe fn walk_lanes(tt: *mut u32, n: usize, orig: usize, cols: *mut u8, pre: *m
                 return Err(corrupt("inverse BWT"));
             }
             let p = cols.add(r);
-            for w in 0..LANES {
-                let x = e[w];
-                *p.add(w * COL) = x as u8;
-                let t = (x >> 8) as usize;
-                let ne = *tt.add(t);
-                e[w] = if ne & MARK == 0 { ne } else { seg_end(s, tt, w, t, r) };
+            let mut any = 0u32;
+            for (w, x) in e.iter_mut().enumerate() {
+                *p.add(w * COL) = *x as u8;
+                let ne = *tt.add((*x >> 8) as usize);
+                *x = ne;
+                any |= ne;
             }
             r += 1;
-            if s.active == 0 {
-                break;
+            if any & MARK != 0 {
+                // Close the segments of the lanes that reached a start and hand them the
+                // next unassigned segment (or park them).
+                for (w, x) in e.iter_mut().enumerate() {
+                    if *x & MARK != 0 {
+                        let k = s.cur[w] as usize;
+                        s.r1[k] = r as u32;
+                        s.next[k] = *x & !MARK;
+                        if unassigned < nseg {
+                            let j = unassigned;
+                            unassigned += 1;
+                            s.cur[w] = j as u32;
+                            s.lane[j] = w as u8;
+                            s.r0[j] = r as u32;
+                            *x = s.first[j];
+                        } else {
+                            active -= 1;
+                            *x = (n as u32) << 8;
+                        }
+                    }
+                }
+                if active == 0 {
+                    break;
+                }
             }
         }
         // Stitch the segments in chain order, starting with the one at `orig`.
@@ -864,6 +1028,108 @@ mod tests {
         for n in 0..BZ.len() {
             assert!(decompress(&BZ[..n]).is_err(), "truncated at {n}");
         }
+    }
+
+    /// Per-phase cost of CODECS_BENCH_FILE (single stream), in user-mode cycles per BWT symbol.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore]
+    fn codecs_bzip2_phases() {
+        let Ok(file) = std::env::var("CODECS_BENCH_FILE") else { return };
+        let data = std::fs::read(file).unwrap();
+        // User-mode cycles of this thread (perf_event_open), falling back to the TSC.
+        use std::os::raw::{c_int, c_long, c_ulong};
+        unsafe extern "C" {
+            fn syscall(num: c_long, ...) -> c_long;
+            fn ioctl(fd: c_int, req: c_ulong, ...) -> c_int;
+            fn read(fd: c_int, buf: *mut u8, n: usize) -> isize;
+        }
+        let pmu = std::fs::read_to_string("/sys/bus/event_source/devices/cpu_core/type")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let mut attr = [0u64; 8];
+        attr[0] = 64u64 << 32;
+        attr[1] = pmu << 32;
+        attr[5] = (1 << 5) | (1 << 6);
+        let fd = unsafe { syscall(298, attr.as_ptr(), 0 as c_int, -1 as c_int, -1 as c_int, 0 as c_ulong) } as c_int;
+        if fd >= 0 {
+            unsafe { ioctl(fd, 0x2400, 0 as c_ulong) };
+        }
+        let tsc = || {
+            if fd >= 0 {
+                let mut v = 0u64;
+                unsafe { read(fd, &mut v as *mut u64 as *mut u8, 8) };
+                v
+            } else {
+                unsafe { std::arch::x86_64::_rdtsc() }
+            }
+        };
+        let mut best = [u64::MAX; 5];
+        let mut total_n = 0usize;
+        let mut total_out = 0usize;
+        let mut total_runs = 0usize;
+        for _ in 0..5 {
+            let mut t = [0u64; 5];
+            let mut sc = Scratch::new().unwrap();
+            let mut out = Vec::with_capacity(1 << 27);
+            let max_block = (data[3] - b'0') as usize * 100_000;
+            let mut br = BitReader::new(&data, 4);
+            total_n = 0;
+            total_runs = 0;
+            loop {
+                let hi = br.bits(24) as u64;
+                let magic = (hi << 24) | br.bits(24) as u64;
+                if magic != BLOCK_MAGIC {
+                    break;
+                }
+                let t0 = tsc();
+                let Ok(info) = sc.entropy(&mut br, max_block) else { panic!("entropy") };
+                let t1 = tsc();
+                let n = info.n;
+                total_n += n;
+                total_runs += info.run_total;
+                unsafe {
+                    scatter(sc.ll8.as_ptr(), n, &info, &sc.snap_pos, &sc.snap_counts, sc.tt.as_mut_ptr());
+                    let t2 = tsc();
+                    if n < LANES_MIN {
+                        walk_single(sc.tt.as_ptr(), n, info.orig_ptr, sc.pre.as_mut_ptr());
+                    } else {
+                        if sc.cols.capacity() < LANES * COL {
+                            sc.cols.reserve_exact(LANES * COL);
+                        }
+                        walk_lanes(sc.tt.as_mut_ptr(), n, info.orig_ptr, sc.cols.as_mut_ptr(), sc.pre.as_mut_ptr(), &mut sc.segs)
+                            .unwrap();
+                    }
+                    let t3 = tsc();
+                    let start = out.len();
+                    unrle(std::slice::from_raw_parts(sc.pre.as_ptr(), n), &mut out).unwrap();
+                    let t4 = tsc();
+                    assert_eq!(crc32_bzip2(&out[start..]), info.crc);
+                    let t5 = tsc();
+                    for (k, d) in [t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4].into_iter().enumerate() {
+                        t[k] += d;
+                    }
+                }
+            }
+            total_out = out.len();
+            for k in 0..5 {
+                best[k] = best[k].min(t[k]);
+            }
+        }
+        let names = ["entropy", "scatter", "walk", "unrle", "crc"];
+        let sum: u64 = best.iter().sum();
+        let line: Vec<String> = names
+            .iter()
+            .zip(best.iter())
+            .map(|(nm, &c)| format!("{nm} {:.2}", c as f64 / total_n as f64))
+            .collect();
+        println!(
+            "phases (cycles per BWT symbol, n={total_n}, out={total_out}, runs {:.2}): {} | total {:.1} Mticks",
+            total_runs as f64 / total_n as f64,
+            line.join("  "),
+            sum as f64 / 1e6
+        );
     }
 
     #[test]
