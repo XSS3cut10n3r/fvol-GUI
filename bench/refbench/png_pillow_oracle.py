@@ -114,6 +114,25 @@ def main():
     quick = "--quick" in sys.argv
     os.makedirs(outdir, exist_ok=True)
     kinds = ["noise", "gradient", "solid", "zero", "black", "alpha", "rgb565", "duprows", "text", "desktop", "palette"]
+    if "--random" in sys.argv:
+        # --random N [--seed S]: N images of random kind and size (odd widths, tall/wide shapes)
+        n = int(sys.argv[sys.argv.index("--random") + 1])
+        seed = int(sys.argv[sys.argv.index("--seed") + 1]) if "--seed" in sys.argv else 1
+        r = random.Random(seed)
+        for i in range(n):
+            k = r.choice(kinds)
+            w = r.choice([r.randrange(1, 40), r.randrange(40, 700), r.randrange(700, 2200)])
+            h = r.choice([r.randrange(1, 40), r.randrange(40, 500)])
+            if w * h > 1_500_000:
+                h = max(1, 1_500_000 // w)
+            data = gen(k, w, h, seed * 100000 + i)
+            name = f"r{seed}n{i}{k}_{w}x{h}"
+            with open(os.path.join(outdir, name + ".rgba"), "wb") as f:
+                f.write(data)
+            with open(os.path.join(outdir, name + ".png"), "wb") as f:
+                f.write(pillow_png(w, h, data))
+        print(f"{n} random images in {outdir}")
+        return
     cases = []
     for (w, h) in [(1, 1), (3, 7), (17, 5), (2, 9), (64, 1)]:
         cases += [(k, w, h) for k in kinds]
