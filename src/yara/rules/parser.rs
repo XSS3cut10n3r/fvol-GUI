@@ -22,8 +22,9 @@ const MAX_LOOP_NESTING: usize = 4;
 const MAX_LOOP_VARS: usize = 2;
 const INTERNAL_LOOP_VARS: usize = 3;
 const MAX_STRINGS_PER_RULE: usize = 10000;
-/// Nesting cap for recursive constructs (parentheses, unary operators, `not`).
-const MAX_DEPTH: usize = 128;
+/// Nesting cap for recursive constructs (parentheses, unary operators, `not`):
+/// at most ~0.3 MiB of stack in optimized builds, < 2 MiB in debug builds.
+pub const MAX_DEPTH: usize = 256;
 const DEFAULT_BASE64_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// A compiled rule.

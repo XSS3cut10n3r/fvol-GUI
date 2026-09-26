@@ -408,6 +408,36 @@ fn t_src(src: &str) -> bool {
     !names(src, b"", &[]).is_empty()
 }
 
+/// The nesting caps keep compilation well inside a small thread stack.
+#[test]
+fn yara_rules_max_depth_fits_small_stack() {
+    let stack_kb: usize = std::env::var("RSVOL_YARA_STACK_KB").ok().and_then(|v| v.parse().ok()).unwrap_or(2048);
+    let run = || {
+        // Every construct below uses exactly MAX_DEPTH - 1 nesting units.
+        let n = parser::MAX_DEPTH - 1;
+        let srcs = [
+            format!("rule a {{ condition: {}true{} }}", "(".repeat(n), ")".repeat(n)),
+            format!("rule a {{ condition: {}1 }}", "-".repeat(n)),
+            format!("rule a {{ condition: {}true }}", "not ".repeat(n)),
+            format!("rule a {{ condition: {}1{} }}", "(~(".repeat(n / 3), "))".repeat(n / 3)),
+            format!("rule a {{ condition: 1 + {}1{} }}", "(1 * (".repeat(n / 4), "))".repeat(n / 4)),
+            format!("rule a {{ condition: uint8({}0{}) }}", "uint8(".repeat(n - 1), ")".repeat(n - 1)),
+            format!("rule a {{ condition: \"a\" matches /{}a{}/ }}", "(".repeat(199), ")".repeat(199)),
+        ];
+        for s in &srcs {
+            let r = Rules::compile(s);
+            assert!(r.is_ok(), "{:?}", r.err());
+            let _ = r.map(|r| r.evaluate(b"abc", &[]));
+        }
+        // One level deeper fails cleanly.
+        let m = parser::MAX_DEPTH + 1;
+        let deep = format!("rule a {{ condition: {}true{} }}", "(".repeat(m), ")".repeat(m));
+        assert!(Rules::compile(&deep).is_err());
+    };
+    let h = std::thread::Builder::new().stack_size(stack_kb * 1024).spawn(run).unwrap();
+    assert!(h.join().is_ok());
+}
+
 #[test]
 fn yara_rules_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
