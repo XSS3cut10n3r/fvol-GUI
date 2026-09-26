@@ -40,7 +40,7 @@ pub enum IsfLocation {
     Embedded { rel: &'static str, top: bool, data: &'static [u8] },
     /// A location from a remote identifier list (python `-u/--remote-isf-url`), kept verbatim:
     /// `file://...` is read in place, anything else (http/https/ftp) is downloaded once and
-    /// cached in `~/.cache/rsvol/remote` (python: `CACHE_PATH/data_<sha512>.cache`).
+    /// cached as `~/.cache/rsvol/data_<sha512>.cache` (python: `CACHE_PATH/data_<sha512>.cache`).
     Url(String),
 }
 
@@ -92,32 +92,17 @@ impl IsfLocation {
 }
 
 /// The local file behind a URL: the path of a `file://` URL, else the download cache file
-/// (fetched with curl on first use, like python's `ResourceAccessor` cache it never expires).
+/// `data_<sha512>.cache` (fetched with curl on first use; like python's `ResourceAccessor`
+/// cache it never expires, `--clear-cache` removes it).
 pub fn url_local_path(url: &str) -> Result<PathBuf> {
     if let Some(p) = paths::file_uri_to_path(url) {
         return Ok(p);
     }
-    if !["http://", "https://", "ftp://"].iter().any(|s| url.starts_with(s)) {
+    if !crate::util::download::is_remote(url) {
         return Err(Error::msg(format!("URL does not reference an openable file: {url}")));
     }
-    // named by a fully mixing hash of the URL; the URL itself is kept next to the download
-    // and compared, so a hash collision re-downloads instead of serving another URL's file
-    let base = paths::rsvol_cache_dir().join("remote").join(format!("{:016x}-{}", crate::layers::scancache::key_hash(url.as_bytes()), url.len()));
-    let cache = base.with_extension("cache");
-    let tag = base.with_extension("url");
-    if cache.is_file() && std::fs::read(&tag).is_ok_and(|t| t == url.as_bytes()) {
-        return Ok(cache);
-    }
-    let out = std::process::Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location", "--globoff", "--connect-timeout", "30", "--output", "-", "--", url])
-        .output()
-        .map_err(|e| Error::msg(format!("cannot run curl: {e}")))?;
-    if !out.status.success() {
-        return Err(Error::msg(format!("download of {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
-    }
-    paths::write_atomic(&cache, &out.stdout)?;
-    paths::write_atomic(&tag, url.as_bytes())?;
-    Ok(cache)
+    // remote lists are ignored in offline mode (see `set_remote_isf_url`)
+    crate::util::download::fetch(url, false)
 }
 
 /// python `RemoteIdentifierFormat(url).process({}, os)` for every `constants.OS_CATEGORIES`

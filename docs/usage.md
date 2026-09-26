@@ -51,6 +51,11 @@ Any unique prefix of a plugin name works, so `windows.pslist` runs `windows.psli
 `-f` takes the image file, and the format is detected from its contents. For a VMware image,
 pass the `.vmem` file and keep the `.vmss` or `.vmsn` file of the same name next to it.
 
+`-f` also takes an `http://`, `https://` or `ftp://` URL, as python does. rsvol downloads the
+image once with `curl` into `~/.cache/rsvol/data_<SHA512>.cache`, named like python's download,
+and reads it from there on later runs without checking the server again. Like python, rsvol retries a download whose TLS certificate fails
+verification without verification, with a warning.
+
 The exit status is 0 on success, 1 when the plugin cannot run or fails, and 2 for a usage error.
 rsvol prints no progress output, so `-q` is accepted but changes nothing.
 
@@ -189,7 +194,7 @@ File names may end in `.json`, `.json.xz`, `.json.gz` or `.json.bz2`, and may si
 archives.
 
 To use a remote list of symbol files, pass its URL with `-u`. rsvol downloads the list and the
-files it needs once, with `curl`, and keeps them in `~/.cache/rsvol/remote/`:
+files it needs once, with `curl`, and keeps them in `~/.cache/rsvol/` as `data_<SHA512>.cache`:
 
 ```bash
 vol -u <ISF_LIST_URL> -f <IMAGE> linux.pslist.PsList

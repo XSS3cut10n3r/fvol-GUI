@@ -139,8 +139,9 @@ a capstone-compatible x86 disassembler, a regex engine with python `re` semantic
 engine, a PDB to ISF converter, and readers for JSON, zip and SQLite files.
 
 The only external program rsvol runs is `curl`, and only where python volatility3 goes to the
-network: downloading PDB files from the Microsoft symbol server, and fetching remote ISF lists and
-files named with `-u/--remote-isf-url`. `--offline` disables both.
+network: downloading PDB files from the Microsoft symbol server, images given to `-f` or
+`--single-location` as `http://`, `https://` or `ftp://` URLs, and remote ISF lists and files
+named with `-u/--remote-isf-url`. `--offline` disables all of them.
 
 ## Web UI
 
@@ -181,13 +182,16 @@ files downloaded by either tool are shared.
 | Kernel discovery results           | `~/.cache/rsvol/automagic/`                     | Warm runs skip the DTB, KDBG and banner scans              |
 | Raw scan hits                      | `~/.cache/rsvol/scan/`, capped at 256 MiB       | Scanning plugins replay hits instead of rereading memory   |
 | `isfinfo --live` results           | `~/.cache/rsvol/isfinfo.cache`                  | Warm `isfinfo` runs parse no files                         |
-| Remote ISF downloads               | `~/.cache/rsvol/remote/`                        | Files fetched for `-u` are downloaded once                 |
+| Downloads                          | `~/.cache/rsvol/data_<SHA512>.cache`            | Remote images and `-u` files are downloaded once           |
 | Converted Windows PDBs             | `~/.cache/volatility3/symbols/windows/`         | Shared with python volatility3                             |
 
 A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
 directory where the file can be created, as python does: normally
 `~/.cache/volatility3/symbols`, but a writable `-s` directory or python volatility3 installation
 comes first.
+
+Downloads are named like python's, `data_` and the SHA-512 of the URL, and like python's they are
+never checked for changes on the server.
 
 To empty the caches, run any plugin with `--clear-cache` or delete the directory. `--clear-cache`
 removes the symbol tables, the identifier index, the kernel discovery results and the scan
@@ -277,8 +281,8 @@ gates.
   unless `RSVOL_THREADS` says otherwise.
 - **YARA.** Rules that `import` a module such as `pe` fail with "modules are not supported", and
   `--yara-compiled-file` is not supported. Plain rules, strings and conditions work.
-- **Remote images.** The image must be a local file, given as a path or a `file://` URL. python can
-  also open `http://` and `https://` locations.
+- **Compressed images.** python decompresses an image whose name ends in `.gz`, `.bz2` or `.xz`
+  while reading it; rsvol reads the file as it is.
 - **Corrupt circular lists.** Where python would loop forever on a smeared structure, such as a
   cyclic subsection list in `windows.dumpfiles.DumpFiles`, rsvol stops with an error.
 - **`isfinfo.IsfInfo`** leaves the `hash` column empty for rows it adds to python's identifier
