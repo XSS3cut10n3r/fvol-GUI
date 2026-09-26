@@ -936,6 +936,23 @@ mod tests {
     }
 
     #[test]
+    fn la57_five_levels() {
+        let mut m = vec![0u8; 0x10000];
+        // PML5 0x1000 -> PML4 0x2000 -> PDPT 0x3000 -> PD 0x4000 -> PT 0x5000 -> page 0x6000
+        for (t, next) in [(0x1000usize, 0x2000u64), (0x2000, 0x3000), (0x3000, 0x4000), (0x4000, 0x5000), (0x5000, 0x6000)] {
+            put(&mut m, t, next | 1);
+            put(&mut m, t + 8, 0x9000 | 1);
+        }
+        m[0x6123] = 0x44;
+        let l = IntelLayer::new("t", Arc::new(Buf(m)), 0x1000, PagingMode::La57, PteFlavor::Generic);
+        assert_eq!(l.max_address(), (1 << 57) - 1);
+        assert_eq!(l.translate_addr(0x123), Some((0x6123, Target::Phys)));
+        assert_eq!(l.read_u8(0x123).unwrap(), 0x44);
+        // bit 48 selects PML5 entry 1 (-> 0x9000, a zero table) -> invalid
+        assert!(l.translate_addr(1 << 48).is_none());
+    }
+
+    #[test]
     fn pae_three_levels() {
         // PDPT at 0x1020 (32-byte aligned, not page aligned); the 4096-byte "table" read from
         // it must not be uniform
