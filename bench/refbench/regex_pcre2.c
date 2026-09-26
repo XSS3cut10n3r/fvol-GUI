@@ -46,6 +46,32 @@ static long scan(pcre2_code *re, pcre2_match_data *md, pcre2_match_context *mc, 
     return n;
 }
 
+/* If the pattern is a plain literal (only \xHH and \<punct> escapes), decode it into out and
+ * return its length, else -1. */
+static long literal_of(const char *p, size_t n, unsigned char *out) {
+    long k = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (c == '\\') {
+            if (i + 1 >= n) return -1;
+            unsigned char e = (unsigned char)p[i + 1];
+            if (e == 'x' && i + 3 < n) {
+                char h[3] = {p[i + 2], p[i + 3], 0};
+                out[k++] = (unsigned char)strtoul(h, NULL, 16);
+                i += 3;
+                continue;
+            }
+            if ((e >= '0' && e <= '9') || (e >= 'a' && e <= 'z') || (e >= 'A' && e <= 'Z')) return -1;
+            out[k++] = e;
+            i++;
+            continue;
+        }
+        if (strchr(".^$*+?()[]{}|", c)) return -1;
+        out[k++] = c;
+    }
+    return k;
+}
+
 int main(int argc, char **argv) {
     if (argc < 6) {
         fprintf(stderr, "usage: %s IMG OFF LEN REPS CASES.tsv [case,case...]\n", argv[0]);
@@ -102,6 +128,27 @@ int main(int argc, char **argv) {
         fflush(stdout);
         pcre2_match_data_free(md);
         pcre2_code_free(re);
+        /* the substring-search floor: glibc memmem over the same window */
+        unsigned char lit[512];
+        long ll = lens[c] < sizeof lit ? literal_of(pats[c], lens[c], lit) : -1;
+        if (ll > 1) {
+            double bm = 1e9;
+            long cnt = 0;
+            for (int r = 0; r < reps; r++) {
+                double t0 = bu_now();
+                long k = 0;
+                const unsigned char *p = hay, *end = hay + len;
+                while ((p = memmem(p, (size_t)(end - p), lit, (size_t)ll)) != NULL) {
+                    k++;
+                    p++;
+                }
+                double dt = bu_now() - t0;
+                if (dt < bm) bm = dt;
+                cnt = k;
+            }
+            printf("PRIM\tglibc-memmem\t%s\t%.4f\t%.1f\t%ld\n", names[c], bm, (double)len / 1e6 / bm, cnt);
+            fflush(stdout);
+        }
     }
     return 0;
 }

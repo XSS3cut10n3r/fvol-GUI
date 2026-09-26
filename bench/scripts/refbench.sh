@@ -70,7 +70,7 @@ echo "== building rust drivers (cargo test --profile $PROFILE, through limit.sh)
 run() { # engine-label cmd... : run through limit.sh, keep BENCH lines
   echo "== $1" >&2
   shift
-  "$LIMIT" -m 4G "$@" 2>"$OUT/stderr.last" | grep '^BENCH' | tee -a "$RES" >&2
+  "$LIMIT" -m 4G "$@" 2>"$OUT/stderr.last" | grep --line-buffered -E '^(BENCH|PRIM)' | tee -a "$RES" >&2
 }
 rust() { # driver-name extra-env...
   local drv=$1; shift
@@ -155,5 +155,15 @@ awk -F'\t' -v pylen="$PYLEN" -v len="$LEN" '
       print row " | " eng " |"
     }
   }' "$RES"
+if grep -q '^PRIM' "$RES"; then
+  echo
+  echo "substring-search floor for the plain-literal cases (MB/s, same window; diagnostic, not a reference library):"
+  echo
+  echo "| case | glibc memmem | rsvol Memmem | rsvol regex |"
+  echo "|---|---:|---:|---:|"
+  awk -F'\t' '$1 == "PRIM" { p[$3, $2] = $5; if (!($3 in s)) { s[$3] = 1; o[++n] = $3 } }
+    $1 == "BENCH" && $2 == "rsvol" { r[$3] = $6 }
+    END { for (i = 1; i <= n; i++) { c = o[i]; printf "| %s | %.0f | %.0f | %.0f |\n", c, p[c, "glibc-memmem"], p[c, "rsvol-memmem"], r[c] } }' "$RES"
+fi
 echo
 echo "(yara matches = matching rules / string instances; raw lines: $RES)"

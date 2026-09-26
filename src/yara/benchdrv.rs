@@ -120,7 +120,39 @@ fn secs_best<F: FnMut() -> T, T>(reps: usize, mut f: F) -> (f64, T) {
     (best, last.unwrap())
 }
 
+/// The bytes a pattern matches if it is a plain literal (only `\xHH` / `\<punct>` escapes).
+fn pattern_literal(p: &[u8]) -> Option<Vec<u8>> {
+    let hexv = |c: u8| (c as char).to_digit(16).map(|v| v as u8);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < p.len() {
+        let c = p[i];
+        if c == b'\\' {
+            let n = *p.get(i + 1)?;
+            if n == b'x' {
+                out.push(hexv(*p.get(i + 2)?)? << 4 | hexv(*p.get(i + 3)?)?);
+                i += 4;
+                continue;
+            }
+            if n.is_ascii_alphanumeric() {
+                return None;
+            }
+            out.push(n);
+            i += 2;
+            continue;
+        }
+        if b".^$*+?()[]{}|".contains(&c) {
+            return None;
+        }
+        out.push(c);
+        i += 1;
+    }
+    Some(out)
+}
+
 /// Regex throughput: `Regex::new(pattern, 0)` + `find_iter(window).count()`.
+/// For plain-literal patterns also prints the substring primitive's own throughput
+/// (`PRIM` line: `memchr::Memmem::find_iter`, the floor under the regex layer).
 #[test]
 #[ignore]
 fn yara_regex_bench_driver() {
@@ -157,6 +189,11 @@ fn yara_regex_bench_driver() {
             hay.len() >> 20,
             re.engine_name()
         );
+        if let Some(lit) = pattern_literal(pat).filter(|l| l.len() > 1) {
+            let mm = super::memchr::Memmem::new(&lit);
+            let (best, n) = secs_best(reps, || mm.find_iter(black_box(hay)).count());
+            println!("PRIM\trsvol-memmem\t{name}\t{best:.4}\t{:.1}\t{n}", hay.len() as f64 / 1e6 / best);
+        }
     }
 }
 

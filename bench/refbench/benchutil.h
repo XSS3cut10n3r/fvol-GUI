@@ -7,6 +7,10 @@
 #ifndef RSVOL_BENCHUTIL_H
 #define RSVOL_BENCHUTIL_H
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* memmem */
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
