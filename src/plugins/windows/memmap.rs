@@ -176,6 +176,9 @@ fn push_padded(out: &mut Vec<u8>, src: &[u8], a: usize, b: usize) {
     }
 }
 
+/// A run's row template: (shared piece, run index).
+type Template<'s> = Option<(&'s SharedPiece, usize)>;
+
 /// Top-level pieces that at least two processes share: built on first use by any worker.
 type Shared = FxHashMap<TopPiece, OnceLock<SharedPiece>>;
 
@@ -201,7 +204,7 @@ fn encode_process(layer: LayerRef, enc: &RowEncoder, shared: &Shared, mut out: V
     out.clear();
     let (mut n, mut file_offset) = (0usize, 0u64);
     // one row: from its template, or formatted
-    let emit = |out: &mut Vec<u8>, n: &mut usize, file_offset: &mut u64, m: &Mapping, tmpl: Option<(&SharedPiece, usize)>| {
+    let emit = |out: &mut Vec<u8>, n: &mut usize, file_offset: &mut u64, m: &Mapping, tmpl: Template| {
         match tmpl {
             Some((sp, j)) => sp.emit(out, enc, j, *file_offset),
             None => enc.row(out, &row_values(m, *file_offset)),
@@ -210,7 +213,7 @@ fn encode_process(layer: LayerRef, enc: &RowEncoder, shared: &Shared, mut out: V
         *file_offset = file_offset.wrapping_add(m.len);
     };
     // the last run so far (not emitted yet: it may merge with the next one), with its template
-    let mut pending: Option<(Mapping, Target, Option<(&SharedPiece, usize)>)> = None;
+    let mut pending: Option<(Mapping, Target, Template)> = None;
     let mut own: Vec<(Mapping, Target)> = Vec::new();
     for p in &pieces {
         let (runs, sp): (&[(Mapping, Target)], Option<&SharedPiece>) = match shared.get(p) {

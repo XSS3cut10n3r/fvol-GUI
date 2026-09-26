@@ -946,8 +946,7 @@ impl<F: FnMut(u64, u64, u64, Target) -> bool> RangeWalk<'_, F> {
         let l = self.l;
         let offset = self.off;
         let length = self.end - offset as u128;
-        let skip_mask: u64;
-        match l.translate_cursor(offset, &mut self.cur) {
+        let skip_mask: u64 = match l.translate_cursor(offset, &mut self.cur) {
             Ok((chunk_offset, bits, t)) => {
                 let page_size = 1u128 << bits;
                 let chunk_size = (page_size - (offset as u128 & (page_size - 1))).min(length) as u64;
@@ -957,12 +956,16 @@ impl<F: FnMut(u64, u64, u64, Target) -> bool> RangeWalk<'_, F> {
                     }
                     return self.advance(offset as u128 + chunk_size as u128) == Flow::Next;
                 }
-                skip_mask = chunk_size - 1;
+                chunk_size - 1
             }
             Err(fault) => {
-                skip_mask = if fault.invalid_bits >= 64 { u64::MAX } else { (1u64 << fault.invalid_bits) - 1 };
+                if fault.invalid_bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << fault.invalid_bits) - 1
+                }
             }
-        }
+        };
         let length_diff = skip_mask as u128 + 1 - (offset & skip_mask) as u128;
         self.advance(offset as u128 + length_diff) == Flow::Next
     }
@@ -1034,15 +1037,16 @@ impl<F: FnMut(u64, u64, u64, Target) -> bool> RangeWalk<'_, F> {
     #[inline(always)]
     fn fault(&mut self, entry: u64, bits: u32, vbase: u64) -> Flow {
         let block_end = vbase as u128 + (1u128 << bits);
-        if self.swap && entry != 0 {
-            if let Ok((swap_offset, _, t)) = self.l.translate_swap(Fault { invalid_bits: bits, entry, swap_offset: None }) {
-                if vbase < self.off || block_end > self.end {
-                    return Flow::Partial;
-                }
-                let size = 1u64 << bits;
-                if self.l.target_valid(t, swap_offset, size) && !(self.f)(vbase, size, swap_offset, t) {
-                    return Flow::Stop;
-                }
+        if self.swap
+            && entry != 0
+            && let Ok((swap_offset, _, t)) = self.l.translate_swap(Fault { invalid_bits: bits, entry, swap_offset: None })
+        {
+            if vbase < self.off || block_end > self.end {
+                return Flow::Partial;
+            }
+            let size = 1u64 << bits;
+            if self.l.target_valid(t, swap_offset, size) && !(self.f)(vbase, size, swap_offset, t) {
+                return Flow::Stop;
             }
         }
         self.advance(block_end)

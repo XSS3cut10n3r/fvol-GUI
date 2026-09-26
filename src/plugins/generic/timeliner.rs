@@ -642,7 +642,9 @@ fn record_config(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Result<()> {
     Ok(())
 }
 
-type Outcome = Option<(Vec<TimelineBatch>, Option<Error>)>;
+/// A plugin's timeline events and the error it raised (if any).
+type Ran = (Vec<TimelineBatch>, Option<Error>);
+type Outcome = Option<Ran>;
 
 /// Run the plugins' timelines concurrently; a panicking plugin is python's `except Exception`.
 fn run_all(ctx: &Context, plugins: &[&'static dyn Plugin]) -> Vec<Outcome> {
@@ -685,7 +687,7 @@ impl Plugin for Timeliner {
         let plugins = usable_plugins(&cfg.get_strs("plugin-filter"));
         let results = run_all(ctx, &plugins);
         // python constructs the plugins first: unsatisfied ones never run
-        let ran: Vec<(&'static dyn Plugin, (Vec<TimelineBatch>, Option<Error>))> = plugins
+        let ran: Vec<(&'static dyn Plugin, Ran)> = plugins
             .iter()
             .zip(results)
             .filter_map(|(p, r)| match r {

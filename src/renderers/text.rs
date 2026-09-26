@@ -1241,7 +1241,7 @@ impl Pretty<'_> {
     /// Bookkeeping after storing row `r` whose bytes start at `arena[a0]`.
     #[inline]
     fn stored(&mut self, r: usize, a0: usize) {
-        if r % PRETTY_CK == 0 {
+        if r.is_multiple_of(PRETTY_CK) {
             self.ckpt.push(a0);
         }
         match self.segs.last_mut() {
