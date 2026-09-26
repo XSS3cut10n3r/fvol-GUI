@@ -22,7 +22,6 @@ use crate::util::mmap::Mmap;
 use crate::util::paths;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 /// ISF file extensions in python's preference order (`constants.ISF_EXTENSIONS`).
 pub const ISF_EXTENSIONS: [&str; 4] = [".json", ".json.xz", ".json.gz", ".json.bz2"];
@@ -124,7 +123,7 @@ pub fn decompress_by_name(name: &str, raw: Vec<u8>) -> Result<Vec<u8>> {
 }
 
 /// A search root.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Root {
     Dir(PathBuf),
     /// the embedded files (`top` = volatility3/symbols, else framework/symbols)
@@ -132,7 +131,7 @@ pub enum Root {
 }
 
 /// The symbol search path.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolPath {
     pub roots: Vec<Root>,
     /// Where downloaded / converted PDB ISFs are written (python's cache symbols dir).
@@ -607,11 +606,16 @@ fn write_ident_cache(path: &Path, entries: &[IdentEntry]) {
 /// SymbolCacheMagic update), built/refreshed on first use for `path`.
 /// `identifier_index(p).dictionary("linux")` = python `get_identifier_dictionary("linux")`.
 pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
-    static INDEX: OnceLock<IdentifierIndex> = OnceLock::new();
-    INDEX.get_or_init(|| {
-        let _t = crate::util::trace::span("identifier index update");
-        IdentifierIndex::update(path)
-    })
+    // one index per distinct search path (a process normally has exactly one)
+    static INDEX: std::sync::Mutex<Vec<(SymbolPath, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
+    let mut all = INDEX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, i)) = all.iter().find(|(p, _)| p == path) {
+        return i;
+    }
+    let _t = crate::util::trace::span("identifier index update");
+    let i: &'static IdentifierIndex = Box::leak(Box::new(IdentifierIndex::update(path)));
+    all.push((path.clone(), i));
+    i
 }
 
 /// Find the ISF for a Windows PDB (python `PDBUtility.load_windows_symbol_table` lookup order:
