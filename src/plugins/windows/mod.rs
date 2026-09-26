@@ -58,6 +58,7 @@ pub mod thrdscan;
 pub mod thread_pe_symbols;
 pub mod threads;
 pub mod timers;
+pub mod unhooked_system_calls;
 pub mod unloadedmodules;
 pub mod vadinfo;
 pub mod vadregexscan;
@@ -121,6 +122,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&thrdscan::ThrdScan);
     v.push(&threads::Threads);
     v.push(&timers::Timers);
+    v.push(&unhooked_system_calls::UnhookedSystemCalls);
     v.push(&unloadedmodules::UnloadedModules);
     v.push(&vadinfo::VadInfo);
     v.push(&vadregexscan::VadRegExScan);
