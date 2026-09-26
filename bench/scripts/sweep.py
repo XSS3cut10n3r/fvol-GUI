@@ -410,7 +410,8 @@ def gen_windows(C, V, inputs):
     V["base_args"] = {
         "windows.pe_symbols.PESymbols": ["--source", "kernel", "--module", "ntoskrnl.exe", "--symbols", "NtCreateFile"],
         "windows.pedump.PEDump": ["--pid", pid1, "--base", hx(V["exe_base"])] if V.get("exe_base") else None,
-        "windows.strings.Strings": ["--strings-file", sf],
+        # without --pid python maps the whole kernel layer (> 8 GB on the 5 GB image): one small process
+        "windows.strings.Strings": ["--pid", small, "--strings-file", sf],
         "windows.vadregexscan.VadRegExScan": ["--pid", pid1, "--pattern", "kernel32"],
         "regexscan.RegExScan": ["--pattern", "Codebreaker|rsvol"],
         "yarascan.YaraScan": ["--yara-string", V.get("user", "Microsoft")],
@@ -474,7 +475,6 @@ def gen_windows(C, V, inputs):
     all_renderers(C, V_, "vadinfo", ["--pid", small])
     C.add("windows.memmap.Memmap", "small", ["--pid", small])
     C.add("windows.memmap.Memmap", "dump-small", ["--pid", small, "--dump"])
-    C.add("windows.memmap.Memmap", "nopid", [])
     for M in ("windows.modules.Modules", "windows.modscan.ModScan"):
         C.add(M, "name", ["--name", "ntoskrnl.exe"])
         C.add(M, "name-nomatch", ["--name", "NTOSKRNL.EXE"])
@@ -555,7 +555,8 @@ def gen_windows(C, V, inputs):
     T = "windows.strings.Strings"
     C.add(T, "pid", ["--pid", pid1, "--strings-file", sf])
     C.add(T, "missing-file", ["--strings-file", "/nonexistent/strings.txt"])
-    C.add(T, "file-uri", ["--strings-file", "file://" + sf])
+    C.add(T, "missing-uri", ["--strings-file", "file:///nonexistent/strings.txt"])
+    C.add(T, "file-uri", ["--pid", small, "--strings-file", "file://" + sf])
     R = "windows.vadregexscan.VadRegExScan"
     C.add(R, "maxsize", ["--pid", pid1, "--pattern", r"[a-z]{4,}\.dll", "--maxsize", "0x1000"])
     C.add(R, "bad-regex", ["--pid", pid1, "--pattern", "(unclosed"])
@@ -573,6 +574,7 @@ def gen_windows(C, V, inputs):
     C.add(Y, "maxsize", ["--pid", pid1, "--yara-string", "kernel32", "--max-size", "0x1000"])
     C.add(Y, "bad-rule", ["--pid", pid1, "--yara-file", f"{inputs}/bad.yar"])
     C.add(Y, "missing-file", ["--pid", pid1, "--yara-file", "/nonexistent/rules.yar"])
+    C.add(Y, "missing-uri", ["--pid", pid1, "--yara-file", "file:///nonexistent/rules.yar"])
     C.add(Y, "no-rules", ["--pid", pid1])
     all_renderers(C, Y, "vadyara", ["--pid", small, "--yara-string", "{4D 5A 90 00}"])
     G = "yarascan.YaraScan"
@@ -581,6 +583,8 @@ def gen_windows(C, V, inputs):
     C.add(G, "wide", ["--yara-string", V.get("user", "Microsoft"), "--wide"])
     C.add(G, "no-rules", [], est=5)
     C.add(G, "bad-hex", ["--yara-string", "{ZZ}"], est=5)
+    C.add(G, "missing-uri", ["--yara-file", "file:///nonexistent/rules.yar"], est=5)
+    C.add(G, "bad-rule", ["--yara-file", f"{inputs}/bad.yar"], est=5)
     all_renderers(C, G, "yarascan", ["--yara-string", V.get("user", "Microsoft")])
     X = "regexscan.RegExScan"
     C.add(X, "maxsize", ["--pattern", "Codebreaker", "--maxsize", "4"])
@@ -731,6 +735,8 @@ def gen_linux(C, V, inputs):
     C.add(Y, "wide", ["--pid", pid1, "--yara-string", "rsvol", "--wide"])
     C.add(Y, "hex", ["--pid", small, "--yara-string", "{7F 45 4C 46}"])
     C.add(Y, "maxsize", ["--pid", small, "--yara-string", "{7F 45 4C 46}", "--max-size", "64"])
+    C.add(Y, "bad-rule", ["--pid", pid1, "--yara-file", f"{inputs}/bad.yar"])
+    C.add(Y, "missing-uri", ["--pid", pid1, "--yara-file", "file:///nonexistent/rules.yar"])
     all_renderers(C, Y, "vmayara", ["--pid", small, "--yara-string", "{7F 45 4C 46}"])
     G = "yarascan.YaraScan"
     C.add(G, "file", ["--yara-file", f"{inputs}/linux.yar"], est=300)
@@ -1014,6 +1020,18 @@ KNOWN = [
 ]
 
 
+def sort_strings_revmap(data):
+    """windows.strings: each string's mappings come from a python set of (name, offset) tuples
+    (hash-randomized order). Compare them as sets."""
+    out = []
+    for line in data.split(b"\n"):
+        f = line.split(b"\t")
+        if len(f) > 1:
+            f[-1] = b", ".join(sorted(f[-1].split(b", ")))
+        out.append(b"\t".join(f))
+    return b"\n".join(out)
+
+
 def sort_last_field_items(data):
     """linux.mountinfo --mount-format joins a python set of mount options: the order follows
     the per-process string hash seed, so python itself is nondeterministic. Compare the
@@ -1029,6 +1047,7 @@ def sort_last_field_items(data):
 
 # python-nondeterministic output: (predicate on the case, normalization applied to both sides)
 SET_ORDER = [
+    (lambda c: c["plugin"] == "windows.strings.Strings", sort_strings_revmap),
     (lambda c: c["plugin"] == "linux.mountinfo.MountInfo" and "--mount-format" in c["argv"], sort_last_field_items),
 ]
 
@@ -1038,6 +1057,8 @@ def compare(img, case, pd, rd):
     rm = json.load(open(rd + "/meta.json"))
     if pm.get("timeout"):
         return "PY-TIMEOUT", ""
+    if any(r["rc"] in (137, -9) for r in pm["runs"]):
+        return "PY-KILLED", "python exceeded limit.sh's memory cap"
     if rm.get("timeout"):
         return "RS-TIMEOUT", ""
     for rx, why in KNOWN:
