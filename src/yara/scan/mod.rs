@@ -26,7 +26,7 @@
 pub mod freq;
 pub mod hashf;
 pub mod literal;
-mod matcher;
+pub(crate) mod matcher;
 pub mod re_string;
 pub mod teddy;
 

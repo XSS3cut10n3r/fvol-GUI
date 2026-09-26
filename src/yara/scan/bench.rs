@@ -231,7 +231,12 @@ fn yara_scan_bench() {
     let mut out = Vec::new();
     let mut best = f64::MAX;
     let mut counts = vec![0usize; defs.len()];
-    for pass in 0..6 {
+    let ab = std::env::var("RSVOL_YARA_AB").is_ok();
+    let mut best_ab = [f64::MAX; 2];
+    for pass in 0..if ab { 12 } else { 6 } {
+        if ab {
+            super::matcher::NO_FUSE.store(pass % 2 == 1, std::sync::atomic::Ordering::Relaxed);
+        }
         let t = std::time::Instant::now();
         let c0 = thread_cpu();
         counts.iter_mut().for_each(|c| *c = 0);
@@ -252,6 +257,9 @@ fn yara_scan_bench() {
         // Thread CPU time: robust against being descheduled on a busy machine.
         let dt = thread_cpu() - c0;
         eprintln!("pass {pass}: cpu {:.3} s (wall {:.3})  {:.0} MB/s", dt, wall, data.len() as f64 / dt / 1e6);
+        if ab {
+            best_ab[pass % 2] = best_ab[pass % 2].min(dt);
+        }
         best = best.min(dt);
     }
     eprintln!(
@@ -263,6 +271,9 @@ fn yara_scan_bench() {
         data.len() as f64 / best / 1e6
     );
     eprintln!("matches per string: {:?}  total {}", counts, counts.iter().sum::<usize>());
+    if ab {
+        eprintln!("A/B: variant A {:.3}s  variant B {:.3}s", best_ab[0], best_ab[1]);
+    }
 }
 
 /// Window-model check: for every 4-byte window of the benchmark patterns, the true

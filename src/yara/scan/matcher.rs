@@ -137,6 +137,22 @@ impl Scratch {
 
 static MATCHER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Benchmark knob: materialize the difference stream instead of fusing it into Teddy.
+#[cfg(test)]
+pub(crate) static NO_FUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[inline(always)]
+fn no_fuse() -> bool {
+    #[cfg(test)]
+    {
+        NO_FUSE.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 /// Compiled matcher for a list of strings (all strings of all rules, global index).
 pub struct Matcher {
     id: u64,
@@ -585,15 +601,23 @@ impl Matcher {
             let (live_raw, live_diff) = (sc.live_raw, sc.live_diff);
             self.raw.run(data, b0, b1, &mut raw_state, live_raw, |q, p| self.on_raw(data, q, p, out, sc));
             if !self.diff.is_none() && n >= 2 {
-                // D[i] = data[i] ^ data[i+1] for i in [b0, e).
-                let e = (b1 + 64).min(n - 1);
-                if e > b0 {
-                    dbuf.clear();
-                    dbuf.extend(data[b0..e].iter().zip(&data[b0 + 1..e + 1]).map(|(a, b)| a ^ b));
-                    let to = b1.min(e) - b0;
-                    self.diff.run(&dbuf, 0, to, &mut diff_state, live_diff, |q, p| {
-                        self.on_diff(data, b0 + q, p, out, sc)
-                    });
+                if let (Engine::Teddy(t, _), false) = (&self.diff, no_fuse()) {
+                    // Teddy computes D on the fly.
+                    t.find_diff(data, b0, b1, live_diff, |q, p| self.on_diff(data, q, p, out, sc));
+                } else {
+                    // D[i] = data[i] ^ data[i+1] for i in [b0, e).
+                    let e = (b1 + 64).min(n - 1);
+                    if e > b0 {
+                        dbuf.resize(e - b0, 0);
+                        let (x, y) = (&data[b0..e], &data[b0 + 1..e + 1]);
+                        for ((d, &a), &b) in dbuf.iter_mut().zip(x).zip(y) {
+                            *d = a ^ b;
+                        }
+                        let to = b1.min(e) - b0;
+                        self.diff.run(&dbuf, 0, to, &mut diff_state, live_diff, |q, p| {
+                            self.on_diff(data, b0 + q, p, out, sc)
+                        });
+                    }
                 }
             }
             if self.has_re {

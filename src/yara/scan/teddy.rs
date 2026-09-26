@@ -253,13 +253,14 @@ impl Teddy {
     }
 
     #[inline(always)]
-    fn emit<F: FnMut(usize, u32)>(&self, hay: &[u8], q: usize, mut bits: u8, f: &mut F) {
-        let x = match hay.get(q..q + 4) {
+    fn emit<const DIFF: bool, F: FnMut(usize, u32)>(&self, hay: &[u8], q: usize, mut bits: u8, f: &mut F) {
+        let x = match hay.get(q..q + 5) {
+            Some(b) if DIFF => u32::from_le_bytes([b[0] ^ b[1], b[1] ^ b[2], b[2] ^ b[3], b[3] ^ b[4]]),
             Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
             None => {
                 let mut w = [0u8; 4];
                 for (j, v) in w.iter_mut().enumerate() {
-                    *v = hay.get(q + j).copied().unwrap_or(0);
+                    *v = dbyte::<DIFF>(hay, q + j);
                 }
                 u32::from_le_bytes(w)
             }
@@ -276,11 +277,11 @@ impl Teddy {
     }
 
     #[inline(always)]
-    fn scalar_bits(&self, hay: &[u8], q: usize) -> u8 {
+    fn scalar_bits<const DIFF: bool>(&self, hay: &[u8], q: usize) -> u8 {
         let mut acc = 0xffu8;
         for j in 0..self.m {
             // Past the end: any byte (the caller's bounds check rejects the candidate).
-            let b = hay.get(q + j).copied().unwrap_or(0) as usize;
+            let b = dbyte::<DIFF>(hay, q + j) as usize;
             acc &= self.lo[j][b & 15] & self.hi[j][b >> 4];
         }
         acc
@@ -300,7 +301,20 @@ impl Teddy {
 
     /// [`Teddy::find`] restricted to the buckets set in `live` (bit b = bucket b).
     #[inline]
-    pub fn find_live<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, live: u8, mut f: F) {
+    pub fn find_live<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, live: u8, f: F) {
+        self.find_impl::<false, F>(hay, from, to, live, f)
+    }
+
+    /// Search the difference stream `D[i] = hay[i] ^ hay[i + 1]` (computed on the fly;
+    /// positions are D positions, `D` has `hay.len() - 1` bytes).
+    #[inline]
+    pub fn find_diff<F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, live: u8, f: F) {
+        let to = to.min(hay.len().saturating_sub(1));
+        self.find_impl::<true, F>(hay, from, to, live, f)
+    }
+
+    #[inline]
+    fn find_impl<const DIFF: bool, F: FnMut(usize, u32)>(&self, hay: &[u8], from: usize, to: usize, live: u8, mut f: F) {
         if live == 0 {
             return;
         }
@@ -314,14 +328,14 @@ impl Teddy {
                     // SAFETY: AVX2 availability checked at runtime.
                     let (next, k) = unsafe {
                         match self.m {
-                            1 => core_avx2::<1>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
-                            2 => core_avx2::<2>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
-                            3 => core_avx2::<3>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
-                            _ => core_avx2::<4>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                            1 => core_avx2::<1, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                            2 => core_avx2::<2, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                            3 => core_avx2::<3, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
+                            _ => core_avx2::<4, DIFF>(&self.lo, &self.hi, live, hay, q, to, &mut cands),
                         }
                     };
                     for &c in &cands[..k.min(CAND_CAP)] {
-                        self.emit(hay, (c >> 8) as usize, c as u8, &mut f);
+                        self.emit::<DIFF, F>(hay, (c >> 8) as usize, c as u8, &mut f);
                     }
                     if next == q {
                         break;
@@ -331,12 +345,25 @@ impl Teddy {
             }
         }
         while q < to {
-            let bits = self.scalar_bits(hay, q) & live;
+            let bits = self.scalar_bits::<DIFF>(hay, q) & live;
             if bits != 0 {
-                self.emit(hay, q, bits, &mut f);
+                self.emit::<DIFF, F>(hay, q, bits, &mut f);
             }
             q += 1;
         }
+    }
+}
+
+/// Byte `i` of the raw (`DIFF = false`) or difference stream; 0 past the end.
+#[inline(always)]
+fn dbyte<const DIFF: bool>(hay: &[u8], i: usize) -> u8 {
+    if DIFF {
+        match (hay.get(i), hay.get(i + 1)) {
+            (Some(a), Some(b)) => a ^ b,
+            _ => 0,
+        }
+    } else {
+        hay.get(i).copied().unwrap_or(0)
     }
 }
 
@@ -349,7 +376,7 @@ const CAND_CAP: usize = 256;
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline(never)]
-unsafe fn core_avx2<const M: usize>(
+unsafe fn core_avx2<const M: usize, const DIFF: bool>(
     lo_t: &[[u8; 16]; MAX_WINDOW],
     hi_t: &[[u8; 16]; MAX_WINDOW],
     live: u8,
@@ -373,31 +400,38 @@ unsafe fn core_avx2<const M: usize>(
     }
     // Dead buckets never match: clear them from the first table.
     lo[0] = _mm256_and_si256(lo[0], _mm256_set1_epi8(live as i8));
-    let classify = |p: usize| -> __m256i {
-        // SAFETY: the caller guarantees p + 32 + M - 1 <= n.
+    // Byte vector of the searched stream at `p` (D = hay[p..] ^ hay[p+1..] when DIFF).
+    let load = |p: usize| -> __m256i {
+        // SAFETY: the caller guarantees p + 32 + DIFF <= n.
         unsafe {
             let v = _mm256_loadu_si256(ptr.add(p) as *const __m256i);
-            let mut acc = _mm256_and_si256(
-                _mm256_shuffle_epi8(lo[0], _mm256_and_si256(v, nib)),
-                _mm256_shuffle_epi8(hi[0], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
-            );
-            let mut j = 1;
-            while j < M {
-                let v = _mm256_loadu_si256(ptr.add(p + j) as *const __m256i);
-                let r = _mm256_and_si256(
-                    _mm256_shuffle_epi8(lo[j], _mm256_and_si256(v, nib)),
-                    _mm256_shuffle_epi8(hi[j], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
-                );
-                acc = _mm256_and_si256(acc, r);
-                j += 1;
-            }
-            acc
+            if DIFF { _mm256_xor_si256(v, _mm256_loadu_si256(ptr.add(p + 1) as *const __m256i)) } else { v }
         }
+    };
+    // The caller guarantees p + 32 + M - 1 + DIFF <= n.
+    let classify = |p: usize| -> __m256i {
+        let v = load(p);
+        let mut acc = _mm256_and_si256(
+            _mm256_shuffle_epi8(lo[0], _mm256_and_si256(v, nib)),
+            _mm256_shuffle_epi8(hi[0], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
+        );
+        let mut j = 1;
+        while j < M {
+            let v = load(p + j);
+            let r = _mm256_and_si256(
+                _mm256_shuffle_epi8(lo[j], _mm256_and_si256(v, nib)),
+                _mm256_shuffle_epi8(hi[j], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib)),
+            );
+            acc = _mm256_and_si256(acc, r);
+            j += 1;
+        }
+        acc
     };
     let mut k = 0usize;
     let mut buf = [0u8; 64];
     // Loads touch [q, q + 64 + M - 1).
-    while q + 64 <= to && q + 64 + M - 1 <= n && k + 64 <= CAND_CAP {
+    let extra = M - 1 + DIFF as usize;
+    while q + 64 <= to && q + 64 + extra <= n && k + 64 <= CAND_CAP {
         let a = classify(q);
         let b = classify(q + 32);
         let ma = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, zero)) as u32) as u64;
@@ -418,7 +452,7 @@ unsafe fn core_avx2<const M: usize>(
         }
         q += 64;
     }
-    while q + 32 <= to && q + 32 + M - 1 <= n && k + 32 <= CAND_CAP {
+    while q + 32 <= to && q + 32 + extra <= n && k + 32 <= CAND_CAP {
         let a = classify(q);
         let mut mask = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, zero)) as u32);
         if mask != 0 {
