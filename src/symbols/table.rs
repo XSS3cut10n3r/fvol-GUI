@@ -812,7 +812,19 @@ impl SymbolTable {
                     j += 1;
                 }
                 if j - i > 1 {
-                    v[i..j].sort_unstable_by(|a, b| self.rec_str(self.sym_rec(a.1)).cmp(self.rec_str(self.sym_rec(b.1))));
+                    // raw name bytes (byte order == str order), resolved once per element: some
+                    // runs are large (e.g. thousands of symbols at address 0)
+                    let pool = self.sec(sec::STRINGS);
+                    let name = |e: &(u64, u32)| {
+                        let r = self.sym_rec(e.1);
+                        let (o, l) = (rd32(r, 0) as usize, rd32(r, 4) as usize);
+                        pool.get(o..o.saturating_add(l)).unwrap_or(&[])
+                    };
+                    let mut run: Vec<(&[u8], (u64, u32))> = v[i..j].iter().map(|e| (name(e), *e)).collect();
+                    run.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    for (k, (_, e)) in run.into_iter().enumerate() {
+                        v[i + k] = e;
+                    }
                 }
                 i = j;
             }
