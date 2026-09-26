@@ -213,19 +213,12 @@ mod tests {
         assert_eq!(o("PARTITION_ENTRY", "EndingCHS"), 5);
         assert_eq!(o("PARTITION_ENTRY", "StartingLBA"), 8);
         assert_eq!(o("PARTITION_ENTRY", "SizeInSectors"), 12);
-        // mbr.json repeats keys ("Hibernation": 132, 160, 161; "NTFS Volume Set": 134, 135):
-        // python's json keeps the LAST value of a duplicated key
+        // mbr.json repeats keys ("Hibernation": 132, 160, 161; "NTFS Volume Set": 134, 135);
+        // the ISF loader keeps the last value like python's json
         let e = t.enumeration("PartitionTypes").unwrap();
-        let mut consts: Vec<(&str, i64)> = Vec::new();
-        for (name, v) in t.enum_constants(e) {
-            match consts.iter_mut().find(|c| c.0 == name) {
-                Some(c) => c.1 = v,
-                None => consts.push((name, v)),
-            }
+        for v in 0..=255u8 {
+            assert_eq!(partition_type_name(v), t.enum_lookup(e, v as i128), "{v}");
         }
-        for &(name, v) in &consts {
-            assert_eq!(partition_type_name(v as u8), Some(name), "{name} = {v}");
-        }
-        assert_eq!((0..=255u8).filter(|&v| partition_type_name(v).is_some()).count(), consts.len());
+        assert_eq!((0..=255u8).filter(|&v| partition_type_name(v).is_some()).count(), t.enum_constants(e).count());
     }
 }

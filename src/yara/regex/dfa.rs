@@ -82,7 +82,8 @@ fn look_ok(l: Look, left: u8, right: u8) -> bool {
 
 /// One search direction (NFA + configuration).
 struct Dir {
-    nfa: Nfa,
+    /// (shared: the prefiltered and the plain forward directions use one NFA)
+    nfa: std::sync::Arc<Nfa>,
     reverse: bool,
     /// Context bits of the "behind" byte kept in the state.
     behind_mask: u8,
@@ -91,7 +92,7 @@ struct Dir {
 }
 
 impl Dir {
-    fn new(nfa: Nfa, reverse: bool, leftmost_first: bool, start_tag: bool) -> Dir {
+    fn new(nfa: std::sync::Arc<Nfa>, reverse: bool, leftmost_first: bool, start_tag: bool) -> Dir {
         let mut behind_mask = 0u8;
         for &l in &nfa.looks {
             match (l, reverse) {
@@ -122,23 +123,9 @@ struct Classes {
 
 impl Classes {
     fn new(nfas: &[&Nfa]) -> Classes {
-        let mut boundary = [false; 257];
-        let mut mark = |s: &ByteSet| {
-            let mut b = 0usize;
-            while b < 256 {
-                if s.contains(b as u8) {
-                    let mut e = b;
-                    while e + 1 < 256 && s.contains((e + 1) as u8) {
-                        e += 1;
-                    }
-                    boundary[b] = true;
-                    boundary[e + 1] = true;
-                    b = e + 1;
-                } else {
-                    b += 1;
-                }
-            }
-        };
+        // A class boundary wherever some set's membership changes between b - 1 and b.
+        let mut boundary = ByteSet::EMPTY;
+        let mut mark = |s: &ByteSet| boundary.union(&s.edges());
         let mut has_look = false;
         let mut has_final = false;
         for nfa in nfas {
@@ -164,7 +151,7 @@ impl Classes {
         let mut rep = Vec::new();
         let mut cls: usize = 0;
         for b in 0..256usize {
-            if b > 0 && boundary[b] {
+            if b > 0 && boundary.contains(b as u8) {
                 cls += 1;
             }
             map[b] = cls as u8;
@@ -282,6 +269,9 @@ pub struct PreStats {
     calls: u64,
     skipped: u64,
     off: bool,
+    /// Where the prefiltered forward scan last (re)started with no thread alive: the
+    /// match it finds starts there or later (bounds the reverse scan).
+    restart: usize,
 }
 
 impl Cache {
@@ -341,6 +331,15 @@ fn flatten_concat(h: &Hir) -> Vec<Hir> {
             _ => out.push(h.clone()),
         }
     }
+    // Anything but a concatenation / splittable repeat (under captures) flattens to
+    // itself: a single element, of no use to the caller, so skip the copy.
+    let mut top = h;
+    while let Hir::Capture { sub, .. } = top {
+        top = sub;
+    }
+    if !matches!(top, Hir::Concat(_) | Hir::Repeat { min: 1..=8, .. }) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let mut budget = 256usize;
     go(h, &mut out, &mut budget);
@@ -349,7 +348,7 @@ fn flatten_concat(h: &Hir) -> Vec<Hir> {
 
 impl Searcher {
     pub fn new(h: &Hir) -> Option<Searcher> {
-        let fnfa = Nfa::new(h, false)?;
+        let fnfa = std::sync::Arc::new(Nfa::new(h, false)?);
         let rnfa = Nfa::new(h, true)?;
         let nullable = h.min_width(&[]) == 0;
         // Prefix prefilter.
@@ -363,19 +362,20 @@ impl Searcher {
         }
         // Inner literal strategy for top-level concatenations.
         let mut strategy = Strategy::Core;
-        let mut inner_nfa = None;
-        let flat = flatten_concat(h);
+        // An inner sequence must be 8x more selective than the prefix prefilter (and every
+        // sequence rate is >= 1): skip the analysis when the prefix is already that good.
+        let flat = if pre_rate > 8 { flatten_concat(h) } else { Vec::new() };
         if flat.len() > 1 {
             let v = &flat[..];
             let mut best: Option<(u64, usize, Vec<ByteSet>)> = None;
+            // Bytes the prefix v[..i] can consume, grown one element at a time.
+            let mut pbytes = ByteSet::EMPTY;
             for i in 1..v.len().min(12) {
-                let rest = Hir::Concat(v[i..].to_vec());
-                let (seq, _) = literal::positions(&rest);
+                pbytes.union(&literal::bytes_of_nested(&v[i - 1], 1));
+                let (seq, _) = literal::positions_concat(&v[i..]);
                 if seq.is_empty() {
                     continue;
                 }
-                let prefix = Hir::Concat(v[..i].to_vec());
-                let pbytes = literal::bytes_of(&prefix);
                 if !pbytes.intersect(&seq[0]).is_empty() {
                     continue;
                 }
@@ -389,17 +389,14 @@ impl Searcher {
                 if rate < (1 << 20) / 64 && rate.saturating_mul(8) < pre_rate {
                     let prefix = Hir::Concat(v[..i].to_vec());
                     if let (Some(f), Some(pn)) = (SeqFinder::new(&seq), Nfa::new(&prefix, true)) {
-                        inner_nfa = Some(pn.clone());
-                        strategy = Strategy::Inner { finder: f, pre: Dir::new(pn, true, false, false) };
+                        strategy = Strategy::Inner { finder: f, pre: Dir::new(std::sync::Arc::new(pn), true, false, false) };
                     }
                 }
             }
         }
-        let mut nfas: Vec<&Nfa> = vec![&fnfa, &rnfa];
-        if let Some(n) = &inner_nfa {
-            nfas.push(n);
-        }
-        let cls = Classes::new(&nfas);
+        // Byte classes: every NFA here (forward, reverse, inner prefix) is built from the
+        // classes and assertions of the same HIR, so the forward NFA's suffice.
+        let cls = Classes::new(&[&*fnfa]);
         let use_start_tag = prefilter.is_some();
         let name = match (&strategy, &prefilter) {
             (Strategy::Inner { .. }, _) => "dfa+inner",
@@ -410,7 +407,7 @@ impl Searcher {
             cls,
             plain: Dir::new(fnfa.clone(), false, true, false),
             fwd: Dir::new(fnfa, false, true, use_start_tag),
-            rev: Dir::new(rnfa, true, false, false),
+            rev: Dir::new(std::sync::Arc::new(rnfa), true, false, false),
             prefilter,
             strategy,
             name,
@@ -452,29 +449,34 @@ impl Searcher {
                 return self.find_inner(finder, pre, pc, &mut c.plain, &mut c.rev, hay, start, must_advance);
             }
         }
-        let e = self.fwd_unanchored(c, hay, start, must_advance)?;
+        let (e, lb) = self.fwd_unanchored(c, hay, start, must_advance)?;
         if let Some(w) = self.fixed_width {
             if e >= start + w {
                 return Some((e - w, e));
             }
         }
-        let s = rev_search(&self.cls, &self.rev, &mut c.rev, hay, e, start)?;
+        // The match starts at or after `lb` (>= start): no need to scan further back (the
+        // reverse DFA would otherwise run on through bytes that could precede a match,
+        // e.g. the rest of a class run before a URL).
+        let s = rev_search(&self.cls, &self.rev, &mut c.rev, hay, e, lb)?;
         Some((s, e))
     }
 
-    /// Unanchored forward search with the adaptive prefilter.
-    fn fwd_unanchored(&self, c: &mut Cache, hay: &[u8], start: usize, must_advance: bool) -> Option<usize> {
+    /// Unanchored forward search with the adaptive prefilter: (match end, lower bound of
+    /// the match start).
+    fn fwd_unanchored(&self, c: &mut Cache, hay: &[u8], start: usize, must_advance: bool) -> Option<(usize, usize)> {
         match &self.prefilter {
             Some(pf) if !c.stats.off => {
+                c.stats.restart = start;
                 let (e, pos, switched) =
                     fwd_search(&self.cls, &self.fwd, &mut c.fwd, Some((pf, &mut c.stats)), hay, start, false, must_advance);
                 if switched {
-                    fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, pos, false, false).0
+                    Some((fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, pos, false, false).0?, pos))
                 } else {
-                    e
+                    Some((e?, c.stats.restart.max(start)))
                 }
             }
-            _ => fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, start, false, must_advance).0,
+            _ => Some((fwd_search(&self.cls, &self.plain, &mut c.plain, None, hay, start, false, must_advance).0?, start)),
         }
     }
 
@@ -705,13 +707,14 @@ fn fwd_search(
     let behind = if p == 0 { CTX_NONE } else { cls.byte_ctx(hay[p - 1]) };
     let mut sid = start_state(cls, d, c, behind, anchored, must_advance);
     let mut last: Option<usize> = None;
-    if let (Some((pf, _)), false) = (pre.as_ref(), anchored) {
+    if let (Some((pf, st)), false) = (pre.as_mut(), anchored) {
         match pf.find(hay, p) {
             None => return (None, n, false),
             Some(q) => {
                 if q > p {
                     p = q;
                     sid = start_state(cls, d, c, cls.byte_ctx(hay[q - 1]), false, false);
+                    st.restart = q;
                 }
             }
         }
@@ -803,6 +806,9 @@ fn fwd_search(
                             st.off = true;
                             return (None, q, true);
                         }
+                        // No thread alive (and no match yet: restarts stop after one):
+                        // every match from here starts at q or later.
+                        st.restart = q;
                         if q > p {
                             p = q;
                             sid = start_state(cls, d, c, cls.byte_ctx(hay[q - 1]), false, false) & ID_MASK;

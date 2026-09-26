@@ -21,7 +21,83 @@ use crate::error::{Error, Result};
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-/// A parsed JSON value. Objects keep their key order (python dict semantics).
+/// python dict semantics for the entries of one parsed JSON object (python `json.loads`
+/// builds dicts): a repeated key keeps the position of its first occurrence and takes the value
+/// of its last one. `key` gives an entry's key. Costs one hash probe per key when nothing is
+/// repeated (the common case); small objects are checked pairwise.
+pub fn dict_dedupe<T>(items: &mut Vec<T>, key: impl Fn(&T) -> &str) {
+    dict_dedupe_hashed(items, key, None);
+}
+
+/// [`dict_dedupe`] that also returns `hash_bytes(key)` of every remaining entry in `hashes`
+/// (the probe hashes are reused, so a caller indexing the keys gets them for free).
+pub fn dict_dedupe_hashed<T>(items: &mut Vec<T>, key: impl Fn(&T) -> &str, mut hashes: Option<&mut Vec<u64>>) {
+    use crate::util::fxhash::hash_bytes;
+    let n = items.len();
+    if let Some(h) = hashes.as_deref_mut() {
+        h.clear();
+    }
+    let repeated = if n <= 16 {
+        let r = (1..n).any(|i| (0..i).any(|j| key(&items[j]) == key(&items[i])));
+        if !r && let Some(h) = hashes.as_deref_mut() {
+            h.extend(items.iter().map(|it| hash_bytes(key(it).as_bytes())));
+        }
+        r
+    } else {
+        let bits = (2 * n).next_power_of_two().trailing_zeros();
+        let mask = (1usize << bits) - 1;
+        let mut table = vec![u32::MAX; mask + 1];
+        let mut found = false;
+        'items: for i in 0..n {
+            let k = key(&items[i]);
+            let hv = hash_bytes(k.as_bytes());
+            if let Some(h) = hashes.as_deref_mut() {
+                h.push(hv);
+            }
+            let mut h = hv as usize & mask;
+            loop {
+                match table[h] {
+                    u32::MAX => {
+                        table[h] = i as u32;
+                        break;
+                    }
+                    j if key(&items[j as usize]) == k => {
+                        found = true;
+                        break 'items;
+                    }
+                    _ => h = (h + 1) & mask,
+                }
+            }
+        }
+        found
+    };
+    if !repeated {
+        return;
+    }
+    // rare: rebuild in first-occurrence order with the last values
+    let mut last: crate::util::FxHashMap<String, usize> = crate::util::FxHashMap::default();
+    for (i, it) in items.iter().enumerate() {
+        last.insert(key(it).to_string(), i);
+    }
+    let mut slots: Vec<Option<T>> = std::mem::take(items).into_iter().map(Some).collect();
+    let mut done: crate::util::FxHashSet<String> = crate::util::FxHashSet::default();
+    for i in 0..n {
+        let Some(k) = slots[i].as_ref().map(|it| key(it).to_string()) else { continue };
+        if let Some(&l) = last.get(&k)
+            && done.insert(k)
+            && let Some(it) = slots[l].take()
+        {
+            items.push(it);
+        }
+    }
+    if let Some(h) = hashes {
+        h.clear();
+        h.extend(items.iter().map(|it| hash_bytes(key(it).as_bytes())));
+    }
+}
+
+/// A parsed JSON value. Objects keep their key order (python dict semantics: a repeated key
+/// keeps its first position and its last value).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Json<'a> {
     Null,
@@ -720,6 +796,7 @@ impl<'a> Parser<'a> {
                     v.push((k, val));
                     Ok(())
                 })?;
+                dict_dedupe(&mut v, |e| &e.0);
                 self.depth -= 1;
                 Json::Obj(v)
             }

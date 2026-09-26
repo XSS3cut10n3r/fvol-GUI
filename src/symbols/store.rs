@@ -196,7 +196,7 @@ pub fn remote_identifiers(url: &str) -> Result<Vec<(String, Vec<u8>, String)>> {
 fn embedded_stamp(data: &[u8]) -> u64 {
     static EXE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     let exe = EXE.get_or_init(|| {
-        let (s, m) = paths::file_stamp(&std::env::current_exe().ok()?)?;
+        let (s, m) = paths::file_stamp(paths::current_exe()?)?;
         let mut h = FxHasher::default();
         h.write_u64(s);
         h.write_u64(m as u64);
@@ -246,7 +246,7 @@ impl SymbolPath {
             let p = if p.is_absolute() { p } else { std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p) };
             roots.push(Root::Dir(p));
         }
-        if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe) = paths::current_exe() {
             if let Some(dir) = exe.parent() {
                 let s = dir.join("symbols");
                 if s.is_dir() {
@@ -256,12 +256,12 @@ impl SymbolPath {
         }
         // python's own install (volatility3/symbols, volatility3/framework/symbols) when present,
         // so lookups resolve to the same files (and URLs) as python; embedded copies otherwise
-        let py = python_install();
-        if let Some(p) = &py {
+        let py = python_install_cached();
+        if let Some(p) = py {
             roots.push(Root::Dir(p.join("symbols")));
         }
         roots.push(Root::Embedded { top: true });
-        if let Some(p) = &py {
+        if let Some(p) = py {
             roots.push(Root::Dir(p.join("framework").join("symbols")));
         }
         roots.push(Root::Embedded { top: false });
@@ -276,59 +276,56 @@ impl SymbolPath {
         let mut out = Vec::new();
         for root in &self.roots {
             match root {
-                Root::Dir(d) => {
-                    let base = if sub_path.is_empty() { d.clone() } else { d.join(sub_path) };
-                    if !base.is_dir() {
-                        continue;
-                    }
-                    let files = walk_files(&base);
-                    for ext in ISF_EXTENSIONS {
-                        let want = format!("{filename}{ext}");
-                        for f in &files {
-                            if path_ends_with(f, &want) {
-                                out.push(IsfLocation::File(f.clone()));
-                            }
-                        }
-                    }
-                    let wantzip = format!("{filename}.zip");
-                    for f in &files {
-                        if path_ends_with(f, &wantzip) {
-                            if let Ok(names) = super::zipfile::list(f) {
-                                let zip_match = filename.to_string();
-                                for name in names {
-                                    for ext in ISF_EXTENSIONS {
-                                        if name.ends_with(&format!("{zip_match}{ext}")) {
-                                            out.push(IsfLocation::Zip { zip: f.clone(), member: name.clone() });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Root::Embedded { top } => {
-                    for ext in ISF_EXTENSIONS {
-                        let want = format!("{filename}{ext}");
-                        for &(rel, is_top, data) in super::embedded::FILES {
-                            if is_top != *top {
-                                continue;
-                            }
-                            let under = if sub_path.is_empty() {
-                                Some(rel)
-                            } else {
-                                rel.strip_prefix(sub_path).and_then(|r| r.strip_prefix('/'))
-                            };
-                            if let Some(r) = under {
-                                if r == want || r.ends_with(&format!("/{want}")) {
-                                    out.push(IsfLocation::Embedded { rel, top: *top, data });
-                                }
-                            }
-                        }
-                    }
-                }
+                Root::Dir(d) => dir_matches(d, sub_path, filename, &mut out),
+                Root::Embedded { top } => embedded_matches(sub_path, filename, *top, false, &mut out),
             }
         }
         out
+    }
+
+    /// The first match of [`SymbolPath::find`] (what python `IntermediateSymbolTable.create`
+    /// loads), without walking directory trees for the ISFs shipped with volatility3:
+    ///   * `-s` dirs and `<exe dir>/symbols` keep python's rglob semantics (a walk of the
+    ///     `sub_path` tree, stopping at the first root with a match);
+    ///   * for a name that is embedded, python's install is not walked: its
+    ///     `framework/symbols` holds exactly the embedded files (the embedded path is
+    ///     stat'ed), and in `volatility3/symbols` and the download cache only the direct
+    ///     path `<root>/<sub_path>/<filename>.json*` / `.zip` can override it;
+    ///   * the embedded roots are looked up by file name (binary search in a compile-time
+    ///     table; no index to build, no scan of the embedded files).
+    ///
+    /// Names that are not embedded (PDB ISFs, user files) search every root as before.
+    pub fn find_first(&self, sub_path: &str, filename: &str) -> Option<IsfLocation> {
+        // the shipped match of each embedded root (volatility3/symbols, framework/symbols)
+        let shipped = |top: bool| -> Option<&'static str> {
+            let mut v = Vec::new();
+            embedded_matches(sub_path, filename, top, true, &mut v);
+            match v.pop() {
+                Some(IsfLocation::Embedded { rel, .. }) => Some(rel),
+                _ => None,
+            }
+        };
+        let (top_rel, fw_rel) = (shipped(true), shipped(false));
+        let is_shipped = top_rel.is_some() || fw_rel.is_some();
+        let py = python_install_cached();
+        let mut out = Vec::new();
+        for root in &self.roots {
+            match root {
+                Root::Embedded { top } => embedded_matches(sub_path, filename, *top, true, &mut out),
+                Root::Dir(d) if is_shipped && py.is_some_and(|p| *d == p.join("symbols")) => {
+                    builtin_matches(d, sub_path, filename, top_rel, &mut out)
+                }
+                Root::Dir(d) if is_shipped && py.is_some_and(|p| *d == p.join("framework").join("symbols")) => {
+                    builtin_matches(d, sub_path, filename, fw_rel, &mut out)
+                }
+                Root::Dir(d) if is_shipped && *d == self.download_dir => builtin_matches(d, sub_path, filename, None, &mut out),
+                Root::Dir(d) => dir_matches(d, sub_path, filename, &mut out),
+            }
+            if !out.is_empty() {
+                return Some(out.swap_remove(0));
+            }
+        }
+        None
     }
 
     /// Every ISF reachable from the search path (python `file_symbol_url("")`), including
@@ -409,7 +406,7 @@ pub fn python_install() -> Option<PathBuf> {
         }
         return None;
     }
-    let exe = std::env::current_exe().ok()?;
+    let exe = paths::current_exe()?;
     let mut dir = exe.parent();
     for _ in 0..10 {
         let d = dir?;
@@ -421,6 +418,132 @@ pub fn python_install() -> Option<PathBuf> {
         dir = d.parent();
     }
     None
+}
+
+/// [`python_install`], computed once per process.
+fn python_install_cached() -> Option<&'static Path> {
+    static PY: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PY.get_or_init(python_install).as_deref()
+}
+
+/// Relative path of embedded file `i`, from the compact name table.
+fn embedded_rel(i: usize) -> &'static str {
+    use super::embedded::{NAME_OFFSETS, NAMES};
+    std::str::from_utf8(&NAMES[NAME_OFFSETS[i] as usize..NAME_OFFSETS[i + 1] as usize]).unwrap_or("")
+}
+
+/// Indices of the embedded files whose file name (last path component) is `name`, in
+/// `FILES` order: a binary search in the compile-time sorted `BY_NAME`.
+fn embedded_named(name: &str) -> &'static [u16] {
+    use super::embedded::{BY_NAME, file_name_start};
+    let key = |i: u16| {
+        let r = embedded_rel(i as usize).as_bytes();
+        &r[file_name_start(r)..]
+    };
+    let lo = BY_NAME.partition_point(|&i| key(i) < name.as_bytes());
+    let n = BY_NAME[lo..].iter().take_while(|&&i| key(i) == name.as_bytes()).count();
+    &BY_NAME[lo..lo + n]
+}
+
+/// Matches of `<sub_path>/**/<filename><ext>` among the embedded files of one root, in
+/// `find` order (extension preference, then `FILES` order); only the first with `first`.
+/// A match's last component equals the wanted one, so the file-name index finds them all.
+fn embedded_matches(sub_path: &str, filename: &str, top: bool, first: bool, out: &mut Vec<IsfLocation>) {
+    let files = super::embedded::FILES;
+    for ext in ISF_EXTENSIONS {
+        let want = format!("{filename}{ext}");
+        for &i in embedded_named(want.rsplit('/').next().unwrap_or(&want)) {
+            let rel = embedded_rel(i as usize);
+            let Some(&(_, is_top, data)) = files.get(i as usize) else { continue };
+            if is_top != top {
+                continue;
+            }
+            let under = if sub_path.is_empty() { Some(rel) } else { rel.strip_prefix(sub_path).and_then(|r| r.strip_prefix('/')) };
+            if let Some(r) = under
+                && (r == want || (r.len() > want.len() && r.ends_with(want.as_str()) && r.as_bytes()[r.len() - want.len() - 1] == b'/'))
+            {
+                out.push(IsfLocation::Embedded { rel, top, data });
+                if first {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Matches of python's `rglob` for one directory root, in `find` order (a tree walk).
+fn dir_matches(d: &Path, sub_path: &str, filename: &str, out: &mut Vec<IsfLocation>) {
+    let base = if sub_path.is_empty() { d.to_path_buf() } else { d.join(sub_path) };
+    if !base.is_dir() {
+        return;
+    }
+    let files = walk_files(&base);
+    for ext in ISF_EXTENSIONS {
+        let want = format!("{filename}{ext}");
+        for f in &files {
+            if path_ends_with(f, &want) {
+                out.push(IsfLocation::File(f.clone()));
+            }
+        }
+    }
+    let wantzip = format!("{filename}.zip");
+    for f in &files {
+        if path_ends_with(f, &wantzip) {
+            zip_matches(f, filename, out);
+        }
+    }
+}
+
+/// A root of python's install (or the download cache) for a shipped name, without a walk:
+/// the shipped file `<d>/<rel>` (these roots hold the embedded files) and the direct override
+/// candidates `<d>/<sub_path>/<filename><ext>` and `.zip`; the leading matches in `find`
+/// order (enough for `find_first`).
+fn builtin_matches(d: &Path, sub_path: &str, filename: &str, rel: Option<&str>, out: &mut Vec<IsfLocation>) {
+    let base = if sub_path.is_empty() { d.to_path_buf() } else { d.join(sub_path) };
+    for ext in ISF_EXTENSIONS {
+        let want = format!("{filename}{ext}");
+        let mut found: Vec<PathBuf> = Vec::new();
+        let f = base.join(&want);
+        if is_file_entry(&f) {
+            found.push(f);
+        }
+        if let Some(rel) = rel
+            && rel.ends_with(want.as_str())
+        {
+            let f = d.join(rel);
+            if !found.contains(&f) && is_file_entry(&f) {
+                found.push(f);
+            }
+        }
+        if !found.is_empty() {
+            // the first extension with a match decides (later ones sort after it)
+            found.sort(); // walk order
+            out.extend(found.into_iter().map(IsfLocation::File));
+            return;
+        }
+    }
+    let f = base.join(format!("{filename}.zip"));
+    if is_file_entry(&f) {
+        zip_matches(&f, filename, out);
+    }
+}
+
+/// Members of zip symbol pack `f` matching `filename` (python: `zip_match + extension`).
+fn zip_matches(f: &Path, filename: &str, out: &mut Vec<IsfLocation>) {
+    if let Ok(names) = super::zipfile::list(f) {
+        for name in names {
+            for ext in ISF_EXTENSIONS {
+                if name.ends_with(&format!("{filename}{ext}")) {
+                    out.push(IsfLocation::Zip { zip: f.to_path_buf(), member: name.clone() });
+                }
+            }
+        }
+    }
+}
+
+/// What [`walk_files`] would list for this path: a regular file or a symlink.
+fn is_file_entry(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file() || m.file_type().is_symlink())
 }
 
 /// Recursively list regular files under `dir` (sorted for determinism).
@@ -496,9 +619,8 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
 /// Load an ISF by python sub_path/filename (e.g. `("windows", "pe")`), first match wins
 /// (python `IntermediateSymbolTable.create`).
 pub fn load_named(path: &SymbolPath, sub_path: &str, filename: &str, table_name: &str, opts: &BuildOptions) -> Result<SymbolTable> {
-    let locs = path.find(sub_path, filename);
-    let loc = locs.first().ok_or_else(|| Error::Symbol(format!("No symbol files found at provided filename: {filename}")))?;
-    load(loc, table_name, opts)
+    let loc = path.find_first(sub_path, filename).ok_or_else(|| Error::Symbol(format!("No symbol files found at provided filename: {filename}")))?;
+    load(&loc, table_name, opts)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -765,7 +887,7 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
             }
         }
     }
-    if let Some(l) = path.find("windows", &filter).into_iter().next() {
+    if let Some(l) = path.find_first("windows", &filter) {
         return Ok(l);
     }
     let idx = identifier_index(path);
@@ -776,4 +898,132 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
     // download + convert (pdb agent)
     let out = super::windows::pdb::download_and_convert(pdb_name, &guid.to_uppercase(), age, &path.download_dir, offline)?;
     Ok(IsfLocation::File(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lookup cost of shipped ISFs with this machine's search path:
+    ///   cargo test --release isf_lookup_timing -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn isf_lookup_timing() {
+        // first calls in the process: search path setup, lookup, cached-blob load, register
+        let t = std::time::Instant::now();
+        let p0 = SymbolPath::new(&[]);
+        let t1 = t.elapsed();
+        // RSVOL_ISF_OLD=1: the previous lookup (every match of every root, then the first)
+        let l0 = if std::env::var_os("RSVOL_ISF_OLD").is_some() {
+            p0.find("windows", "pe").into_iter().next().unwrap()
+        } else {
+            p0.find_first("windows", "pe").unwrap()
+        };
+        let t2 = t.elapsed();
+        let tb = load(&l0, "pe", &BuildOptions::default()).unwrap();
+        let t3 = t.elapsed();
+        drop(tb);
+        let pe = crate::symbols::load_isf("windows", "pe", None, &[]).unwrap();
+        let t4 = t.elapsed();
+        println!(
+            "first calls: SymbolPath::new {t1:?}, find_first +{:?}, load +{:?}, symbols::load_isf +{:?} ({})",
+            t2 - t1,
+            t3 - t2,
+            t4 - t3,
+            pe.isf_url()
+        );
+        let t = std::time::Instant::now();
+        let path = SymbolPath::new(&[]);
+        let t_new = t.elapsed();
+        println!("roots: {:?}", path.roots);
+        let reps = 200;
+        for (sub, name) in [("windows", "pe"), ("windows", "netscan-win10-19041-x64"), ("linux", "elf"), ("generic", "qemu")] {
+            let first = path.find(sub, name).into_iter().next();
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(path.find(sub, name));
+            }
+            let t_find = t.elapsed() / reps;
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(path.find_first(sub, name));
+            }
+            let t_first = t.elapsed() / reps;
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                let l = path.find(sub, name).into_iter().next().unwrap();
+                std::hint::black_box(load(&l, name, &BuildOptions::default()).unwrap());
+            }
+            let t_old = t.elapsed() / reps;
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(load_named(&path, sub, name, name, &BuildOptions::default()).unwrap());
+            }
+            let t_load = t.elapsed() / reps;
+            println!(
+                "{sub}/{name}: find (all) {t_find:?}  find_first {t_first:?}  |  find+load {t_old:?}  load_named {t_load:?}  -> {}",
+                first.map(|l| l.url()).unwrap_or_default()
+            );
+        }
+        println!("SymbolPath::new {t_new:?}");
+    }
+
+    #[test]
+    fn embedded_name_tables_match_files() {
+        let files = super::super::embedded::FILES;
+        for (i, f) in files.iter().enumerate() {
+            assert_eq!(embedded_rel(i), f.0);
+            let name = f.0.rsplit('/').next().unwrap();
+            assert!(embedded_named(name).contains(&(i as u16)), "{name}");
+            let all: Vec<u16> = (0..files.len() as u16).filter(|&k| files[k as usize].0.rsplit('/').next() == Some(name)).collect();
+            assert_eq!(embedded_named(name), &all[..]);
+        }
+        assert!(embedded_named("nonexistent.json").is_empty());
+        assert!(embedded_named("").is_empty());
+    }
+
+    /// `find_first` == `find().first()` for every shipped ISF and some other names, with and
+    /// without `-s` dirs; user dirs keep rglob semantics (any depth, first root wins).
+    #[test]
+    fn find_first_matches_find() {
+        let tmp = std::env::temp_dir().join(format!("rsvol-isf-{}", std::process::id()));
+        let user = tmp.join("user");
+        let deep = tmp.join("deep");
+        for (dir, rel) in [(&user, "windows/pe.json"), (&deep, "windows/sub/dir/kdbg.json.xz"), (&deep, "linux/elf.json.gz")] {
+            let f = dir.join(rel);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"{}").unwrap();
+        }
+        let mut names: Vec<(String, String)> = Vec::new();
+        for &(rel, _, _) in super::super::embedded::FILES {
+            let stem = rel.strip_suffix(".json").unwrap_or(rel);
+            let (dir, file) = stem.rsplit_once('/').unwrap_or(("", stem));
+            names.push((dir.to_string(), file.to_string()));
+            if let Some((top, rest)) = dir.split_once('/') {
+                // nested name through a shorter sub_path (rglob over sub dirs)
+                names.push((top.to_string(), format!("{rest}/{file}")));
+                names.push((top.to_string(), file.to_string()));
+            }
+            names.push((String::new(), file.to_string()));
+        }
+        for n in ["pe.json", "nonexistent", "ntkrnlmp.pdb/8E3373D6124E747F0E72EF8E02E676B3-1", "win"] {
+            names.push(("windows".into(), n.into()));
+        }
+        let paths = [
+            SymbolPath::new(&[]),
+            SymbolPath::new(&[user.to_string_lossy().into_owned()]),
+            SymbolPath::new(&[deep.to_string_lossy().into_owned(), user.to_string_lossy().into_owned()]),
+        ];
+        for path in &paths {
+            for (sub, name) in &names {
+                let url = |l: Option<IsfLocation>| l.map(|l| l.url());
+                assert_eq!(url(path.find_first(sub, name)), url(path.find(sub, name).into_iter().next()), "{sub} / {name}");
+            }
+        }
+        // the overrides win
+        assert_eq!(paths[1].find_first("windows", "pe"), Some(IsfLocation::File(user.join("windows/pe.json"))));
+        assert_eq!(paths[2].find_first("windows", "kdbg"), Some(IsfLocation::File(deep.join("windows/sub/dir/kdbg.json.xz"))));
+        assert_eq!(paths[2].find_first("linux", "elf"), Some(IsfLocation::File(deep.join("linux/elf.json.gz"))));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

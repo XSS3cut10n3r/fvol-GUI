@@ -211,7 +211,11 @@ const DIGITS: &[u8] = b"0123456789";
 const OCTDIGITS: &[u8] = b"01234567";
 const HEXDIGITS: &[u8] = b"0123456789abcdefABCDEF";
 const WHITESPACE: &[u8] = b" \t\n\r\x0b\x0c";
-const SPECIAL: &[u8] = b".\\[{()*+?^$|";
+/// sre's SPECIAL_CHARS (`. \\ [ { ( ) * + ? ^ $ |`).
+#[inline]
+fn is_special(c: u32) -> bool {
+    matches!(c, 0x2e | 0x5c | 0x5b | 0x7b | 0x28 | 0x29 | 0x2a | 0x2b | 0x3f | 0x5e | 0x24 | 0x7c)
+}
 
 fn is_ascii_letter(c: u8) -> bool {
     c.is_ascii_alphabetic()
@@ -536,7 +540,7 @@ fn uniq(items: Vec<SetItem>) -> Vec<SetItem> {
 }
 
 fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, first: bool) -> Result<Vec<Node>, Error> {
-    let mut sub: Vec<Node> = Vec::new();
+    let mut sub: Vec<Node> = Vec::with_capacity(8);
     let mut verbose = verbose;
     loop {
         let this = match src.next {
@@ -566,7 +570,19 @@ fn parse_seq(src: &mut Source, state: &mut State, verbose: bool, nested: usize, 
                 Esc::Node(n) => sub.push(n),
                 Esc::Cat(c) => sub.push(cat_node(c)),
             },
-            Tok::Ch(c) if c >= 128 || !SPECIAL.contains(&(c as u8)) => sub.push(Node::Lit(c)),
+            Tok::Ch(c) if !is_special(c) => {
+                sub.push(Node::Lit(c));
+                if !verbose {
+                    // the rest of a run of plain characters
+                    while let Some(Tok::Ch(c)) = src.next {
+                        if is_special(c) {
+                            break;
+                        }
+                        sub.push(Node::Lit(c));
+                        src.advance()?;
+                    }
+                }
+            }
             Tok::Ch(0x5b) => {
                 let here = src.tell() - 1;
                 let negate = src.matches(b'^')?;

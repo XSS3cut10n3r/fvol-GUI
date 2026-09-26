@@ -126,6 +126,15 @@ pub trait Layer: Send + Sync {
         None
     }
 
+    /// python `isinstance(layer, LinearlyMappedLayer)` for translation layers: `mapping()` runs
+    /// are plain byte ranges of the target layer, which scans read directly. python's
+    /// `NonLinearlySegmentedLayer`s (AVML, QEMU) decode their data (compressed frames, fill
+    /// pages): scans read those through the layer itself, one chunk series per `mapping()`
+    /// tuple (`_scan_iterator(linear=False)`).
+    fn is_linear(&self) -> bool {
+        true
+    }
+
     /// Zero-copy access to `[addr, addr+len)` if it is one contiguous span of the backing file.
     fn slice(&self, _addr: u64, _len: usize) -> Option<&[u8]> {
         None

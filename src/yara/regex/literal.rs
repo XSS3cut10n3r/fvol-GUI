@@ -28,16 +28,64 @@ pub const BYTE_FREQ: [u32; 256] = [
 
 /// Estimated probability (parts per 2^20) that a random memory byte is in `s`.
 pub fn set_freq(s: &ByteSet) -> u64 {
-    s.iter().map(|b| BYTE_FREQ[b as usize] as u64).sum()
+    // 32 table lookups, one per byte of the 256-bit set
+    let mut t = 0u64;
+    for (w, &word) in s.0.iter().enumerate() {
+        for k in 0..8 {
+            t += FREQ_BY_MASK[w * 8 + k][(word >> (8 * k)) as u8 as usize] as u64;
+        }
+    }
+    t
 }
+
+/// `FREQ_BY_MASK[g][m]`: summed `BYTE_FREQ` of the bytes `8 g + i` for the bits `i` set
+/// in `m` (byte group `g` of a 256-bit set).
+static FREQ_BY_MASK: [[u32; 256]; 32] = {
+    let mut t = [[0u32; 256]; 32];
+    let mut g = 0;
+    while g < 32 {
+        let mut m = 0;
+        while m < 256 {
+            let mut sum = 0u32;
+            let mut i = 0;
+            while i < 8 {
+                if m >> i & 1 != 0 {
+                    sum += BYTE_FREQ[g * 8 + i];
+                }
+                i += 1;
+            }
+            t[g][m] = sum;
+            m += 1;
+        }
+        g += 1;
+    }
+    t
+};
 
 const MAX_POSITIONS: usize = 32;
 
 /// Required leading byte-set sequence; `complete` = every match of `h` has exactly
 /// this length (so a following concat element may extend it).
 pub fn positions(h: &Hir) -> (Vec<ByteSet>, bool) {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(16);
     let complete = pos_into(h, &mut out, 0);
+    if out.len() > MAX_POSITIONS {
+        out.truncate(MAX_POSITIONS);
+        return (out, false);
+    }
+    (out, complete)
+}
+
+/// `positions(&Hir::Concat(v.to_vec()))` without building the concatenation.
+pub fn positions_concat(v: &[Hir]) -> (Vec<ByteSet>, bool) {
+    let mut out = Vec::new();
+    let mut complete = true;
+    for x in v {
+        if !pos_into(x, &mut out, 1) {
+            complete = false;
+            break;
+        }
+    }
     if out.len() > MAX_POSITIONS {
         out.truncate(MAX_POSITIONS);
         return (out, false);
@@ -111,6 +159,13 @@ pub fn bytes_of(h: &Hir) -> ByteSet {
     s
 }
 
+/// `bytes_of` for a node found at nesting `depth` of a larger tree (same depth limit).
+pub fn bytes_of_nested(h: &Hir, depth: usize) -> ByteSet {
+    let mut s = ByteSet::EMPTY;
+    bytes_into(h, &mut s, depth);
+    s
+}
+
 fn bytes_into(h: &Hir, s: &mut ByteSet, depth: usize) {
     if depth > 3000 {
         *s = ByteSet::FULL;
@@ -134,12 +189,39 @@ fn bytes_into(h: &Hir, s: &mut ByteSet, depth: usize) {
 /// Estimated candidate rate (parts per 2^20) of a position sequence using its two
 /// rarest positions.
 pub fn seq_rate(seq: &[ByteSet]) -> u64 {
-    let mut f: Vec<u64> = seq.iter().map(set_freq).collect();
-    f.sort_unstable();
-    match f.len() {
+    // the two smallest frequencies
+    let (mut a, mut b) = (u64::MAX, u64::MAX);
+    for s in seq {
+        let f = set_freq(s);
+        if f < a {
+            b = a;
+            a = f;
+        } else if f < b {
+            b = f;
+        }
+    }
+    match seq.len() {
         0 => 1 << 20,
-        1 => f[0],
-        _ => ((f[0] * f[1]) >> 20).max(1),
+        1 => a,
+        _ => ((a * b) >> 20).max(1),
+    }
+}
+
+/// Whether `alt_seqs` can find more than one top-level alternative (an alternation at
+/// the top, under captures or at the head of a concatenation).
+fn top_alt(h: &Hir, depth: usize) -> bool {
+    if depth > 50 {
+        return false;
+    }
+    match h {
+        Hir::Alt(_) => true,
+        Hir::Capture { sub, .. } => top_alt(sub, depth + 1),
+        Hir::Concat(v) => match v.iter().find(|x| !matches!(x, Hir::Look(_) | Hir::Empty)) {
+            Some(Hir::Capture { sub, .. }) => matches!(**sub, Hir::Alt(_)),
+            Some(x) => matches!(x, Hir::Alt(_)),
+            None => false,
+        },
+        _ => false,
     }
 }
 
@@ -206,7 +288,24 @@ impl Prefilter {
     /// Choose the best prefix prefilter for `h` (None when not selective enough).
     pub fn for_hir(h: &Hir) -> Option<(Prefilter, u64)> {
         const MAX_RATE: u64 = (1 << 20) / 12;
-        let (pseq, _) = positions(h);
+        let alts = if top_alt(h, 0) { alt_seqs(h) } else { None };
+        // For a plain top-level alternation the per-alternative sequences are what
+        // `positions` would compute again: take their union directly.
+        let pseq = match (&alts, h) {
+            (Some(a), Hir::Alt(v)) if a.len() == v.len() => {
+                let min = a.iter().map(|x| x.len()).min().unwrap_or(0);
+                (0..min)
+                    .map(|i| {
+                        let mut u = ByteSet::EMPTY;
+                        for x in a {
+                            u.union(&x[i]);
+                        }
+                        u
+                    })
+                    .collect()
+            }
+            _ => positions(h).0,
+        };
         let seq_rate_v = if pseq.is_empty() { u64::MAX } else { seq_rate(&pseq) };
         let mut best: Option<(Prefilter, u64)> = None;
         if seq_rate_v < MAX_RATE {
@@ -214,21 +313,22 @@ impl Prefilter {
                 best = Some((Prefilter::Seq(f), seq_rate_v));
             }
         }
-        if let Some(alts) = alt_seqs(h) {
-            if alts.len() > 1 {
-                let m = alts.iter().map(|s| s.len()).min().unwrap_or(0).min(3);
-                if m >= 1 {
-                    let rate: u64 = alts
-                        .iter()
-                        .map(|s| s[..m].iter().fold(1u64 << 20, |acc, x| (acc * set_freq(x)) >> 20).max(1))
-                        .sum::<u64>()
-                        .saturating_mul(2);
-                    let better = best.as_ref().map_or(true, |b| rate * 2 < b.1);
-                    if rate < MAX_RATE && better {
-                        if let Some(t) = crate::yara::teddy::Teddy::new(&alts) {
-                            best = Some((Prefilter::Teddy(t), rate));
-                        }
-                    }
+        if let Some(alts) = alts
+            && alts.len() > 1
+        {
+            let m = alts.iter().map(|s| s.len()).min().unwrap_or(0).min(3);
+            if m >= 1 {
+                let rate: u64 = alts
+                    .iter()
+                    .map(|s| s[..m].iter().fold(1u64 << 20, |acc, x| (acc * set_freq(x)) >> 20).max(1))
+                    .sum::<u64>()
+                    .saturating_mul(2);
+                let better = best.as_ref().is_none_or(|b| rate * 2 < b.1);
+                if rate < MAX_RATE
+                    && better
+                    && let Some(t) = crate::yara::teddy::Teddy::from_vec(alts)
+                {
+                    best = Some((Prefilter::Teddy(t), rate));
                 }
             }
         }
@@ -273,9 +373,17 @@ impl SeqFinder {
             return Some(SeqFinder { kind: Kind::Set(ByteSetFinder::new(&seq[0].to_bools())), s1: SetDesc::new(&seq[0]), s2: SetDesc::new(&seq[0]), seq });
         }
         // Two rarest positions.
-        let mut idx: Vec<usize> = (0..seq.len()).collect();
-        idx.sort_by_key(|&i| (set_freq(&seq[i]), i));
-        let (i1, i2) = (idx[0], idx[1]);
+        let (mut i1, mut i2) = (usize::MAX, usize::MAX);
+        let (mut f1, mut f2) = (u64::MAX, u64::MAX);
+        for (i, s) in seq.iter().enumerate() {
+            let f = set_freq(s);
+            if f < f1 {
+                (i2, f2) = (i1, f1);
+                (i1, f1) = (i, f);
+            } else if f < f2 {
+                (i2, f2) = (i, f);
+            }
+        }
         Some(SeqFinder { kind: Kind::Pair { i1, i2 }, s1: SetDesc::new(&seq[i1]), s2: SetDesc::new(&seq[i2]), seq })
     }
 

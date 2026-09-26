@@ -26,11 +26,9 @@ use super::constants::{ATTRIBUTE_NAME_MAX_SIZE, KSYM_NAME_LEN, MODULE_MAXIMUM_CO
 use super::vmlinux_of;
 use crate::error::{Error, Result};
 use crate::layers::LayerExt;
-use crate::objects::strings::decode_utf8;
 use crate::objects::util::{array_to_string, pointer_to_string, pointer_to_string_ex};
 use crate::objects::{LayerRef, Obj};
 use crate::symbols::Ty;
-use crate::symbols::table::StrErrors;
 
 /// python `TypeError("pointer_to_string takes a Pointer")` (python passes an int).
 fn pointer_to_string_type_error() -> Error {
@@ -49,8 +47,9 @@ fn none_on_invalid<T>(r: Result<T>) -> Result<Option<T>> {
 
 /// An `Elf32_Sym` / `Elf64_Sym` entry of a kernel module's symbol table: python's `elf_sym`
 /// object with `cached_strtab` set (as yielded by `module.get_symbols()`). Fields are read on
-/// demand, one member at a time, like python's attribute access.
-// TODO(dedupe): elf_sym lives in symbols/linux/elf.rs (L1-B)
+/// demand, one member at a time, like python's attribute access. A raw view (no `Obj`) of what
+/// `symbols::linux::elf::ElfSym` models, for the kallsyms hot loops; the name logic is shared
+/// (`elf::sym_name_at`).
 #[derive(Clone, Copy)]
 pub struct ElfSym {
     /// The layer of the module (python `vol.layer_name`).
@@ -89,10 +88,7 @@ impl ElfSym {
     /// with errors="replace"; may be empty).
     pub fn get_name(&self) -> Option<String> {
         let st_name = self.st_name().ok()?;
-        let mut buf = [0u8; KSYM_NAME_LEN as usize];
-        self.layer.read_padded(self.strtab.wrapping_add(st_name), &mut buf);
-        let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        Some(decode_utf8(&buf[..n], StrErrors::Replace).unwrap_or_default())
+        Some(super::elf::sym_name_at(self.layer, self.strtab, st_name))
     }
     /// Like [`ElfSym::get_name`] but only reports whether the name is non-empty (python's
     /// `if not elf_sym.get_name()`), without decoding.

@@ -19,11 +19,20 @@ pub struct Teddy {
     lo: [[u8; 16]; 3],
     hi: [[u8; 16]; 3],
     min_len: usize,
+    /// No fingerprinted byte is >= 0x80: `vpshufb` on the raw byte already yields the
+    /// low-nibble entry for ASCII bytes and 0 for the others (whose high-nibble entry is
+    /// 0 anyway), so the low-nibble mask can be skipped.
+    ascii: bool,
 }
 
 impl Teddy {
     /// Build for 1..=64 non-empty patterns.
     pub fn new(pats: &[Vec<ByteSet>]) -> Option<Teddy> {
+        Self::from_vec(pats.to_vec())
+    }
+
+    /// [`Teddy::new`] taking ownership of the patterns (no copy).
+    pub fn from_vec(pats: Vec<Vec<ByteSet>>) -> Option<Teddy> {
         if pats.is_empty() || pats.len() > 64 || pats.iter().any(|p| p.is_empty() || p.iter().any(|s| s.is_empty())) {
             return None;
         }
@@ -58,7 +67,8 @@ impl Teddy {
                 }
             }
         }
-        Some(Teddy { pats: pats.to_vec(), buckets, m, lo, hi, min_len })
+        let ascii = pats.iter().all(|p| p[..m].iter().all(|s| s.0[2] == 0 && s.0[3] == 0));
+        Some(Teddy { pats, buckets, m, lo, hi, min_len, ascii })
     }
 
     #[inline]
@@ -96,9 +106,18 @@ impl Teddy {
         let last = hay.len() - self.min_len;
         #[cfg(target_arch = "x86_64")]
         {
-            if last - from >= 64 && std::is_x86_feature_detected!("avx2") {
+            if last - from >= 64 && has_avx2() {
                 // SAFETY: AVX2 checked; loads stay within hay (see find_avx2).
-                return unsafe { self.find_avx2(hay, from, last) };
+                return unsafe {
+                    match (self.m, self.ascii) {
+                        (1, false) => self.find_avx2::<1, false>(hay, from, last),
+                        (2, false) => self.find_avx2::<2, false>(hay, from, last),
+                        (_, false) => self.find_avx2::<3, false>(hay, from, last),
+                        (1, true) => self.find_avx2::<1, true>(hay, from, last),
+                        (2, true) => self.find_avx2::<2, true>(hay, from, last),
+                        (_, true) => self.find_avx2::<3, true>(hay, from, last),
+                    }
+                };
             }
         }
         (from..=last).find(|&p| {
@@ -107,36 +126,33 @@ impl Teddy {
         })
     }
 
+    /// 64 candidate starts per branch (two 32-byte classifications OR-tested), the line
+    /// one page ahead touched per step (see `memchr`'s block loops).
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
-    unsafe fn find_avx2(&self, hay: &[u8], from: usize, last: usize) -> Option<usize> {
+    unsafe fn find_avx2<const M: usize, const ASCII: bool>(&self, hay: &[u8], from: usize, last: usize) -> Option<usize> {
         unsafe {
             let ptr = hay.as_ptr();
+            let n = hay.len();
             let nib = _mm256_set1_epi8(0x0f);
             let t = |a: &[u8; 16]| _mm256_broadcastsi128_si256(_mm_loadu_si128(a.as_ptr() as *const __m128i));
-            let (lo0, hi0) = (t(&self.lo[0]), t(&self.hi[0]));
-            let (lo1, hi1) = (t(&self.lo[1]), t(&self.hi[1]));
-            let (lo2, hi2) = (t(&self.lo[2]), t(&self.hi[2]));
-            let m = self.m;
-            let classify = |v: __m256i, lo: __m256i, hi: __m256i| -> __m256i {
-                let l = _mm256_shuffle_epi8(lo, _mm256_and_si256(v, nib));
-                let h = _mm256_shuffle_epi8(hi, _mm256_and_si256(_mm256_srli_epi16(v, 4), nib));
-                _mm256_and_si256(l, h)
-            };
+            let lo = [t(&self.lo[0]), t(&self.lo[1]), t(&self.lo[2])];
+            let hi = [t(&self.hi[0]), t(&self.hi[1]), t(&self.hi[2])];
+            // Positions q..q+31 need bytes up to q+31+(M-1) <= last + M - 1 < hay.len().
+            macro_rules! classify {
+                ($q:expr) => {{
+                    let mut r = _mm256_set1_epi8(-1);
+                    for j in 0..M {
+                        let v = _mm256_loadu_si256(ptr.add($q + j) as *const __m256i);
+                        let l = _mm256_shuffle_epi8(lo[j], if ASCII { v } else { _mm256_and_si256(v, nib) });
+                        let h = _mm256_shuffle_epi8(hi[j], _mm256_and_si256(_mm256_srli_epi16(v, 4), nib));
+                        r = _mm256_and_si256(r, _mm256_and_si256(l, h));
+                    }
+                    r
+                }};
+            }
             let zero = _mm256_setzero_si256();
-            // Positions p..p+31 need bytes up to p+31+(m-1) <= last + m - 1 < hay.len().
-            let mut p = from;
-            while p + 31 <= last {
-                let v0 = _mm256_loadu_si256(ptr.add(p) as *const __m256i);
-                let mut r = classify(v0, lo0, hi0);
-                if m > 1 {
-                    let v1 = _mm256_loadu_si256(ptr.add(p + 1) as *const __m256i);
-                    r = _mm256_and_si256(r, classify(v1, lo1, hi1));
-                }
-                if m > 2 {
-                    let v2 = _mm256_loadu_si256(ptr.add(p + 2) as *const __m256i);
-                    r = _mm256_and_si256(r, classify(v2, lo2, hi2));
-                }
+            let emit = |q: usize, r: __m256i| -> Option<usize> {
                 let mut mask = !(_mm256_movemask_epi8(_mm256_cmpeq_epi8(r, zero)) as u32);
                 if mask != 0 {
                     let mut bytes = [0u8; 32];
@@ -144,10 +160,34 @@ impl Teddy {
                     while mask != 0 {
                         let k = mask.trailing_zeros() as usize;
                         mask &= mask - 1;
-                        if self.verify_bucket(hay, p + k, bytes[k] as u32) {
-                            return Some(p + k);
+                        if self.verify_bucket(hay, q + k, bytes[k] as u32) {
+                            return Some(q + k);
                         }
                     }
+                }
+                None
+            };
+            let mut p = from;
+            while p + 63 <= last {
+                if p + 4096 < n {
+                    _mm_prefetch::<_MM_HINT_T0>(ptr.add(p + 4096) as *const i8);
+                }
+                let a = classify!(p);
+                let b = classify!(p + 32);
+                let any = _mm256_or_si256(a, b);
+                if _mm256_testz_si256(any, any) == 0 {
+                    if let Some(x) = emit(p, a) {
+                        return Some(x);
+                    }
+                    if let Some(x) = emit(p + 32, b) {
+                        return Some(x);
+                    }
+                }
+                p += 64;
+            }
+            while p + 31 <= last {
+                if let Some(x) = emit(p, classify!(p)) {
+                    return Some(x);
                 }
                 p += 32;
             }
@@ -155,6 +195,25 @@ impl Teddy {
                 let bits = self.scalar_bits(hay, q);
                 bits != 0 && self.verify_bucket(hay, q, bits)
             })
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn has_avx2() -> bool {
+    if cfg!(target_feature = "avx2") {
+        return true;
+    }
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let yes = std::is_x86_feature_detected!("avx2");
+            STATE.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+            yes
         }
     }
 }

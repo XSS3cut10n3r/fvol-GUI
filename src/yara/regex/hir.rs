@@ -81,8 +81,21 @@ impl ByteSet {
     pub fn as_single(&self) -> Option<u8> {
         if self.len() == 1 { self.iter().next() } else { None }
     }
+    /// Members in increasing order (bit iteration: O(members), not O(256)).
     pub fn iter(&self) -> impl Iterator<Item = u8> + '_ {
-        (0..=255u8).filter(move |&b| self.contains(b))
+        ByteSetIter { words: self.0, w: 0 }
+    }
+    /// Boundaries of the maximal byte ranges of the set: bit `b` is set when membership
+    /// changes between `b - 1` and `b` (byte -1 counts as a non-member).
+    pub fn edges(&self) -> ByteSet {
+        let w = self.0;
+        let mut out = [0u64; 4];
+        let mut carry = 0u64;
+        for i in 0..4 {
+            out[i] = w[i] ^ ((w[i] << 1) | carry);
+            carry = w[i] >> 63;
+        }
+        ByteSet(out)
     }
     pub fn to_bools(&self) -> [bool; 256] {
         let mut out = [false; 256];
@@ -99,6 +112,27 @@ impl ByteSet {
                 self.insert(b ^ 0x20);
             }
         }
+    }
+}
+
+struct ByteSetIter {
+    words: [u64; 4],
+    w: usize,
+}
+
+impl Iterator for ByteSetIter {
+    type Item = u8;
+    #[inline]
+    fn next(&mut self) -> Option<u8> {
+        while self.w < 4 {
+            let x = self.words[self.w];
+            if x != 0 {
+                self.words[self.w] = x & (x - 1);
+                return Some((self.w * 64 + x.trailing_zeros() as usize) as u8);
+            }
+            self.w += 1;
+        }
+        None
     }
 }
 

@@ -177,6 +177,44 @@ mutants / FILE_OBJECT names, in `symbols::windows::objects`). See "Pool scanning
 | `PESymbols.get_vads_for_process_cache / get_proc_vads_with_file_paths / filepath_for_address / range_info_for_address / filename_for_path` | same names in `crate::plugins::windows::pe_symbols` |
 | `PEDump.dump_pe_at_base / dump_kernel_pe_at_base` | `crate::plugins::windows::pedump::{dump_pe_at_base, dump_kernel_pe_at_base}` |
 
+### Registry (`crate::symbols::windows::registry::RegExt`, `crate::layers::registry`, package W3)
+
+Hives are layers (`&'static RegistryHive`, memoized per hive offset); key nodes / values are
+`Obj`s on them. Error classes: `registry::{is_key_error, is_value_error, is_registry_exception,
+is_invalid_or_registry}` (python `KeyError` / `ValueError` / `RegistryException`).
+
+| python | rust |
+|---|---|
+| `HiveList.list_hives(ctx, path, kernel, filter_string, hive_offsets)` | `crate::plugins::windows::registry::hivelist::list_hives(ctx, k, filter, offsets)` → `Vec<Result<&'static RegistryHive>>` (trailing `Err` = python raised); the `_CMHIVE`s: `hivelist::list_hive_objects(ctx, k, filter)` |
+| `registry.RegistryHive(ctx, config, name="hive0x...")` / `_find_registry_process()` | `hivelist::hive_at(k, hive_offset)?` / `hivelist::registry_process(k)?` |
+| `hive.get_key(path, return_list=True)` / `get_node(cell)` / `get_cell(cell)` / `root_cell_offset` / `get_name()` | `hive.get_key(path)?` (nodes root..key) / `get_key_node(path)?` / `get_node(cell)` / `get_cell(cell)` / `root_cell_offset()` / `get_name()` |
+| `HiveScan.scan_hives(ctx, kernel)` | `crate::plugins::windows::registry::hivescan::scan_hives(ctx, k)` |
+| `CM_KEY_NODE.get_subkeys() / get_values() / get_name() / get_key_path() / get_volatile()`, `node.LastWriteTime` | `RegExt` same names (lazy iterators; `last_write_time()` → `Value`) |
+| `CM_KEY_VALUE.get_type() / decode_data()` | `v.get_value_type()?` → `RegValueType` / `v.decode_data()?` → `RegData` |
+| `CM_KEY_BODY.get_full_key_name()` (a handle's `Key` body) | `body.get_full_key_name()?` (`RegExt`; `None` where python returns None) |
+| `PrintKey.key_iterator(hive, node_path, recurse)` / `MultiTypeData(decode_data())` | `printkey::key_iterator(hive, &path, recurse, &mut f)` (visitor) / `printkey::value_data(&node, ty)?` |
+| `Hashdump.get_hive_key / get_bootkey / get_hbootkey / get_user_keys / sid_to_key` | same names in `crate::plugins::windows::registry::hashdump` (+ `read_value_data`, and `find_hives` = python `run()`'s SYSTEM/SAM/SECURITY pick) |
+| `Lsadump.get_lsa_key / get_secret_by_name / decrypt_secret / decrypt_aes` | same names in `crate::plugins::windows::registry::lsadump` |
+
+### GUI, network, consoles (package W4)
+
+| python | rust |
+|---|---|
+| `WindowStations.create_gui_table(ctx, symbol_table, config_path)` | `crate::symbols::windows::gui::create_gui_table(ctx, k.table)?` (python's version → `windows/gui/gui-*` map, `gui::WIN_VERSION_FILE_MAP`) |
+| `WindowStations.get_session_map(ctx, kernel, gui_table)` | `crate::plugins::windows::windowstations::get_session_map(k, gui_table)?` → `Vec<(session id, &'static Space)>` (python dict order) |
+| `WindowStations.scan_gui_object(ctx, path, kernel, tag, object_type)` / `scan_window_stations(ctx, path, kernel)` | `windowstations::scan_gui_object(ctx, k, tag, object_type, \|obj\| ..)` / `windowstations::scan_window_stations(ctx, k, \|winsta, name, session\| ..)` (streaming, `Ok(false)` stops) |
+| `tagWINDOWSTATION` / `tagDESKTOP` / `tagWND` / `_LARGE_UNICODE_STRING` methods | `gui::GuiExt`, named after the class: `winsta_{get_session_id, is_valid, traverse, get_info(k.table), desktops(k.table)}`, `desktop_{get_window_station, get_session_id, is_valid, get_threads}`, `wnd_{get_name, get_desktop, get_session_id, is_valid, get_process, get_window_procedure}`, `large_unicode_get_string` |
+| a desktop's window tree / `Windows.list_windows` | `gui::desktop_windows(top: WndRef, max, &mut f)` / `crate::plugins::windows::windows::list_windows(ctx, k, f)` |
+| `Desktops.list_desktops` / `DeskScan.scan_desktops` | `desktops::list_desktops(ctx, k, f)` / `deskscan::scan_desktops(ctx, k, f)` (rows: `desktops::{desktop_columns, desktop_values}`) |
+| `NetScan.determine_tcpip_version(ctx, kernel)` (netscan ISF version detection) | `crate::plugins::windows::netscan::determine_tcpip_version(k)?` → (ISF file name, python's `win10_x64_class_types`?) |
+| `NetScan.create_netscan_symbol_table / create_netscan_constraints / scan` | `netscan::{create_netscan_symbol_table(ctx, k)?, create_netscan_constraints(t)?, scan_each(ctx, k, t, \|obj\| ..)}` |
+| netscan / netstat `_generator` rows, columns, `generate_timeline` | `netscan::{object_rows(&obj, show_corrupt, netstat)?, emit_rows(..), columns(), timeline_event(&row, absent)}` |
+| `_TCP_ENDPOINT` / `_TCP_LISTENER` / `_UDP_ENDPOINT` / `_LOCAL_ADDRESS` methods (`get_owner(_pid/_procname)`, `get_create_time`, `get_local_address`, `get_remote_address`, `dual_stack_sockets`, `is_valid`) | `crate::symbols::windows::network::NetExt` (same names; `net_create_time`, `net_is_valid`); call `network::bind_class_types(t, win10_x64)` after loading a netscan ISF; glibc `inet_ntop` = `network::inet_ntop(Family, bytes)` |
+| `NetStat.get_tcpip_module / list_sockets / parse_partitions / find_port_pools / enumerate_structures_by_port / parse_hashtable / parse_bitmap` (tcpip.sys walking) | same names in `crate::plugins::windows::netstat` (tcpip table: `ctx.symbol_table_from_pdb(k.vlayer, "tcpip.pdb", Some(base), Some(size))?`) |
+| consoles classes (`_ROW`, `_SCREEN_INFORMATION`, `_CONSOLE_INFORMATION`, `_COMMAND_HISTORY`, `_COMMAND`, `_EXE_ALIAS_LIST`, `_ALIAS`) | `crate::symbols::windows::consoles::ConsoleExt` (+ `Screen`); properties shadowing members are methods: `command_count()`, `process_handle()`, `screen_buffer()`, `Screen::screen_x/screen_y` |
+| `Consoles.find_conhost_proc / find_conhostexe / determine_conhost_version / create_conhost_symbol_table / get_console_settings_from_registry` | `crate::plugins::windows::consoles::{find_conhost_procs, find_conhostexe, determine_conhost_version, create_conhost_symbol_table, get_console_settings_from_registry}` |
+| `CmdScan.get_filtered_vads(proc, size_filter)` | `crate::plugins::windows::cmdscan::get_filtered_vads(&proc, size_filter)?` |
+
 ## Linux (`use crate::symbols::linux::prelude::*` - LinuxExt, FsExt, CapsExt, NetExt, ...)
 
 `let k = ctx.linux_kernel()?;` → `&LinuxKernel`, derefs to the kernel `Module` (offset =
@@ -204,7 +242,7 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `vmlinux = linux.LinuxUtilities.get_module_from_volobj_type(ctx, obj)` | `crate::symbols::linux::vmlinux_of(&obj)?` |
 | `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump, elf_dump_ex}` (`elf_dump_ex` → (preferred, final) names) |
 | `elf` extension (`get_program_headers`, `get_section_headers`, `get_link_maps`, `get_symbols`, `elf_phdr.get_vaddr/dynamic_sections`, `elf_sym.get_name`, `elf_linkmap.get_name`) | `symbols::linux::elf::{Elf::new(layer, table, off)?, Phdr, ElfSym, LinkMap, elf_sym_get_name}` same method names |
-| bash `hist_entry` (`is_valid`, `get_command`, `get_time_object`) + `bash32/bash64` ISFs | `symbols::linux::bash::{bash_table(ctx, is_64bit), HistEntry::parse(&hist)?}` |
+| bash `hist_entry` (`is_valid`, `get_command`, `get_time_object`, `get_time_as_integer`) + `bash32/bash64` ISFs (linux and mac) | `symbols::linux::bash::{bash_table(ctx, is_64bit), HistEntry::parse(&hist)?}` (`.command`, `.time_object()`, `.time` (i128), `.time_int` = exact python int, the `sorted()` key); python `int(str)`: `bash::{PyInt::parse, py_int}` |
 | `yarascan.YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `plugins::linux::vmayarascan::{yarascan_option_requirements, yara_rules_from_config}` (+ `crate::yara::rules::volatility`) |
 | `renderers.LayerData(context, offset, layer, length)` | `plugins::linux::vmayarascan::layer_data(layer, offset, len)` → `Value::LayerBytes` |
 | `scanners.RegExScanner(pattern)` | `plugins::linux::vmaregexscan::regex_scanner(&Regex)` |
@@ -236,6 +274,14 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `kallsyms.Kallsyms(ctx, layer, module)` + `lookup_address / lookup_name / get_*_symbols` | `symbols::linux::kallsyms::Kallsyms::get(vm)?` (built once, cached, thread-safe) + same names → `KasSymbol` |
 | `ModuleExtract.extract_module(ctx, kernel, module)` | `symbols::linux::module_extract::extract_module(vm, &module)?` → `Option<Vec<u8>>` |
 | `linux_constants.KSYM_NAME_LEN / MODULE_* / NM_TYPES_DESC` | `symbols::linux::constants` |
+| `tainting.Tainting.get_taints_parsed / get_taints_as_plain_string(ctx, kernel, taints, is_module)`, `linux_constants.TAINT_FLAGS` | `symbols::linux::tainting::{Tainting::new(k)?.get_taints_parsed(taints, is_module)?, TAINT_FLAGS}` (build `Tainting` once per run) |
+| `Modules.get_kset_modules` keeping the `module_kobject.mod` pointer objects | `modules::get_kset_modules_ptrs(k)?` → `(name, pointer Obj, value)` |
+| many `Modules.module_lookup_by_address` calls (e.g. a table of handlers) | `modules::module_lookup_by_addresses(k, &mods, &addrs)` (one symbol-table pass for all kernel addresses; stops at the first `Err`) |
+| `get_symbols_by_absolute_location(addr)` for many addresses | `k.table.symbols_at_exact_many(&rel_offsets)` (one linear pass; `symbols_at(off, 0)` itself answers the first 8 exact lookups linearly, then builds the address index) |
+| `for sn in vmlinux.symbols: vmlinux.get_symbol(sn).address` (whole-table scans) | `k.table.symbol_names_addrs()` → `(raw name bytes, masked address)` |
+| `ModuleDisplayPlugin.generate_results(...)` / `columns_results` (lsmod, check_modules, hidden_modules) | `plugins::linux::lsmod::{generate_results(ctx, k, iter of (vol.offset, module), dump, out), columns()}` |
+| `Hidden_modules.find_hidden_modules / get_lsmod_module_addresses`, `Check_modules.compare_kset_and_lsmod` | `plugins::linux::malware::{hidden_modules, check_modules}` same names |
+| `Check_idt.get_idt_type`, `IOMem.parse_resource`, `Boottime.get_time_namespaces_bootime` | `plugins::linux::{malware::check_idt::get_idt_type, iomem::parse_resource, boottime::get_time_namespaces_boottime}` |
 
 ## Mac (`use crate::symbols::mac::MacExt`)
 
@@ -284,6 +330,7 @@ with a traceback; the rsvol equivalent is a plugin panic, which the CLI renders 
 | `layer.canonicalize(addr)` | `k.layer.canonicalize(addr)` |
 | `layer.config["kernel_virtual_offset"]` | `layer.as_intel().and_then(\|i\| i.kernel_virtual_offset())` |
 | `isinstance(layer, intel.Intel)` | `layer.as_intel().is_some()` |
+| `isinstance(layer, linear.LinearlyMappedLayer)` (false for AVML / QEMU) | `layer.is_linear()` (scans read non-linear layers through the layer, per segment) |
 
 ## Scanning (python `layer.scan(context, scanner, sections=...)`)
 
@@ -308,7 +355,7 @@ changes python's last chunk of a section (hits there can be reported twice, like
 | `layer.scan(ctx, scanners.BytesScanner(needle), sections)` | `scan(layer, &BytesScanner::new(needle), Some(&secs))` → `Vec<u64>` |
 | `layer.scan(ctx, scanners.MultiStringScanner(patterns))` | `scan_each(layer, &MultiStringScanner::new(&pats), None, \|(addr, idx)\| ..)` (AVX2 prefilter; `RSVOL_NO_SIMD=1` forces scalar) |
 | `layer.scan(ctx, scanners.RegExScanner(pattern))` | `FnScanner::new(\|data, off, out\| ..)` with the regex engine (apply the `chunk_size` rule yourself) |
-| `PdbSignatureScanner(names)` / `PDBUtility.pdbname_scan(...)` | `automagic::windows::{RsdsScanner, pdbname_scan}` (streaming) or `PdbSignatureScanner` (GUID/age in the hit) |
+| `PdbSignatureScanner(names)` / `PDBUtility.pdbname_scan(...)` | `automagic::windows::{RsdsScanner, pdbname_scan}` (streaming) or `PdbSignatureScanner` (GUID/age in the hit); the matcher on raw bytes: `symbols::windows::pdb::{rsds_search, rsds_scan, find_mz_before, guid_string}` |
 | a scan that usually stops at an early hit (banners) | `scan_each_progressive(layer, &scanner, \|h\| h.0, \|h\| ..)` (growing batches; same hits/order as `scan_each`) |
 
 A custom scanner gets the fast paths by implementing the optional `Scanner` methods:
@@ -384,6 +431,20 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
 | `UnloadedModules.create_unloadedmodules_table / list_unloadedmodules` | same names in `unloadedmodules` |
 | `DebugRegisters._get_debug_info(ethread)` | `debugregisters::get_debug_info(&t)?` |
 
+### Services, malware helpers (`crate::plugins::windows::*`, package W5)
+
+| python | rust |
+|---|---|
+| `SvcScan.get_prereq_info(...)` (services ISF + registry `ImagePath` / `ServiceDll` map) | `svcscan::get_prereq_info(ctx, k)?` → `Prereq { table, binary_map }` |
+| `SvcScan.service_scan(...)` / `SvcList.service_list(...)` (rows of `get_record_tuple`) | `svcscan::service_scan(k, &pre, &mut \|row\| ..)` / `svclist::service_list(k, &pre, f)` → `ServiceRow { values, name, key }` |
+| `SvcScan.enumerate_vista_or_later_header(...)` / `SERVICE_RECORD.traverse()` | `svcscan::enumerate_vista_or_later_header(table, &map, layer, offset, f)` (row offsets are the `PrevEntry` pointers' own addresses, like python) |
+| `pslist.PsList.create_name_filter(["services.exe"])` / `create_active_process_filter()` | `svcscan::services_filter` / `malware::processghosting::active_process_filter` |
+| `Malfind.is_vad_empty(layer, vad)` / `list_injection_sites(...)` | `malware::malfind::is_vad_empty(layer, start, size)?` / `malware::malfind::list_injection_sites(&proc, &pv)` |
+| `YaraScan.get_yarascan_option_requirements()` / `process_yara_options(config)` | `vadyarascan::yarascan_option_requirements()` / `vadyarascan::rules_from_config(cfg)?` |
+| `scanners.RegExScanner(pattern)` (DOTALL, `chunk_size` rule) | `vadregexscan::regex_scanner(&re)` → `FnScanner` |
+| `DirectSystemCalls` / `IndirectSystemCalls` machinery (`syscall_finder_type`, `_is_syscall_block`, `_generator`) | `malware::direct_system_calls::{SyscallFinder, DIRECT, run_finder}`, `malware::indirect_system_calls::INDIRECT` |
+| a python dict keyed by int (insertion order) | `malware::hollowprocesses::OrderedMap<V>` |
+
 ## Plugins & output
 
 * A plugin is a unit struct implementing `crate::plugins::Plugin` (see `src/plugins/windows/pslist.rs`),
@@ -392,7 +453,9 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
   Column TYPE decides formatting (`ColType::Hex` renders `Value::Int(16)` as `0x10`).
 * python `renderers.UnreadableValue()` = `Value::Unreadable` ("-"), `NotApplicableValue()` =
   `Value::NotApplicable` ("N/A"), `UnparsableValue()` = `Value::Unparsable` ("-").
-* Files: `let (file, name) = ctx.create_output_file(&sanitize_filename(..))?;` — `name` is the
+* Files: `let (file, name) = ctx.create_output_file(&sanitize_filename(..))?;` (python's
+  `-N` de-duplication and mode 0o600 minus umask, like `tempfile.mkstemp`; a plugin creating a
+  file itself uses `cli::files::open_new(path)`) — `name` is the
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
 * A plugin's own unsatisfied requirement (e.g. `TranslationLayerRequirement(name="primary",
   description=...)`): `Err(crate::plugins::unsatisfied_described(&[("primary", UnsatKind::Layer,
@@ -422,6 +485,16 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
 | `Banners.locate_banners(ctx, layer)` | `banners::locate_banners(layer)?` |
 | `LayerWriter.write_layer(...)` | `layerwriter::write_layer(layer, &file, len)` (sparse, reflink / copy_file_range) |
 | a requirement's `build_configuration()` tree | `pyconfig::{primary_tree, kernel_tree, container_tree}` |
+
+## Python-compatibility utilities (`crate::util`)
+
+| python | rust |
+|---|---|
+| `json.loads(s)` (dicts: a repeated key keeps its first position, last value) | `util::json::Json::parse(bytes)?` (DOM) / `util::json::Parser` (pull parser, the ISF loader); pull-parsed objects: `util::json::dict_dedupe(&mut entries, \|e\| key)` |
+| iterating a python `set` of ints (CPython slot order) | `util::pyset::PyIntSet`; sets of str / tuples (as with `PYTHONHASHSEED=0`): `util::pyset::{PySet, py_hash_int, py_hash_str_seed0, py_hash_tuple}` |
+| `sqlite3` full table scan (rowid order), e.g. volatility3's `identifier.cache` | `util::sqlite::Database::open(path)?` → `table(name)?`, `for_each_row(&t, f)` / `rows(&t)` |
+| `format(v, spec)` / f-string format specs | `util::pyformat::{fmt_int, fmt_str}` |
+| `datetime` conversions / `str(datetime)` | `util::time::{wintime_to_datetime, unixtime_to_datetime, py_str, asctime, fromtimestamp_local}` |
 
 ## Performance notes
 

@@ -315,7 +315,7 @@ fn decode_impl<const NOLEG: bool, const M64: bool, const FULL: bool>(data: &[u8]
     let map: usize;
     let op: u8;
     let mut pfx: usize; // mandatory prefix selector value
-    let mut opcode = [0u8; 4];
+    let mut opcode: [u8; 4];
     if esc && b == 0x0F {
         let b2 = match st.byte() {
             Some(x) => x,
