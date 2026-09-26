@@ -9,6 +9,13 @@ P=$1; shift
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
 REF=${REF:-/home/user/rs-vol/bench/ref/py/$P.txt}
 OUTDIR=${OUTDIR:-/home/user/rs-vol/bench/out}
+# isfinfo lists whatever symbol files are on disk right now (plus python's sqlite cache state), so a stored
+# reference goes stale whenever symbol dirs change: compare it against a fresh python run instead.
+if [ "$P" = "isfinfo.IsfInfo" ] && [ -z "$NO_LIVE_ISFINFO" ]; then
+  mkdir -p $OUTDIR; LIVE=$OUTDIR/isfinfo.live.ref
+  /home/user/rs-vol/bench/scripts/limit.sh -m 4G /home/user/rs-vol/bench/venv/bin/python /home/user/rs-vol/volatility3/vol.py -q $GLOBAL_ARGS -f $IMG isfinfo.IsfInfo > $LIVE 2>/dev/null
+  REF=$LIVE
+fi
 rm -rf $OUTDIR/dump/$P; mkdir -p $OUTDIR/dump/$P
 s=$(date +%s%N)
 $BIN -q $GLOBAL_ARGS -o $OUTDIR/dump/$P -f $IMG $P "$@" > $OUTDIR/$P.txt 2> $OUTDIR/$P.err

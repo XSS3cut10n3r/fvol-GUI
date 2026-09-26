@@ -9,7 +9,6 @@ use crate::objects::util::array_to_string;
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::prelude::*;
-use std::io::Write;
 
 pub struct VadInfo;
 
@@ -80,19 +79,21 @@ pub fn vad_dump(ctx: &Context, proc: &Obj, vad: &Obj, maxsize: i128) -> Option<S
     let pid = proc.m("UniqueProcessId").and_then(|p| p.int()).ok()?;
     let pl = proc.add_process_layer().ok()?;
     let name = format!("pid.{pid}.vad.{start:#x}-{end:#x}.dmp");
-    let (mut f, final_name) = ctx.create_output_file(&name).ok()?;
-    let chunk = 1024 * 1024 * 10u64;
-    let mut off = start;
+    let (f, final_name) = ctx.create_output_file(&name).ok()?;
+    // python writes `read(off, 10 MiB, pad=True)` chunks of [start, start + size): only the
+    // mapped runs can hold anything but zeros; zero pages stay holes of the same file
     let stop = start.wrapping_add(size);
-    let mut buf = Vec::new();
-    while off < stop {
-        let n = chunk.min(stop - off) as usize;
-        buf.resize(n, 0);
-        pl.read_padded(off, &mut buf);
-        if f.write_all(&buf).is_err() {
+    if start < stop {
+        let mut w = crate::plugins::windows::memmap::SparseDump::new(&f);
+        let mut res = Ok(());
+        pl.mapping_targets(start, stop - start, &mut |m, _| {
+            res = w.range(pl, m.offset, m.len, m.offset - start);
+            res.is_ok()
+        });
+        w.set_size(stop - start);
+        if res.is_err() || w.finish().is_err() {
             return None;
         }
-        off += n as u64;
     }
     Some(final_name)
 }

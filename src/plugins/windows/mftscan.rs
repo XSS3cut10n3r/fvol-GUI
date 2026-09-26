@@ -25,7 +25,8 @@ use crate::error::{Error, Result};
 use crate::layers::Layer;
 use crate::layers::scan::{MultiStringScanner, Scanner, scan_each};
 use crate::objects::LayerRef;
-use crate::plugins::{Config, Plugin, TimeKind, TimelineEvent};
+use crate::plugins::{Config, Plugin, TimeKind, TimelineBatch, TimelineEvent, TimelineGroups, TimelineTime};
+use crate::renderers::text::RowEncoder;
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::mft::{MftEntry, mft_flags_name, permission_flags_name, signature_str};
 use crate::util::time::wintime_to_datetime;
@@ -275,59 +276,112 @@ pub fn add_mftscan_record(b: &mut MftScanBatch, e: MftEntry) -> bool {
 }
 
 /// MFTScan's `Value`s of one row (python `_generator`).
-pub fn mftscan_values(b: &MftScanBatch, r: &MftScanRow) -> Vec<Value> {
-    let mut v = Vec::with_capacity(12);
-    v.push(Value::Int(r.offset as i128));
-    v.push(signature_value(r.signature));
-    v.push(Value::Int(r.record_number as i128));
-    v.push(Value::Int(r.link_count as i128));
-    v.push(enum_or_hex(mft_flags_name(r.flags), r.flags));
-    if r.file_name {
-        v.push(enum_or_hex(permission_flags_name(r.permissions), r.permissions));
-        v.push(Value::SStr("FILE_NAME"));
+pub fn mftscan_values(b: &MftScanBatch, r: &MftScanRow) -> [Value; 12] {
+    let [c, m, u, a] = r.times.map(|t| wintime_to_datetime(t as i128));
+    let (permissions, attr_type, name) = if r.file_name {
+        (
+            enum_or_hex(permission_flags_name(r.permissions), r.permissions),
+            Value::SStr("FILE_NAME"),
+            Value::Str(text(&b.names, r.name).to_owned()),
+        )
     } else {
-        v.push(Value::NotApplicable);
-        v.push(Value::SStr("STANDARD_INFORMATION"));
-    }
-    for t in r.times {
-        v.push(wintime_to_datetime(t as i128));
-    }
-    v.push(if r.file_name { Value::Str(text(&b.names, r.name).to_owned()) } else { Value::NotApplicable });
-    v
+        (Value::NotApplicable, Value::SStr("STANDARD_INFORMATION"), Value::NotApplicable)
+    };
+    [
+        Value::Int(r.offset as i128),
+        signature_value(r.signature),
+        Value::Int(r.record_number as i128),
+        Value::Int(r.link_count as i128),
+        enum_or_hex(mft_flags_name(r.flags), r.flags),
+        permissions,
+        attr_type,
+        c,
+        m,
+        u,
+        a,
+        name,
+    ]
 }
 
 fn emit_mftscan(b: MftScanBatch, out: &mut dyn RowSink) -> Result<()> {
     for r in &b.rows {
-        out.row(r.file_name as usize, mftscan_values(&b, r))?;
+        out.row_ref(r.file_name as usize, &mftscan_values(&b, r))?;
     }
     b.err.map_or(Ok(()), Err)
 }
 
-/// python `MFTScan.generate_timeline()` for one record: its events are appended to `ev`; `Err`
-/// = python raised after them.
-fn timeline_record(ev: &mut Vec<TimelineEvent>, tmp: &mut MftScanBatch, e: &MftEntry) -> Result<()> {
+/// MFTScan's rows with the renderer's encoder (quick / csv / pretty): each scan batch is also
+/// formatted on its scan worker; the output thread appends the blocks (rows are at tree depths
+/// 0 and 1, valid without clamping except possibly a batch's first row, which the renderer
+/// checks: such a batch is emitted row by row).
+fn run_encoded(layer: &dyn Layer, enc: &RowEncoder, out: &mut dyn RowSink) -> Result<()> {
+    #[derive(Default)]
+    struct Batch {
+        b: MftScanBatch,
+        block: Vec<u8>,
+    }
+    let mut res = Ok(());
+    enumerate_mft_batches(
+        layer,
+        Batch::default,
+        |x: &mut Batch, e| {
+            let n0 = x.b.rows.len();
+            let more = add_mftscan_record(&mut x.b, e);
+            for r in &x.b.rows[n0..] {
+                enc.row_at(&mut x.block, r.file_name as usize, &mftscan_values(&x.b, r));
+            }
+            more
+        },
+        |x| {
+            res = (|| {
+                let rows = &x.b.rows;
+                if let (Some(first), Some(last)) = (rows.first(), rows.last())
+                    && !out.rows_encoded_at(&x.block, rows.len(), first.file_name as usize, last.file_name as usize)?
+                {
+                    for r in rows {
+                        out.row_ref(r.file_name as usize, &mftscan_values(&x.b, r))?;
+                    }
+                }
+                x.b.err.map_or(Ok(()), Err)
+            })();
+            res.is_ok()
+        },
+    );
+    res
+}
+
+/// python `MFTScan.generate_timeline()` for one record: its events are appended to `g` (four
+/// per STANDARD_INFORMATION / FILE_NAME row, yielded Created, Modified, Changed, Accessed; one
+/// group each); `Err` = python raised after them.
+fn timeline_record(g: &mut TimelineGroups, desc: &mut String, tmp: &mut MftScanBatch, e: &MftEntry) -> Result<()> {
+    use std::fmt::Write;
     let fname = e.longest_filename()?;
-    let push = |ev: &mut Vec<TimelineEvent>, desc: String, times: [u64; 4]| {
-        let [c, m, u, a] = times.map(|t| wintime_to_datetime(t as i128));
-        ev.push(TimelineEvent { description: desc.clone(), kind: TimeKind::Created, time: c });
-        ev.push(TimelineEvent { description: desc.clone(), kind: TimeKind::Modified, time: m });
-        ev.push(TimelineEvent { description: desc.clone(), kind: TimeKind::Changed, time: u });
-        ev.push(TimelineEvent { description: desc, kind: TimeKind::Accessed, time: a });
+    let wt = |t: u64| match wintime_to_datetime(t as i128) {
+        Value::DateTime(dt) => TimelineTime::DateTime(dt),
+        Value::Unparsable => TimelineTime::Unparsable,
+        _ => TimelineTime::NotApplicable,
     };
     tmp.clear();
     let r = parse_standard_information_records(tmp, e);
     let fname = fname.as_deref().unwrap_or("None");
     for row in &tmp.rows {
-        push(ev, format!("MFT STANDARD_INFORMATION entry for {fname}"), row.times);
+        desc.clear();
+        let _ = write!(desc, "MFT STANDARD_INFORMATION entry for {fname}");
+        g.push(desc, row.times.map(wt));
     }
     r?;
     tmp.clear();
     let r = parse_filename_records(tmp, e);
     for row in &tmp.rows {
-        push(ev, format!("MFT FILE_NAME entry for {}", text(&tmp.names, row.name)), row.times);
+        desc.clear();
+        let _ = write!(desc, "MFT FILE_NAME entry for {}", text(&tmp.names, row.name));
+        g.push(desc, row.times.map(wt));
     }
     r
 }
+
+/// The event types of a `timeline_record` group, in yield order (`times` = [c, m, u, a]).
+const MFT_ORDER: [TimeKind; 4] = [TimeKind::Created, TimeKind::Modified, TimeKind::Changed, TimeKind::Accessed];
 
 // ------------------------------------------------------------------------------------------
 // ADS / ResidentData
@@ -549,37 +603,51 @@ impl Plugin for MFTScan {
             Column::new("Accessed", ColType::DateTime),
             Column::new("Filename", ColType::Str),
         ])?;
-        run_batches(layer, add_mftscan_record, emit_mftscan, out)
+        match out.encoder().filter(|e| e.supports_depth()) {
+            Some(enc) => run_encoded(layer, &enc, out),
+            None => run_batches(layer, add_mftscan_record, emit_mftscan, out),
+        }
     }
     /// python `generate_timeline()`. If python raises midway (an unreadable FILE_NAME name or
     /// record flags) the events generated before stay in python's timeline, so they are
     /// returned without the error.
     fn timeline(&self, ctx: &Context, cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
-        let layer = match if cfg.get_bool(ANY_OS_STACKER) { any_os_memory_layer(ctx) } else { primary_memory_layer(ctx) } {
-            Ok(l) => l,
-            Err(e) => return Some(Err(e)),
-        };
-        #[derive(Default)]
-        struct Batch {
-            ev: Vec<TimelineEvent>,
-            tmp: MftScanBatch,
-            failed: bool,
-        }
-        let mut all = Vec::new();
-        enumerate_mft_batches(
-            layer,
-            Batch::default,
-            |b: &mut Batch, e| {
-                b.failed = timeline_record(&mut b.ev, &mut b.tmp, &e).is_err();
-                !b.failed
-            },
-            |b| {
-                all.extend(b.ev);
-                !b.failed
-            },
-        );
-        Some(Ok(all))
+        Some(timeline_batches(ctx, cfg).map(|b| b.into_iter().flat_map(TimelineBatch::into_events).collect()))
     }
+    /// `timeline()` as the scan workers' batches (millions of events: no concatenation).
+    fn timeline_batches(&self, ctx: &Context, cfg: &Config) -> Option<(Vec<TimelineBatch>, Option<Error>)> {
+        Some(match timeline_batches(ctx, cfg) {
+            Ok(b) => (b, None),
+            Err(e) => (Vec::new(), Some(e)),
+        })
+    }
+}
+
+/// The events of `MFTScan.generate_timeline()`, compact, one batch per scan batch, in order.
+fn timeline_batches(ctx: &Context, cfg: &Config) -> Result<Vec<TimelineBatch>> {
+    let layer = if cfg.get_bool(ANY_OS_STACKER) { any_os_memory_layer(ctx) } else { primary_memory_layer(ctx) }?;
+    struct Batch {
+        g: TimelineGroups,
+        desc: String,
+        tmp: MftScanBatch,
+        failed: bool,
+    }
+    let mut all = Vec::new();
+    enumerate_mft_batches(
+        layer,
+        || Batch { g: TimelineGroups::new(MFT_ORDER), desc: String::new(), tmp: MftScanBatch::default(), failed: false },
+        |b: &mut Batch, e| {
+            b.failed = timeline_record(&mut b.g, &mut b.desc, &mut b.tmp, &e).is_err();
+            !b.failed
+        },
+        |b| {
+            if !b.g.groups.is_empty() {
+                all.push(TimelineBatch::Groups(b.g));
+            }
+            !b.failed
+        },
+    );
+    Ok(all)
 }
 
 impl Plugin for ADS {
