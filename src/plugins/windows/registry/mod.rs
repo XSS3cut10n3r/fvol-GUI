@@ -12,6 +12,7 @@ pub mod hivelist;
 pub mod hivescan;
 pub mod lsadump;
 pub mod printkey;
+pub mod userassist;
 
 pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&hivelist::HiveList);
@@ -25,4 +26,5 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&cachedump::CachedumpDeprecated);
     v.push(&certificates::Certificates);
     v.push(&getcellroutine::GetCellRoutine);
+    v.push(&userassist::UserAssist);
 }
