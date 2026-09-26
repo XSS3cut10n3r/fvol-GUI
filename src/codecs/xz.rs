@@ -481,6 +481,49 @@ fn delta_decode(buf: &mut [u8], dist: usize) {
     }
 }
 
+/// First index in `from..end` whose byte is 0xE8 or 0xE9 (CALL/JMP), or `end`. The BCJ
+/// state only changes at those bytes, so the filter skips everything else 16 bytes at a
+/// time (was a byte loop at ~2 cycles/byte, ~6% of decoding x86 code).
+#[inline]
+fn next_e8(buf: &[u8], mut from: usize, end: usize) -> usize {
+    debug_assert!(end <= buf.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::*;
+        // SAFETY: SSE2 is part of x86-64; every load reads 16 bytes below `end`.
+        unsafe {
+            let fe = _mm_set1_epi8(0xFEu8 as i8);
+            let e8 = _mm_set1_epi8(0xE8u8 as i8);
+            while from + 16 <= end {
+                let v = _mm_loadu_si128(buf.as_ptr().add(from) as *const __m128i);
+                let m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(v, fe), e8)) as u32;
+                if m != 0 {
+                    return from + m.trailing_zeros() as usize;
+                }
+                from += 16;
+            }
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // SWAR: bytes b with (b ^ 0xE8) & 0xFE == 0; the lowest flagged byte is exact.
+        const LO: u64 = 0x0101_0101_0101_0101;
+        while from + 8 <= end {
+            let w = u64::from_le_bytes(buf[from..from + 8].try_into().unwrap());
+            let y = (w ^ (0xE8 * LO)) & (0xFE * LO);
+            let z = y.wrapping_sub(LO) & !y & (0x80 * LO);
+            if z != 0 {
+                return from + (z.trailing_zeros() / 8) as usize;
+            }
+            from += 8;
+        }
+    }
+    while from < end && buf[from] & 0xFE != 0xE8 {
+        from += 1;
+    }
+    from
+}
+
 /// x86 BCJ decoder over a complete block (converts absolute CALL/JMP targets back to
 /// relative ones). `start` is the filter's start offset.
 fn x86_decode(buf: &mut [u8], start: u32) {
@@ -498,10 +541,9 @@ fn x86_decode(buf: &mut [u8], start: u32) {
     let limit = buf.len() - 5;
     let mut i = 0usize;
     while i <= limit {
-        let b = buf[i];
-        if b != 0xE8 && b != 0xE9 {
-            i += 1;
-            continue;
+        i = next_e8(buf, i, limit + 1);
+        if i > limit {
+            break;
         }
         let now = start.wrapping_add(i as u32);
         let offset = now.wrapping_sub(prev_pos);
@@ -749,6 +791,97 @@ mod tests {
         let mut short = [0xE8u8, 1, 2, 3];
         x86_decode(&mut short, 0);
         assert_eq!(short, [0xE8, 1, 2, 3]);
+    }
+
+    /// The BCJ x86 decoder's CALL/JMP scan against a byte loop, and the whole filter against
+    /// the byte-at-a-time reference, on buffers dense and sparse in E8/E9 bytes.
+    #[test]
+    fn codecs_xz_x86_scan() {
+        fn reference(buf: &mut [u8], start: u32) {
+            const ALLOWED: [bool; 8] = [true, true, true, false, true, false, false, false];
+            const BIT_NUM: [u32; 8] = [0, 1, 2, 2, 3, 3, 3, 3];
+            let ms = |b: u8| b == 0 || b == 0xFF;
+            if buf.len() < 5 {
+                return;
+            }
+            let (mut prev_mask, mut prev_pos) = (0u32, start.wrapping_sub(5));
+            let mut i = 0;
+            while i <= buf.len() - 5 {
+                if buf[i] != 0xE8 && buf[i] != 0xE9 {
+                    i += 1;
+                    continue;
+                }
+                let now = start.wrapping_add(i as u32);
+                let offset = now.wrapping_sub(prev_pos);
+                prev_pos = now;
+                if offset > 5 {
+                    prev_mask = 0;
+                } else {
+                    for _ in 0..offset {
+                        prev_mask = (prev_mask & 0x77) << 1;
+                    }
+                }
+                let b4 = buf[i + 4];
+                if ms(b4) && ALLOWED[((prev_mask >> 1) & 7) as usize] && (prev_mask >> 1) < 0x10 {
+                    let mut src = u32::from_le_bytes([buf[i + 1], buf[i + 2], buf[i + 3], b4]);
+                    let mut dest;
+                    loop {
+                        dest = src.wrapping_sub(now.wrapping_add(5));
+                        if prev_mask == 0 {
+                            break;
+                        }
+                        let idx = BIT_NUM[(prev_mask >> 1) as usize & 7];
+                        if !ms((dest >> (24 - idx * 8)) as u8) {
+                            break;
+                        }
+                        src = dest ^ ((1u32 << (32 - idx * 8)) - 1);
+                    }
+                    let d = dest & 0x01FF_FFFF;
+                    buf[i + 1..i + 5].copy_from_slice(&[d as u8, (d >> 8) as u8, (d >> 16) as u8, if (dest >> 24) & 1 != 0 { 0xFF } else { 0 }]);
+                    i += 5;
+                    prev_mask = 0;
+                } else {
+                    i += 1;
+                    prev_mask |= 1 | if ms(b4) { 0x10 } else { 0 };
+                }
+            }
+        }
+        let mut s = 0x0BCD_1234_5678_9EF1u64;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for round in 0..400 {
+            let n = (rnd() % 300) as usize;
+            let density = 1 + rnd() % 40;
+            let buf: Vec<u8> = (0..n)
+                .map(|_| match rnd() % density {
+                    0 => 0xE8,
+                    1 => 0xE9,
+                    2 => 0x00,
+                    3 => 0xFF,
+                    _ => rnd() as u8,
+                })
+                .collect();
+            for from in 0..=n.min(40) {
+                for end in from..=n {
+                    let want = (from..end).find(|&k| buf[k] & 0xFE == 0xE8).unwrap_or(end);
+                    assert_eq!(next_e8(&buf, from, end), want, "round {round} from {from} end {end}");
+                }
+            }
+            let start = rnd() as u32;
+            let (mut a, mut b) = (buf.clone(), buf.clone());
+            x86_decode(&mut a, start);
+            reference(&mut b, start);
+            assert_eq!(a, b, "round {round}");
+        }
+        let mut x = X86.to_vec();
+        let mut y = X86.to_vec();
+        x86_decode(&mut x, 0);
+        reference(&mut y, 0);
+        assert_eq!(x, y);
     }
 
     /// Long mutation fuzz over every xz/lzma fixture (CODECS_FUZZ_ITERS, default 200k):
