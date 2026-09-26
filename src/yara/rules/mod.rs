@@ -23,6 +23,7 @@ pub mod eval;
 pub mod lexer;
 pub mod parser;
 pub mod regex;
+pub mod regions;
 pub mod volatility;
 
 #[cfg(test)]
@@ -95,6 +96,19 @@ pub struct RuleMatch {
     pub strings: Vec<StringMatch>,
 }
 
+/// One instance of one string of a matching rule ([`Rules::scan_refs`]): 16 bytes instead
+/// of a `RuleMatch` instance with its data and names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HitRef {
+    /// Offset of the match in the scanned buffer.
+    pub offset: u64,
+    /// Global string index (see [`Rules::hit_rule`], [`Rules::hit_string`]).
+    pub string: u32,
+    /// Length of yara-python's `matched_data` (at most `MAX_MATCH_DATA`, cut at the end of
+    /// the buffer).
+    pub len: u32,
+}
+
 /// Compiled rule set.
 pub struct Rules {
     namespaces: Vec<String>,
@@ -103,6 +117,8 @@ pub struct Rules {
     defs: Vec<StringDef>,
     matcher: Matcher,
     prog: Program,
+    /// `string_rule[g]`: the rule declaring string `g`.
+    string_rule: Vec<u32>,
 }
 
 impl fmt::Debug for Rules {
@@ -152,7 +168,16 @@ impl Rules {
     fn build(mut c: parser::Compiler) -> Result<Rules, CompileError> {
         c.finalize_defs();
         let matcher = Matcher::new(&c.defs).map_err(|msg| CompileError { msg, line: 0 })?;
+        let mut string_rule = vec![u32::MAX; c.defs.len()];
+        for (i, r) in c.rules.iter().enumerate() {
+            for g in r.strings.0..r.strings.1 {
+                if let Some(x) = string_rule.get_mut(g as usize) {
+                    *x = i as u32;
+                }
+            }
+        }
         Ok(Rules {
+            string_rule,
             namespaces: c.namespaces,
             rules: c.rules,
             strings: c.strings,
@@ -182,6 +207,69 @@ impl Rules {
         let mut matches = Vec::new();
         self.matcher.scan(data, &mut matches);
         self.evaluate(data, &matches)
+    }
+
+    /// [`Rules::scan`] of a buffer whose ranges `holes` (sorted, disjoint `(start, len)`)
+    /// are known to be all zero: same result, the string search may skip the holes
+    /// ([`Matcher::scan_holes`]).
+    pub fn scan_holes(&self, data: &[u8], holes: &[(usize, usize)]) -> Vec<RuleMatch> {
+        let mut matches = Vec::new();
+        self.matcher.scan_holes(data, holes, &mut matches);
+        self.evaluate(data, &matches)
+    }
+
+    /// volatility's `YaraScanner` view of [`Rules::scan_holes`] without copying any data:
+    /// appends one [`HitRef`] per `(rule, string, instance)` of the result, in yara-python
+    /// iteration order (matching public rules in declaration order, their non-private
+    /// strings that matched, the instances by offset). The rule name and the identifier
+    /// come from [`Rules::hit_rule`] / [`Rules::hit_string`].
+    pub fn scan_refs(&self, data: &[u8], holes: &[(usize, usize)], out: &mut Vec<HitRef>) {
+        thread_local! {
+            static MATCHES: std::cell::RefCell<Vec<Vec<Match>>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut local = Vec::new();
+        MATCHES.with(|cell| {
+            let mut guard = cell.try_borrow_mut();
+            let matches = match guard.as_deref_mut() {
+                Ok(m) => m,
+                Err(_) => &mut local,
+            };
+            self.matcher.scan_holes(data, holes, matches);
+            let matched = self.evaluate_rules(data, matches);
+            for (i, r) in self.rules.iter().enumerate() {
+                if !matched[i] || r.private {
+                    continue;
+                }
+                for g in r.strings.0..r.strings.1 {
+                    let (Some(ms), false) = (matches.get(g as usize), self.strings.get(g as usize).is_some_and(|s| s.private)) else {
+                        continue;
+                    };
+                    for m in ms {
+                        // yara-python's matched_data: at most MAX_MATCH_DATA bytes, cut at the end
+                        let start = m.offset.min(data.len());
+                        let end = start.saturating_add(m.len.min(MAX_MATCH_DATA)).min(data.len());
+                        out.push(HitRef { offset: m.offset as u64, string: g, len: (end - start) as u32 });
+                    }
+                }
+            }
+            // keep the per-string vectors' capacity bounded between calls
+            for v in matches.iter_mut() {
+                if v.capacity() > 4096 {
+                    *v = Vec::new();
+                }
+            }
+        });
+    }
+
+    /// Name of the rule string `string` (a [`HitRef::string`]) belongs to.
+    pub fn hit_rule(&self, string: u32) -> &str {
+        let r = self.string_rule.get(string as usize).and_then(|&i| self.rules.get(i as usize));
+        r.map_or("", |r| &r.name[..])
+    }
+
+    /// Identifier of string `string` (a [`HitRef::string`]), e.g. `"$a"`.
+    pub fn hit_string(&self, string: u32) -> &str {
+        self.defs.get(string as usize).map_or("", |d| &d.id[..])
     }
 
     /// Evaluate all conditions given the matches of every string

@@ -496,3 +496,165 @@ fn yara_rules_send_sync() {
         }
     });
 }
+
+/// The exact zero runs of `data` inside `ranges` (holes must be all zero).
+fn zero_runs(data: &[u8], ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for &(a, l) in ranges {
+        let mut i = a;
+        while i < a + l {
+            if data[i] != 0 {
+                i += 1;
+                continue;
+            }
+            let st = i;
+            while i < a + l && data[i] == 0 {
+                i += 1;
+            }
+            out.push((st, i - st));
+        }
+    }
+    out
+}
+
+/// `scan_holes` / `scan_refs` find exactly what `scan` finds on sparse buffers (zero holes
+/// of every size, patterns planted across hole edges), for every engine type and for rule
+/// sets that are not zero-inert (full-scan fallback).
+#[test]
+fn scan_holes_equals_scan() {
+    let mut s = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rnd = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    let mut big = String::from("rule big { strings:\n");
+    for i in 0..700 {
+        big.push_str(&format!("  $h{i} = {{ {:02X} {:02X} {:02X} {:02X} {:02X} }}\n", 1 + i % 250, (i * 7) % 256, 0x41 + i % 20, 0x42, (i * 13) % 256));
+    }
+    big.push_str("  $t = \"MZPE\" condition: any of them }");
+    let sources = [
+        r#"rule a { strings: $a = "Microsoft" $b = { 00 00 00 00 4D 5A 90 00 } $c = /[a-z]{5,}\.exe/ nocase condition: any of them }"#.to_string(),
+        r#"rule w { strings: $w = "kernel32" wide nocase $x = { 43 00 3A 00 5C 00 [0-8] 00 00 00 00 } condition: any of them }"#.to_string(),
+        r#"rule t { strings: $1 = "alpha" $2 = "bravo" $3 = "charlie" $4 = "delta" $5 = "echo" $6 = "foxtrot" $7 = "golf" $8 = "hotel" $9 = "india" condition: any of them }
+rule c { condition: uint16(0) == 0x5A4D or filesize > 100 }"#.to_string(),
+        r#"rule z { strings: $z = { 00 00 00 00 00 00 00 00 } condition: #z > 1 }"#.to_string(),
+        r#"rule x { strings: $x = "http://" xor(1-255) $y = /ab[^\x00]{2,40}cd/ condition: any of them }"#.to_string(),
+        r#"rule k { strings: $k = { ?1 ?2 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 00 00 00 00 } $j = { 00 00 00 00 ?3 ?4 } condition: any of them }"#.to_string(),
+        big,
+    ];
+    let words: [&[u8]; 14] = [
+        b"Microsoft",
+        b"\x00\x00\x00\x00MZ\x90\x00",
+        b"notepad.EXE",
+        b"k\x00e\x00r\x00n\x00e\x00l\x003\x002\x00",
+        b"C\x00:\x00\\\x00ab\x00\x00\x00\x00",
+        b"charlie",
+        b"hotel",
+        b"MZPE",
+        b"abxyzcd",
+        b"\x01\x00\x41\x42\x00",
+        b"http://",
+        b"ab\x00cd",
+        b"\x31\x42",
+        b"\x00\x00\x00\x00\x13\x24",
+    ];
+    for src in &sources {
+        let rules = Rules::compile(src).unwrap_or_else(|e| panic!("compile: {e}"));
+        for round in 0..6 {
+            let n = 200_000 + (rnd() % 900_000) as usize;
+            let mut data: Vec<u8> = (0..n).map(|_| if rnd() % 4 == 0 { 0 } else { (rnd() % 256) as u8 }).collect();
+            let mut holes = Vec::new();
+            let mut p = (rnd() % 5000) as usize;
+            while p < n {
+                let l = match rnd() % 4 {
+                    0 => (rnd() % 64) as usize,
+                    1 => (rnd() % 4096) as usize,
+                    _ => (rnd() % 300_000) as usize,
+                }
+                .min(n - p);
+                data[p..p + l].fill(0);
+                if l > 0 {
+                    holes.push((p, l));
+                }
+                // plant words around both hole edges
+                for &e in &[p, p + l] {
+                    let w = words[(rnd() % words.len() as u64) as usize];
+                    let off = (rnd() % 24) as usize;
+                    if let Some(at) = e.checked_sub(off)
+                        && at + w.len() <= n
+                    {
+                        data[at..at + w.len()].copy_from_slice(w);
+                    }
+                }
+                p += l + 1 + (rnd() % 20_000) as usize;
+            }
+            let exact = zero_runs(&data, &holes);
+            let full = rules.scan(&data);
+            let sparse = rules.scan_holes(&data, &exact);
+            assert_eq!(format!("{full:?}"), format!("{sparse:?}"), "rules {src:.40} round {round}");
+            // the compact form lists the same instances
+            let mut refs = Vec::new();
+            rules.scan_refs(&data, &exact, &mut refs);
+            let flat: Vec<(u64, String, String, usize)> = full
+                .iter()
+                .flat_map(|m| m.strings.iter().flat_map(move |s| s.instances.iter().map(move |i| (i.offset as u64, m.rule.clone(), s.identifier.clone(), i.matched_data.len()))))
+                .collect();
+            let refs: Vec<(u64, String, String, usize)> = refs.iter().map(|h| (h.offset, rules.hit_rule(h.string).to_string(), rules.hit_string(h.string).to_string(), h.len as usize)).collect();
+            assert_eq!(flat, refs, "rules {src:.40} round {round}");
+        }
+    }
+}
+
+/// Pins the hole margin. A candidate can sit inside a zero range when a hex/regex atom is
+/// itself zeros (the only atom yara finds in `{ ?1 ?2 ?? ?? 00 00 00 00 }`) and the pair
+/// engine accepts it by its context, the required bytes up to 8 before or after the atom's
+/// node: the candidate then lies up to 8 bytes deep in the hole that follows `?1 ?2` (or
+/// precedes the context). Each case must match through `scan_holes` with the real margin,
+/// match with a margin equal to its depth, and be missed with one byte less -- so the test
+/// fails whenever the margin drops below what the engines need.
+#[test]
+fn scan_holes_margin_pins_context_atoms() {
+    use crate::yara::scan::matcher::HOLE_MARGIN_OVERRIDE;
+    let z = |n: usize| std::iter::repeat_n(0u8, n);
+    // (rule, instance bytes, depth of its candidate inside the adjacent hole)
+    let mut cases: Vec<(String, Vec<u8>, usize)> = Vec::new();
+    for k in [0usize, 3, 6, 7] {
+        // context before: the atom starts k bytes into the hole after `?2`
+        let src = format!("rule k {{ strings: $k = {{ ?1 ?2 {}00 00 00 00 }} condition: $k }}", "?? ".repeat(k));
+        cases.push((src, [0x31, 0x42].into_iter().chain(z(k + 4)).collect(), k + 1));
+    }
+    // (explicit dots: the filters do not see through `.{n}` repeats)
+    let src = r#"rule r { strings: $r = /[\x01-\x0f][\x21-\x2f].....\x00\x00\x00\x00/s condition: $r }"#.to_string();
+    cases.push((src, [0x05, 0x25].into_iter().chain(z(9)).collect(), 6));
+    for j in [0usize, 2] {
+        // context after: the candidate is 4 + j bytes before the end of the hole
+        let src = format!("rule e {{ strings: $e = {{ 00 00 00 00 {}?3 ?4 }} condition: $e }}", "?? ".repeat(j));
+        cases.push((src, z(4 + j).chain([0x13, 0x24]).collect(), 4 + j));
+    }
+    let src = r#"rule f { strings: $f = /\x00\x00\x00\x00..[\x41-\x4f][\x51-\x5f]/s condition: $f }"#.to_string();
+    cases.push((src, z(6).chain([0x44, 0x55]).collect(), 6));
+    for (src, inst, depth) in &cases {
+        let rules = Rules::compile(src).unwrap_or_else(|e| panic!("compile {src}: {e}"));
+        let margin = rules.matcher.hole_margin().unwrap_or_else(|| panic!("{src}: not zero-inert, the test would not skip anything"));
+        assert!(margin >= *depth, "{src}: margin {margin} < depth {depth}");
+        // the instance between two big zero ranges
+        let n = 4 * margin + 3 * 65536;
+        let at = n / 2;
+        let mut data = vec![0u8; n];
+        data[at..at + inst.len()].copy_from_slice(inst);
+        let holes = zero_runs(&data, &[(0, n)]);
+        let full = rules.scan(&data);
+        assert!(!full.is_empty(), "{src}: the planted instance must match");
+        let run = |m: Option<usize>| {
+            HOLE_MARGIN_OVERRIDE.with(|c| c.set(m));
+            let r = rules.scan_holes(&data, &holes);
+            HOLE_MARGIN_OVERRIDE.with(|c| c.set(None));
+            format!("{r:?}") == format!("{full:?}")
+        };
+        assert!(run(None), "{src}: scan_holes differs from scan with the real margin {margin}");
+        assert!(run(Some(*depth)), "{src}: margin {depth} must suffice");
+        assert!(!run(Some(depth - 1)), "{src}: margin {} must miss the candidate (the test pins nothing otherwise)", depth - 1);
+    }
+}

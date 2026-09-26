@@ -4,10 +4,10 @@
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 //!
-//! Every VMA (up to 1 GiB) of every task is read as one padded buffer and matched by the YARA
-//! engine ([`crate::yara::rules`]) like python's `scanner(proc_layer.read(start, size,
-//! pad=True), start)`. Large buffers live in an anonymous mapping filled only where the VMA
-//! is mapped, so unmapped stretches cost no memory (they read as the kernel's zero page).
+//! Every VMA (up to 1 GiB) of every task is matched by the YARA engine like python's
+//! `scanner(proc_layer.read(start, size, pad=True), start)`, through the region engine
+//! [`crate::yara::rules::regions`]: identical VMAs are scanned once, only the mapped pages
+//! are copied and searched, and the hits stream out VMA by VMA.
 
 use crate::context::Context;
 use crate::error::{Error, Result};
@@ -18,7 +18,7 @@ use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::prelude::*;
 use crate::yara::rules::Rules;
-use crate::yara::rules::volatility::{process_yara_options, scanner_hits};
+use crate::yara::rules::volatility::process_yara_options;
 
 pub struct VmaYaraScan;
 
@@ -105,59 +105,6 @@ pub fn layer_data(layer: &dyn Layer, offset: u64, length: u64) -> Value {
     Value::LayerBytes { data, errors }
 }
 
-unsafe extern "C" {
-    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn munmap(addr: *mut u8, len: usize) -> i32;
-}
-
-/// A zero-initialised byte buffer; big ones are anonymous mappings whose untouched pages
-/// stay unallocated.
-enum ZeroBuf {
-    Heap(Vec<u8>),
-    Map(*mut u8, usize),
-}
-
-impl ZeroBuf {
-    fn new(len: usize) -> ZeroBuf {
-        const PROT_RW: i32 = 1 | 2;
-        const MAP_PRIVATE_ANON_NORESERVE: i32 = 0x02 | 0x20 | 0x4000;
-        if len >= 1 << 20 {
-            let p = unsafe { mmap(std::ptr::null_mut(), len, PROT_RW, MAP_PRIVATE_ANON_NORESERVE, -1, 0) };
-            if p as usize != usize::MAX && !p.is_null() {
-                return ZeroBuf::Map(p, len);
-            }
-        }
-        ZeroBuf::Heap(vec![0u8; len])
-    }
-    fn as_mut(&mut self) -> &mut [u8] {
-        match self {
-            ZeroBuf::Heap(v) => v,
-            ZeroBuf::Map(p, n) => unsafe { std::slice::from_raw_parts_mut(*p, *n) },
-        }
-    }
-}
-
-impl Drop for ZeroBuf {
-    fn drop(&mut self) {
-        if let ZeroBuf::Map(p, n) = *self {
-            unsafe { munmap(p, n) };
-        }
-    }
-}
-
-/// python `proc_layer.read(start, size, pad=True)` into a [`ZeroBuf`]: only the mapped runs
-/// are copied, the rest stays zero.
-fn read_vma(layer: &dyn Layer, start: u64, size: u64) -> ZeroBuf {
-    let mut buf = ZeroBuf::new(size as usize);
-    let b = buf.as_mut();
-    layer.mapping(start, size, &mut |m| {
-        let off = (m.offset - start) as usize;
-        layer.read_padded(m.offset, &mut b[off..off + m.len as usize]);
-        true
-    });
-    buf
-}
-
 /// python `VmaYaraScan.get_vma_maps(task)`: `(vm_start, vm_end - vm_start)` of every VMA.
 pub fn get_vma_maps(task: &Obj) -> Result<Vec<(u64, u64)>> {
     let mm = task.m("mm")?;
@@ -237,31 +184,26 @@ impl Plugin for VmaYaraScan {
                 None => Ok(()),
             };
         };
-        // Scan the VMAs on all cores, biggest first (cost ~ VMA size; a few big VMAs would
-        // otherwise form the tail), then emit in python order. Only one buffer per worker is
-        // alive at a time; the hits are small.
-        let mut order: Vec<usize> = (0..items.len()).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(items[i].3));
-        let done = crate::util::par::par_map(order.len(), |k| {
-            let (layer, tgid, start, size) = items[order[k]];
-            let mut buf = read_vma(layer, start, size);
-            let hits = scanner_hits(rules, buf.as_mut(), start);
-            drop(buf);
-            hits.into_iter()
-                .map(|(offset, rule, name, value)| {
-                    vec![Value::Int(offset as i128), Value::Int(tgid), Value::Str(rule), Value::Str(name), layer_data(layer, offset, value.len() as u64)]
-                })
-                .collect::<Vec<_>>()
-        });
-        let mut slots: Vec<Vec<Vec<Value>>> = (0..items.len()).map(|_| Vec::new()).collect();
-        for (k, rows) in done.into_iter().enumerate() {
-            slots[order[k]] = rows;
-        }
-        for rows in slots {
-            for row in rows {
-                out.row(0, row)?;
-            }
-        }
+        // every VMA of every task in python order; identical VMAs are scanned once and the
+        // hits stream out VMA by VMA (bounded memory)
+        let regions: Vec<crate::yara::rules::regions::Region<'_>> = items.iter().map(|&(layer, _, start, size)| (layer as &dyn Layer, start, size)).collect();
+        crate::yara::rules::regions::scan_regions(rules, &regions, |i, hits| {
+            let (layer, tgid, start, _) = items[i];
+            crate::yara::rules::regions::for_each_prepared(
+                hits,
+                |h| layer_data(layer, start + h.offset, h.len as u64),
+                |h, data| {
+                    let row = vec![
+                        Value::Int((start + h.offset) as i128),
+                        Value::Int(tgid),
+                        Value::Str(rules.hit_rule(h.string).to_string()),
+                        Value::Str(rules.hit_string(h.string).to_string()),
+                        data,
+                    ];
+                    out.row(0, row)
+                },
+            )
+        })?;
         match tail {
             Some(e) => Err(e),
             None => Ok(()),

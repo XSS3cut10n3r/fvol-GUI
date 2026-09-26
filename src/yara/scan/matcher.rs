@@ -122,6 +122,8 @@ pub struct Scratch {
     live_raw: u8,
     live_diff: u8,
     dead_changed: bool,
+    /// Ranges the raw candidate search skips (`scan_holes`).
+    skips: Vec<(usize, usize)>,
 }
 
 impl Scratch {
@@ -184,6 +186,14 @@ pub struct Matcher {
     every_text: Vec<u32>,
     /// Longest pattern / check span (bounds libyara's discovery-order window).
     max_span: usize,
+    /// [`Matcher::hole_margin`], computed on first use.
+    hole_margin: std::sync::OnceLock<Option<usize>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test knob: force the hole margin of `scan_holes` on this thread (None = computed).
+    pub(crate) static HOLE_MARGIN_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 fn freq(b: u8, fold: bool) -> f64 {
@@ -409,6 +419,21 @@ impl Engine {
         matches!(self, Engine::None)
     }
 
+    /// Upper bound on how far from a reported window start `q` the bytes lie that the
+    /// engine examined to report it (both directions), and on the atom length an
+    /// Aho-Corasick state needs to be rebuilt after a jump.
+    fn lookaround(&self, pats: &[Pat]) -> usize {
+        let pat_max = pats.iter().map(|p| (p.w + p.len) as usize).max().unwrap_or(0);
+        match self {
+            Engine::None => 0,
+            // the sequence starts `w + anchor` bytes before q and spans the context and the
+            // pattern
+            Engine::Pairs(v) => v.iter().map(|pe| pe.w + pe.anchor + pe.seq.len().max(pe.anchor + pe.bytes.len())).max().unwrap_or(0),
+            Engine::Hash { short, .. } => pat_max.max(short.lookaround(pats)),
+            Engine::Teddy(..) | Engine::Aho { .. } => pat_max,
+        }
+    }
+
     /// Candidate windows in `hay[from..to)`: `f(q, pattern)` with `q` the window start.
     #[inline]
     /// Bucket mask of a Teddy engine given the disabled strings.
@@ -506,6 +531,7 @@ impl Matcher {
             has_re: false,
             every_text: Vec::new(),
             max_span: 1,
+            hole_margin: std::sync::OnceLock::new(),
         };
         let mut dbytes: Vec<u8> = Vec::new();
         for (si, def) in strings.iter().enumerate() {
@@ -677,19 +703,100 @@ impl Matcher {
     /// Uses a per-thread [`Scratch`] (kept between calls: repeated scans of small
     /// buffers, e.g. one per VAD, do not rebuild the hex/regex scan state each time).
     pub fn scan(&self, data: &[u8], out: &mut Vec<Vec<Match>>) {
+        self.scan_holes(data, &[], out)
+    }
+
+    /// [`Matcher::scan`] of a buffer whose ranges `holes` (sorted, disjoint `(start, len)`)
+    /// are known to be all zero, e.g. the unmapped pages of a padded VAD read. The result
+    /// is exactly `scan`'s; when the matcher is zero-inert ([`Matcher::hole_margin`]) the
+    /// candidate search skips the hole interiors, so a sparse buffer costs about its
+    /// non-zero bytes.
+    pub fn scan_holes(&self, data: &[u8], holes: &[(usize, usize)], out: &mut Vec<Vec<Match>>) {
         thread_local! {
             static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::new());
         }
         SCRATCH.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut sc) => self.scan_with(&mut sc, data, out),
+            Ok(mut sc) => self.scan_with_holes(&mut sc, data, holes, out),
             // re-entered (a scan from inside a scan): private scratch
-            Err(_) => self.scan_with(&mut Scratch::new(), data, out),
+            Err(_) => self.scan_with_holes(&mut Scratch::new(), data, holes, out),
+        })
+    }
+
+    /// How much of each edge of an all-zero range the candidate search must still cover,
+    /// or `None` when no range may be skipped.
+    ///
+    /// Skipping is exact when the matcher is *zero-inert*: no string is resolved at every
+    /// offset, there is no difference-stream (xor) engine, and the raw engine reports no
+    /// candidate on all-zero data (checked once, on 3 blocks of zeros). Every engine's
+    /// report at a window start `q` is a function of the bytes within
+    /// [`Engine::lookaround`] of `q` (and, for Aho-Corasick, of a state that the same
+    /// number of bytes rebuilds), so a candidate that lies further than that inside a
+    /// zero range would also be reported on all-zero data: it cannot exist. Conditions
+    /// and verification still see the whole buffer (the holes are real zeros).
+    pub fn hole_margin(&self) -> Option<usize> {
+        #[cfg(test)]
+        {
+            if let Some(o) = HOLE_MARGIN_OVERRIDE.with(|c| c.get()) {
+                return self.hole_margin_computed().map(|_| o);
+            }
+        }
+        self.hole_margin_computed()
+    }
+
+    fn hole_margin_computed(&self) -> Option<usize> {
+        *self.hole_margin.get_or_init(|| {
+            if !self.every.is_empty() || !self.every_text.is_empty() || !self.diff.is_none() {
+                return None;
+            }
+            let zeros = vec![0u8; 3 * BLOCK];
+            let mut hit = false;
+            let mut st = 0u32;
+            self.raw.run(&zeros, 0, zeros.len(), &mut st, 0xff, |_, _| hit = true);
+            if hit {
+                return None;
+            }
+            // +64: slack for the engines' block / vector granularity
+            Some(self.max_span.max(self.raw.lookaround(&self.pats)) + 64)
         })
     }
 
     /// [`Matcher::scan`] with caller-owned scratch space (no allocation per call once
     /// warmed up, apart from the match vectors themselves).
     pub fn scan_with(&self, sc: &mut Scratch, data: &[u8], out: &mut Vec<Vec<Match>>) {
+        self.scan_with_holes(sc, data, &[], out)
+    }
+
+    /// [`Matcher::scan_holes`] with caller-owned scratch space.
+    pub fn scan_with_holes(&self, sc: &mut Scratch, data: &[u8], holes: &[(usize, usize)], out: &mut Vec<Vec<Match>>) {
+        // hole interiors the raw candidate search skips: [a + margin, a + len - margin)
+        sc.skips.clear();
+        if !holes.is_empty()
+            && let Some(margin) = self.hole_margin()
+        {
+            let mut last = 0usize;
+            for &(a, l) in holes {
+                if a >= data.len() {
+                    break;
+                }
+                let e = a.saturating_add(l).min(data.len());
+                if a < last {
+                    // not sorted / disjoint: no skipping at all
+                    debug_assert!(false, "scan_holes: unsorted holes");
+                    sc.skips.clear();
+                    break;
+                }
+                last = e;
+                if e - a > 2 * margin {
+                    sc.skips.push((a + margin, e - margin));
+                }
+            }
+        }
+        let skips = std::mem::take(&mut sc.skips);
+        self.scan_blocks(sc, data, &skips, out);
+        sc.skips = skips;
+    }
+
+    fn scan_blocks(&self, sc: &mut Scratch, data: &[u8], skips: &[(usize, usize)], out: &mut Vec<Vec<Match>>) {
         let ns = self.kinds.len();
         out.truncate(ns);
         for v in out.iter_mut() {
@@ -742,6 +849,7 @@ impl Matcher {
         let mut diff_state = 0u32;
         let mut dbuf = std::mem::take(&mut sc.dbuf);
         let mut b0 = 0usize;
+        let mut first_skip = 0usize;
         while b0 < n {
             let b1 = (b0 + BLOCK).min(n);
             if sc.dead_changed {
@@ -750,7 +858,32 @@ impl Matcher {
                 sc.live_diff = self.diff.live(&sc.disabled);
             }
             let (live_raw, live_diff) = (sc.live_raw, sc.live_diff);
-            self.raw.run(data, b0, b1, &mut raw_state, live_raw, |q, p| self.on_raw(data, q, p, out, sc));
+            if skips.is_empty() {
+                self.raw.run(data, b0, b1, &mut raw_state, live_raw, |q, p| self.on_raw(data, q, p, out, sc));
+            } else {
+                // the block minus the skipped hole interiors
+                while first_skip < skips.len() && skips[first_skip].1 <= b0 {
+                    first_skip += 1;
+                }
+                let (mut cur, mut k) = (b0, first_skip);
+                while cur < b1 {
+                    match skips.get(k) {
+                        Some(&(ss, se)) if ss < b1 => {
+                            if ss > cur {
+                                self.raw.run(data, cur, ss, &mut raw_state, live_raw, |q, p| self.on_raw(data, q, p, out, sc));
+                            }
+                            // the stream state after the zeros is rebuilt from the margin
+                            raw_state = 0;
+                            cur = cur.max(se);
+                            k += 1;
+                        }
+                        _ => {
+                            self.raw.run(data, cur, b1, &mut raw_state, live_raw, |q, p| self.on_raw(data, q, p, out, sc));
+                            cur = b1;
+                        }
+                    }
+                }
+            }
             if !self.diff.is_none() && n >= 2 {
                 if let (Engine::Teddy(t, _), false) = (&self.diff, no_fuse()) {
                     // Teddy computes D on the fly.
