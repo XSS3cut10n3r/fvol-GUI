@@ -119,3 +119,25 @@ the load sat at 1.0.
 03:22-03:48 untimed diagnostics (timeliner / windows.windows outputs) + vol-rs native build
 03:48-04:04 pass 3: Windows, rsvol 344e88c + vol-rs rebuilt with target-cpu=native
 04:05 untimed dumpfiles content check
+
+# run 2 (final, 2026-09-26 06:03-07:29 VM time)
+
+Same VM, same boot as run 1 (up since 00:01:59), same images, python venv and vol-rs binary.
+Free before run 2: 28 GiB RAM available, 11 GB disk.
+
+## rsvol 95528b2 (main HEAD)
+source: `git -C rs-vol archive main` (95528b2b6615876b60e2e9c9d8a471ca2f0bd56d), built on the VM with
+~/.cargo/bin/cargo build --release (rustup stable, rustc 1.98.1 (48a229cea 2026-09-01), LLVM 22.1.8,
+target-cpu=native = znver1, +crt-static), 4 min 57 s
+rsvol-95528b2: ELF 64-bit LSB pie executable, x86-64, static-pie linked, stripped
+23a71a59bf62742733b4d752e5a9d1480995b6facba49d157a0a7e70ce6c0496  rsvol-95528b2/target/release/vol
+
+## load during run 2 (raw2/load.log: /proc/loadavg every 10 s, 06:03-07:29, 513 samples)
+load1 min 0.55, median 1.78, p90 8.52, max 16.26 (own load of the multi-threaded rust runs).
+
+## timeline (VM local time)
+05:55-06:03 source copy, rsvol 95528b2 build, sanity check (10 new Linux plugins + 7 others vs python)
+06:03-06:37 Windows round (77 plugins; python again for isfinfo, frameworkinfo, windows.windows)
+06:37-07:29 Linux round (59 plugins; python for the 10 new plugins)
+07:29 startup table
+07:30-07:40 untimed checks (RSVOL_TRACE cold runs, RecoverFs archive comparison)
