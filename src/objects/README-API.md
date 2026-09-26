@@ -202,6 +202,14 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `sysctl_oid.get_ctltype()` / `vnode.full_path()` | same names |
 | `datetime.datetime.fromtimestamp(t)` (naive local time) | `crate::util::time::fromtimestamp_local(t)` → `Result<DateTime, String>` (`Err` = python exception text) |
 | `mac.MacUtilities.virtual_to_physical_address(a)` | `crate::symbols::mac::virtual_to_physical_address(a)` |
+| `lsmod.Lsmod.list_modules(ctx, kernel)` | `crate::plugins::mac::lsmod::list_modules(k)` → `Vec<Result<Obj>>` (first a `kmod_info`, then `kmod_info *` pointers) |
+| `MacUtilities.generate_kernel_handler_info(ctx, layer, kernel, mods)` | `symbols::mac::generate_kernel_handler_info(k, list_modules(k))?` → `Vec<Handler>` |
+| `MacUtilities.lookup_module_address(ctx, handlers, addr, kernel_name)` | `symbols::mac::lookup_module_address(k.table, &handlers, addr, Some(k.offset))` (`None` = no module name passed) |
+| `kauth_scope.get_listeners()` | `scope.get_listeners()` (`MacExt`) |
+| `MacUtilities.files_descriptors_for_process(ctx, table, task)` | `symbols::mac::files::files_descriptors_for_process(&task)` → `Vec<Result<FdEntry>>`; map a trailing error with `files::raise_python` (python ValueError / UnboundLocalError crash the plugin) |
+| `socket.get_family() / get_state() / get_converted_connection_info()` ..., `inpcb.*`, `ifnet.sockaddr_dl()`, `str(sockaddr_dl)`, `sockaddr.get_address()` | `symbols::mac::net::{socket_get_family, socket_get_state, socket_get_converted_connection_info, inpcb_get_tcp_state, ifnet_sockaddr_dl, sockaddr_dl_str, sockaddr_get_address}` |
+| `conversion.convert_ipv4 / convert_ipv6 / convert_port / convert_network_four_tuple` | `symbols::mac::net::{convert_ipv4, convert_ipv6, ipv6_to_string, convert_port, convert_network_four_tuple}` (python 3.14 `ipaddress` formatting; host AF_INET6 = 10) |
+| `Mount.list_mounts` / `List_Files.list_files` / `Kevents.list_kernel_events` / `Netstat.list_sockets` / `Kauth_scopes.list_kauth_scopes` / `Dmesg.get_kernel_log_buffer` | same names in `crate::plugins::mac::{mount, list_files, kevents, netstat, kauth_scopes, dmesg}` |
 
 A trailing `Err` in a walker's `Vec` marks where python would have raised. Python exceptions
 that are not volatility exceptions (e.g. `ValueError` from `datetime`) crash python's plugin
