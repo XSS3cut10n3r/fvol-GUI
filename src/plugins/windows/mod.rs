@@ -19,6 +19,7 @@ pub mod handles;
 pub mod info;
 pub mod joblinks;
 pub mod kpcrs;
+pub mod malfind;
 pub mod malware;
 pub mod memmap;
 pub mod modscan;
@@ -69,7 +70,9 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&info::Info);
     v.push(&joblinks::JobLinks);
     v.push(&kpcrs::KPCRs);
+    v.push(&malfind::Malfind);
     v.push(&malware::drivermodule::DriverModule);
+    v.push(&malware::malfind::Malfind);
     v.push(&memmap::Memmap);
     v.push(&modscan::ModScan);
     v.push(&modules::Modules);

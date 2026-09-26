@@ -670,6 +670,16 @@ impl IntelLayer {
         }
     }
 
+    /// python `Intel.is_dirty(offset)`: the dirty bit (bit 6) of the final paging entry of the
+    /// page holding `addr`. Like python's `_translate_entry`, only an invalid upper-level entry
+    /// or page table fails (InvalidAddress); the final entry is tested even when not present.
+    pub fn is_dirty(&self, addr: u64) -> Result<bool> {
+        match self.translate_entry(addr & !0xfff) {
+            Ok((entry, _)) => Ok(entry & (1 << 6) != 0),
+            Err(_) => Err(Error::invalid(addr)),
+        }
+    }
+
     /// Translate a virtual address like python `layer.translate(offset)`:
     /// (physical offset, target) or None.
     pub fn translate_addr(&self, addr: u64) -> Option<(u64, Target)> {
