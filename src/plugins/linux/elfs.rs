@@ -9,7 +9,6 @@ use crate::error::{Error, Result};
 use crate::objects::util::array_to_string;
 use crate::objects::{LayerRef, Obj};
 use crate::plugins::linux::pslist::{collect_tasks, pid_filter};
-use crate::plugins::linux::pyexc::raise_if_python;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::elf;
@@ -96,7 +95,7 @@ impl Plugin for Elfs {
         for (rows, err) in per_task {
             for mut row in rows {
                 if dump {
-                    row.values[5] = match elf::elf_dump_ex(ctx, row.layer, elf_table, &row.vma, &row.task).map_err(raise_if_python)? {
+                    row.values[5] = match elf::elf_dump_ex(ctx, row.layer, elf_table, &row.vma, &row.task)? {
                         Some((_, final_name)) => Value::Str(final_name),
                         None => Value::SStr("Error outputting file"),
                     };
@@ -104,11 +103,11 @@ impl Plugin for Elfs {
                 out.row(0, row.values)?;
             }
             if let Some(e) = err {
-                return Err(raise_if_python(e));
+                return Err(e);
             }
         }
         match tail {
-            Some(e) => Err(raise_if_python(e)),
+            Some(e) => Err(e),
             None => Ok(()),
         }
     }

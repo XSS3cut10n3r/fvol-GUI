@@ -12,7 +12,6 @@ use crate::layers::scan::{DEFAULT_CHUNK_SIZE, FnScanner, scan};
 use crate::objects::Obj;
 use crate::objects::util::array_to_string;
 use crate::plugins::linux::pslist::{collect_tasks, pid_filter};
-use crate::plugins::linux::pyexc::raise_if_python;
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::prelude::*;
@@ -118,11 +117,11 @@ impl Plugin for VmaRegExScan {
                 out.row(0, row)?;
             }
             if let Some(e) = err {
-                return Err(raise_if_python(e));
+                return Err(e);
             }
         }
         match tail {
-            Some(e) => Err(raise_if_python(e)),
+            Some(e) => Err(e),
             None => Ok(()),
         }
     }

@@ -13,7 +13,6 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::layers::Layer;
 use crate::objects::{LayerRef, Obj};
-use crate::plugins::linux::pyexc::{py_raise, raise_if_python};
 use crate::plugins::linux::pslist::{collect_tasks, pid_filter};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -206,8 +205,9 @@ impl Plugin for VmaYaraScan {
             Column::new("Value", ColType::LayerData),
         ])?;
         let k = ctx.linux_kernel()?;
-        // yara.SyntaxError / an unreadable rule file: python's plugin dies with a traceback
-        let rules = yara_rules_from_config(cfg).unwrap_or_else(|e| py_raise(e));
+        // yara.SyntaxError / an unreadable rule file: not volatility exceptions, python's
+        // plugin dies with a traceback (a panic is rsvol's equivalent)
+        let rules = yara_rules_from_config(cfg).unwrap_or_else(|e| panic!("{e}"));
         let pids = cfg.get_ints("pid");
         let filter = pid_filter(&pids);
         let (tasks, tail) = collect_tasks(k, &filter, false);
@@ -219,7 +219,7 @@ impl Plugin for VmaYaraScan {
             match r {
                 Ok(Some(_)) if rules.is_none() => {
                     // python: `YaraScanner(rules=None)` at the first task with VMAs
-                    py_raise(Error::msg("ValueError: No rules provided to YaraScanner"));
+                    return Err(Error::msg("ValueError: No rules provided to YaraScanner"));
                 }
                 Ok(Some((layer, tgid, vmas))) => items.extend(vmas.into_iter().map(|(s, n)| (layer, tgid, s, n))),
                 Ok(None) => {}
@@ -232,7 +232,7 @@ impl Plugin for VmaYaraScan {
         let tail = first_err.or(tail);
         let Some(rules) = rules.as_ref() else {
             return match tail {
-                Some(e) => Err(raise_if_python(e)),
+                Some(e) => Err(e),
                 None => Ok(()),
             };
         };
@@ -262,7 +262,7 @@ impl Plugin for VmaYaraScan {
             }
         }
         match tail {
-            Some(e) => Err(raise_if_python(e)),
+            Some(e) => Err(e),
             None => Ok(()),
         }
     }

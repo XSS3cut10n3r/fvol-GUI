@@ -16,7 +16,6 @@ pub mod pscallstack;
 pub mod pslist;
 pub mod psscan;
 pub mod pstree;
-pub mod pyexc;
 pub mod ptrace;
 pub mod vmaregexscan;
 pub mod vmayarascan;
