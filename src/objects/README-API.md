@@ -151,6 +151,34 @@ Pool / object-header helpers live in `crate::symbols::windows::pool`.
 | `kdbg.get_build_lab()` / `get_csdversion()` | `crate::symbols::windows::kdbg::{get_build_lab, get_csdversion}` |
 | `info.Info.get_kdbg_structure / get_kuser_structure / get_version_structure / get_ntheader_structure` | `crate::plugins::windows::info::{...}` same names |
 
+## Linux (`use crate::symbols::linux::LinuxExt`)
+
+`let k = ctx.linux_kernel()?;` → `&LinuxKernel`, derefs to the kernel `Module` (offset =
+`aslr_shift`). Fields: `layer` (`&IntelLayer` named "layer_name": `Intel32e` from the VMCOREINFO
+stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
+(`symbol_table_name1`, symbol_mask = layer address mask), `kaslr_shift`, `aslr_shift`, `dtb`,
+`banner`, `stacker`. Cached per image + symbol roots + `--stackers`.
+
+| python | rust |
+|---|---|
+| `PsList.list_tasks(ctx, kernel, filter, include_threads)` | `crate::plugins::linux::pslist::list_tasks(k, &filter, threads, &mut \|task\| { ...; Ok(true) })?` (callback; `Ok(false)` stops) |
+| `PsList.create_pid_filter(pids)` / `get_task_fields(task, decorate)` | `pslist::pid_filter(&pids)` / `pslist::get_task_fields(&task, decorate)?` |
+| `list_head.to_list(type, member, forward, sentinel, layer)` | `lh.to_list("task_struct", "tasks", true, true, None)` → lazy `ListIter` of `Result<Obj>` |
+| `for x in obj.list_head_member` / `hlist_head.to_list(type, member)` | `lh.list_of(type, member)` / `hh.hlist_to_list(type, member)` |
+| `task.is_valid()` (task_struct / vm_area_struct / ... ) | `obj.is_valid()` (unported types return true) |
+| `task.add_process_layer()` / `get_address_space_layer()` | same names → `Option<LayerRef>` |
+| `task.is_kernel_thread / is_thread_group_leader / is_user_thread` | same names → `Result<bool>` |
+| `task.get_threads()` / `state` / `get_parent_pid()` | same names |
+| `task.get_create_time()` / `get_boottime(root_ns)` / `get_time_namespace*()` | same names (python's exact float arithmetic, `symbols::linux::timespec`) |
+| `mm.get_vma_iter()` (mmap list < 6.1, maple tree >= 6.1) / `get_slot_iter()` | same names → `Vec<Result<..>>` |
+| `vma.get_protection()` / `get_flags()` / `get_page_offset()` / `is_valid()` | `get_protection()` / `get_flags()` / `get_page_offset()` / `vma_is_valid()` |
+| `path.dentry / .mnt`, `file.get_inode()` | `get_dentry()` / `get_vfsmnt()` / `get_inode()` |
+| `task.cred.uid` (int or kuid_t) | `cred.cred_value("uid")?` |
+| `LinuxUtilities.container_of(addr, type, member, vmlinux)` | `crate::symbols::linux::container_of(addr, type, member, &vmlinux)?` → `Option<Obj>` |
+| `vmlinux = linux.LinuxUtilities.get_module_from_volobj_type(ctx, obj)` | `crate::symbols::linux::vmlinux_of(&obj)?` |
+| `elfs.Elfs.elf_dump(...)` | `crate::symbols::linux::elf::{elf_table, elf_dump}` |
+| `LinuxUtilities.virtual_to_physical_address(a)` | `crate::symbols::linux::virtual_to_physical_address(a)` |
+
 ## Mac (`use crate::symbols::mac::MacExt`)
 
 `let k = ctx.mac_kernel()?;` → `&MacKernel`, derefs to the kernel `Module` (offset = python
