@@ -53,6 +53,15 @@ fn corrupt(what: &str) -> Error {
     Error::Msg(format!("lzma: corrupt data ({what})"))
 }
 
+#[cfg(lzma_stats)]
+pub(crate) static STATS: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
+macro_rules! stat {
+    ($i:expr, $v:expr) => {
+        #[cfg(lzma_stats)]
+        STATS[$i].fetch_add($v as u64, std::sync::atomic::Ordering::Relaxed);
+    };
+}
+
 /// Why [`LzmaDecoder::decode`] stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stop {
@@ -246,30 +255,52 @@ impl LzmaDecoder {
                 }
             }};
         }
-        // Bit-tree of $n bits rooted at probs[$base + 1]; evaluates to the value (< 2^n).
-        macro_rules! tree {
-            ($base:expr, $n:expr) => {{
-                let base = $base;
-                let mut m = 1usize;
-                for _ in 0..$n {
-                    m = (m << 1) | bit!(base + m);
-                }
-                m - (1usize << $n)
+        // Branchless bit with an already-loaded probability `$pr` stored at `$pp`: range/code
+        // are selected with cmov and the probability update is a single subtraction
+        // (p -= (p - adj) >> 5 with adj = 0 for a 1 bit and 2048 - 31 for a 0 bit).
+        // Evaluates to the bit as a bool.
+        macro_rules! bitnb_loaded {
+            ($pp:expr, $pr:expr) => {{
+                let pr = $pr;
+                normalize!();
+                let bound = (range >> 11) * pr;
+                let b = code >= bound;
+                let adj = ((b as u32).wrapping_sub(1)) & (2048 - 31);
+                // SAFETY: caller guarantees $pp is inside the probability array.
+                unsafe { *$pp = (pr as i32 - ((pr as i32 - adj as i32) >> 5)) as u16 };
+                range = std::hint::select_unpredictable(b, range.wrapping_sub(bound), bound);
+                code = std::hint::select_unpredictable(b, code.wrapping_sub(bound), code);
+                b
             }};
         }
-        // Reverse bit-tree of $n bits; evaluates to the value.
-        macro_rules! rev_tree {
+        // Bit-tree walk of $n bits rooted at probs[$base + 1]. Both children of the current
+        // node are loaded before the bit is known, so the probability load is off the
+        // critical path. (Child indices < 2^($n+1) stay inside the probability array for
+        // every tree of the layout.) Evaluates to (final node m in [2^n, 2^(n+1)), the bits
+        // in reverse order).
+        macro_rules! walk {
             ($base:expr, $n:expr) => {{
-                let base = $base;
+                // SAFETY: see above; all indices are bounded by the tree size.
+                let tp = unsafe { probs.add($base) };
                 let mut m = 1usize;
-                let mut v = 0usize;
-                for i in 0..$n {
-                    let b = bit!(base + m);
-                    m = (m << 1) | b;
-                    v |= b << i;
+                let mut pr = unsafe { *tp.add(1) } as u32;
+                let mut rev = 0usize;
+                for _i in 0..$n {
+                    let p0 = unsafe { *tp.add(2 * m) } as u32;
+                    let p1 = unsafe { *tp.add(2 * m + 1) } as u32;
+                    let b = bitnb_loaded!(tp.add(m), pr);
+                    rev |= (b as usize) << _i;
+                    m = 2 * m + b as usize;
+                    pr = std::hint::select_unpredictable(b, p1, p0);
                 }
-                v
+                (m, rev)
             }};
+        }
+        macro_rules! tree {
+            ($base:expr, $n:expr) => {{ walk!($base, $n).0 - (1usize << $n) }};
+        }
+        macro_rules! rev_tree {
+            ($base:expr, $n:expr) => {{ walk!($base, $n).1 }};
         }
         macro_rules! len {
             ($coder:expr, $ps:expr) => {{
@@ -301,23 +332,39 @@ impl LzmaDecoder {
                 let lit = LITERAL + 0x300 * (((p & lp_mask) << lc) + (prev >> (8 - lc)));
                 let mut sym = 1usize;
                 if state < 7 {
-                    for _ in 0..8 {
-                        sym = (sym << 1) | bit!(lit + sym);
-                    }
+                    stat!(0, 1);
+                    sym = walk!(lit, 8).0;
                 } else {
+                    stat!(1, 1);
                     if rep0 >= p {
                         return Err(corrupt("distance"));
                     }
                     // SAFETY: rep0 < p.
-                    let mut match_byte = (unsafe { *outp.add(p - rep0 - 1) }) as usize;
+                    let mut match_byte = ((unsafe { *outp.add(p - rep0 - 1) }) as usize) << 1;
                     let mut offs = 0x100usize;
+                    // SAFETY: offs + match_bit + sym < 0x300 for every visited node.
+                    let lp = unsafe { probs.add(lit) };
+                    let mut match_bit = match_byte & offs;
+                    let mut pp = unsafe { lp.add(offs + match_bit + sym) };
+                    let mut pr = unsafe { *pp } as u32;
                     for _ in 0..8 {
-                        match_byte <<= 1;
-                        let match_bit = match_byte & offs;
-                        let b = bit!(lit + offs + match_bit + sym);
-                        sym = (sym << 1) | b;
-                        // bit 1: keep offs only if match_bit was set; bit 0: only if clear.
-                        offs &= match_bit ^ !0usize.wrapping_sub(b);
+                        // Candidate next nodes for a 0 bit and a 1 bit.
+                        let nmb = match_byte << 1;
+                        let offs0 = offs & !match_bit;
+                        let offs1 = offs & match_bit;
+                        let mb0 = nmb & offs0;
+                        let mb1 = nmb & offs1;
+                        let pp0 = unsafe { lp.add(offs0 + mb0 + 2 * sym) };
+                        let pp1 = unsafe { lp.add(offs1 + mb1 + 2 * sym + 1) };
+                        let p0 = unsafe { *pp0 } as u32;
+                        let p1 = unsafe { *pp1 } as u32;
+                        let b = bitnb_loaded!(pp, pr);
+                        sym = 2 * sym + b as usize;
+                        offs = std::hint::select_unpredictable(b, offs1, offs0);
+                        match_bit = std::hint::select_unpredictable(b, mb1, mb0);
+                        pp = std::hint::select_unpredictable(b, pp1, pp0);
+                        pr = std::hint::select_unpredictable(b, p1, p0);
+                        match_byte = nmb;
                     }
                 }
                 // SAFETY: p < limit <= out_len.
@@ -362,11 +409,14 @@ impl LzmaDecoder {
                 rep2 = rep1;
                 rep1 = rep0;
                 rep0 = dist as usize;
+                stat!(2, 1);
+                stat!(10, (slot >= 14) as u64);
             } else {
                 // ---- rep match ----
                 if bit!(IS_REP0 + state) == 0 {
                     if bit!(IS_REP0_LONG + (state << 4) + pos_state) == 0 {
                         // short rep: one byte at distance rep0
+                        stat!(4, 1);
                         if rep0 >= p {
                             return Err(corrupt("distance"));
                         }
@@ -393,12 +443,16 @@ impl LzmaDecoder {
                     rep0 = d;
                 }
                 len = len!(REP_LEN_CODER, pos_state);
+                stat!(3, 1);
                 state = if state < 7 { 8 } else { 11 };
             }
 
             if rep0 >= p {
                 return Err(corrupt("distance"));
             }
+            stat!(8, len);
+            stat!(9, (rep0 < 15) as u64);
+            stat!(11, (len >= 18) as u64);
             let avail = limit - p;
             let n = if len <= avail { len } else { avail };
             // SAFETY: rep0 < p, p + n <= limit <= out_len.
