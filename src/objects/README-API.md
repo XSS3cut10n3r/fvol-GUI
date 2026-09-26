@@ -203,6 +203,12 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 | `idr.get_entries()` / `rb_root.get_nodes()` / `scatterlist.for_each_sg() / get_content()` | `idstorage::{idr_get_entries, rb_get_nodes, sg_for_each, sg_get_content}` |
 | `kernel_cap_t/kernel_cap_struct.get_capabilities() / get_kernel_cap_full() / enumerate_capabilities() / has_capability()` | `CapsExt` same names; `caps::CAPABILITIES` |
 | network extensions (`net_device`, `in_device`, `inet6_dev`, `*_ifaddr`, `socket`/`sock`/`*_sock`) | `NetExt` (`symbols::linux::network`): python names; `net_get_inode`, `sock_get_state`, `sock_get_type`, `unix_get_name` where names clash; `inet_ntop4/6`, `convert_ipv4/6`, constants |
+| `module.*` (get_module_base/core/init, get_*_size, get_name, get_sections, get_symbols, get_symbol(_by_address), get_module_address_boundaries, section_symtab/strtab/typetab, get_symbol_type), `module.is_valid()` | `ModuleExt` (`symbols::linux::module`) same names; `is_valid` via `LinuxExt::is_valid` / `module::module_is_valid(_checked)` |
+| `kernel_symbol` / `module_sect_attr` / `bin_attribute` / `bpf_prog(_aux)` / `latch_tree_root.find` / `kobject.reference_count` | `ModuleExt`: `get_name()` (dispatch), `get_value()`, `get_namespace()`, `address()`, `get_type()`, `get_tag()`, `get_address_region()`, `find(key, &mut comp)`, `reference_count()` |
+| `linux_utilities_modules.Modules.*` (list_modules, run_modules_scanners, module_lookup_by_address, get_hidden_modules, get_kset_modules, get_load_parameters, get_modules_memory_boundaries, mask_mods_list, lookup_module_address) | `symbols::linux::modules` same names (`vm` = `k` / `&Module`; `ALL_GATHERERS`, `ModuleInfo`) |
+| `kallsyms.Kallsyms(ctx, layer, module)` + `lookup_address / lookup_name / get_*_symbols` | `symbols::linux::kallsyms::Kallsyms::get(vm)?` (built once, cached, thread-safe) + same names → `KasSymbol` |
+| `ModuleExtract.extract_module(ctx, kernel, module)` | `symbols::linux::module_extract::extract_module(vm, &module)?` → `Option<Vec<u8>>` |
+| `linux_constants.KSYM_NAME_LEN / MODULE_* / NM_TYPES_DESC` | `symbols::linux::constants` |
 
 ## Mac (`use crate::symbols::mac::MacExt`)
 
@@ -355,6 +361,10 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
   final name python prints after `close()`; `pedump.dump_pe` prints the requested name instead.
 * Errors: return `Err(e)`; python's "skip this row on InvalidAddressException" is
   `match row() { Err(e) if e.is_invalid_address() => continue, ... }`.
+  An `Error::Msg` / `Error::Symbol` whose text starts with a python builtin exception name
+  (`"AttributeError: ..."`, `"ValueError: ..."`, `"TypeError: ..."`, `"KeyError"`, ... see
+  `cli::python_builtin_exception`) is reported like python's uncaught exception (traceback on
+  stderr, no `"\n\n"` on stdout); other errors get python's `process_exceptions` block.
 
 ## Performance notes
 
