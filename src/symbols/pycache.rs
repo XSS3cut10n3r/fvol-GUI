@@ -449,13 +449,14 @@ where
     let cached = sqlite::Value::Text(Cow::Owned(sql_datetime(now).into_bytes()));
     let text = |s: Option<&str>| s.map_or(sqlite::Value::Null, |s| sqlite::Value::Text(Cow::Owned(s.as_bytes().to_vec())));
     let mut stayed = FxHashSet::default();
+    let mut inserted = Vec::with_capacity(todo.len());
     for ((url, _), s) in todo.iter().zip(scanned) {
         let Some(s) = s else {
             stayed.insert(*url);
             continue;
         };
         let local = url.starts_with("file:") || url.starts_with("jar:");
-        replace(rows, CacheRow {
+        inserted.push(CacheRow {
             location: url.to_string(),
             identifier: s.identifier.map_or(sqlite::Value::Null, |i| sqlite::Value::Blob(Cow::Owned(i))),
             operating_system: text(s.os),
@@ -465,6 +466,7 @@ where
             cached: cached.clone(),
         });
     }
+    insert_or_replace(rows, inserted);
     // a stale row python failed to re-read stays as it was (and stale)
     stale.retain(|u| !stayed.contains(u));
     let rescanned: FxHashSet<&str> = todo.iter().map(|(u, _)| *u).filter(|u| !stayed.contains(u)).collect();
@@ -473,18 +475,22 @@ where
     if let Some(url) = remote {
         match super::store::remote_identifiers(url) {
             Ok(list) => {
-                for (os, ident, location) in list {
-                    remote_locs.insert(location.clone());
-                    replace(rows, CacheRow {
-                        location,
-                        identifier: sqlite::Value::Blob(Cow::Owned(ident)),
-                        operating_system: sqlite::Value::Text(Cow::Owned(os.into_bytes())),
-                        hash: sqlite::Value::Null,
-                        stats: [0, 1, 2, 3].map(|_| sqlite::Value::Int(0)),
-                        local: false,
-                        cached: cached.clone(),
-                    });
-                }
+                let inserted = list
+                    .into_iter()
+                    .map(|(os, ident, location)| {
+                        remote_locs.insert(location.clone());
+                        CacheRow {
+                            location,
+                            identifier: sqlite::Value::Blob(Cow::Owned(ident)),
+                            operating_system: sqlite::Value::Text(Cow::Owned(os.into_bytes())),
+                            hash: sqlite::Value::Null,
+                            stats: [0, 1, 2, 3].map(|_| sqlite::Value::Int(0)),
+                            local: false,
+                            cached: cached.clone(),
+                        }
+                    })
+                    .collect();
+                insert_or_replace(rows, inserted);
             }
             Err(e) => eprintln!("rsvol: remote ISF list {url}: {e}"),
         }
@@ -494,12 +500,20 @@ where
     info
 }
 
-/// `INSERT OR REPLACE`: the old row (UNIQUE location) goes, the new one gets a new rowid.
-fn replace(rows: &mut Vec<CacheRow>, row: CacheRow) {
-    if let Some(p) = rows.iter().position(|r| r.location == row.location) {
-        rows.remove(p);
+/// `INSERT OR REPLACE` of each of `new`, in order: a row with the same (UNIQUE) location goes,
+/// the new one gets a new, highest rowid. In one pass: the old rows without the inserted
+/// locations, then the inserted rows, each location at its last insertion.
+fn insert_or_replace(rows: &mut Vec<CacheRow>, new: Vec<CacheRow>) {
+    if new.is_empty() {
+        return;
     }
-    rows.push(row);
+    let mut last: FxHashMap<&str, usize> = FxHashMap::default();
+    for (i, r) in new.iter().enumerate() {
+        last.insert(r.location.as_str(), i);
+    }
+    rows.retain(|r| !last.contains_key(r.location.as_str()));
+    let keep: Vec<bool> = new.iter().enumerate().map(|(i, r)| last[r.location.as_str()] == i).collect();
+    rows.extend(new.into_iter().zip(keep).filter(|(_, k)| *k).map(|(r, _)| r));
 }
 
 #[cfg(test)]
@@ -524,6 +538,33 @@ mod tests {
         assert_eq!(location_of("https://h/x.json"), IsfLocation::Url("https://h/x.json".into()));
         // not what as_uri() writes: kept verbatim
         assert_eq!(location_of("file://localhost/x.json"), IsfLocation::Url("file://localhost/x.json".into()));
+    }
+
+    #[test]
+    fn insert_or_replace_is_sequential_upsert() {
+        let row = |l: &str, id: &str| CacheRow {
+            location: l.into(),
+            identifier: sqlite::Value::Blob(Cow::Owned(id.as_bytes().to_vec())),
+            operating_system: sqlite::Value::Null,
+            hash: sqlite::Value::Null,
+            stats: [0, 1, 2, 3].map(|_| sqlite::Value::Int(0)),
+            local: true,
+            cached: sqlite::Value::Null,
+        };
+        let show = |rows: &[CacheRow]| rows.iter().map(|r| format!("{}{}", r.location, String::from_utf8_lossy(r.identifier_bytes().unwrap()))).collect::<Vec<_>>();
+        let new = || vec![row("b", "1"), row("d", "2"), row("b", "3"), row("a", "4")];
+        // one row at a time, as sqlite does
+        let mut seq = vec![row("a", "0"), row("b", "0"), row("c", "0")];
+        for n in new() {
+            if let Some(p) = seq.iter().position(|r| r.location == n.location) {
+                seq.remove(p);
+            }
+            seq.push(n);
+        }
+        let mut batch = vec![row("a", "0"), row("b", "0"), row("c", "0")];
+        insert_or_replace(&mut batch, new());
+        assert_eq!(show(&batch), show(&seq));
+        assert_eq!(show(&batch), vec!["c0", "d2", "b3", "a4"]);
     }
 
     #[test]
