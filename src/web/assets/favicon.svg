@@ -1,34 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="fastvol">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="fastvol">
   <!--
-    The fastvol ferret as a bust, simplified for 16 to 48 px: no smirk or eye glint, a heavier mask,
-    eye and nose, and a neck instead of the streaking body. Hand-written source (see mascot.svg).
+    The fastvol ferret (see mascot.svg) redrawn on a 32-unit grid for 16 to 48 px: a straight-edged
+    mask, square eyes and a blunt nose, with the mask and eye edges on even units so that they land
+    on pixel boundaries at 16 px. Hand-written source.
   -->
-  <defs>
-    <linearGradient id="fv-beam" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#3fd0c9" stop-opacity=".9"/>
-      <stop offset="1" stop-color="#3fd0c9" stop-opacity=".1"/>
-    </linearGradient>
-    <path id="fv-head" d="M62 62C65 54 71 47 83 45C95 43 106 47 115 53C120 56 126 58 126 63C126 67 122 69 117 69C109 70 101 73 95 77C89 81 85 86 83 92C82 97 79 101 72 101H58Z"/>
-    <clipPath id="fv-head-clip"><use href="#fv-head"/></clipPath>
-  </defs>
-  <g transform="translate(-37.5 -20.9) scale(.79)">
-    <path fill="url(#fv-beam)" d="M103 35L128 22V52L103 42Z"/>
-    <path fill="#e0662b" d="M66 56C57 68 52 90 50 118H94C90 108 85 100 83 92Z"/>
-    <g transform="rotate(-14 78 50)">
-      <path fill="#e0662b" d="M70 53C66 42 71 34 79 34C87 35 89 44 86 50Z"/>
-      <path fill="#f4e4cc" d="M75 49C73 43 76 40 79 40C83 41 84 44 82 47Z"/>
-    </g>
-    <use href="#fv-head" fill="#e0662b"/>
-    <g clip-path="url(#fv-head-clip)">
-      <path fill="#f4e4cc" d="M87 41C98 42 110 48 130 56V100H96C90 94 84 84 81 74C79 66 80 58 81 53C82 48 84 44 87 41Z"/>
-      <path fill="#22262e" d="M73 53C87 46 106 46 120 56.5C111 62 97 63.5 87 62.5C80 61.5 76 59 73 53Z"/>
-    </g>
-    <path fill="#f4e4cc" d="M93.5 53.6H107C107 58.2 104 60.6 100.2 60.6C96.4 60.6 93.5 58.2 93.5 53.6Z"/>
-    <circle cx="102.4" cy="56.4" r="2.8" fill="#22262e"/>
-    <ellipse cx="123.5" cy="62.6" rx="4.6" ry="3.8" fill="#22262e"/>
-    <g transform="rotate(-12 96 40)">
-      <rect x="87" y="35.5" width="17" height="9" rx="2.5" fill="#3a404b"/>
-      <rect x="100" y="36.5" width="4.5" height="7" rx="1" fill="#3fd0c9"/>
-    </g>
+  <g fill="#e0662b">
+    <path d="M24.49 22L19.09 28.55A4 4 0 0 1 12.91 28.55L7.51 22A11 11 0 1 1 24.49 22Z"/>
+    <circle cx="6" cy="8" r="4"/>
+    <circle cx="26" cy="8" r="4"/>
   </g>
+  <path fill="#22262e" d="M4 12L12 14H20L28 12V16L22 20H10L4 16ZM14 22H18V23L16 25L14 23Z"/>
+  <path fill="#e0662b" d="M10 16H12V18H10ZM20 16H22V18H20Z"/>
 </svg>

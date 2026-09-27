@@ -362,6 +362,7 @@ def main():
     ap.add_argument("--show", type=int, default=5, help="file names shown per DIFF")
     ap.add_argument("names", nargs="*")
     a = ap.parse_args()
+    a.bin = os.path.abspath(a.bin)  # the cases run with cwd = their work directory
     sel = [im for im in images() if not a.names or any(fnmatch.fnmatchcase(im["name"], n) for n in a.names)]
     tot = {}
     for im in sel:
