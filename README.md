@@ -104,7 +104,7 @@ Every plugin's stdout, exit code and dumped files are diffed against python vola
 | ----------------------------------------- | -------------------------- |
 | No-argument runs, 31 images               | 1,975 / 1,975 identical    |
 | Options x renderers sweep, 15 images      | ~4,000 cases, all match ³  |
-| Dumped files, 31 images                   | 315 / 315 identical      |
+| Dumped files, 31 images                   | 315 / 315 identical        |
 | Fuzzing with corrupted images             | 17,000+ runs, 0 panics     |
 | Unit tests                                | 600 passing                |
 
