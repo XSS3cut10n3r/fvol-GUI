@@ -16,7 +16,7 @@ shift $((OPTIND-1))
 # second slot from the same pool: with every slot held by outer wrappers that would deadlock. The inner job
 # still gets its own memory-capped scope.
 if [ -n "$RSVOL_LIMIT_HELD" ] && [[ ":$RSVOL_LIMIT_HELD:" == *":$POOL:"* ]]; then
-  exec systemd-run --user --scope -q -p MemoryMax=$MEM -p MemorySwapMax=0 -- "$@"
+  exec systemd-run --user --scope -q --unit="rsvol-limit-$$-$RANDOM$RANDOM" -p MemoryMax=$MEM -p MemorySwapMax=0 -- "$@"
 fi
 export RSVOL_LIMIT_HELD="${RSVOL_LIMIT_HELD:+$RSVOL_LIMIT_HELD:}$POOL"
 dir=/tmp/rsvol-slots/$POOL; mkdir -p $dir
@@ -24,7 +24,7 @@ while true; do
   for i in $(seq 1 $SLOTS); do
     exec 9>>$dir/slot$i
     if flock -n 9; then
-      systemd-run --user --scope -q -p MemoryMax=$MEM -p MemorySwapMax=0 -- "$@"
+      systemd-run --user --scope -q --unit="rsvol-limit-$$-$RANDOM$RANDOM" -p MemoryMax=$MEM -p MemorySwapMax=0 -- "$@"
       exit $?
     fi
     exec 9>&-
