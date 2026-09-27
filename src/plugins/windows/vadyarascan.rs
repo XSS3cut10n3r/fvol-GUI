@@ -1,6 +1,7 @@
 //! windows.vadyarascan.VadYaraScan (python `plugins/windows/vadyarascan.py`): YARA rules over
-//! every process' VADs (each VAD read whole, python `layer.read(start, size, pad=True)`). VADs
-//! with identical contents (same size and page mappings) are scanned once.
+//! every process' VADs (each VAD read whole, python `layer.read(start, size, pad=True)`), by
+//! the region engine [`crate::yara::rules::regions`] (identical VADs scanned once, unmapped
+//! pages skipped, hits streamed VAD by VAD).
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
@@ -12,7 +13,7 @@ use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::prelude::*;
 use crate::yara::rules::Rules;
-use crate::yara::rules::volatility::{process_yara_options, scanner_hits};
+use crate::yara::rules::volatility::process_yara_options;
 
 pub struct VadYaraScan;
 
@@ -49,88 +50,6 @@ pub fn rules_from_config(cfg: &Config) -> Result<Option<Rules>> {
 
 /// python `SANITY_CHECK`: VADs above 1 GiB are not scanned.
 const SANITY_CHECK: u64 = 1024 * 1024 * 1024;
-
-/// VADs above this size are scanned by at most [`BIG_THREADS`] workers (each worker keeps one
-/// buffer as large as the largest VAD it scanned).
-const BIG_VAD: u64 = 64 << 20;
-const BIG_THREADS: usize = 2;
-
-/// One YARA hit relative to its VAD: (offset, rule, string identifier, matched length).
-type RelHit = (u64, String, String, usize);
-
-/// Identity of a VAD's padded bytes: its size and how its pages map (runs relative to the VAD
-/// start with their physical target). Equal signatures mean equal bytes, e.g. a DLL mapped at
-/// the same address with the same resident pages in many processes, or unbacked reservations.
-fn vad_signature(layer: LayerRef, start: u64, size: u64) -> (u64, u64, u64) {
-    use std::hash::Hasher;
-    let mut h1 = crate::util::fxhash::FxHasher::default();
-    let mut h2 = crate::util::fxhash::FxHasher::default();
-    layer.mapping_targets(start, size, &mut |m, l| {
-        let id = l as *const dyn crate::layers::Layer as *const u8 as u64;
-        for (i, v) in [m.offset.wrapping_sub(start), m.len, m.mapped, id].into_iter().enumerate() {
-            h1.write_u64(v);
-            h2.write_u64(v.rotate_left(17 + i as u32) ^ 0x9e37_79b9_7f4a_7c15);
-        }
-        true
-    });
-    (size, h1.finish(), h2.finish())
-}
-
-/// `YaraScanner(rules)(layer.read(start, size, pad=True), start)` for every VAD of every task,
-/// as hits relative to the VAD. Each distinct VAD content is scanned once, in parallel waves
-/// of bounded memory.
-fn scan_vads(rules: &Rules, tasks: &[(Obj, LayerRef, Vec<(u64, u64)>)]) -> Vec<Vec<std::sync::Arc<Vec<RelHit>>>> {
-    use crate::util::par::par_map;
-    let items: Vec<(usize, u64, u64)> = tasks.iter().enumerate().flat_map(|(ti, (_, _, maps))| maps.iter().map(move |&(s, z)| (ti, s, z))).collect();
-    let sigs = par_map(items.len(), |i| {
-        let (ti, s, z) = items[i];
-        vad_signature(tasks[ti].1, s, z)
-    });
-    let mut slot: crate::util::FxHashMap<(u64, u64, u64), usize> = crate::util::FxHashMap::default();
-    let mut unique: Vec<usize> = Vec::new();
-    let item_slot: Vec<usize> = sigs
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            *slot.entry(*s).or_insert_with(|| {
-                unique.push(i);
-                unique.len() - 1
-            })
-        })
-        .collect();
-    crate::util::trace::note(|| {
-        let total: u64 = items.iter().map(|i| i.2).sum();
-        let distinct: u64 = unique.iter().map(|&i| items[i].2).sum();
-        format!("vadyarascan: {} vads ({total} bytes), {} distinct ({distinct} bytes)", items.len(), unique.len())
-    });
-    // small VADs on every core, big ones on a few (bounded memory); each worker reuses one
-    // buffer (no page faults on fresh allocations)
-    thread_local! {
-        static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-    let scan_one = |u: usize| -> std::sync::Arc<Vec<RelHit>> {
-        let (ti, s, z) = items[unique[u]];
-        BUF.with(|b| {
-            let mut data = b.borrow_mut();
-            data.resize(z as usize, 0);
-            tasks[ti].1.read_padded(s, &mut data);
-            std::sync::Arc::new(scanner_hits(rules, &data, 0).into_iter().map(|(o, r, n, v)| (o, r, n, v.len())).collect())
-        })
-    };
-    let (small, big): (Vec<usize>, Vec<usize>) = (0..unique.len()).partition(|&u| items[unique[u]].2 <= BIG_VAD);
-    let small_hits = par_map(small.len(), |j| scan_one(small[j]));
-    let big_hits = crate::util::par::par_map_bounded(big.len(), BIG_THREADS, |j| scan_one(big[j]));
-    let mut results: Vec<Option<std::sync::Arc<Vec<RelHit>>>> = vec![None; unique.len()];
-    for (u, h) in small.into_iter().zip(small_hits).chain(big.into_iter().zip(big_hits)) {
-        results[u] = Some(h);
-    }
-    let results: Vec<std::sync::Arc<Vec<RelHit>>> = results.into_iter().map(|r| r.unwrap_or_default()).collect();
-    let mut out: Vec<Vec<std::sync::Arc<Vec<RelHit>>>> = tasks.iter().map(|t| Vec::with_capacity(t.2.len())).collect();
-    for (i, &(ti, _, _)) in items.iter().enumerate() {
-        out[ti].push(results[item_slot[i]].clone());
-    }
-    out
-}
 
 impl Plugin for VadYaraScan {
     fn name(&self) -> &'static str {
@@ -194,29 +113,60 @@ impl Plugin for VadYaraScan {
             }
         }
         if let Some(rules) = rules.as_ref() {
-            let hits = scan_vads(rules, &tasks);
-            for ((task, layer, maps), per_vad) in tasks.iter().zip(hits) {
-                for (&(start, _), vad_hits) in maps.iter().zip(per_vad) {
-                    for (rel, rule, name, len) in vad_hits.iter() {
-                        let offset = start + *rel;
+            // every VAD of every task in python order; identical VADs are scanned once and the
+            // hits stream out VAD by VAD (bounded memory)
+            let mut owner = Vec::new();
+            let mut regions: Vec<crate::yara::rules::regions::Region<'_>> = Vec::new();
+            for (ti, (_, layer, maps)) in tasks.iter().enumerate() {
+                for &(start, size) in maps {
+                    owner.push(ti);
+                    regions.push((*layer, start, size));
+                }
+            }
+            // the task columns are read at the task's first hit (python reads them per row;
+            // the first failure is the same)
+            let mut cols: Option<(usize, [Value; 6])> = None;
+            crate::yara::rules::regions::scan_regions(rules, &regions, |i, hits| {
+                let ti = owner[i];
+                let (task, layer) = (&tasks[ti].0, tasks[ti].1);
+                let start = regions[i].1;
+                crate::yara::rules::regions::for_each_prepared(
+                    hits,
+                    |h| layer_data(layer, start + h.offset, h.len as u64),
+                    |h, data| {
+                        if cols.as_ref().is_none_or(|c| c.0 != ti) {
+                            cols = Some((
+                                ti,
+                                [
+                                    Value::Int(task.m("UniqueProcessId")?.int()?),
+                                    task.get_create_time()?,
+                                    Value::Int(task.m("InheritedFromUniqueProcessId")?.int()?),
+                                    Value::Str(task.image_file_name_str()?),
+                                    task.get_session_id()?,
+                                    Value::Int(task.m("ActiveThreads")?.int()?),
+                                ],
+                            ));
+                        }
+                        let Some((_, c)) = cols.as_ref() else { unreachable!() };
+                        let offset = start + h.offset;
                         out.row(
                             0,
                             vec![
                                 Value::Int(offset as i128),
-                                Value::Int(task.m("UniqueProcessId")?.int()?),
-                                task.get_create_time()?,
-                                Value::Int(task.m("InheritedFromUniqueProcessId")?.int()?),
-                                Value::Str(task.image_file_name_str()?),
-                                task.get_session_id()?,
-                                Value::Int(task.m("ActiveThreads")?.int()?),
-                                Value::Str(rule.clone()),
-                                Value::Str(name.clone()),
-                                layer_data(*layer, offset, *len as u64),
+                                c[0].clone(),
+                                c[1].clone(),
+                                c[2].clone(),
+                                c[3].clone(),
+                                c[4].clone(),
+                                c[5].clone(),
+                                Value::Str(rules.hit_rule(h.string).to_string()),
+                                Value::Str(rules.hit_string(h.string).to_string()),
+                                data,
                             ],
-                        )?;
-                    }
-                }
-            }
+                        )
+                    },
+                )
+            })?;
         }
         match failure {
             Some(e) => Err(e),

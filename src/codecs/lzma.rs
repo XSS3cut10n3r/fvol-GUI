@@ -1716,9 +1716,44 @@ pub(crate) fn lzma2_scan(input: &[u8]) -> Result<(usize, u64)> {
     }
 }
 
+/// Output bytes the LZMA2 decoders produce between two calls of their `seen` callback: small
+/// enough to still be in L2 when the callback (a CRC) reads them, big enough that the extra
+/// decoder entries cost nothing.
+pub(crate) const SEEN_STEP: usize = 256 << 10;
+
 /// Decodes a raw LZMA2 stream into `out`, which must be exactly the uncompressed size
 /// (see [`lzma2_scan`]). Returns the number of input bytes consumed.
 pub(crate) fn lzma2_decode_into(input: &[u8], out: &mut [u8]) -> Result<usize> {
+    lzma2_decode_into_seen(input, out, &mut |_| {})
+}
+
+/// Decodes one LZMA chunk of `unpacked` bytes at `window[*wpos..]` in [`SEEN_STEP`] pieces,
+/// handing each to `seen` while it is in cache, and checks that the chunk ends exactly.
+fn lzma2_chunk(d: &mut LzmaDecoder, chunk: &[u8], window: &mut [u8], wpos: &mut usize, unpacked: usize, seen: &mut dyn FnMut(&[u8])) -> Result<()> {
+    let mut rc = RangeDecoder::new(chunk, 0)?;
+    let wlimit = *wpos + unpacked;
+    loop {
+        let from = *wpos;
+        let sub = (from + SEEN_STEP).min(wlimit);
+        if d.decode(&mut rc, chunk, window, wpos, sub)? != Stop::Limit {
+            return Err(corrupt("lzma2 chunk"));
+        }
+        seen(&window[from..*wpos]);
+        if *wpos == wlimit {
+            break;
+        }
+    }
+    rc.finish(chunk);
+    if d.pending_len != 0 || rc.ip != chunk.len() || !rc.is_finished_ok() {
+        return Err(corrupt("lzma2 chunk"));
+    }
+    Ok(())
+}
+
+/// [`lzma2_decode_into`], handing every output byte once, in order, to `seen` right after it
+/// is decoded (pieces of at most [`SEEN_STEP`] bytes): a check computed there reads cached
+/// data instead of the whole output again from memory.
+pub(crate) fn lzma2_decode_into_seen(input: &[u8], out: &mut [u8], seen: &mut dyn FnMut(&[u8])) -> Result<usize> {
     let mut ip = 0usize;
     let mut pos = 0usize;
     let mut dict_start = 0usize;
@@ -1768,14 +1803,8 @@ pub(crate) fn lzma2_decode_into(input: &[u8], out: &mut [u8]) -> Result<usize> {
                 return Err(corrupt("lzma2 uncompressed size mismatch"));
             }
             let d = dec.as_mut().ok_or_else(|| corrupt("lzma2 missing properties"))?;
-            let mut rc = RangeDecoder::new(chunk, 0)?;
-            let window = &mut out[dict_start..];
             let mut wpos = pos - dict_start;
-            let stop = d.decode(&mut rc, chunk, window, &mut wpos, limit - dict_start)?;
-            rc.finish(chunk);
-            if stop != Stop::Limit || d.pending_len != 0 || rc.ip != packed || !rc.is_finished_ok() {
-                return Err(corrupt("lzma2 chunk"));
-            }
+            lzma2_chunk(d, chunk, &mut out[dict_start..], &mut wpos, unpacked, seen)?;
             pos = limit;
             ip += packed;
         } else if c == 1 || c == 2 {
@@ -1785,6 +1814,7 @@ pub(crate) fn lzma2_decode_into(input: &[u8], out: &mut [u8]) -> Result<usize> {
             let src = input.get(ip..ip + size).ok_or_else(|| corrupt("truncated lzma2 chunk"))?;
             let dst = out.get_mut(pos..pos + size).ok_or_else(|| corrupt("lzma2 uncompressed size mismatch"))?;
             dst.copy_from_slice(src);
+            seen(dst);
             pos += size;
             ip += size;
         } else {
@@ -1794,6 +1824,121 @@ pub(crate) fn lzma2_decode_into(input: &[u8], out: &mut [u8]) -> Result<usize> {
     if pos != out.len() {
         return Err(corrupt("lzma2 uncompressed size mismatch"));
     }
+    Ok(ip)
+}
+
+/// [`lzma2_decode_into_seen`] of a stream of `total` output bytes into `sink` through a
+/// sliding window: the buffer keeps only the dictionary (`dict_size`, what the xz block
+/// header declares: the encoder never references further back, and liblzma rejects streams
+/// that do) as history and decodes about `chunk` new bytes between flushes, so a multi-GB
+/// block needs `dict_size + chunk` of memory and its output leaves through the sink (a
+/// writer thread) while decoding goes on. Returns the input bytes consumed.
+pub(crate) fn lzma2_decode_to(
+    input: &[u8],
+    total: usize,
+    dict_size: usize,
+    chunk: usize,
+    sink: &mut dyn super::sink::Sink,
+    seen: &mut dyn FnMut(&[u8]),
+) -> Result<usize> {
+    // the window slides by whole pages, so positions keep their low bits (pos_state, lp)
+    const PAGE: usize = 1 << 12;
+    let keep_min = dict_size.min(total).max(PAGE).next_multiple_of(PAGE);
+    let cap = (keep_min + chunk.max(PAGE).next_multiple_of(PAGE)).min(total.max(1).next_multiple_of(PAGE));
+    let mut buf = super::try_zeroed(cap)?;
+    // buf[0] is output byte `base`; buf[..emitted] went to the sink already
+    let (mut ip, mut pos, mut emitted, mut base) = (0usize, 0usize, 0usize, 0usize);
+    // makes room for `n` more bytes in `buf`: emits the output, keeps the dictionary
+    let room = |buf: &mut Vec<u8>, sink: &mut dyn super::sink::Sink, pos: &mut usize, emitted: &mut usize, base: &mut usize, n: usize| -> Result<()> {
+        if *pos + n <= buf.len() {
+            return Ok(());
+        }
+        let shift = pos.saturating_sub(keep_min) / PAGE * PAGE;
+        let keep = *pos - shift;
+        buf.truncate(*pos);
+        sink.flush(buf, *emitted, keep)?;
+        // (only a `chunk` smaller than an LZMA2 chunk needs more than `cap`)
+        buf.resize(cap.max(keep + n), 0);
+        *pos -= shift;
+        *base += shift;
+        *emitted = *pos;
+        Ok(())
+    };
+    let mut dict_start = 0usize; // absolute output offset of the last dictionary reset
+    let mut need_dict_reset = true;
+    let mut need_props = true;
+    let mut dec: Option<LzmaDecoder> = None;
+    loop {
+        let c = *input.get(ip).ok_or_else(|| corrupt("truncated lzma2 stream"))?;
+        ip += 1;
+        if c == 0 {
+            break;
+        }
+        if c >= 0xE0 || c == 1 {
+            need_props = true;
+            need_dict_reset = false;
+            dict_start = base + pos;
+        } else if need_dict_reset {
+            return Err(corrupt("lzma2 missing dictionary reset"));
+        }
+        if c >= 0x80 {
+            let hlen = if c >= 0xC0 { 5 } else { 4 };
+            let h = input.get(ip..ip + hlen).ok_or_else(|| corrupt("truncated lzma2 chunk header"))?;
+            let unpacked = (((c & 0x1F) as usize) << 16) + u16::from_be_bytes([h[0], h[1]]) as usize + 1;
+            let packed = u16::from_be_bytes([h[2], h[3]]) as usize + 1;
+            if c >= 0xC0 {
+                let props = Props::from_byte(h[4])?;
+                if props.lc + props.lp > 4 {
+                    return Err(corrupt("lzma2 lc + lp > 4"));
+                }
+                match dec.as_mut() {
+                    Some(d) if d.props == props => d.reset_state(),
+                    Some(d) => d.set_props(props),
+                    None => dec = Some(LzmaDecoder::new(props)),
+                }
+                need_props = false;
+            } else if need_props {
+                return Err(corrupt("lzma2 missing properties"));
+            } else if c >= 0xA0 {
+                if let Some(d) = dec.as_mut() {
+                    d.reset_state();
+                }
+            }
+            ip += hlen;
+            let chunk = input.get(ip..ip + packed).ok_or_else(|| corrupt("truncated lzma2 chunk"))?;
+            if base + pos + unpacked > total {
+                return Err(corrupt("lzma2 uncompressed size mismatch"));
+            }
+            let d = dec.as_mut().ok_or_else(|| corrupt("lzma2 missing properties"))?;
+            room(&mut buf, sink, &mut pos, &mut emitted, &mut base, unpacked)?;
+            // the window: since the last reset, as far as the buffer still holds
+            let ws = dict_start.saturating_sub(base).min(pos);
+            let mut wpos = pos - ws;
+            lzma2_chunk(d, chunk, &mut buf[ws..], &mut wpos, unpacked, seen)?;
+            pos += unpacked;
+            ip += packed;
+        } else if c == 1 || c == 2 {
+            let h = input.get(ip..ip + 2).ok_or_else(|| corrupt("truncated lzma2 chunk header"))?;
+            let size = u16::from_be_bytes([h[0], h[1]]) as usize + 1;
+            ip += 2;
+            let src = input.get(ip..ip + size).ok_or_else(|| corrupt("truncated lzma2 chunk"))?;
+            if base + pos + size > total {
+                return Err(corrupt("lzma2 uncompressed size mismatch"));
+            }
+            room(&mut buf, sink, &mut pos, &mut emitted, &mut base, size)?;
+            buf[pos..pos + size].copy_from_slice(src);
+            seen(&buf[pos..pos + size]);
+            pos += size;
+            ip += size;
+        } else {
+            return Err(corrupt("lzma2 control byte"));
+        }
+    }
+    if base + pos != total {
+        return Err(corrupt("lzma2 uncompressed size mismatch"));
+    }
+    buf.truncate(pos);
+    sink.flush(&mut buf, emitted, 0)?;
     Ok(ip)
 }
 
@@ -1986,6 +2131,74 @@ mod tests {
         0x5d, 0x00, 0x00, 0x80, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x34, 0x19,
         0x49, 0xee, 0x8d, 0xe9, 0x56, 0x0a, 0xc1, 0xb6, 0x20, 0xb7, 0xff, 0xff, 0xba, 0x34, 0x00, 0x00,
     ];
+
+    /// The sliding-window LZMA2 decoder (dictionary + chunk, flushed through a sink) writes
+    /// exactly what the flat decoder does and hands every byte to `seen` once, in order, for
+    /// windows much smaller than the output, chunks smaller than an LZMA2 chunk and
+    /// dictionary resets anywhere; a dictionary smaller than the distances the stream uses is
+    /// an error (as in liblzma).
+    #[test]
+    fn codecs_lzma2_sliding_window() {
+        use crate::codecs::lzma_enc::{Lzma2Encoder, LzmaParams};
+        use crate::codecs::testdata::gen_data;
+        // 24 segments of up to 256 KiB encoded one by one: the stream resets its dictionary at
+        // each (the encoder references anything earlier in its block), so 256 KiB of history
+        // decode it. Segments: generated text with copies at distances up to 200 KB, and
+        // random stretches (uncompressed LZMA2 chunks).
+        let mut s = 0x1234_5678_9abc_def1u64;
+        let mut data = Vec::new();
+        let mut stream = Vec::new();
+        let mut enc = Lzma2Encoder::new(LzmaParams::preset(6));
+        for seg in 0..24u64 {
+            let n = 100_000 + (xorshift(&mut s) % 150_000) as usize;
+            let mut v = gen_data(seg + 3, n / 2);
+            while v.len() < n {
+                let r = xorshift(&mut s);
+                if r % 13 == 0 {
+                    v.extend((0..(r >> 40) % 5000).map(|_| xorshift(&mut s) as u8));
+                    continue;
+                }
+                let from = v.len().saturating_sub((r % 200_000) as usize + 1);
+                let len = ((r >> 32) % 2000) as usize + 1;
+                for k in 0..len {
+                    let b = v[from + k];
+                    v.push(b);
+                }
+            }
+            v.truncate(n);
+            if seg == 5 {
+                // random bytes repeated: only a match 60 KB back compresses the copy
+                let r: Vec<u8> = (0..60_000).map(|_| xorshift(&mut s) as u8).collect();
+                v.extend_from_slice(&r);
+                v.extend_from_slice(&r);
+            }
+            let mut one = Vec::new();
+            enc.encode_block(&v, &mut one);
+            assert_eq!(one.pop(), Some(0), "end marker");
+            stream.extend_from_slice(&one);
+            data.extend_from_slice(&v);
+        }
+        stream.push(0);
+        let (_, total) = lzma2_scan(&stream).unwrap();
+        assert_eq!(total as usize, data.len());
+        let mut flat = vec![0u8; data.len()];
+        assert_eq!(lzma2_decode_into(&stream, &mut flat).unwrap(), stream.len());
+        assert!(flat == data);
+        for (dict, chunk) in [(256 << 10, 64 << 10), (256 << 10, 4096), (256 << 10, 1 << 20), (1 << 20, 3 << 20), (64 << 20, 32 << 20)] {
+            let mut out: Vec<u8> = Vec::new();
+            let mut seen: Vec<u8> = Vec::new();
+            let used = lzma2_decode_to(&stream, data.len(), dict, chunk, &mut out, &mut |b| seen.extend_from_slice(b)).unwrap();
+            assert_eq!(used, stream.len());
+            assert!(out == data, "dict {dict} chunk {chunk}");
+            assert!(seen == data, "dict {dict} chunk {chunk}: seen");
+        }
+        // segment 5 references 60 KB back: 16 KiB of history cannot decode it
+        let small = lzma2_decode_to(&stream, data.len(), 16 << 10, 4096, &mut Vec::new(), &mut |_| {});
+        assert!(small.is_err());
+        // truncated / wrong total
+        assert!(lzma2_decode_to(&stream[..stream.len() / 2], data.len(), 256 << 10, 64 << 10, &mut Vec::new(), &mut |_| {}).is_err());
+        assert!(lzma2_decode_to(&stream, data.len() - 1, 256 << 10, 64 << 10, &mut Vec::new(), &mut |_| {}).is_err());
+    }
 
     #[test]
     fn codecs_lzma_alone_small() {

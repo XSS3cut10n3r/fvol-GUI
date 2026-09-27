@@ -147,9 +147,15 @@ mod sha_ni {
     }
 
     /// Safety: the CPU must support sha, sse2, ssse3 and sse4.1.
+    ///
+    /// Never inlined, and it clears the upper YMM halves on entry: see
+    /// `sha256::sha_ni::compress` (SHA-NI after AVX code is 150x slower otherwise).
+    #[inline(never)]
     #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
     pub unsafe fn compress(state: &mut [u32; 5], blocks: &[u8]) {
         unsafe {
+            #[cfg(target_feature = "avx")]
+            _mm256_zeroupper();
             let mask = _mm_set_epi64x(0x0001020304050607u64 as i64, 0x08090a0b0c0d0e0fu64 as i64);
             // ABCD with A in the top lane; E in the top lane of its own register
             // (the low three lanes must stay zero: they are added to W1..W3).
@@ -302,6 +308,60 @@ mod tests {
                 h.update(chunk);
             }
             assert_eq!(h.finalize(), whole, "chunk_size={chunk_size}");
+        }
+    }
+
+    /// Best of 9 timings (ns) of `dirty()` followed by SHA-NI over `data`.
+    #[cfg(target_arch = "x86_64")]
+    fn ni_time(data: &[u8], dirty: impl Fn()) -> u64 {
+        let mut best = u64::MAX;
+        for _ in 0..9 {
+            let t0 = std::time::Instant::now();
+            dirty();
+            let mut st = H0;
+            // Safety: the callers checked sha_ni::available()
+            unsafe { sha_ni::compress(&mut st, data) };
+            std::hint::black_box(st);
+            best = best.min(t0.elapsed().as_nanos() as u64);
+        }
+        best
+    }
+
+    /// See `sha256::tests::ni_fast_after_avx_code`: SHA-NI after AVX code must not pay the
+    /// SSE/AVX transition on every instruction.
+    #[test]
+    fn ni_fast_after_avx_code() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !sha_ni::available() || !is_x86_feature_detected!("avx") {
+                return;
+            }
+            let data = vec![0xa5u8; 64 << 10];
+            let clean = ni_time(&data, || {});
+            // Two shapes of caller: all 16 YMM registers written by visible AVX code, and one
+            // register written in a loop. Where LLVM puts vzeroupper differs with the shape
+            // (measured on the fast test build: without the vzeroupper on entry the SHA-1
+            // run of one of them takes 190x the clean one), so both must stay fast.
+            let seen = ni_time(&data, || unsafe { crate::crypto::dirty_upper_ymm() });
+            let run = |dirty: bool| -> u64 {
+                let mut best = u64::MAX;
+                for _ in 0..9 {
+                    let t0 = std::time::Instant::now();
+                    if dirty {
+                        unsafe { std::arch::asm!("vpcmpeqb {0}, {0}, {0}", out(ymm_reg) _, options(nomem, nostack, preserves_flags)) };
+                    }
+                    let mut st = H0;
+                    // Safety: available() checked the target features
+                    unsafe { sha_ni::compress(&mut st, &data) };
+                    std::hint::black_box(st);
+                    best = best.min(t0.elapsed().as_nanos() as u64);
+                }
+                best
+            };
+            let unseen = run(true);
+            for (case, dirty) in [("all-register", seen), ("loop", unseen)] {
+                assert!(dirty < clean * 4 + 20_000, "SHA-1 NI after {case} AVX code: {dirty} ns vs {clean} ns clean");
+            }
         }
     }
 

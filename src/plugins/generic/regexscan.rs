@@ -5,10 +5,11 @@
 use crate::context::Context;
 use crate::error::Result;
 use crate::layers::LayerExt;
-use crate::layers::scan::{DEFAULT_CHUNK_SIZE, Scanner, scan};
+use crate::layers::scan::{DEFAULT_CHUNK_SIZE, Scanner, scan_each};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::yara::regex::{Flags, Regex};
+use crate::yara::rules::volatility::{HitRun, push_run};
 
 pub struct RegExScan;
 
@@ -17,7 +18,7 @@ pub const MAXSIZE_DEFAULT: i128 = 128;
 
 /// python `layers.scanners.RegExScanner(pattern, flags=re.DOTALL)`: the start of every
 /// `re.finditer` match that begins in the chunk's first `chunk_size` bytes (hit = layer
-/// address). Two-phase (the search depends only on the chunk bytes), so pages mapped at several
+/// address, stored as runs: a pattern matching every zero byte is one entry per chunk). Two-phase (the search depends only on the chunk bytes), so pages mapped at several
 /// virtual addresses are searched once.
 pub struct RegExScanner {
     pub regex: Regex,
@@ -31,13 +32,14 @@ impl RegExScanner {
 }
 
 impl Scanner for RegExScanner {
-    type Hit = u64;
-    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<u64>) {
+    type Hit = HitRun;
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<HitRun>) {
+        let base = hits.len();
         for (s, _) in self.regex.find_iter(data) {
             if s as u64 >= DEFAULT_CHUNK_SIZE {
                 break;
             }
-            hits.push(data_offset + s as u64);
+            push_run(hits, base, data_offset + s as u64, 0);
         }
     }
     fn prescan(&self, data: &[u8], out: &mut Vec<(u64, u32)>) -> bool {
@@ -49,8 +51,11 @@ impl Scanner for RegExScanner {
         }
         true
     }
-    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<u64>) {
-        hits.extend(matches.iter().map(|&(o, _)| data_offset + o));
+    fn finish(&self, matches: &[(u64, u32)], data_offset: u64, hits: &mut Vec<HitRun>) {
+        let base = hits.len();
+        for &(o, _) in matches {
+            push_run(hits, base, data_offset + o, 0);
+        }
     }
 }
 
@@ -88,14 +93,25 @@ impl Plugin for RegExScan {
         let scanner = RegExScanner::new(&pattern).unwrap_or_else(|e| panic!("re.PatternError: {}", e.py_str(&pattern)));
         // python `layer.read(offset, maxsize, pad=True)`: a negative size raises in python
         let maxsize = usize::try_from(maxsize).unwrap_or_else(|_| panic!("ValueError: negative maxsize"));
-        for offset in scan(p.layer, &scanner, None) {
-            let data = p.layer.read_vec_padded(offset, maxsize);
-            let m = match compiled.search(&data, 0) {
-                Some((s, e)) => data[s..e].to_vec(),
-                None => data,
-            };
-            out.row(0, vec![Value::Int(offset as i128), Value::Str(utf8_replace(&m)), Value::Bytes(m)])?;
+        // rows stream out as the chunks are scanned (python yields hit by hit)
+        let mut err = None;
+        scan_each(p.layer, &scanner, None, |run| {
+            for offset in run.offsets() {
+                let data = p.layer.read_vec_padded(offset, maxsize);
+                let m = match compiled.search(&data, 0) {
+                    Some((s, e)) => data[s..e].to_vec(),
+                    None => data,
+                };
+                if let Err(e) = out.row(0, vec![Value::Int(offset as i128), Value::Str(utf8_replace(&m)), Value::Bytes(m)]) {
+                    err = Some(e);
+                    return false;
+                }
+            }
+            true
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
-        Ok(())
     }
 }

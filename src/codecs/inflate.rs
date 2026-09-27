@@ -96,6 +96,12 @@ enum Kind {
 }
 
 /// Builds a two-level decode table for canonical Huffman code `lens` into `table`.
+///
+/// libdeflate's construction (build_decode_table): the symbols are sorted into canonical
+/// order, every codeword up to `bits` long is written once at its bit-reversed index, and
+/// the filled part of the table is doubled (`copy_within`) at each step to the next length,
+/// so the primary table costs one write per codeword plus a memcpy of itself; longer
+/// codewords fill subtables in codeword order.
 fn build_table(lens: &[u8], bits: u32, kind: Kind, table: &mut Vec<u32>) -> Result<()> {
     let entry: fn(usize, u32) -> u32 = match kind {
         Kind::Pre => pre_entry,
@@ -109,10 +115,11 @@ fn build_table(lens: &[u8], bits: u32, kind: Kind, table: &mut Vec<u32>) -> Resu
     count[0] = 0;
     let max_len = (1..16).rev().find(|&l| count[l] != 0).unwrap_or(0);
     table.clear();
-    table.resize(1 << bits, BAD);
+    let size = 1usize << bits;
     if max_len == 0 {
         // No codes at all: every lookup is invalid (legal for a distance code that is never
         // used; the literal/length code is rejected by the caller since EOB is missing).
+        table.resize(size, BAD);
         return if kind == Kind::Pre { Err(corrupt("empty code length code")) } else { Ok(()) };
     }
     let mut left: i32 = 1;
@@ -123,68 +130,128 @@ fn build_table(lens: &[u8], bits: u32, kind: Kind, table: &mut Vec<u32>) -> Resu
             return Err(corrupt("over-subscribed Huffman code"));
         }
     }
-    if left > 0 && (kind == Kind::Pre || max_len != 1) {
-        return Err(corrupt("incomplete Huffman code"));
+    if left > 0 {
+        if kind == Kind::Pre || max_len != 1 {
+            return Err(corrupt("incomplete Huffman code"));
+        }
+        // zlib accepts a single 1-bit code (here: a lone distance / literal code): code 0
+        // decodes to it, code 1 is invalid
+        let sym = lens.iter().position(|&l| l == 1).unwrap_or(0);
+        let v = entry(sym, 1);
+        table.extend((0..size).map(|i| if i & 1 == 0 { v } else { BAD }));
+        return Ok(());
     }
-    // Canonical codes.
-    let mut next = [0u32; 16];
-    let mut code = 0u32;
-    for l in 1..16 {
-        code = (code + count[l - 1] as u32) << 1;
-        next[l] = code;
+    // symbols in canonical order: by code length, then by symbol
+    let mut offs = [0u16; 16];
+    for l in 1..15 {
+        offs[l + 1] = offs[l] + count[l];
     }
-    let mask = (1u32 << bits) - 1;
-    // Pass 1: bit-reversed codes and the longest code per primary-table prefix.
-    let mut sub_len = [0u8; 1 << LIT_BITS];
-    let mut codes = [0u32; 320];
+    let mut sorted = [0u16; 320];
     for (sym, &l) in lens.iter().enumerate() {
-        if l == 0 {
-            continue;
-        }
-        let c = next[l as usize];
-        next[l as usize] += 1;
-        let rev = c.reverse_bits() >> (32 - l as u32);
-        codes[sym] = rev;
-        if l as u32 > bits {
-            let p = (rev & mask) as usize;
-            sub_len[p] = sub_len[p].max(l);
+        if l != 0 {
+            sorted[offs[l as usize] as usize] = sym as u16;
+            offs[l as usize] += 1;
         }
     }
-    // Pass 2: fill.
-    let mut sub_start = [0u32; 1 << LIT_BITS];
-    for (sym, &l) in lens.iter().enumerate() {
-        if l == 0 {
-            continue;
+    table.resize(size, BAD);
+    // the next codeword to assign, bit-reversed (a canonical code counts up from 0 in
+    // code order, i.e. from the high bit of the reversed form)
+    let mut codeword = 0usize;
+    let mut next = 0usize;
+    let mut len = 1usize;
+    while count[len] == 0 {
+        len += 1;
+    }
+    let mut cnt = count[len] as usize;
+    let mut cur_end = 1usize << len.min(bits as usize);
+    // bit-reversed increment of `codeword` as a `len`-bit number; false after the last one
+    let advance = |codeword: &mut usize, len: usize| -> bool {
+        let all = (1usize << len) - 1;
+        if *codeword == all {
+            return false;
         }
-        let l = l as u32;
-        let rev = codes[sym];
-        if l <= bits {
-            let v = entry(sym, l);
-            let mut i = rev as usize;
-            while i < (1 << bits) {
-                table[i] = v;
-                i += 1 << l;
+        let bit = 1usize << (usize::BITS - 1 - (*codeword ^ all).leading_zeros());
+        *codeword &= bit - 1;
+        *codeword |= bit;
+        true
+    };
+    while len <= bits as usize {
+        loop {
+            table[codeword] = entry(sorted[next] as usize, len as u32);
+            next += 1;
+            if !advance(&mut codeword, len) {
+                // the all-ones codeword was the last one: double up to the full table
+                while cur_end < size {
+                    table.copy_within(0..cur_end, cur_end);
+                    cur_end <<= 1;
+                }
+                return Ok(());
             }
-        } else {
-            let p = (rev & mask) as usize;
-            let sbits = sub_len[p] as u32 - bits;
-            if sub_start[p] == 0 {
-                let start = table.len() as u32;
-                sub_start[p] = start;
-                table.try_reserve(1 << sbits).map_err(|_| alloc_error())?;
-                table.resize(table.len() + (1 << sbits), BAD);
-                table[p] = F_EXC | F_SUB | (start << 16) | (sbits << 8) | bits;
+            cnt -= 1;
+            if cnt == 0 {
+                break;
             }
-            let start = sub_start[p] as usize;
-            let v = entry(sym, l - bits);
-            let mut i = (rev >> bits) as usize;
-            while i < (1 << sbits) {
-                table[start + i] = v;
-                i += 1 << (l - bits);
+        }
+        // the next length in use
+        loop {
+            len += 1;
+            if len <= bits as usize {
+                table.copy_within(0..cur_end, cur_end);
+                cur_end <<= 1;
+            }
+            if len > 15 {
+                // cannot happen for a complete code
+                return Err(corrupt("incomplete Huffman code"));
+            }
+            cnt = count[len] as usize;
+            if cnt != 0 {
+                break;
             }
         }
     }
-    Ok(())
+    // codewords longer than `bits`: subtables, one per `bits`-bit prefix, sized to be filled
+    // completely by the codewords sharing it
+    let pmask = size - 1;
+    let mut prefix = usize::MAX;
+    let (mut sub_start, mut sub_end) = (0usize, 0usize);
+    loop {
+        if codeword & pmask != prefix {
+            prefix = codeword & pmask;
+            let mut sbits = len - bits as usize;
+            let mut used = cnt;
+            while used < 1 << sbits {
+                sbits += 1;
+                if bits as usize + sbits > 15 {
+                    return Err(corrupt("incomplete Huffman code"));
+                }
+                used = (used << 1) + count[bits as usize + sbits] as usize;
+            }
+            sub_start = table.len();
+            sub_end = sub_start + (1 << sbits);
+            table.try_reserve(1 << sbits).map_err(|_| alloc_error())?;
+            table.resize(sub_end, BAD);
+            table[prefix] = F_EXC | F_SUB | ((sub_start as u32) << 16) | ((sbits as u32) << 8) | bits;
+        }
+        let v = entry(sorted[next] as usize, (len - bits as usize) as u32);
+        next += 1;
+        let stride = 1usize << (len - bits as usize);
+        let mut i = sub_start + (codeword >> bits);
+        while i < sub_end {
+            table[i] = v;
+            i += stride;
+        }
+        if !advance(&mut codeword, len) {
+            return Ok(());
+        }
+        cnt -= 1;
+        while cnt == 0 {
+            len += 1;
+            if len > 15 {
+                return Err(corrupt("incomplete Huffman code"));
+            }
+            cnt = count[len] as usize;
+        }
+    }
 }
 
 struct Tables {
@@ -548,99 +615,151 @@ fn decode_block(
     loop {
         // ---------------- fast loop ----------------
         if ip + FAST_IN <= in_len && pos + FAST_OUT <= cap {
-            let in_end = in_len - FAST_IN;
-            // The fast loop also pauses at checksum chunk boundaries.
-            let out_end = (cap - FAST_OUT).min(check.limit());
-            // Branchless refill to >= 56 bits (ip <= in_end, so 8 bytes are readable).
-            macro_rules! refill {
-                () => {{
-                    // SAFETY: ip + 8 <= in_len (see FAST_IN).
-                    let w = u64::from_le(unsafe { (inp.add(ip) as *const u64).read_unaligned() });
-                    buf |= w << cnt;
-                    ip += ((63 - cnt) >> 3) as usize;
-                    cnt |= 56;
-                }};
-            }
-            // SAFETY (all table lookups below): masked indices < primary table size.
-            macro_rules! lit_lookup {
-                () => {
-                    unsafe { *lt.get_unchecked((buf & LMASK) as usize) }
-                };
-            }
-            refill!();
-            let mut e = lit_lookup!();
-            // Invariant at the top: >= 56 valid bits and `e` is the entry for them.
-            while ip <= in_end && pos <= out_end {
-                let mut saved = buf;
-                consume!(e);
-                if e & F_LIT != 0 {
-                    // Up to three literals per refill (<= 45 bits).
-                    // SAFETY: pos < out_end; three literals fit in FAST_OUT.
-                    unsafe { *base.add(pos) = (e >> 16) as u8 };
-                    pos += 1;
-                    e = lit_lookup!();
-                    if e & F_LIT != 0 {
-                        consume!(e);
-                        unsafe { *base.add(pos) = (e >> 16) as u8 };
-                        pos += 1;
-                        e = lit_lookup!();
-                        if e & F_LIT != 0 {
-                            consume!(e);
-                            unsafe { *base.add(pos) = (e >> 16) as u8 };
-                            pos += 1;
-                            e = lit_lookup!();
-                        }
-                    }
-                    // >= 11 valid bits remain, so `e` is valid; top up for the next symbol.
-                    refill!();
-                    continue;
+            // libdeflate's loop structure (decompress_template.h). Pointers instead of base +
+            // index (fewer live values: nothing spills), and its bit-count trick: inside the
+            // loop `c` is exact in its low 8 bits only -- a table entry is subtracted whole
+            // and shifts use the entry itself, as x86 shifts mask the count (every count is
+            // below 64). The refill leaves the bits above the count holding the true next
+            // input bits (up to 64 real bits), so a table lookup may run ahead of a refill as
+            // long as fewer than 64 - 11 bits were consumed since the last one.
+            //
+            // SAFETY (the whole block): the loop runs while ipp <= in_len - FAST_IN (8-byte
+            // reads stay in the input) and op <= cap - FAST_OUT (three literals, or a 258-byte
+            // match with a 64-byte over-write, stay in the allocation); primary table indices
+            // are masked, subtable indices come from build_table's pointers; matches are
+            // checked against the window start before they are copied.
+            let status = unsafe {
+                let mut ipp = inp.add(ip);
+                let ip_end = inp.add(in_len - FAST_IN);
+                let mut op = base.add(pos);
+                // the fast loop also pauses at checksum chunk boundaries
+                let op_end = base.add((cap - FAST_OUT).min(check.limit()));
+                let win = base.add(start) as *const u8;
+                let mut c = cnt;
+                // branchless refill to >= 56 counted bits
+                macro_rules! refill {
+                    () => {{
+                        let w = u64::from_le((ipp as *const u64).read_unaligned());
+                        buf |= w.wrapping_shl(c);
+                        ipp = ipp.add(7 - ((c >> 3) & 7) as usize);
+                        c |= 56;
+                    }};
                 }
-                if e & F_EXC != 0 {
-                    if e & F_SUB != 0 {
-                        e = sub!(lt, e);
+                // drops the bits of entry `e` (code + extra bits)
+                macro_rules! eat {
+                    ($e:expr) => {{
+                        let e = $e;
+                        buf = buf.wrapping_shr(e);
+                        c = c.wrapping_sub(e);
+                    }};
+                }
+                // extra-bits value of length/distance entry `e` from the buffer before `e`
+                // was eaten (bits 8..13 of such an entry: the code length, no flags)
+                macro_rules! xbits {
+                    ($saved:expr, $e:expr) => {{
+                        let e = $e;
+                        bzhi($saved, e).wrapping_shr(e >> 8) as usize
+                    }};
+                }
+                macro_rules! lit_lookup {
+                    () => {
+                        *lt.get_unchecked((buf & LMASK) as usize)
+                    };
+                }
+                refill!();
+                let mut e = lit_lookup!();
+                // 0: keep going (slow path / grow / checksum), 1: end of block, 2: bad litlen
+                // code, 3: bad distance code, 4: distance too far back
+                let mut status = 0u32;
+                while ipp <= ip_end && op <= op_end {
+                    let mut saved = buf;
+                    eat!(e);
+                    if e & F_LIT != 0 {
+                        // up to three literals per refill (<= 33 bits, then an 11-bit
+                        // lookup); the entries after the first are eaten before they are
+                        // tested, so a match after literals goes straight on below
+                        *op = (e >> 16) as u8;
+                        op = op.add(1);
+                        e = lit_lookup!();
                         saved = buf;
-                        consume!(e);
+                        eat!(e);
                         if e & F_LIT != 0 {
-                            unsafe { *base.add(pos) = (e >> 16) as u8 };
-                            pos += 1;
-                            refill!();
+                            *op = (e >> 16) as u8;
+                            op = op.add(1);
                             e = lit_lookup!();
-                            continue;
+                            saved = buf;
+                            eat!(e);
+                            if e & F_LIT != 0 {
+                                *op = (e >> 16) as u8;
+                                op = op.add(1);
+                                e = lit_lookup!();
+                                refill!();
+                                continue;
+                            }
                         }
+                        // not a literal (eaten, its extra bits in `saved`): top up for a
+                        // subtable, the length and the distance
+                        refill!();
                     }
                     if e & F_EXC != 0 {
-                        if e & F_EOB != 0 {
-                            done!();
+                        if e & F_SUB != 0 {
+                            e = sub_lookup(lt, e, buf);
+                            saved = buf;
+                            eat!(e);
+                            if e & F_LIT != 0 {
+                                *op = (e >> 16) as u8;
+                                op = op.add(1);
+                                e = lit_lookup!();
+                                refill!();
+                                continue;
+                            }
                         }
-                        return Err(corrupt("invalid literal/length code"));
+                        if e & F_EXC != 0 {
+                            status = if e & F_EOB != 0 { 1 } else { 2 };
+                            break;
+                        }
                     }
-                }
-                // Length (<= 20 bits) + distance (<= 28 bits) fit in the >= 56 bits.
-                let len = (e >> 16) as usize + extra!(saved, e);
-                let mut d = unsafe { *dt.get_unchecked((buf & DMASK) as usize) };
-                saved = buf;
-                consume!(d);
-                if d & F_EXC != 0 {
-                    if d & F_SUB != 0 {
-                        d = sub!(dt, d);
-                        saved = buf;
-                        consume!(d);
-                    }
+                    // length (<= 20 bits) + distance (<= 28 bits) fit in the >= 56 bits
+                    let len = (e >> 16) as usize + xbits!(saved, e);
+                    let mut d = *dt.get_unchecked((buf & DMASK) as usize);
+                    saved = buf;
+                    eat!(d);
                     if d & F_EXC != 0 {
-                        return Err(corrupt("invalid distance code"));
+                        if d & F_SUB != 0 {
+                            d = sub_lookup(dt, d, buf);
+                            saved = buf;
+                            eat!(d);
+                        }
+                        if d & F_EXC != 0 {
+                            status = 3;
+                            break;
+                        }
                     }
+                    let dist = (d >> 16) as usize + xbits!(saved, d);
+                    // the next entry before the refill (<= 48 bits eaten: >= 16 real bits
+                    // left), so its load overlaps the refill and the copy
+                    e = lit_lookup!();
+                    refill!();
+                    if dist > op.offset_from(win) as usize {
+                        status = 4;
+                        break;
+                    }
+                    copy_match(op, dist, len);
+                    op = op.add(len);
                 }
-                let dist = (d >> 16) as usize + extra!(saved, d);
-                refill!();
-                e = lit_lookup!();
-                if dist > pos - start {
-                    return Err(corrupt("distance too far back"));
-                }
-                // SAFETY: dist <= pos - start, pos + len + 64 <= cap.
-                unsafe { copy_fast(base, pos - dist, pos, len) };
-                pos += len;
+                ip = ipp.offset_from(inp) as usize;
+                pos = op.offset_from(base) as usize;
+                cnt = c & 0xFF;
+                status
+            };
+            match status {
+                0 => {}
+                1 => done!(),
+                2 => return Err(corrupt("invalid literal/length code")),
+                3 => return Err(corrupt("invalid distance code")),
+                _ => return Err(corrupt("distance too far back")),
             }
-            if ip <= in_end {
+            if ip <= in_len - FAST_IN {
                 if pos + FAST_OUT > cap {
                     // Output space ran low.
                     grow!(0);
@@ -721,50 +840,92 @@ fn decode_block(
     }
 }
 
-/// LZ77 copy with over-write of up to 63 bytes past `dst + len`.
+/// `x` with the bits from position `n & 0xFF` up cleared (x86 BZHI, which reads only the
+/// index's low byte: a table entry can be passed whole).
+#[inline(always)]
+fn bzhi(x: u64, n: u32) -> u64 {
+    #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+    {
+        // SAFETY: BMI2 is enabled at compile time.
+        unsafe { std::arch::x86_64::_bzhi_u64(x, n) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
+    {
+        let n = n & 0xFF;
+        if n >= 64 { x } else { x & ((1u64 << n) - 1) }
+    }
+}
+
+/// The subtable entry for pointer entry `e` of table `t` (its primary bits already eaten from
+/// `buf`).
 ///
 /// # Safety
-/// `src < dst`, `dst + len + 64` within the allocation, bytes `[src, dst)` initialised.
+/// `e` is a subtable pointer of `t`: build_table allocated 2^((e >> 8) & 15) entries at e >> 16.
 #[inline(always)]
-unsafe fn copy_fast(base: *mut u8, src: usize, dst: usize, len: usize) {
+unsafe fn sub_lookup(t: &[u32], e: u32, buf: u64) -> u32 {
+    unsafe { *t.get_unchecked((e >> 16) as usize + bzhi(buf, (e >> 8) & 0xF) as usize) }
+}
+
+/// LZ77 match copy of `len` (>= 3) bytes from `dist` (>= 1) bytes back; over-writes up to 31
+/// bytes past `d + len`.
+///
+/// # Safety
+/// `[d - dist, d)` initialised, `d + len + 32` within the allocation.
+#[inline(always)]
+unsafe fn copy_match(d: *mut u8, dist: usize, len: usize) {
     use std::ptr::copy_nonoverlapping as cp;
-    let dist = dst - src;
     unsafe {
-        let s = base.add(src);
-        let d = base.add(dst);
-        if dist >= 32 {
-            cp(s, d, 32);
+        let s = d.sub(dist) as *const u8;
+        // one well-predicted test for 94% of the matches of a memory image (a split at 32
+        // bytes of distance mispredicted a fifth of them)
+        if dist >= 8 {
+            // four sequential 8-byte copies: each reads at least 8 back, i.e. bytes written
+            // before it; they cover the 96% of matches that are at most 32 bytes long
+            let w8 = |i: usize| {
+                let w = (s.add(i) as *const u64).read_unaligned();
+                (d.add(i) as *mut u64).write_unaligned(w);
+            };
+            w8(0);
+            w8(8);
+            w8(16);
+            w8(24);
             if len > 32 {
                 let mut i = 32;
-                while i < len {
-                    cp(s.add(i), d.add(i), 32);
-                    i += 32;
+                if dist >= 32 {
+                    // chunk k reads [s + i, s + i + 32): all before d + i, written already
+                    while i < len {
+                        cp(s.add(i), d.add(i), 32);
+                        i += 32;
+                    }
+                } else {
+                    while i < len {
+                        w8(i);
+                        i += 8;
+                    }
                 }
             }
-        } else if dist >= 16 {
-            let mut i = 0;
-            while i < len {
-                cp(s.add(i), d.add(i), 16);
-                i += 16;
-            }
         } else if dist == 1 {
-            std::ptr::write_bytes(d, *s, len);
-        } else {
-            // Short period: replicate the pattern until it is >= 8 bytes, then copy 8 at a
-            // time (each chunk reads bytes at least 8 back).
+            // a run of one byte
+            let v = [*s; 32];
             let mut i = 0;
-            while i < dist.min(len) {
-                *d.add(i) = *s.add(i);
-                i += 1;
+            loop {
+                cp(v.as_ptr(), d.add(i), 32);
+                i += 32;
+                if i >= len {
+                    break;
+                }
             }
-            let period = dist * 8_usize.div_ceil(dist);
-            while i < period.min(len) {
-                *d.add(i) = *d.add(i - dist);
-                i += 1;
-            }
-            while i < len {
-                cp(d.add(i - period), d.add(i), 8);
-                i += 8;
+        } else {
+            // 2..7 (libdeflate): 8-byte copies advancing by `dist`; the first `dist` bytes of
+            // each are final (they read bytes written by the previous one or before `d`)
+            let mut i = 0;
+            loop {
+                let w = (s.add(i) as *const u64).read_unaligned();
+                (d.add(i) as *mut u64).write_unaligned(w);
+                i += dist;
+                if i >= len {
+                    break;
+                }
             }
         }
     }
@@ -1187,6 +1348,79 @@ mod tests {
         fixed_block(&mut w, &[Tok::Lit(b'a'), Tok::Match(3, 2)], true);
         let mut v = b"prefix".to_vec();
         assert!(inflate_into(&w.finish(), &mut v).is_err());
+    }
+
+    /// build_table against the definition: for random complete codes (random binary trees
+    /// up to 15 deep, leaves given to random symbols) every codeword, followed by random
+    /// bits, decodes through the primary table and its subtable to its symbol and length.
+    #[test]
+    fn codecs_inflate_tables_decode_every_codeword() {
+        let mut s = 0x0123_4567_89ab_cdefu64;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut t = Vec::new();
+        for trial in 0..400 {
+            // grow a complete tree: split random leaves until there are n of them
+            let n = 2 + (rnd() % 300) as usize;
+            let mut leaves: Vec<u8> = vec![0];
+            while leaves.len() < n {
+                let i = (rnd() % leaves.len() as u64) as usize;
+                if leaves[i] >= 15 {
+                    if leaves.iter().all(|&d| d >= 15) {
+                        break;
+                    }
+                    continue;
+                }
+                leaves[i] += 1;
+                let d = leaves[i];
+                leaves.push(d);
+            }
+            let nsym = leaves.len() + (rnd() % 20) as usize;
+            let mut lens = vec![0u8; nsym];
+            let mut syms: Vec<usize> = (0..nsym).collect();
+            for i in (1..nsym).rev() {
+                syms.swap(i, (rnd() % (i as u64 + 1)) as usize);
+            }
+            for (k, &d) in leaves.iter().enumerate() {
+                lens[syms[k]] = d;
+            }
+            let bits = [7u32, 8, 9, 11][trial % 4];
+            build_table(&lens, bits, Kind::Pre, &mut t).unwrap_or_else(|e| panic!("trial {trial}: {e}"));
+            // canonical codes
+            let mut count = [0u32; 16];
+            lens.iter().for_each(|&l| count[l as usize] += 1);
+            count[0] = 0;
+            let mut next = [0u32; 16];
+            let mut code = 0u32;
+            for l in 1..16 {
+                code = (code + count[l - 1]) << 1;
+                next[l] = code;
+            }
+            for (sym, &l) in lens.iter().enumerate() {
+                if l == 0 {
+                    continue;
+                }
+                let c = next[l as usize];
+                next[l as usize] += 1;
+                let rev = (c.reverse_bits() >> (32 - l as u32)) as u64;
+                for _ in 0..3 {
+                    let idx = rev | (rnd() << l) & 0xFFFF_FFFF;
+                    let mut e = t[(idx & ((1 << bits) - 1)) as usize];
+                    let mut used = 0u32;
+                    if e & F_SUB != 0 {
+                        used = bits;
+                        let sub = (idx >> bits) & ((1 << ((e >> 8) & 0xF)) - 1);
+                        e = t[(e >> 16) as usize + sub as usize];
+                    }
+                    assert_eq!(e & (F_EXC | F_BAD), 0, "trial {trial} sym {sym} len {l}: bad entry");
+                    assert_eq!(((e >> 16) as usize, used + (e & 0xFF)), (sym, l as u32), "trial {trial} bits {bits} sym {sym}");
+                }
+            }
+        }
     }
 
     #[test]

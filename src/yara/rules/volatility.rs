@@ -58,6 +58,51 @@ pub fn process_yara_options(
 /// One `YaraScanner` hit: (absolute offset, rule name, string identifier, data).
 pub type Hit = (u64, String, String, Vec<u8>);
 
+/// Hits at `first, first + step, ...` (`count` of them) with the same `tag` (a string index,
+/// a matched length): layer scanners report runs, so a pattern matching every byte of a
+/// zero page costs 24 bytes per chunk instead of one entry per offset while the hits wait
+/// to be rendered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HitRun {
+    pub first: u64,
+    pub step: u32,
+    pub count: u32,
+    pub tag: u64,
+}
+
+impl HitRun {
+    /// The hit offsets in order.
+    pub fn offsets(&self) -> impl Iterator<Item = u64> + use<> {
+        let (first, step) = (self.first, self.step as u64);
+        (0..self.count as u64).map(move |i| first + i * step)
+    }
+}
+
+/// Append hit `off` (tag `tag`) to `v`, extending the last run when `off` continues it and the
+/// run is at index `base` or later: a scanner passes `hits.len()` from the start of its `scan`
+/// call, as the scan framework cuts and reorders the hits of a work item per chunk by index.
+#[inline]
+pub fn push_run(v: &mut Vec<HitRun>, base: usize, off: u64, tag: u64) {
+    if v.len() > base
+        && let Some(r) = v.last_mut()
+        && r.tag == tag
+        && r.count < u32::MAX
+        && off > r.first
+    {
+        let d = off - r.first;
+        if r.count == 1 && d <= u32::MAX as u64 {
+            r.step = d as u32;
+            r.count = 2;
+            return;
+        }
+        if r.step != 0 && d == r.step as u64 * r.count as u64 {
+            r.count += 1;
+            return;
+        }
+    }
+    v.push(HitRun { first: off, step: 0, count: 1, tag });
+}
+
 /// `YaraScanner.__call__(data, data_offset)` (yara-python >= 4.3 branch):
 /// `for match in rules.match(data=data): for s in match.strings:
 ///  for i in s.instances: yield (i.offset + data_offset, match.rule, s.identifier, i.matched_data)`.
@@ -96,6 +141,27 @@ fn push_hits(m: &super::RuleMatch, data_offset: u64, out: &mut Vec<Hit>) {
 mod tests {
     use super::*;
     use crate::yara::scan::{Match, StringKind};
+
+    #[test]
+    fn hit_runs_round_trip() {
+        let hits: Vec<(u64, u64)> = vec![(5, 1), (6, 1), (7, 1), (9, 1), (11, 1), (13, 1), (13, 2), (20, 2), (100, 2), (101, 2), (102, 1), (1 << 40, 1)];
+        let mut runs = Vec::new();
+        for &(o, t) in &hits {
+            push_run(&mut runs, 0, o, t);
+        }
+        let back: Vec<(u64, u64)> = runs.iter().flat_map(|r| r.offsets().map(move |o| (o, r.tag))).collect();
+        assert_eq!(back, hits);
+        assert_eq!(runs.len(), 6);
+        // a zero page matched at every offset is one run
+        let mut runs = Vec::new();
+        (0..4096u64).for_each(|o| push_run(&mut runs, 0, 0x1000 + o, 7));
+        assert_eq!(runs, vec![HitRun { first: 0x1000, step: 1, count: 4096, tag: 7 }]);
+        // a run from before `base` (an earlier chunk of the same work item) is never extended
+        push_run(&mut runs, 1, 0x2000, 7);
+        assert_eq!(runs.len(), 2);
+        push_run(&mut runs, 1, 0x2001, 7);
+        assert_eq!(runs[1], HitRun { first: 0x2000, step: 1, count: 2, tag: 7 });
+    }
 
     #[test]
     fn yara_volatility_get_rule_and_options() {

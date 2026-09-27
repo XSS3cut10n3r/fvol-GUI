@@ -67,6 +67,18 @@ const DEPTH: usize = 2;
 impl FileSink {
     /// Writes to `file` from its current position.
     pub fn new(file: File) -> Result<FileSink> {
+        Self::spawn(file, None)
+    }
+
+    /// Writes to `file` from offset `at` with positional writes (`pwrite`: the file position
+    /// is not used, so several sinks can fill different parts of one file through cloned
+    /// handles). `truncate` only moves the write offset back, it does not shrink the file.
+    pub fn at(file: File, at: u64) -> Result<FileSink> {
+        Self::spawn(file, Some(at))
+    }
+
+    fn spawn(file: File, at: Option<u64>) -> Result<FileSink> {
+        use std::os::unix::fs::FileExt;
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(DEPTH);
         let (back_tx, back) = std::sync::mpsc::channel::<Vec<u8>>();
         let handle = std::thread::Builder::new()
@@ -74,18 +86,26 @@ impl FileSink {
             .spawn(move || -> std::io::Result<File> {
                 let mut file = file;
                 let mut err: Option<std::io::Error> = None;
+                let mut off = at.unwrap_or(0);
                 for m in rx {
                     match m {
                         Msg::Data(buf, from) => {
+                            let r = match at {
+                                Some(_) => file.write_all_at(&buf[from..], off),
+                                None => file.write_all(&buf[from..]),
+                            };
+                            off += (buf.len() - from) as u64;
                             if err.is_none()
-                                && let Err(e) = file.write_all(&buf[from..])
+                                && let Err(e) = r
                             {
                                 err = Some(e);
                             }
                             let _ = back_tx.send(buf);
                         }
                         Msg::Truncate(len) => {
-                            if err.is_none()
+                            if let Some(a) = at {
+                                off = a + len;
+                            } else if err.is_none()
                                 && let Err(e) = file.set_len(len).and_then(|()| file.seek(SeekFrom::Start(len)).map(|_| ()))
                             {
                                 err = Some(e);
@@ -200,6 +220,37 @@ mod tests {
         let mut buf = b"abcdef".to_vec();
         Sink::flush(&mut v, &mut buf, 2, 2).unwrap();
         assert_eq!((v.as_slice(), buf.as_slice()), (&b"cdef"[..], &b"ef"[..]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Positional sinks on cloned handles fill their own parts of one file, whatever the
+    /// shared file position does.
+    #[test]
+    fn file_sink_at_offsets() {
+        let dir = std::env::temp_dir().join(format!("rsvol-sink-at-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("out");
+        let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&p).unwrap();
+        f.set_len(3000).unwrap();
+        let mut a = FileSink::at(f.try_clone().unwrap(), 0).unwrap();
+        let mut b = FileSink::at(f.try_clone().unwrap(), 1000).unwrap();
+        let mut want = vec![0u8; 3000];
+        for i in 0..10u8 {
+            let mut x = vec![b'a' + i; 100];
+            want[i as usize * 100..][..100].fill(b'a' + i);
+            a.flush(&mut x, 0, 0).unwrap();
+            let mut y = vec![b'A' + i; 150];
+            want[1000 + i as usize * 150..][..150].fill(b'A' + i);
+            b.flush(&mut y, 0, 0).unwrap();
+        }
+        // moving back overwrites
+        b.truncate(1400).unwrap();
+        let mut y = vec![b'#'; 10];
+        want[2400..2410].fill(b'#');
+        b.flush(&mut y, 0, 0).unwrap();
+        a.finish().unwrap();
+        b.finish().unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), want);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

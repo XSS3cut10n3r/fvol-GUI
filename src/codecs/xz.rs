@@ -10,8 +10,8 @@
 //! 2. decoding every block straight into its slice of one exactly-sized output buffer —
 //!    in parallel when a file has several blocks (e.g. produced by `xz -T0`).
 
-use super::crc::{crc32, crc64};
-use super::lzma::{lzma2_decode_into, lzma2_scan};
+use super::crc::{crc32, crc32_update, crc64_update};
+use super::lzma::{lzma2_decode_into, lzma2_decode_into_seen, lzma2_decode_to, lzma2_scan};
 use crate::error::{Error, Result};
 
 const HEADER_MAGIC: [u8; 6] = [0xFD, b'7', b'z', b'X', b'Z', 0x00];
@@ -50,8 +50,16 @@ struct Block {
     check_type: u8,
     /// Pre-filters applied before LZMA2 when compressing (in chain order), at most 3.
     filters: [Option<Filter>; 3],
+    /// LZMA2 dictionary size (how far back matches may reach).
+    dict_size: usize,
     out_start: usize,
     out_len: usize,
+}
+
+impl Block {
+    fn filtered(&self) -> bool {
+        self.filters.iter().any(Option::is_some)
+    }
 }
 
 /// Size in bytes of the check field for a check type id.
@@ -96,6 +104,12 @@ struct BlockHeader {
     compressed: Option<u64>,
     uncompressed: Option<u64>,
     filters: [Option<Filter>; 3],
+    dict_size: usize,
+}
+
+/// LZMA2 dictionary size of property byte `b` (at most 40, checked by the caller).
+fn lzma2_dict_size(b: u8) -> usize {
+    if b >= 40 { u32::MAX as usize } else { (2 | (b as usize & 1)) << (b / 2 + 11) }
 }
 
 fn parse_block_header(data: &[u8], off: usize) -> Result<BlockHeader> {
@@ -118,6 +132,7 @@ fn parse_block_header(data: &[u8], off: usize) -> Result<BlockHeader> {
         return Err(err("zero compressed size"));
     }
     let mut filters = [None; 3];
+    let mut dict_size = 0usize;
     for i in 0..nfilters {
         let id = read_vli(body, &mut p)?;
         let psize = read_vli(body, &mut p)? as usize;
@@ -129,6 +144,7 @@ fn parse_block_header(data: &[u8], off: usize) -> Result<BlockHeader> {
                 if psize != 1 || props[0] > 40 {
                     return Err(err("invalid LZMA2 properties"));
                 }
+                dict_size = lzma2_dict_size(props[0]);
             }
             FILTER_DELTA if !last => {
                 if psize != 1 {
@@ -150,7 +166,7 @@ fn parse_block_header(data: &[u8], off: usize) -> Result<BlockHeader> {
     if body[p..].iter().any(|&b| b != 0) {
         return Err(err("non-zero block header padding"));
     }
-    Ok(BlockHeader { size, compressed, uncompressed, filters })
+    Ok(BlockHeader { size, compressed, uncompressed, filters, dict_size })
 }
 
 /// Structural scan of the whole file. Returns the blocks and the total output size.
@@ -209,6 +225,7 @@ fn scan(data: &[u8]) -> Result<(Vec<Block>, usize)> {
                 check_start,
                 check_type,
                 filters: bh.filters,
+                dict_size: bh.dict_size,
                 out_start: out_total,
                 out_len,
             });
@@ -280,10 +297,50 @@ fn scan(data: &[u8]) -> Result<(Vec<Block>, usize)> {
     Ok((blocks, out_total))
 }
 
-/// Decodes one block into `out` (exactly the block's uncompressed size) and verifies it.
+/// A block's integrity check, computed incrementally.
+enum Check {
+    None,
+    Crc32(u32),
+    Crc64(u64),
+}
+
+impl Check {
+    fn new(check_type: u8) -> Check {
+        match check_type {
+            1 => Check::Crc32(0),
+            4 => Check::Crc64(0),
+            // none / SHA-256 / reserved types: not verified
+            _ => Check::None,
+        }
+    }
+
+    #[inline]
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            Check::None => {}
+            Check::Crc32(c) => *c = crc32_update(*c, data),
+            Check::Crc64(c) => *c = crc64_update(*c, data),
+        }
+    }
+
+    fn verify(&self, data: &[u8], blk: &Block) -> Result<()> {
+        let stored = &data[blk.check_start..blk.check_start + check_size(blk.check_type)];
+        match *self {
+            Check::Crc32(c) if c != u32::from_le_bytes(stored.try_into().unwrap()) => Err(err("CRC32 mismatch")),
+            Check::Crc64(c) if c != u64::from_le_bytes(stored.try_into().unwrap()) => Err(err("CRC64 mismatch")),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Decodes one block into `out` (exactly the block's uncompressed size) and verifies it. The
+/// check of an unfiltered block is computed as the output is decoded, while it is in cache
+/// (a CRC-64 of data that already left the caches runs at a third of the speed).
 fn decode_block(data: &[u8], blk: &Block, out: &mut [u8]) -> Result<()> {
     let input = &data[blk.data_start..blk.data_end];
-    let used = lzma2_decode_into(input, out)?;
+    let mut check = Check::new(blk.check_type);
+    let filtered = blk.filtered();
+    let used = if filtered { lzma2_decode_into(input, out)? } else { lzma2_decode_into_seen(input, out, &mut |b| check.update(b))? };
     if used != input.len() {
         return Err(err("block size mismatch"));
     }
@@ -293,21 +350,34 @@ fn decode_block(data: &[u8], blk: &Block, out: &mut [u8]) -> Result<()> {
             Filter::X86 { start } => x86_decode(out, start),
         }
     }
-    let check = &data[blk.check_start..blk.check_start + check_size(blk.check_type)];
-    match blk.check_type {
-        1 => {
-            if crc32(out) != u32::from_le_bytes(check.try_into().unwrap()) {
-                return Err(err("CRC32 mismatch"));
-            }
-        }
-        4 => {
-            if crc64(out) != u64::from_le_bytes(check.try_into().unwrap()) {
-                return Err(err("CRC64 mismatch"));
-            }
-        }
-        _ => {} // none / SHA-256 / reserved types: not verified
+    if filtered {
+        check.update(out);
     }
-    Ok(())
+    check.verify(data, blk)
+}
+
+/// Blocks with a dictionary up to this size are streamed ([`decode_block_to`]) when they are
+/// too big for a buffer; others go through a file mapping.
+const STREAM_DICT_MAX: usize = 256 << 20;
+/// New output decoded between two flushes of a streamed block.
+const STREAM_CHUNK: usize = 32 << 20;
+
+/// Whether [`decode_block_to`] can decode `blk`: no pre-filters (the delta and x86 filters
+/// run over the finished output) and a dictionary that fits in memory.
+fn streamable(blk: &Block) -> bool {
+    !blk.filtered() && blk.dict_size <= STREAM_DICT_MAX
+}
+
+/// [`decode_block`] of a [`streamable`] block into `sink` with bounded memory (the dictionary
+/// plus [`STREAM_CHUNK`]), verifying the check on the way.
+fn decode_block_to(data: &[u8], blk: &Block, sink: &mut dyn super::sink::Sink) -> Result<()> {
+    let input = &data[blk.data_start..blk.data_end];
+    let mut check = Check::new(blk.check_type);
+    let used = lzma2_decode_to(input, blk.out_len, blk.dict_size, STREAM_CHUNK, sink, &mut |b| check.update(b))?;
+    if used != input.len() {
+        return Err(err("block size mismatch"));
+    }
+    check.verify(data, blk)
 }
 
 /// Decompresses a complete `.xz` file (all streams).
@@ -340,7 +410,10 @@ pub fn decompress_reuse(data: &[u8], buf: &mut Vec<u8>, parallel: bool) -> Resul
 }
 
 /// Blocks up to this size are decoded into a per-thread buffer and written with `pwrite`;
-/// bigger ones (a single-block file) straight into a writable mapping of the output file.
+/// bigger ones (a single-block file) are streamed to the file through a sliding window and a
+/// writer thread ([`decode_block_to`]), or decoded into a writable mapping of the output
+/// file when they have filters. (Decoding into the mapping stalls the decoder on page
+/// writeback: a 2 GB block took 18.8-48.6 s that way against 17.7 s for the decode alone.)
 pub(crate) const FILE_BUF_MAX: usize = 64 << 20;
 /// Memory the per-thread buffers may use together (limits the threads for big blocks).
 const FILE_BUF_BUDGET: usize = 1 << 30;
@@ -348,8 +421,8 @@ const FILE_BUF_BUDGET: usize = 1 << 30;
 /// [`decompress`] into `file` (from offset 0; it is resized to the output size) without
 /// holding the output in memory: multi-block files are decoded in parallel, each thread
 /// decoding one block at a time into its own buffer and writing it at the block's offset.
-/// `file` must be open for reading and writing (blocks over 64 MiB are decoded into a
-/// shared mapping of it). Returns the decompressed size.
+/// `file` must be open for reading and writing (filtered blocks over 64 MiB are decoded
+/// into a shared mapping of it). Returns the decompressed size.
 pub fn decompress_to_file(data: &[u8], file: &std::fs::File) -> Result<u64> {
     decompress_to_file_with(data, file, FILE_BUF_MAX)
 }
@@ -375,6 +448,12 @@ pub(crate) fn decompress_to_file_with(data: &[u8], file: &std::fs::File, buf_max
                 }
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(blk) = blocks.get(i) else { return Ok(()) };
+                if blk.out_len > buf_max && streamable(blk) {
+                    let mut sink = super::sink::FileSink::at(file.try_clone().map_err(io)?, blk.out_start as u64)?;
+                    decode_block_to(data, blk, &mut sink)?;
+                    sink.finish()?;
+                    continue;
+                }
                 if blk.out_len > buf_max {
                     // map the block's pages (from the page boundary below its start)
                     let a = blk.out_start & !0xfff;

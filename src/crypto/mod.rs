@@ -71,3 +71,21 @@ mod vectors;
 // --ignored --nocapture`); see bench.rs for why there's no bench-harness crate.
 #[cfg(test)]
 mod bench;
+
+/// Test helper: leave the upper halves of all 16 YMM registers non-zero, like AVX code
+/// that returns without `vzeroupper` (for the SHA-NI transition tests).
+#[cfg(all(test, target_arch = "x86_64"))]
+#[inline(always)]
+pub(crate) unsafe fn dirty_upper_ymm() {
+    unsafe {
+        std::arch::asm!(
+            "vpcmpeqb ymm0, ymm0, ymm0", "vpcmpeqb ymm1, ymm1, ymm1", "vpcmpeqb ymm2, ymm2, ymm2", "vpcmpeqb ymm3, ymm3, ymm3",
+            "vpcmpeqb ymm4, ymm4, ymm4", "vpcmpeqb ymm5, ymm5, ymm5", "vpcmpeqb ymm6, ymm6, ymm6", "vpcmpeqb ymm7, ymm7, ymm7",
+            "vpcmpeqb ymm8, ymm8, ymm8", "vpcmpeqb ymm9, ymm9, ymm9", "vpcmpeqb ymm10, ymm10, ymm10", "vpcmpeqb ymm11, ymm11, ymm11",
+            "vpcmpeqb ymm12, ymm12, ymm12", "vpcmpeqb ymm13, ymm13, ymm13", "vpcmpeqb ymm14, ymm14, ymm14", "vpcmpeqb ymm15, ymm15, ymm15",
+            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _, out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _, out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}

@@ -4,12 +4,12 @@
 
 use crate::context::Context;
 use crate::error::Result;
-use crate::layers::scan::{Scanner, scan};
+use crate::layers::scan::{Scanner, scan_each};
 use crate::layers::{Layer, LayerExt};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::yara::rules::Rules;
-use crate::yara::rules::volatility::{Hit, process_yara_options, scanner_hits};
+use crate::yara::rules::volatility::{HitRun, process_yara_options, push_run};
 
 pub struct YaraScan;
 
@@ -60,10 +60,17 @@ pub struct YaraScanner<'a> {
     pub rules: &'a Rules,
 }
 
+/// Hits as runs (tag = string index << 32 | matched length): a rule matching every offset of
+/// a zero page stays one entry per chunk until it is rendered.
 impl Scanner for YaraScanner<'_> {
-    type Hit = Hit;
-    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<Hit>) {
-        hits.extend(scanner_hits(self.rules, data, data_offset));
+    type Hit = HitRun;
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<HitRun>) {
+        let mut refs = Vec::new();
+        self.rules.scan_refs(data, &[], &mut refs);
+        let base = hits.len();
+        for h in refs {
+            push_run(hits, base, h.offset.wrapping_add(data_offset), (h.string as u64) << 32 | h.len as u64);
+        }
     }
 }
 
@@ -128,10 +135,23 @@ impl Plugin for YaraScan {
         ])?;
         // python: `YaraScanner(rules=None)` raises ValueError("No rules provided to YaraScanner")
         let rules = rules_from_config(cfg).unwrap_or_else(|| panic!("ValueError: No rules provided to YaraScanner"));
-        for (offset, rule, name, value) in scan(p.layer, &YaraScanner { rules: &rules }, None) {
-            let v = layer_data_value(p.layer, offset, value.len() as u64);
-            out.row(0, vec![Value::Int(offset as i128), Value::Str(rule), Value::Str(name), v])?;
+        // rows stream out as the chunks are scanned (python yields hit by hit)
+        let mut err = None;
+        scan_each(p.layer, &YaraScanner { rules: &rules }, None, |run| {
+            let (string, len) = ((run.tag >> 32) as u32, run.tag as u32 as u64);
+            for offset in run.offsets() {
+                let v = layer_data_value(p.layer, offset, len);
+                let row = vec![Value::Int(offset as i128), Value::Str(rules.hit_rule(string).to_string()), Value::Str(rules.hit_string(string).to_string()), v];
+                if let Err(e) = out.row(0, row) {
+                    err = Some(e);
+                    return false;
+                }
+            }
+            true
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
