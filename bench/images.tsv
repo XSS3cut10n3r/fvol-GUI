@@ -3,7 +3,7 @@
 # bench/ref/py) is NOT listed here: check_all.sh covers it.
 # Columns (TAB separated):  name  os  image_path  symbol_args  ref_dir
 #   os          windows | linux | mac  -> plugin list bench/{win,linux,mac}_noarg.txt
-#   symbol_args extra global args for python vol / rsvol ("-" = none); word-split, no quoting (";" separates
+#   symbol_args extra global args for python vol / fvol ("-" = none); word-split, no quoting (";" separates
 #               several -s dirs, as in vol3). symbols-extra holds ISFs that are NOT on the MS symbol server:
 #               python deletes a same-named file in the first -s dir when its identifier cache misses the entry
 #               and the download fails, so such files must not live in the first dir.

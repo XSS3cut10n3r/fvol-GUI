@@ -116,7 +116,7 @@ cycles.
      `resource.rs::decompress_file_with` to positional mode.
    * bzip2 calls `sink.truncate`: drain the in-flight writes before accepting new ones, then
      `set_len(start + pos)` at finish.
-   * Use `RSVOL_TRACE=1` to see "decompress: decode" against "writer drain".
+   * Use `FASTVOL_TRACE=1` to see "decompress: decode" against "writer drain".
    * Measure only when the box is quiet: one run took 96 s wall because of global writeback
      stalls.
 2. **Multi-symbol inflate tables** (2 literals per lookup when l1 + l2 <= 11), to go beyond

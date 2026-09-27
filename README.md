@@ -42,28 +42,28 @@
 - **635-1,869x faster than python**, 6-68x faster than vol-rs.
 - **Zero dependencies**: one static binary, Rust standard library only.
 - **Every common format**: raw, LiME, ELF core, crash dump, VMware, QEMU, AVML, Xen, gzip/bzip2/xz.
-- **Built-in web UI**: `vol serve`.
+- **Built-in web UI**: `fvol serve`.
 
 ## Install
 
 Requires Rust 1.95+. Tested on Linux x86-64.
 
 ```bash
-cargo build --release    # -> target/release/vol
+cargo build --release    # -> target/release/fvol
 ```
 
 > [!NOTE]
-> The binary is still named `vol` (development name: rsvol). The build targets the build machine's
-> CPU; for a portable binary see [docs/building.md](docs/building.md#build-for-other-machines).
+> The build targets the build machine's CPU; for a portable binary see
+> [docs/building.md](docs/building.md#build-for-other-machines).
 
 ## Quick start
 
 ```bash
-vol -f memory.raw windows.pslist.PsList                  # run a plugin
-vol -h                                                   # list plugins
-vol -s ./symbols -f linux.lime linux.pslist.PsList       # Linux/macOS: symbol dir
-vol -f memory.raw -o out/ windows.dlllist.DllList --dump # dump files
-vol -f memory.raw -r json windows.pslist.PsList          # quick, pretty, csv, json, jsonl
+fvol -f memory.raw windows.pslist.PsList                 # run a plugin
+fvol -h                                                  # list plugins
+fvol -s ./symbols -f linux.lime linux.pslist.PsList      # Linux/macOS: symbol dir
+fvol -f memory.raw -o out/ windows.dlllist.DllList --dump # dump files
+fvol -f memory.raw -r json windows.pslist.PsList         # quick, pretty, csv, json, jsonl
 ```
 
 Windows symbols are downloaded automatically. See [docs/usage.md](docs/usage.md).
@@ -71,7 +71,7 @@ Windows symbols are downloaded automatically. See [docs/usage.md](docs/usage.md)
 ## Web UI
 
 ```bash
-vol serve -f memory.raw    # prints a local URL with an access token
+fvol serve -f memory.raw   # prints a local URL with an access token
 ```
 
 <p align="center">
@@ -134,7 +134,7 @@ originals. [docs/architecture.md](docs/architecture.md#performance-techniques)
 | Doc                                            | Content                                     |
 | ---------------------------------------------- | ------------------------------------------- |
 | [usage.md](docs/usage.md)                      | Symbols, dumping, renderers, filters, YARA  |
-| [web-ui.md](docs/web-ui.md)                    | `vol serve` and its security model          |
+| [web-ui.md](docs/web-ui.md)                    | `fvol serve` and its security model         |
 | [building.md](docs/building.md)                | Build profiles, portable binaries           |
 | [caching.md](docs/caching.md)                  | Cache files, `--clear-cache`, env variables |
 | [differences.md](docs/differences.md)          | Known differences from python volatility3   |

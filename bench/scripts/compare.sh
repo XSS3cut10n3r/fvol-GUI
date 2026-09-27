@@ -3,7 +3,7 @@
 # Runs our binary on the Windows test image and diffs stdout against the Python volatility3
 # reference in bench/ref/py/PLUGIN.txt (first line - the version banner - is compared too).
 # Prints "OK <plugin> <secs>" or "DIFF <plugin>" followed by the first diff lines.
-BIN=/home/user/rs-vol/target/fast/vol
+BIN=/home/user/rs-vol/target/fast/fvol
 if [ "$1" = "-b" ]; then BIN=$2; shift 2; fi
 P=$1; shift
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}

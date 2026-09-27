@@ -51,14 +51,14 @@ Warm filescan, netscan and thrdscan improve by the same amount as psscan. Unchan
   - The look-ahead is counted in bytes of item data. Counting items made 40% of thread time idle behind slow items.
   - Physical and other scans use the same scheduler (`split_rounds`).
   - `RSVOL_TRACE=1` prints thread time for walk, plan, items and idle, plus the walk-done and plan times.
-- `FileLayer::release` (MADV_DONTNEED after big chunks) is roughly neutral on the CLI now that main's exit helper takes the teardown off the exit path. It is kept for `vol serve` and for runs with the helper off.
+- `FileLayer::release` (MADV_DONTNEED after big chunks) is roughly neutral on the CLI now that main's exit helper takes the teardown off the exit path. It is kept for `fvol serve` and for runs with the helper off.
 - **Cold bench.**
   - `bench/scripts/coldcache_bench.sh -b base=BIN -b new=BIN[,ENV=V] -n 3 -c win-pslist,...`; `-l` lists the cases.
   - Eviction retries until `fincore` shows 0: pages locked by an in-flight readahead survive one DONTNEED.
   - Stdout goes to a file, not /dev/null.
   - Don't wrap `check_*.sh` in `limit.sh` on an old checkout: the nested python limit.sh deadlocked. This is fixed on main.
 - **Validation helpers.**
-  - `RSVOL_BENCH_IMG=<img> RSVOL_BENCH_WIN=1 cargo.sh test --profile fast -- --ignored scan_exact vscan_bench` checks that the pipeline and parallel chunks are identical to the sequential walk on the real image.
+  - `FASTVOL_BENCH_IMG=<img> FASTVOL_BENCH_WIN=1 cargo.sh test --profile fast -- --ignored scan_exact vscan_bench` checks that the pipeline and parallel chunks are identical to the sequential walk on the real image.
   - The unit tests `pipeline_matches_sequential_scan` and `pipeline_propagates_panics` use a synthetic page table.
 
 ## Next steps / remaining ideas (not started)

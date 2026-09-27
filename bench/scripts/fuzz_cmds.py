@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Subcommands for the rsvol robustness fuzzer (fuzz_images.py)."""
+"""Subcommands for the fastvol robustness fuzzer (fuzz_images.py)."""
 
 import argparse
 import json
@@ -383,7 +383,7 @@ def cmd_containers(a):
 
 
 # ---------------------------------------------------------------------------------------------
-# pycompare: run python vol3 on a sample of degradation cases, diff stdout with rsvol
+# pycompare: run python vol3 on a sample of degradation cases, diff stdout with fastvol
 
 def cmd_pycompare(a):
     recs = [json.loads(l) for l in open(a.results) if l.strip()]
@@ -444,7 +444,7 @@ def cmd_pycompare(a):
         if tag != 'SAME' and a.verbose:
             import difflib
             d = list(difflib.unified_diff(py_out.splitlines(), rs_out.splitlines(),
-                                          'python', 'rsvol', lineterm=''))
+                                          'python', 'fastvol', lineterm=''))
             for l in d[:24]:
                 log('      ' + l)
         os.unlink(mdst)
@@ -485,7 +485,7 @@ def main():
     import fuzz_images
     ap = argparse.ArgumentParser(prog='fuzz_images.py', description=fuzz_images.__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--bin', default=os.path.join(SCRATCH, 'bin', 'vol-base'), help='rsvol binary')
+    ap.add_argument('--bin', default=os.path.join(SCRATCH, 'bin', 'vol-base'), help='fastvol binary')
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     p = sub.add_parser('targets')

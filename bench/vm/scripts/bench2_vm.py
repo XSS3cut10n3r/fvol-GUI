@@ -4,11 +4,11 @@ times and output hashes are reused from pass 1 (same image, same python, same ma
 plugins pass 1 did not run or that are listed in --py-fresh.
 
 Columns (every run: `TOOL -q -o <fresh dir> -f IMG [EXTRA] PLUGIN`, stdout to a file):
-  rs_cold    rsvol, RSVOL_CACHE=<C2>/rs-cold, the whole directory deleted before EVERY run
+  rs_cold    rsvol, FASTVOL_CACHE=<C2>/rs-cold, the whole directory deleted before EVERY run
              (symbol tables, identifier index, automagic results, scan cache: a first-ever run)
-  rs_steady  rsvol, RSVOL_CACHE=<C2>/rs-steady, RSVOL_NO_SCAN_CACHE=1: symbol/automagic caches warm,
+  rs_steady  rsvol, FASTVOL_CACHE=<C2>/rs-steady, FASTVOL_NO_SCAN_CACHE=1: symbol/automagic caches warm,
              the per-image scan cache off, so every scan is really done
-  rs_warm    rsvol, RSVOL_CACHE=<C2>/rs-warm: every cache warm (2nd+ run of a plugin)
+  rs_warm    rsvol, FASTVOL_CACHE=<C2>/rs-warm: every cache warm (2nd+ run of a plugin)
   vr_cold    vol-rs, $XDG_CACHE_HOME/vol-rs deleted before EVERY run except pdb/ (the PDB files it
              downloaded from the Microsoft symbol server, kept like the provisioned ISFs, so no timed
              run touches the network)
@@ -37,8 +37,14 @@ PY = [f"{B}/venv314/bin/python", f"{B}/volatility3/vol.py"]
 EXTRA = os.environ.get("EXTRA", "").split()  # "-s ~/rsvol-bench/isf" for the linux round
 os.environ["XDG_CACHE_HOME"] = C
 os.environ["XDG_DATA_HOME"] = f"{B}/home/.local/share"
-for k in ("RSVOL_CACHE", "RSVOL_NO_SCAN_CACHE", "RSVOL_THREADS", "RSVOL_TRACE"):
-    os.environ.pop(k, None)
+for k in ("CACHE", "NO_SCAN_CACHE", "THREADS", "TRACE"):
+    for pre in ("FASTVOL_", "RSVOL_"):  # RSVOL_* = the pre-rename names, still honoured
+        os.environ.pop(pre + k, None)
+
+
+def both(**kv):
+    """fastvol's env vars under both names: the default RS_BIN is a pre-rename build (RSVOL_* only)."""
+    return {pre + k: v for k, v in kv.items() for pre in ("FASTVOL_", "RSVOL_")}
 
 
 def wipe_rs_cold():
@@ -56,9 +62,9 @@ def wipe_vr_cold():
 
 
 TOOLS = {  # name: (argv, extra env, pre-run hook)
-    "rs_cold": ([RS], {"RSVOL_CACHE": f"{C2}/rs-cold"}, wipe_rs_cold),
-    "rs_steady": ([RS], {"RSVOL_CACHE": f"{C2}/rs-steady", "RSVOL_NO_SCAN_CACHE": "1"}, None),
-    "rs_warm": ([RS], {"RSVOL_CACHE": f"{C2}/rs-warm"}, None),
+    "rs_cold": ([RS], both(CACHE=f"{C2}/rs-cold"), wipe_rs_cold),
+    "rs_steady": ([RS], both(CACHE=f"{C2}/rs-steady", NO_SCAN_CACHE="1"), None),
+    "rs_warm": ([RS], both(CACHE=f"{C2}/rs-warm"), None),
     "vr_cold": ([VR], {}, wipe_vr_cold),
     "vr_warm": ([VR], {}, None),
     "py": (PY, {}, None),

@@ -1,4 +1,4 @@
-// libyara reference for the rsvol string matcher benchmark (src/yara/scan/bench.rs).
+// libyara reference for the fastvol string matcher benchmark (src/yara/scan/bench.rs).
 //
 //   gcc -O3 -march=native -o yara_strings_bench yara_strings_bench.c -lyara
 //   ./yara_strings_bench RULES.yar IMAGE [OFF LEN CHUNK]

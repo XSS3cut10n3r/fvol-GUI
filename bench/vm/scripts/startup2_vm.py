@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pass 2: cold vs warm start of `windows.pslist.PsList` for each tool (adapted from startup_vm.py).
 
-cold = the tool's own cache removed right before the run (rsvol: its whole RSVOL_CACHE directory;
+cold = the tool's own cache removed right before the run (rsvol: its whole FASTVOL_CACHE directory;
 vol-rs: $XDG_CACHE_HOME/vol-rs except pdb/ (downloaded PDBs; pslist needs none); python:
 identifier.cache + data_*.cache in $XDG_CACHE_HOME/volatility3). The provisioned kernel symbol
 files stay for all tools, the image stays in the page cache. warm = the cache left by the previous
@@ -14,8 +14,9 @@ C = f"{B}/home/.cache"
 RSC = f"{B}/cache2/rs-startup"
 os.environ["XDG_CACHE_HOME"] = C
 os.environ["XDG_DATA_HOME"] = f"{B}/home/.local/share"
-os.environ["RSVOL_CACHE"] = RSC
-os.environ.pop("RSVOL_NO_SCAN_CACHE", None)
+for pre in ("FASTVOL_", "RSVOL_"):  # both names: the default RS_BIN is a pre-rename build (RSVOL_* only)
+    os.environ[pre + "CACHE"] = RSC
+    os.environ.pop(pre + "NO_SCAN_CACHE", None)
 
 
 def wipe_vr():

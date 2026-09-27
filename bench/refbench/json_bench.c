@@ -1,4 +1,4 @@
-// Reference JSON parse speed (yyjson DOM, cJSON) for comparison with rsvol's util::json.
+// Reference JSON parse speed (yyjson DOM, cJSON) for comparison with fastvol's util::json.
 // Build: gcc -O3 -march=native -o json_bench json_bench.c -lyyjson -lcjson
 // Run:   ./json_bench file.json
 #include <stdio.h>

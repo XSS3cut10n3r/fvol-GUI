@@ -1,4 +1,4 @@
-/* PCRE2-JIT reference harness for rsvol's regex engine (src/yara/regex).
+/* PCRE2-JIT reference harness for fastvol's regex engine (src/yara/regex).
  *
  * For every case of regex_cases.tsv: compile time (pcre2_compile + pcre2_jit_compile,
  * best of 20) and a python-`finditer`-equivalent loop of pcre2_jit_match over an mmapped

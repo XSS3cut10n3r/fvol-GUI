@@ -1,6 +1,6 @@
 # Regex throughput cases shared by every engine (bench/scripts/refbench.sh):
 #   python re (bench/scripts/regex_bench.py), PCRE2-JIT (bench/refbench/regex_pcre2.c),
-#   RE2 (bench/refbench/regex_re2.cc), rsvol (src/yara/benchdrv.rs yara_regex_bench_driver).
+#   RE2 (bench/refbench/regex_re2.cc), fastvol (src/yara/benchdrv.rs yara_regex_bench_driver).
 # Format: name<TAB>pattern. The pattern bytes are passed verbatim to every engine (bytes pattern,
 # flags 0; use inline (?i) and regex escapes such as \x00, never literal tabs/newlines).
 literal	Microsoft

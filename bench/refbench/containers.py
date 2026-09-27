@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Container layer read throughput: python volatility3 layer classes vs rsvol.
+"""Container layer read throughput: python volatility3 layer classes vs fastvol.
 
     containers.py make   RAW OUTDIR [MiB]   build large containers from a raw image + address lists
     containers.py pybench OUTDIR [N]        python volatility3 timings (random 4K + sequential)
 Rust side (same files, same addresses):
-    RSVOL_LAYER_BENCH=OUTDIR cargo test --release container_bench -- --ignored --nocapture
+    FASTVOL_LAYER_BENCH=OUTDIR cargo test --release container_bench -- --ignored --nocapture
 
 Each container NAME gets NAME.addrs: little-endian u64 page addresses (random, mapped).
 """

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test: rsvol's YARA engine (src/yara/rules + src/yara/scan) vs yara-python 4.5.4.
+"""Differential test: fastvol's YARA engine (src/yara/rules + src/yara/scan) vs yara-python 4.5.4.
 
 Corpus = hand-written rules exercising every feature (text modifiers nocase / wide / ascii /
 fullword / xor / xor(k) / xor(a-b) / base64 / base64wide / custom alphabets / private, hex
@@ -825,7 +825,7 @@ def rust_canon(rec):
 # ---------------------------------------------------------------------------------------
 
 def build_driver(profile):
-    r = subprocess.run(["cargo", "test", "--profile", profile, "--bin", "vol", "--no-run", "--message-format=json"],
+    r = subprocess.run(["cargo", "test", "--profile", profile, "--bin", "fvol", "--no-run", "--message-format=json"],
                        cwd=ROOT, capture_output=True, text=True)
     exe = None
     for line in r.stdout.splitlines():
@@ -871,8 +871,8 @@ def run_rust(exe, cpath, opath, ids, timeout, mem, use_limit):
     crashes = {}
     last_stderr = ""
     while True:
-        env = dict(os.environ, RSVOL_YARA_CASES=cpath, RSVOL_YARA_OUT=opath, RSVOL_YARA_START=str(start),
-                   RSVOL_YARA_TIMEOUT=str(timeout))
+        env = dict(os.environ, FASTVOL_YARA_CASES=cpath, FASTVOL_YARA_OUT=opath, FASTVOL_YARA_START=str(start),
+                   FASTVOL_YARA_TIMEOUT=str(timeout))
         cmd = [exe, "yara::benchdrv::yara_rules_difftest_driver", "--exact", "--ignored", "--test-threads=1", "-q"]
         if use_limit:
             cmd = [LIMIT, "-m", mem] + cmd
@@ -1226,7 +1226,7 @@ def main():
             continue
         for cat, detail in mm:
             cats.setdefault(cat, []).append((cid, detail))
-    print("\n### YARA differential: rsvol vs yara-python %s (libyara %s)" % (yara.__version__, yara.YARA_VERSION))
+    print("\n### YARA differential: fastvol vs yara-python %s (libyara %s)" % (yara.__version__, yara.YARA_VERSION))
     print("cases=%d (fixed valid %d, namespaced %d, invalid %d, random %d; valid per yara: %d) data: %d synthetic + %d memory slices%s" % (
         len(expected), len(FIXED_VALID), len(FIXED_NS), len(FIXED_INVALID), args.n, n_valid, len(syn), len(mems),
         " + zeros" if zeros else ""))

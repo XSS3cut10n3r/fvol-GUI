@@ -1,4 +1,4 @@
-/* Reference benchmark harness for rsvol's src/crypto/ primitives, measured
+/* Reference benchmark harness for fastvol's src/crypto/ primitives, measured
  * in-process against OpenSSL's EVP API (the "beat the reference library" bar).
  *
  * Two workloads per primitive, matching src/crypto/bench.rs on the Rust side

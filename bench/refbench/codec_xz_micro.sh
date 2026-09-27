@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# xz decode, rsvol vs liblzma, single-threaded and pinned: builds codec_xz_micro.rs with rustc
+# xz decode, fastvol vs liblzma, single-threaded and pinned: builds codec_xz_micro.rs with rustc
 # (no crate build) and codecs_refbench.c with gcc, then runs both on every FILE, interleaved
 # for $ROUNDS rounds of $RUNS decodes each, and prints best wall MB/s and best user-mode
 # cycles per side.

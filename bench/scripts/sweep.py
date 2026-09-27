@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential sweep of plugin options x renderers: python volatility3 2.28.2 against rsvol.
+"""Differential sweep of plugin options x renderers: python volatility3 2.28.2 against fastvol.
 
 The no-argument output of every plugin is covered by check_all.sh / check_nix.sh. This sweep
 covers everything else: each boolean flag, --pid with one and three real PIDs, --offset / --base /
@@ -14,7 +14,7 @@ Run with /home/user/rs-vol/bench/venv/bin/python (yara-python builds the compile
     sweep.py py     [-i IMG ...] [-m RE] [-j 2] [--max-est 600] [--force]
                                                         run python for each case not cached yet
     sweep.py rs     [-i IMG ...] [-m RE] [-b BIN] [-j 2] [--failed] [--live]
-                                                        run rsvol for each case python has run, compare
+                                                        run fastvol for each case python has run, compare
     sweep.py report [-i IMG ...] [-v]                   counts per image and every mismatch
     sweep.py show IMG CASE                              diff of one case
 
@@ -28,7 +28,7 @@ Layout under /home/user/rs-vol/testdata/scratch/sweep/:
     harvest/IMG.json   the real values (PIDs, offsets, bases, ...) the cases were built from
     cases/IMG.jsonl    one case per line: id, argv, mode, est
     py/IMG/ID/         python run: out.txt err.txt meta.json cwd/ files/ (files/ is the -o dir)
-    rs/IMG/ID/         rsvol run, same layout
+    rs/IMG/ID/         fastvol run, same layout
     report/IMG.tsv     id, status, detail
 
 Case modes: `run` (one run), `twice` (the same command twice into one -o directory: file name
@@ -196,7 +196,7 @@ def uniq(xs):
 
 
 # ------------------------------------------------------------------------------------------------
-# inputs shared by python and rsvol
+# inputs shared by python and fastvol
 
 
 def write_inputs():
@@ -221,8 +221,8 @@ def write_inputs():
     return d
 
 
-def rsvol_json(binary, img, argv):
-    """Run rsvol with -r json at harvest time (used only to find real argument values)."""
+def fastvol_json(binary, img, argv):
+    """Run fastvol with -r json at harvest time (used only to find real argument values)."""
     im = IMAGES[img]
     cmd = [binary, "-q", "-r", "json"] + sym_args(img) + ["-f", im["path"]] + argv
     try:
@@ -255,7 +255,7 @@ class Cases:
             return
         self.ids.add(cid)
         # isfinfo lists the symbol files on disk and python's identifier cache as it is right now:
-        # python is rerun right before rsvol instead of cached
+        # python is rerun right before fastvol instead of cached
         live = plugin == "isfinfo.IsfInfo"
         argv = list(gopts) + ([plugin] if plugin else []) + [str(a) for a in args]
         self.cases.append(dict(id=cid, plugin=plugin, argv=argv, mode=mode,
@@ -363,7 +363,7 @@ def windows_values(img, binary):
     V["pid_lsass"] = n2p.get("lsass.exe")
     V["pid_svc"] = n2p.get("svchost.exe")
     V["pids3"] = uniq([V["pid_small"], V["pid_lsass"], V["pid1"], 4])[:3]
-    phys = rsvol_json(binary, img, ["windows.pslist.PsList", "--physical", "--pid"] + [str(p) for p in uniq([V["pid1"], V["pid_small"]])])
+    phys = fastvol_json(binary, img, ["windows.pslist.PsList", "--physical", "--pid"] + [str(p) for p in uniq([V["pid1"], V["pid_small"]])])
     for row in phys:
         if row.get("PID") == V["pid1"]:
             V["phys1"] = row.get("Offset(P)")
@@ -423,11 +423,11 @@ def windows_values(img, binary):
     for r in ref_rows(img, "windows.bigpools.BigPools"):
         tags[r["Tag"]] = tags.get(r["Tag"], 0) + 1
     V["tags"] = [t for t, _ in sorted(tags.items(), key=lambda kv: (-kv[1], kv[0]))[:2]]
-    sym = rsvol_json(binary, img, ["windows.pe_symbols.PESymbols", "--source", "kernel", "--module", "ntoskrnl.exe", "--symbols", "NtCreateFile"])
+    sym = fastvol_json(binary, img, ["windows.pe_symbols.PESymbols", "--source", "kernel", "--module", "ntoskrnl.exe", "--symbols", "NtCreateFile"])
     for row in sym:
         if isinstance(row.get("Address"), int):
             V["sym_addr"] = row["Address"]
-    V["psscan_phys"] = [row.get("Offset(P)") for row in rsvol_json(binary, img, ["windows.psscan.PsScan", "--physical"])][:6]
+    V["psscan_phys"] = [row.get("Offset(P)") for row in fastvol_json(binary, img, ["windows.psscan.PsScan", "--physical"])][:6]
     return V
 
 
@@ -942,8 +942,9 @@ def manifest(run_dir):
 def env_for():
     e = dict(os.environ)
     e["COLUMNS"] = "80"
-    e["RSVOL_CACHE"] = SCR + "/rscache"
-    e.pop("RSVOL_TRACE", None)
+    e["FASTVOL_CACHE"] = SCR + "/rscache"
+    e.pop("FASTVOL_TRACE", None)
+    e.pop("RSVOL_TRACE", None)  # the pre-rename name is an alias
     return e
 
 
@@ -1211,7 +1212,7 @@ def cmd_rs(args):
             pd = f"{SCR}/py/{img}/{c['id']}"
             rd = f"{SCR}/rs/{img}/{c['id']}"
             if c.get("live"):
-                with live_lock:  # one python at a time, and rsvol right after it
+                with live_lock:  # one python at a time, and fastvol right after it
                     run_one(py_prefix, img, c, pd, PY_TIMEOUT)
                     run_one(prefix, img, c, rd, RS_TIMEOUT)
             else:
@@ -1285,7 +1286,7 @@ def main():
         s.add_argument("-i", "--img", nargs="+", default=list(IMAGES), choices=list(IMAGES))
         s.add_argument("-m", "--match", default=None)
         s.add_argument("-j", "--jobs", type=int, default=2)
-        s.add_argument("-b", "--bin", default=HERE + "/target/release/vol")
+        s.add_argument("-b", "--bin", default=HERE + "/target/release/fvol")
         s.add_argument("-v", "--verbose", action="store_true")
         s.add_argument("--max-est", type=float, default=PY_TIMEOUT)
         s.add_argument("--force", action="store_true")

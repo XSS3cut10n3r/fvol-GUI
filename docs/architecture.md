@@ -1,16 +1,16 @@
-# How rsvol works
+# How fastvol works
 
-This page explains how rsvol is put together, how it keeps its output identical to python
+This page explains how fastvol is put together, how it keeps its output identical to python
 volatility3 and where its speed comes from. It is background reading for contributors and for
 anyone who wants to know why the results can be trusted. For the rules contributors must follow,
 see [DESIGN.md](../DESIGN.md); for the API, see
 [src/objects/README-API.md](../src/objects/README-API.md).
 
-Applies to rsvol 0.1.0.
+Applies to fastvol 0.1.0.
 
 ## The shape of a run
 
-A `vol` invocation does one thing: it runs one plugin over one image and prints its rows. The
+A `fvol` invocation does one thing: it runs one plugin over one image and prints its rows. The
 pieces involved mirror volatility3's architecture, and most modules name the python file they
 port.
 
@@ -36,13 +36,13 @@ layer never runs kernel discovery.
 
 ## Layers
 
-A layer is an address space that can be read. volatility3 stacks them, and rsvol builds the same
+A layer is an address space that can be read. volatility3 stacks them, and fastvol builds the same
 stacks with the same names, because layer names appear in output such as `windows.info.Info`.
 
 - **The file layer** maps the image read-only with `mmap`. Reads are a bounds check and a copy,
   and `slice()` returns the mapped bytes themselves when a range is contiguous in the file.
   python reads a `.gz`, `.bz2` or `.xz` image through a decompressing file object, where every
-  backwards seek decompresses again from the start of the file. rsvol decompresses such an image
+  backwards seek decompresses again from the start of the file. fastvol decompresses such an image
   once into its cache and maps the result, so the file layer stays a mapping. The decoders
   stream to disk with bounded memory: xz blocks, bzip2 blocks and gzip members decode on all
   cores and a single DEFLATE stream decodes on one, with a writer thread copying the output
@@ -70,7 +70,7 @@ page.
 volatility3 describes kernels and data structures in ISF files, which are JSON documents of up to
 tens of megabytes. python parses them on every run.
 
-rsvol converts each ISF once into a flat, position-independent binary blob: a string pool,
+fastvol converts each ISF once into a flat, position-independent binary blob: a string pool,
 fixed-size records for types, members, symbols and enums, and precomputed open-addressing hash
 tables. The blob is written to the cache as it is. On the next run, loading a symbol table means
 mapping the cache file and checking its header, with no parsing, no hashing and no allocation.
@@ -102,19 +102,19 @@ a hidden mode, in its own session, with no inherited file descriptors and at idl
 The run exits at once. The helper takes a lock so that concurrent runs build a blob once,
 rereads the ISF, checks that the file did not change, and writes the blob atomically; the next
 run maps it. Building the blob on a thread of the run itself would add the build, 50 ms for
-that kernel, to every first run. `RSVOL_DEFERRED_ISFB=thread` does that instead, and `=off`
+that kernel, to every first run. `FASTVOL_DEFERRED_ISFB=thread` does that instead, and `=off`
 writes no blob at all.
 
 To find the right ISF for a Linux or macOS kernel, volatility3 compares the kernel banner in
 memory with the banner stored in every ISF on the search path; for a Windows PDB it looks up
-the PDB's name, GUID and age the same way. rsvol keeps an identifier index of those banners and
+the PDB's name, GUID and age the same way. fastvol keeps an identifier index of those banners and
 PDB identifiers, updated only for files whose size or modification time changed. The index is
 python volatility3's own identifier cache (an SQLite database) as python would update it:
-rsvol replays python's cache update in memory (drop rows of vanished files, re-read files newer
+fastvol replays python's cache update in memory (drop rows of vanished files, re-read files newer
 than a row older than three days, append new files) and reads only the files that update would
 read. python resolves an identifier to the last matching row, so its choice among ISFs sharing
 one depends on the history of its database; replaying it gives the same choice. python appends
-new files in the iteration order of a `set` of their URLs, so rsvol lists the files on the
+new files in the iteration order of a `set` of their URLs, so fastvol lists the files on the
 search path in python's directory-walk order and emulates CPython's set table (with the
 `PYTHONHASHSEED=0` string hash, the only reproducible one); without a python database it
 replays python building one from scratch. When the index has to read new files, a quick scan of
@@ -139,7 +139,7 @@ where python reads.
 
 This matters for parity. python raises `InvalidAddressException` at the exact attribute access
 that touches an unreadable page, and its plugins decide per call site whether to skip a row, stop
-or print `-`. rsvol's accessors return an error at the same points, so a port can make the same
+or print `-`. fastvol's accessors return an error at the same points, so a port can make the same
 decision in the same place.
 
 Layers and symbol tables live for the whole process, so objects carry no lifetimes and can be
@@ -150,7 +150,7 @@ read it without any lookup.
 
 Automagic is volatility3's name for the steps that turn an image into a usable kernel: stacking
 container layers, finding the page table root, finding the kernel base and loading its symbols.
-rsvol makes the same decisions from the same evidence:
+fastvol makes the same decisions from the same evidence:
 
 - **Windows**: a scan for the self-referencing page table entry that gives the DTB, then the
   kernel's PDB signature and base, via KDBG or a scan, then the PDB symbol table, downloaded and
@@ -159,7 +159,7 @@ rsvol makes the same decisions from the same evidence:
   and python's `swapper` search for the KASLR shift.
 - **macOS**: the kernel banner scan, the KASLR shift and the `IdlePML4` root.
 
-python scans the whole image and then chooses; rsvol streams the scan in python's hit order and
+python scans the whole image and then chooses; fastvol streams the scan in python's hit order and
 stops at the first hit python would pick. The result is stored per image in the automagic cache,
 so a warm run does no scanning at all. So is a failure to find an OS's kernel: timeliner runs the
 plugins of every OS, and a warm run does not look for the other two kernels again.
@@ -169,7 +169,7 @@ plugins of every OS, and a warm run does not look for the other two kernels agai
 Scanning plugins, such as `psscan`, `filescan`, `netscan` and `yarascan`, search whole layers for
 byte patterns. Which hits python reports depends on how it cuts the layer into chunks: 16 MiB
 chunks with a one-page overlap on the file, chunks that never cross a mapped run on translation
-layers, and a hit counts only if it starts before the chunk size. rsvol reproduces that chunk
+layers, and a hit counts only if it starts before the chunk size. fastvol reproduces that chunk
 list exactly, then runs it differently:
 
 - Chunks are scanned on all cores. Results are buffered and emitted in chunk order, so the output
@@ -218,12 +218,12 @@ status 1.
 
 ## How parity is guaranteed
 
-The python source of volatility3 2.28.2 is the specification. Four practices keep rsvol faithful
+The python source of volatility3 2.28.2 is the specification. Four practices keep fastvol faithful
 to it.
 
 1. **Port behaviour, not intent.** Ports reproduce which exceptions python catches and where, the
    evaluation order that decides which rows are skipped, and python's own bugs where they are
-   visible in output. When python raises halfway through a plugin, rsvol prints the same rows
+   visible in output. When python raises halfway through a plugin, fastvol prints the same rows
    and then fails the same way.
 2. **Emulate the python runtime where output depends on it.** The code includes CPython's set
    iteration order for integers and, where needed, for strings under `PYTHONHASHSEED=0`, python's
@@ -264,6 +264,6 @@ PCRE2-JIT and RE2.
 ## Caches and correctness
 
 Every cache is a pure function of its inputs: image identity, symbol file identity, format
-versions and, for the scan cache, the rsvol executable. Each cache file carries its full key,
+versions and, for the scan cache, the fastvol executable. Each cache file carries its full key,
 which is compared on load, and is written atomically. The rules and the list of cache files are
 in [caching.md](caching.md).

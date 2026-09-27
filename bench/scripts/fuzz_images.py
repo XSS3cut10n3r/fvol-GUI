@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Robustness fuzzer for rsvol: corrupt memory images, run every plugin, classify the outcome.
+"""Robustness fuzzer for fastvol: corrupt memory images, run every plugin, classify the outcome.
 
-rsvol must never panic, hang, exhaust memory or run away on a damaged image (DESIGN.md rule 4:
+fastvol must never panic, hang, exhaust memory or run away on a damaged image (DESIGN.md rule 4:
 "Never panic on malformed memory"). This driver builds corrupted copies ("mutants") of the test
 images *without copying them* -- a btrfs reflink (`cp --reflink=auto`) shares every extent with
 the original, then targeted in-place writes, hole punches and truncation cost only the changed
@@ -26,7 +26,7 @@ Subcommands (run with -h for options):
     campaign   BASE          N mutants x every plugin case; keeps only failing mutants
     mutate     BASE SEED     build one mutant, print its path and mutation log
     rerun      LOGFILE       rebuild a mutant from its log and re-run its cases
-    pycompare  RESULTS.jsonl run python vol3 on a sample of runs and diff stdout with rsvol
+    pycompare  RESULTS.jsonl run python vol3 on a sample of runs and diff stdout with fastvol
     containers               mutate the tiny container fixtures (tests/fixtures/containers)
     report     RESULTS...    print summary tables
 
@@ -100,8 +100,9 @@ def run_case(binary, image, osname, argv, timeout, mem, cache, outdir, slots,
         cmd += ['-s', SYMS]
     cmd += argv
     env = dict(os.environ)
-    env['RSVOL_CACHE'] = cache
-    env.pop('RSVOL_TRACE', None)
+    env['FASTVOL_CACHE'] = cache
+    env.pop('FASTVOL_TRACE', None)
+    env.pop('RSVOL_TRACE', None)  # the pre-rename name is an alias
     t0 = time.monotonic()
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, env=env, start_new_session=True)
@@ -172,7 +173,7 @@ def run_case(binary, image, osname, argv, timeout, mem, cache, outdir, slots,
     return r
 
 
-# rsvol deliberately emulates python's uncaught exceptions by panicking with a message that names
+# fastvol deliberately emulates python's uncaught exceptions by panicking with a message that names
 # the python exception; the CLI catches it (catch_unwind) and exits 1, exactly as python does, so
 # these are NOT bugs (stderr text is irrelevant to parity). A panic whose message is a Rust-internal
 # fault (index/unwrap/overflow/slice/unreachable/...) IS a bug: python would have skipped the object.

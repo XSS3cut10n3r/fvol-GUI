@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test: rsvol's YARA hex / regex string engine vs yara-python 4.5.
+"""Differential test: fastvol's YARA hex / regex string engine vs yara-python 4.5.
 
 Random YARA regexes and hex strings (incl. jumps, wildcards, alternations, chained
 strings over 200-byte jumps) with random modifiers are matched against random buffers
@@ -183,8 +183,8 @@ def main():
         for i, (kind, src, mods, data) in enumerate(cases):
             fh.write("%d\t%s\t%s\t%s\t%s\n" % (i, kind, src.encode().hex(), ",".join(mods), data.hex()))
             expected.append(yara_matches(kind, src, mods, data))
-    env = dict(os.environ, RSVOL_YRE_CASES=cpath, RSVOL_YRE_OUT=opath)
-    cmd = ["cargo", "test", "--profile", args.profile, "--bin", "vol", "yara_yre_difftest_driver", "--", "--ignored", "--nocapture", "--test-threads=1"]
+    env = dict(os.environ, FASTVOL_YRE_CASES=cpath, FASTVOL_YRE_OUT=opath)
+    cmd = ["cargo", "test", "--profile", args.profile, "--bin", "fvol", "yara_yre_difftest_driver", "--", "--ignored", "--nocapture", "--test-threads=1"]
     res = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
     if res.returncode != 0:
         print(res.stdout[-3000:], res.stderr[-3000:])
@@ -207,10 +207,10 @@ def main():
                 shown += 1
                 e = expected[i].split(",")
                 g = (got.get(i) or "").split(",")
-                print("MISMATCH #%d %s %r mods=%s len=%d\n   yara =%s\n   rsvol=%s" % (
+                print("MISMATCH #%d %s %r mods=%s len=%d\n   yara =%s\n   fastvol=%s" % (
                     i, kind, src, mods, len(data), ",".join(e[:12]), ",".join(g[:12])))
                 se, sg = set(e), set(g)
-                print("   only-yara=%s only-rsvol=%s" % (sorted(se - sg)[:8], sorted(sg - se)[:8]))
+                print("   only-yara=%s only-fastvol=%s" % (sorted(se - sg)[:8], sorted(sg - se)[:8]))
     print("cases=%d mismatches=%d (%.2f%%) yara-scan-errors-skipped=%d" % (len(cases), bad, 100.0 * bad / max(1, len(cases)), scanerr))
     sys.exit(1 if bad else 0)
 

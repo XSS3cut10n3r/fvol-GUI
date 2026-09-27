@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interleaved 3-way benchmark: python volatility3 vs vol-rs vs rsvol, per plugin, run back to back
+"""Interleaved 3-way benchmark: python volatility3 vs vol-rs vs fastvol, per plugin, run back to back
 so all three see the same machine load. Records wall time and CPU time (user+sys of the child).
 Usage: bench3.py PLUGIN_LIST OUT.tsv [--py-runs 1] [--rs-runs 3]
 Python runs go through limit.sh (memory cap). One process at a time."""

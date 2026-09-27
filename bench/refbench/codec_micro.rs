@@ -109,7 +109,7 @@ fn main() {
     let dir = args.get(1).cloned().expect("usage: codec_micro VECDIR [REPS] [FILTER]");
     let reps: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(9);
     let only: String = args.get(3).cloned().unwrap_or_default();
-    if let Some(cpu) = std::env::var("RSVOL_BENCH_CPU").ok().and_then(|v| v.parse().ok()) {
+    if let Some(cpu) = std::env::var("FASTVOL_BENCH_CPU").or_else(|_| std::env::var("RSVOL_BENCH_CPU")).ok().and_then(|v| v.parse().ok()) {
         pin(cpu);
     }
     type Dec = fn(&[u8], &mut [u8]) -> bool;
@@ -167,6 +167,6 @@ fn main() {
                 cyc as f64 / best / 1e9
             );
         }
-        println!("{name:<12} rsvol {:8.1} MB/s  ({} chunks, best of {reps}){extra}", total as f64 / best / 1e6, v.len());
+        println!("{name:<12} fastvol {:8.1} MB/s  ({} chunks, best of {reps}){extra}", total as f64 / best / 1e6, v.len());
     }
 }

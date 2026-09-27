@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cold vs warm start of `windows.pslist.PsList` for each tool.
 
-cold = the tool's own cache directory removed right before the run (rsvol: $XDG_CACHE_HOME/rsvol,
+cold = the tool's own cache directory removed right before the run (rsvol: $XDG_CACHE_HOME/fastvol, or rsvol before the rename,
 vol-rs: $XDG_CACHE_HOME/vol-rs, python: identifier.cache + data_*.cache in $XDG_CACHE_HOME/volatility3;
 the provisioned kernel symbol files are kept for all tools, the image stays in the page cache).
 warm = the cache left by the previous run. Usage: startup_vm.py OUT.tsv [--runs 5] [--py-runs 3]"""
@@ -13,7 +13,7 @@ C = f"{B}/home/.cache"
 os.environ["XDG_CACHE_HOME"] = C
 os.environ["XDG_DATA_HOME"] = f"{B}/home/.local/share"
 TOOLS = {
-    "rsvol": ([os.environ.get("RS_BIN", f"{B}/rsvol/target/release/vol")], lambda: shutil.rmtree(f"{C}/rsvol", ignore_errors=True)),
+    "rsvol": ([os.environ.get("RS_BIN", f"{B}/rsvol/target/release/fvol")], lambda: [shutil.rmtree(f"{C}/{d}", ignore_errors=True) for d in ("fastvol", "rsvol")]),
     "vol-rs": ([f"{B}/bin/vol-rs"], lambda: shutil.rmtree(f"{C}/vol-rs", ignore_errors=True)),
     "python": ([f"{B}/venv314/bin/python", f"{B}/volatility3/vol.py"],
                lambda: [os.remove(f) for f in glob.glob(f"{C}/volatility3/*.cache")]),

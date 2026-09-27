@@ -1,5 +1,5 @@
 #!/bin/bash
-# libcapstone vs rsvol ARM / AArch64 decode+format throughput, interleaved runs (best of N),
+# libcapstone vs fastvol ARM / AArch64 decode+format throughput, interleaved runs (best of N),
 # on random words and on real code blobs (raw .text, e.g. from llvm-objcopy -O binary).
 #   bench/refbench/arm_bench.sh [ARM64_TEXT.bin] [ARM_TEXT.bin] [N]
 set -e
@@ -21,7 +21,7 @@ run() {  # label arch [file]
     best_c=$(echo "$c $best_c" | awk '{print ($1>$2)?$1:$2}')
     best_r=$(echo "$r $best_r" | awk '{print ($1>$2)?$1:$2}')
   done
-  printf "%-22s capstone %6.2f M insn/s   rsvol %6.2f M insn/s   x%.1f\n" "$1" "$best_c" "$best_r" \
+  printf "%-22s capstone %6.2f M insn/s   fastvol %6.2f M insn/s   x%.1f\n" "$1" "$best_c" "$best_r" \
     "$(echo "$best_r $best_c" | awk '{print $1/$2}')"
 }
 run "arm64 random words" arm64

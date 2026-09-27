@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test harness: rsvol's ARM / AArch64 disassemblers (src/disasm/arm64, arm) vs
+"""Differential test harness: fastvol's ARM / AArch64 disassemblers (src/disasm/arm64, arm) vs
 capstone 5.
 
 Usage (bench venv python, which has capstone):

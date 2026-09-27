@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Codec throughput: reference C libraries vs rsvol (src/codecs), same inputs, in-process,
+# Codec throughput: reference C libraries vs fastvol (src/codecs), same inputs, in-process,
 # best of N.
 #   snappy       libsnappy (system, -lsnappy)
 #   xpress_huff  wimlib 1.14.4 XPRESS decompressor (built from source into $WORK)
@@ -12,7 +12,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 RAW="${1:-/home/user/cbc2/task2/memory-dirty.raw}"
 N="${2:-2048}"
 REPS="${3:-7}"
-export RSVOL_BENCH_CPU="${RSVOL_BENCH_CPU:-2}"   # pin both sides to one P-core
+export FASTVOL_BENCH_CPU="${FASTVOL_BENCH_CPU:-${RSVOL_BENCH_CPU:-2}}"   # pin both sides to one P-core
 WORK="${WORK:-/home/user/rs-vol/testdata/scratch/refbench}"   # on disk, not tmpfs
 mkdir -p "$WORK"
 cd "$WORK"
@@ -33,5 +33,5 @@ gcc -O3 -march=native -o refbench "$HERE/refbench.c" lzxpress.c \
 [ -f snappy.vec ] || ./refbench mkvec "$RAW" "$WORK" "$N"
 ./refbench bench "$WORK" "$REPS"
 cd "$ROOT"
-RSVOL_CODEC_BENCH="$WORK" RSVOL_BENCH_REPS="$REPS" /home/user/rs-vol/bench/scripts/cargo.sh test --release codec_bench -- --ignored --nocapture 2>/dev/null \
-    | grep -E "rsvol"
+FASTVOL_CODEC_BENCH="$WORK" FASTVOL_BENCH_REPS="$REPS" /home/user/rs-vol/bench/scripts/cargo.sh test --release codec_bench -- --ignored --nocapture 2>/dev/null \
+    | grep -E "fastvol"

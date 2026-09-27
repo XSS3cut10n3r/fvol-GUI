@@ -1,4 +1,4 @@
-"""Probe-driven instruction-class learner for fixed-width (32-bit) ISAs, used to build rsvol's
+"""Probe-driven instruction-class learner for fixed-width (32-bit) ISAs, used to build fastvol's
 ARM / AArch64 disassembler specs from the capstone 5 oracle (black box: word -> text).
 
 Model

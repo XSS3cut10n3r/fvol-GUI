@@ -2,8 +2,8 @@
 # Build and run the reference JSON benchmarks (simdjson, yyjson, python json) on ISF files.
 # Usage: bench/refbench/isf_json_bench.sh [FILE.json ...]
 # simdjson is not packaged on this machine: its single-header amalgamation is fetched once into
-# $WORK (disk scratch; override with WORK=...). Compare with rsvol:
-#   RSVOL_BENCH_JSON=FILE.json bench/scripts/cargo.sh test --release isf_parse_bench -- --ignored --nocapture
+# $WORK (disk scratch; override with WORK=...). Compare with fastvol:
+#   FASTVOL_BENCH_JSON=FILE.json bench/scripts/cargo.sh test --release isf_parse_bench -- --ignored --nocapture
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=${WORK:-$HERE/../../testdata/scratch/refbench-json}

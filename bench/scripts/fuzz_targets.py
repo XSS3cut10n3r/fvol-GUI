@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ISF reading + structure-offset discovery for the rsvol robustness fuzzer.
+"""ISF reading + structure-offset discovery for the fastvol robustness fuzzer.
 
 Reads a volatility3 ISF (JSON, possibly xz) to learn struct sizes, the byte offsets of the
 linked-list members inside kernel objects (so a mutant can build a cyclic list), and kernel

@@ -1,5 +1,5 @@
 /*
- * Reference codec throughput for rsvol's src/codecs (see run.sh).
+ * Reference codec throughput for fastvol's src/codecs (see run.sh).
  *
  *   refbench mkvec RAW_IMAGE OUTDIR NCHUNKS   write snappy.vec, xpress_huff.vec, xpress_lz77.vec
  *   refbench bench OUTDIR REPS                in-process decode throughput, best of REPS
@@ -145,7 +145,8 @@ static void bench(const char *label, struct vec v, decode_fn fn, void *ctx, int 
 }
 
 int main(int argc, char **argv) {
-    const char *cpu = getenv("RSVOL_BENCH_CPU");
+    const char *cpu = getenv("FASTVOL_BENCH_CPU");
+    if (!cpu) cpu = getenv("RSVOL_BENCH_CPU"); /* pre-rename name */
     if (cpu) {
         cpu_set_t set;
         CPU_ZERO(&set);

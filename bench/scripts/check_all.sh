@@ -3,7 +3,7 @@
 export OUTDIR=${OUTDIR:-/home/user/rs-vol/testdata/scratch/gates/run-$$/main}; mkdir -p $OUTDIR; find /home/user/rs-vol/testdata/scratch/gates -maxdepth 1 -name "run-*" -mmin +360 -exec rm -rf {} + 2>/dev/null
 # Run every plugin in a list against its python reference; summary of OK/DIFF/MISSING.
 # Usage: check_all.sh [-b BIN] [LIST]   (default list: bench/win_noarg.txt)
-BIN=/home/user/rs-vol/target/fast/vol
+BIN=/home/user/rs-vol/target/fast/fvol
 if [ "$1" = "-b" ]; then BIN=$2; shift 2; fi
 LIST=${1:-/home/user/rs-vol/bench/win_noarg.txt}
 ok=0; bad=0; miss=0

@@ -1,4 +1,4 @@
-/* libyara reference harness for rsvol's YARA engine (src/yara/rules + src/yara/scan).
+/* libyara reference harness for fastvol's YARA engine (src/yara/rules + src/yara/scan).
  *
  * For every rule file given (bench/refbench/yara_cases/NAME.yar, the SAME text the rust
  * driver compiles): compile time (yr_compiler_create + add_string + get_rules, best of
