@@ -591,6 +591,7 @@ impl LazyCore {
             return Streamed::Failed;
         }
         let _t = crate::util::trace::span("isf decode + lazy index (streamed)");
+        let t0 = std::time::Instant::now();
         let workers = crate::util::par::threads().saturating_sub(2).clamp(1, 12);
         let r = super::stream::decode_following(data, plan, |dec| {
             let (tx, rx) = std::sync::mpsc::channel::<Job>();
@@ -643,7 +644,9 @@ impl LazyCore {
                     }
                 }
                 drop(tx);
+                crate::util::trace::note(|| format!("isf lazy index: everything fed at {:.2} ms", t0.elapsed().as_secs_f64() * 1e3));
                 let outs: Vec<Option<JobOut>> = orx.iter().collect();
+                crate::util::trace::note(|| format!("isf lazy index: every range checked at {:.2} ms", t0.elapsed().as_secs_f64() * 1e3));
                 (ok, f, outs)
             })
         });
@@ -716,10 +719,19 @@ impl LazyCore {
             }
         }
         drop(_tc);
-        match Self::index_pre(&json, sh.unwrap_or_default(), pre, opts) {
-            Some(x) => Streamed::Table(Self::from_indexed(JsonBuf::Owned(json), x)),
+        let x = {
+            let _t = crate::util::trace::span("isf lazy: final index");
+            Self::index_pre(&json, sh.unwrap_or_default(), pre, opts)
+        };
+        let r = match x {
+            Some(x) => {
+                let _t = crate::util::trace::span("isf lazy: table");
+                Streamed::Table(Self::from_indexed(JsonBuf::Owned(json), x))
+            }
             None => Streamed::Json(json),
-        }
+        };
+        crate::util::trace::note(|| format!("isf lazy index: done at {:.2} ms", t0.elapsed().as_secs_f64() * 1e3));
+        r
     }
 
     /// A lazy table over `json` (see the module docs); `Err(json)` when the fused builder would
