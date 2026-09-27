@@ -404,9 +404,10 @@ impl Session {
         g
     }
 
-    /// A record atom ([`Atom::Recs`]) mapped and verified in place: header, key, checksum, hit
-    /// lists, tags below `ntags`, and exactly one record per match.
-    fn load_recs(&self, atom: &Atom, ntags: usize) -> Option<MappedRecs> {
+    /// An atom's file mapped and verified in place (header, key, checksum, hit lists, tags
+    /// accepted by `tag_ok`, and for record atoms exactly one record per match): its arrays are
+    /// read where they are, nothing is decoded or copied.
+    fn load_view(&self, atom: &Atom, tag_ok: impl Fn(u32) -> bool) -> Option<AtomView> {
         let key = self.atom_key(atom);
         let path = self.atom_path(&key);
         let Some(map) = std::fs::File::open(&path).ok().and_then(|f| crate::util::mmap::Mmap::map(&f).ok()) else {
@@ -414,23 +415,30 @@ impl Session {
             return None;
         };
         let rec_len = atom.rec_len();
-        let m = (|| {
+        let v = (|| {
             let buf = map.as_slice();
-            let (payload, lay) = verified_payload(buf, KIND_RECS, true, &key)?;
-            let records = check_groups(payload, &lay, |tag| (tag as usize) < ntags)?;
+            let (payload, lay) = verified_payload(buf, atom.kind(), atom.tagged(), &key)?;
+            let records = check_groups(payload, &lay, tag_ok)?;
             if (payload.len() - records) as u64 != (lay.nrecs as u64).checked_mul(rec_len as u64)? {
                 return None;
             }
             let at = buf.len() - payload.len();
             Some((at..buf.len(), lay))
         })();
-        match m {
-            Some((payload, lay)) => Some(MappedRecs { map, payload, lay, rec_len }),
+        match v {
+            Some((payload, lay)) => Some(AtomView { map, payload, lay }),
             None => {
                 crate::util::trace::note(|| format!("scan cache: damaged {atom:?} ({})", path.display()));
                 None
             }
         }
+    }
+
+    /// A record atom ([`Atom::Recs`]) mapped and verified in place ([`Session::load_view`],
+    /// tags below `ntags`).
+    fn load_recs(&self, atom: &Atom, ntags: usize) -> Option<MappedRecs> {
+        let view = self.load_view(atom, |tag| (tag as usize) < ntags)?;
+        Some(MappedRecs { view, rec_len: atom.rec_len() })
     }
 
     /// Write the atoms, then keep the cache under its size cap when this created the image
@@ -675,7 +683,7 @@ fn check_groups(payload: &[u8], lay: &Layout, tag_ok: impl Fn(u32) -> bool) -> O
 /// The arrays are copied out as they are (no decoding).
 fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
     let (payload, lay) = verified_payload(buf, kind, tagged, key)?;
-    let pos = check_groups(payload, &lay, |_| true)?;
+    let pos = lay.len()?;
     if pos != payload.len() && kind != KIND_RECS {
         // only record atoms carry bytes after the hit lists (the caller checks their size)
         return None;
@@ -689,34 +697,103 @@ fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
         payload[lay.rels_at()..lay.tags_at()].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as u64).collect()
     };
     let tags = if tagged { payload[lay.tags_at()..lay.tags_at() + nr * 4].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect() } else { Vec::new() };
-    Some(Groups { starts, ends, rels, tags, data: payload[pos..].to_vec() })
+    let g = Groups { starts, ends, rels, tags, data: payload[pos..].to_vec() };
+    valid_groups(&g, tagged).then_some(g)
 }
 
-/// A record atom verified in its mapped file and read in place: a warm vmscan allocates no
-/// buffer for it (on a VM, every fresh heap page is a ~6 us fault).
-struct MappedRecs {
+/// [`check_groups`] of decoded arrays (tight loops over the vectors).
+fn valid_groups(g: &Groups, tagged: bool) -> bool {
+    let (ends, rels) = (&g.ends, &g.rels);
+    g.starts.is_sorted_by(|a, b| a < b)
+        && ends.first().is_none_or(|&e| e > 0)
+        && ends.is_sorted_by(|a, b| a < b)
+        && ends.last().map_or(0, |&e| e as usize) == rels.len()
+        && (tagged || (0..ends.len()).all(|i| rels[g.range(i)].is_sorted()))
+}
+
+/// An atom verified in its mapped file ([`Session::load_view`]) and read in place: a warm
+/// replay allocates nothing for it (every fresh heap page is a fault: ~6 us on a VM, and the
+/// 480k MFT hits are MBs).
+struct AtomView {
     map: crate::util::mmap::Mmap,
     /// the payload's range in the file
     payload: std::ops::Range<usize>,
     lay: Layout,
+}
+
+impl AtomView {
+    #[inline(always)]
+    fn p(&self) -> &[u8] {
+        &self.map.as_slice()[self.payload.clone()]
+    }
+    fn groups(&self) -> usize {
+        self.lay.ngroups
+    }
+    #[inline(always)]
+    fn start(&self, i: usize) -> u64 {
+        u64_le(self.p(), i * 8)
+    }
+    /// The matches of group `i`.
+    #[inline(always)]
+    fn range(&self, i: usize) -> std::ops::Range<usize> {
+        let end = |i: usize| u32_le(self.p(), self.lay.ends_at() + i * 4) as usize;
+        (if i == 0 { 0 } else { end(i - 1) })..end(i)
+    }
+    #[inline(always)]
+    fn rel(&self, j: usize) -> u64 {
+        if self.lay.wide { u64_le(self.p(), self.lay.rels_at() + j * 8) } else { u32_le(self.p(), self.lay.rels_at() + j * 4) as u64 }
+    }
+    #[inline(always)]
+    fn tag(&self, j: usize) -> u32 {
+        u32_le(self.p(), self.lay.tags_at() + j * 4)
+    }
+    /// Record bytes after the hit lists.
+    fn records(&self) -> &[u8] {
+        let p = self.p();
+        &p[self.lay.len().unwrap_or(p.len())..]
+    }
+}
+
+/// A record atom verified in its mapped file and read in place (a warm vmscan).
+struct MappedRecs {
+    view: AtomView,
     rec_len: usize,
 }
 
 impl MappedRecs {
     /// `f(chunk start, offset in chunk, tag, record)` for every match, in chunk order.
     fn for_each(&self, mut f: impl FnMut(u64, u64, u32, &[u8])) {
-        let p = &self.map.as_slice()[self.payload.clone()];
-        let lay = &self.lay;
-        let data = &p[lay.len().unwrap_or(p.len())..];
-        let mut j = 0usize;
-        for i in 0..lay.ngroups {
-            let start = u64_le(p, i * 8);
-            let end = u32_le(p, lay.ends_at() + i * 4) as usize;
-            while j < end {
-                let rel = if lay.wide { u64_le(p, lay.rels_at() + j * 8) } else { u32_le(p, lay.rels_at() + j * 4) as u64 };
-                f(start, rel, u32_le(p, lay.tags_at() + j * 4), &data[j * self.rec_len..(j + 1) * self.rec_len]);
-                j += 1;
+        let v = &self.view;
+        let data = v.records();
+        for i in 0..v.groups() {
+            let start = v.start(i);
+            for j in v.range(i) {
+                f(start, v.rel(j), v.tag(j), &data[j * self.rec_len..(j + 1) * self.rec_len]);
             }
+        }
+    }
+}
+
+/// A query's cached matches as the scanner's `finish` takes them: chunk `i` starts at
+/// `starts[i]` and has the `(offset in chunk, tag)` matches `m[ends[i - 1]..ends[i]]`.
+#[derive(Default)]
+struct Matches {
+    starts: Vec<u64>,
+    ends: Vec<u32>,
+    m: Vec<(u64, u32)>,
+}
+
+impl Matches {
+    #[inline]
+    fn range(&self, i: usize) -> std::ops::Range<usize> {
+        (if i == 0 { 0 } else { self.ends[i - 1] as usize })..self.ends[i] as usize
+    }
+    /// The matches pushed since the last chunk belong to the chunk at `start` (none: no chunk).
+    #[inline]
+    fn close(&mut self, start: u64) {
+        if self.m.len() > self.ends.last().map_or(0, |&e| e as usize) {
+            self.starts.push(start);
+            self.ends.push(self.m.len() as u32);
         }
     }
 }
@@ -868,7 +945,7 @@ where
     match cached {
         Some(m) => {
             let _t = crate::util::trace::span("scan cache: replay");
-            crate::util::trace::note(|| format!("scan cache: hit, {} chunks, {} matches", m.starts.len(), m.rels.len()));
+            crate::util::trace::note(|| format!("scan cache: hit, {} chunks, {} matches", m.starts.len(), m.m.len()));
             replay(scanner, &m, f)
         }
         None => {
@@ -911,67 +988,90 @@ where
 }
 
 /// The matches of `q` (the scanner's prescan output per chunk) from the cache, if every atom
-/// it needs is there.
-fn load_query(session: &Session, q: &CacheQuery) -> Option<Groups> {
+/// it needs is there. The atoms are read in their mapped files: only the matches handed to the
+/// scanner are built.
+fn load_query(session: &Session, q: &CacheQuery) -> Option<Matches> {
+    let mut out = Matches::default();
     match q {
-        CacheQuery::Opaque { key } => session.load(&Atom::Opaque(key)),
-        CacheQuery::Every { needle, limit } => {
-            let a = session.load(&Atom::Lit(needle))?;
-            let mut g = Groups::default();
-            for i in 0..a.starts.len() {
-                for j in a.range(i) {
-                    if a.rels[j] < *limit {
-                        g.push(a.starts[i], a.rels[j], Some(0));
-                    }
-                }
+        CacheQuery::Opaque { key } => {
+            let v = session.load_view(&Atom::Opaque(key), |_| true)?;
+            out.m.reserve(v.lay.nrecs);
+            for i in 0..v.groups() {
+                out.m.extend(v.range(i).map(|j| (v.rel(j), v.tag(j))));
+                out.close(v.start(i));
             }
-            Some(g)
+        }
+        CacheQuery::Every { needle, limit } => {
+            let v = session.load_view(&Atom::Lit(needle), |_| true)?;
+            out.m.reserve(v.lay.nrecs);
+            for i in 0..v.groups() {
+                out.m.extend(v.range(i).map(|j| v.rel(j)).take_while(|&r| r < *limit).map(|r| (r, 0)));
+                out.close(v.start(i));
+            }
         }
         CacheQuery::Greedy { patterns, limit, cap } => {
             let pats = distinct_patterns(patterns);
-            let mut atoms: Vec<(Groups, u32, u32)> = Vec::with_capacity(pats.len());
+            let mut atoms: Vec<(AtomView, u32, u32)> = Vec::with_capacity(pats.len());
             for &(p, tag) in &pats {
-                atoms.push((session.load(&Atom::Lit(p))?, tag, p.len() as u32));
+                atoms.push((session.load_view(&Atom::Lit(p), |_| true)?, tag, p.len() as u32));
             }
-            Some(merge_greedy(&atoms, *limit, *cap))
+            merge_greedy(&atoms, *limit, *cap, &mut out);
         }
     }
+    Some(out)
 }
 
-/// Merge per-literal atoms `(groups, tag, len)` chunk by chunk and apply the greedy selection.
-fn merge_greedy(atoms: &[(Groups, u32, u32)], limit: u64, cap: usize) -> Groups {
-    let mut out = Groups::default();
+/// Merge per-literal atoms `(atom, tag, len)` chunk by chunk and apply the greedy selection.
+fn merge_greedy(atoms: &[(AtomView, u32, u32)], limit: u64, cap: usize, out: &mut Matches) {
+    out.m.reserve(atoms.iter().map(|a| a.0.lay.nrecs).sum());
     let mut cur = vec![0usize; atoms.len()];
     let mut cand: Vec<(u64, u32, u32)> = Vec::new();
-    let mut sel: Vec<(u64, u32)> = Vec::new();
     loop {
+        // the next chunk, and which literals occur in it
         let mut cs = u64::MAX;
-        let mut any = false;
-        for (i, (g, _, _)) in atoms.iter().enumerate() {
-            if let Some(&s) = g.starts.get(cur[i])
-                && (!any || s < cs)
-            {
-                cs = s;
-                any = true;
+        let (mut only, mut count) = (0usize, 0usize);
+        for (i, (v, _, _)) in atoms.iter().enumerate() {
+            if cur[i] < v.groups() {
+                let s = v.start(cur[i]);
+                if count == 0 || s < cs {
+                    (cs, only, count) = (s, i, 1);
+                } else if s == cs {
+                    count += 1;
+                }
             }
         }
-        if !any {
+        if count == 0 {
             break;
         }
-        cand.clear();
-        for (i, (g, tag, len)) in atoms.iter().enumerate() {
-            if g.starts.get(cur[i]) == Some(&cs) {
-                cand.extend(g.range(cur[i]).map(|j| (g.rels[j], *len, *tag)));
-                cur[i] += 1;
+        if count == 1 {
+            // one literal (MFT: 480k "FILE0" hits): its occurrences ascend and have one
+            // length, the greedy walk just skips the overlapping ones
+            let (v, tag, len) = &atoms[only];
+            let (mut next, mut n) = (0u64, 0usize);
+            for j in v.range(cur[only]) {
+                let rel = v.rel(j);
+                if rel >= limit || n >= cap {
+                    break;
+                }
+                if rel >= next {
+                    out.m.push((rel, *tag));
+                    next = rel + *len as u64;
+                    n += 1;
+                }
             }
+            cur[only] += 1;
+        } else {
+            cand.clear();
+            for (i, (v, tag, len)) in atoms.iter().enumerate() {
+                if cur[i] < v.groups() && v.start(cur[i]) == cs {
+                    cand.extend(v.range(cur[i]).map(|j| (v.rel(j), *len, *tag)));
+                    cur[i] += 1;
+                }
+            }
+            greedy(&mut cand, limit, cap, &mut out.m);
         }
-        sel.clear();
-        greedy(&mut cand, limit, cap, &mut sel);
-        for &(rel, tag) in &sel {
-            out.push(cs, rel, Some(tag));
-        }
+        out.close(cs);
     }
-    out
 }
 
 /// Matches per replay work item (about).
@@ -979,13 +1079,13 @@ const REPLAY_ITEM: usize = 256;
 
 /// Hand the cached matches to `scanner.finish` chunk by chunk (in parallel, results in python
 /// order, `f` may stop early).
-fn replay<S, F>(scanner: &S, m: &Groups, mut f: F)
+fn replay<S, F>(scanner: &S, m: &Matches, mut f: F)
 where
     S: Scanner,
     F: FnMut(S::Hit) -> bool,
 {
     let n = m.starts.len();
-    let matches: Vec<(u64, u32)> = m.rels.iter().zip(&m.tags).map(|(&r, &t)| (r, t)).collect();
+    let matches = &m.m;
     let run = |a: usize, b: usize, hits: &mut Vec<S::Hit>| {
         for i in a..b {
             scanner.finish(&matches[m.range(i)], m.starts[i], hits);
