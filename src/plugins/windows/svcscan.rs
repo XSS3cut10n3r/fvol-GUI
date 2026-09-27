@@ -244,13 +244,17 @@ pub struct ServiceRow {
 
 impl ServiceRow {
     /// Hand the row to `out` (formatted bytes when it was encoded on a worker).
-    pub fn emit(self, out: &mut dyn RowSink) -> Result<()> {
-        match self.enc {
-            Some(b) => out.rows_encoded_owned(b, 1).map(|_| ()),
-            None => out.row(0, self.values),
+    pub fn emit(&self, out: &mut dyn RowSink) -> Result<()> {
+        match &self.enc {
+            Some(b) => out.rows_encoded(b, 1),
+            None => out.row(0, self.values.clone()),
         }
     }
 }
+
+/// A row as the replay hands it out: rows are shared (python yields a record's row again
+/// when a walk passes it again).
+pub type RowRef = std::rc::Rc<ServiceRow>;
 
 /// Resolved `_SERVICE_RECORD` members (None: not in this table, looked up by name).
 #[derive(Clone, Copy)]
@@ -544,7 +548,7 @@ impl Traverse {
 /// Where the rows of a walk go (python's loop body over the records).
 trait RowConsumer {
     /// python's loop body for one row; false = `break`.
-    fn row(&mut self, row: ServiceRow) -> Result<bool>;
+    fn row(&mut self, row: RowRef) -> Result<bool>;
 }
 
 /// Fewer candidates than this are computed on the calling thread.
@@ -562,14 +566,6 @@ fn row_of(rec: &Rec, map: &BinaryMap, enc: Option<&RowEncoder>, c: &Cand) -> Res
     Ok(row)
 }
 
-/// The rows of `cands` in order, in parallel when worth it.
-fn rows_of(rec: &Rec, map: &BinaryMap, enc: Option<&RowEncoder>, cands: &[Cand]) -> Vec<Result<ServiceRow>> {
-    if cands.len() < PAR_MIN {
-        cands.iter().map(|c| row_of(rec, map, enc, c)).collect()
-    } else {
-        crate::util::par::par_map(cands.len(), |i| row_of(rec, map, enc, &cands[i]))
-    }
-}
 
 /// python `SvcScan.enumerate_vista_or_later_header(...)`'s checks of the `_SERVICE_HEADER`
 /// candidate at `offset`: its first record when python walks from it.
@@ -618,6 +614,8 @@ struct HeaderPlan {
     cands: Vec<Cand>,
     /// (offset, record address) -> index into `cands`
     ids: FxHashMap<(u64, u64), u32>,
+    /// per `cands` entry: its row's index in the [`RowStore`] (set by [`compute_rows`])
+    gids: Vec<u32>,
 }
 
 /// Walk the pointers of every header candidate in `offsets` (cheap, serial), each walk
@@ -668,30 +666,66 @@ fn plan_headers(rec: Rec, offsets: &[u64], stop_at_visited: bool) -> HeaderPlan 
         };
         walks.push(Planned::Walk { ids: walk, end });
     }
-    HeaderPlan { rec, walks, cands, ids }
+    HeaderPlan { rec, walks, cands, ids, gids: Vec::new() }
 }
 
-/// The rows of a [`HeaderPlan`] to `c` in python's order: the rows of the distinct records are
-/// computed in one parallel pass, then the walks are replayed; a walk that goes on past its
-/// planned records continues record by record with the rows computed (a record's row only
-/// depends on the record and its offset).
-fn replay_headers(hp: HeaderPlan, map: &BinaryMap, enc: Option<&RowEncoder>, c: &mut dyn RowConsumer) -> Result<()> {
-    let HeaderPlan { rec, walks, cands, ids } = hp;
-    // an error is python raising at the first use
-    let mut rows: Vec<Option<Result<ServiceRow>>> = rows_of(&rec, map, enc, &cands).into_iter().map(Some).collect();
-    drop(cands);
-    let mut take = |i: usize| -> Result<ServiceRow> {
-        match &rows[i] {
+/// The rows of the planned records of one or more [`ServicePlan`]s (a record planned twice,
+/// e.g. by svcdiff's scan and list walks of the same process, has one row).
+pub struct RowStore {
+    rows: Vec<Option<Result<RowRef>>>,
+}
+
+impl RowStore {
+    /// The row at `i` (an error is python raising at the first use).
+    fn take(&mut self, i: u32) -> Result<RowRef> {
+        let i = i as usize;
+        match &self.rows[i] {
             Some(Ok(r)) => Ok(r.clone()),
-            _ => rows[i].take().expect("a failed row raises once"),
+            _ => self.rows[i].take().expect("a failed row raises once"),
         }
-    };
+    }
+}
+
+/// Compute the rows of every record planned in `plans` in one parallel pass (formatted with
+/// `enc` when given) and point the plans at them.
+pub fn compute_rows(plans: &mut [&mut ServicePlan], map: &BinaryMap, enc: Option<&RowEncoder>) -> RowStore {
+    let mut uniq: FxHashMap<(usize, u64, u64), u32> = FxHashMap::default();
+    let mut work: Vec<(Rec, Cand)> = Vec::new();
+    for plan in plans.iter_mut() {
+        for p in plan.procs.iter_mut() {
+            let (rec, cands, gids) = match p {
+                ProcPlan::Headers(hp) => (hp.rec, &hp.cands, &mut hp.gids),
+                ProcPlan::Records { rec, cands, gids, .. } => (*rec, &*cands, gids),
+            };
+            let space = rec.sp as *const Space as usize;
+            *gids = cands
+                .iter()
+                .map(|c| {
+                    *uniq.entry((space, c.offset, c.rec.addr)).or_insert_with(|| {
+                        work.push((rec, *c));
+                        (work.len() - 1) as u32
+                    })
+                })
+                .collect();
+        }
+    }
+    drop(uniq);
+    let one = |(rec, c): &(Rec, Cand)| row_of(rec, map, enc, c);
+    let rows: Vec<Result<ServiceRow>> = if work.len() < PAR_MIN { work.iter().map(one).collect() } else { crate::util::par::par_map(work.len(), |i| one(&work[i])) };
+    RowStore { rows: rows.into_iter().map(|r| Some(r.map(RowRef::new))).collect() }
+}
+
+/// The rows of a [`HeaderPlan`] to `c` in python's order: the walks are replayed with the rows
+/// of `store`; a walk that goes on past its planned records continues record by record with
+/// the rows computed (a record's row only depends on the record and its offset).
+fn replay_headers(hp: HeaderPlan, store: &mut RowStore, map: &BinaryMap, enc: Option<&RowEncoder>, c: &mut dyn RowConsumer) -> Result<()> {
+    let HeaderPlan { rec, walks, ids, gids, .. } = hp;
     'walks: for p in walks {
         match p {
             Planned::Raise(e) => return Err(e),
             Planned::Walk { ids: walk, end } => {
                 for id in walk {
-                    if !c.row(take(id as usize)?)? {
+                    if !c.row(store.take(gids[id as usize])?)? {
                         continue 'walks;
                     }
                 }
@@ -705,8 +739,8 @@ fn replay_headers(hp: HeaderPlan, map: &BinaryMap, enc: Option<&RowEncoder>, c: 
                             Some(Ok(cand)) => cand,
                         };
                         let row = match ids.get(&(cand.offset, cand.rec.addr)) {
-                            Some(&id) => take(id as usize)?,
-                            None => row_of(&rec, map, enc, &cand)?,
+                            Some(&id) => store.take(gids[id as usize])?,
+                            None => RowRef::new(row_of(&rec, map, enc, &cand)?),
                         };
                         if !c.row(row)? {
                             break;
@@ -720,10 +754,10 @@ fn replay_headers(hp: HeaderPlan, map: &BinaryMap, enc: Option<&RowEncoder>, c: 
 }
 
 /// Every row to a callback (svclist).
-struct All<'a>(&'a mut dyn FnMut(ServiceRow) -> Result<()>);
+struct All<'a>(&'a mut dyn FnMut(RowRef) -> Result<()>);
 
 impl RowConsumer for All<'_> {
-    fn row(&mut self, row: ServiceRow) -> Result<bool> {
+    fn row(&mut self, row: RowRef) -> Result<bool> {
         (self.0)(row)?;
         Ok(true)
     }
@@ -733,11 +767,11 @@ impl RowConsumer for All<'_> {
 struct Dedup<'a> {
     /// python's `seen` list, indexed by offset (only comparable tuples can ever match)
     seen: FxHashMap<u64, Vec<RowKey>>,
-    f: &'a mut dyn FnMut(ServiceRow) -> Result<()>,
+    f: &'a mut dyn FnMut(RowRef) -> Result<()>,
 }
 
 impl RowConsumer for Dedup<'_> {
-    fn row(&mut self, row: ServiceRow) -> Result<bool> {
+    fn row(&mut self, row: RowRef) -> Result<bool> {
         if let Some(key) = &row.key {
             let v = self.seen.entry(key.offset).or_default();
             if v.contains(key) {
@@ -755,7 +789,7 @@ enum ProcPlan {
     /// Vista and later: `_SERVICE_HEADER` walks
     Headers(HeaderPlan),
     /// XP / 2003: every valid `_SERVICE_RECORD` at a tag hit, then where python raised
-    Records { rec: Rec, cands: Vec<Cand>, tail: Option<Error> },
+    Records { rec: Rec, cands: Vec<Cand>, gids: Vec<u32>, tail: Option<Error> },
 }
 
 /// svcscan's / svclist's memory walks (everything but the rows, which need the registry's
@@ -808,7 +842,7 @@ pub fn plan_service_scan(k: &WinKernel, table: TableRef) -> ServicePlan {
                     }
                 }
             }
-            procs.push(ProcPlan::Records { rec, cands, tail });
+            procs.push(ProcPlan::Records { rec, cands, gids: Vec::new(), tail });
         }
         Ok(())
     })()
@@ -861,24 +895,23 @@ fn get_exe_range(proc: &Obj) -> Result<Option<(u64, u64)>> {
     Ok(None)
 }
 
-/// The rows python yields for a [`ServicePlan`], in order, to `f` (formatted with `enc` when
-/// given); `dedup` = svcscan's `seen` break (the header walks of svclist have none).
-pub fn replay_services(plan: ServicePlan, map: &BinaryMap, enc: Option<&RowEncoder>, dedup: bool, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
+/// The rows python yields for a [`ServicePlan`], in order, to `f`, from `store` (see
+/// [`compute_rows`]; rows past the planned records are computed with `map` / `enc`); `dedup` =
+/// svcscan's `seen` break (the header walks of svclist have none).
+pub fn replay_services(plan: ServicePlan, store: &mut RowStore, map: &BinaryMap, enc: Option<&RowEncoder>, dedup: bool, f: &mut dyn FnMut(RowRef) -> Result<()>) -> Result<()> {
     let mut seen = Dedup { seen: FxHashMap::default(), f };
     for p in plan.procs {
         match p {
             ProcPlan::Headers(hp) => {
                 if dedup {
-                    replay_headers(hp, map, enc, &mut seen)?;
+                    replay_headers(hp, store, map, enc, &mut seen)?;
                 } else {
-                    replay_headers(hp, map, enc, &mut All(&mut *seen.f))?;
+                    replay_headers(hp, store, map, enc, &mut All(&mut *seen.f))?;
                 }
             }
-            ProcPlan::Records { rec, cands, tail } => {
-                for window in cands.chunks(4096) {
-                    for row in rows_of(&rec, map, enc, window) {
-                        (seen.f)(row?)?;
-                    }
+            ProcPlan::Records { gids, tail, .. } => {
+                for g in gids {
+                    (seen.f)(store.take(g)?)?;
                 }
                 if let Some(e) = tail {
                     return Err(e);
@@ -892,16 +925,30 @@ pub fn replay_services(plan: ServicePlan, map: &BinaryMap, enc: Option<&RowEncod
     }
 }
 
+/// [`compute_rows`] + [`replay_services`] for one plan.
+fn run_plan(mut plan: ServicePlan, map: &BinaryMap, enc: Option<&RowEncoder>, dedup: bool, f: &mut dyn FnMut(RowRef) -> Result<()>) -> Result<()> {
+    let mut store = compute_rows(&mut [&mut plan], map, enc);
+    replay_services(plan, &mut store, map, enc, dedup, f)
+}
+
 /// python `SvcScan.service_scan(...)`: rows in python order; `f` gets every row python yields
 /// (formatted with `enc` when given).
-pub fn service_scan(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
-    replay_services(plan_service_scan(k, pre.table), &pre.binary_map, enc, true, f)
+pub fn service_scan(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(RowRef) -> Result<()>) -> Result<()> {
+    run_plan(plan_service_scan(k, pre.table), &pre.binary_map, enc, true, f)
 }
 
 /// python `SvcList.service_list(...)`: every row python yields, in order (formatted with `enc`
 /// when given).
-pub fn service_list(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
-    replay_services(plan_service_list(k, pre.table), &pre.binary_map, enc, false, f)
+pub fn service_list(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(RowRef) -> Result<()>) -> Result<()> {
+    run_plan(plan_service_list(k, pre.table), &pre.binary_map, enc, false, f)
+}
+
+/// The SvcScan / SvcList plugin body: prerequisites, the memory walks (meanwhile), the rows
+/// (formatted on the workers), emitted in order.
+pub fn run_service_plugin(ctx: &Context, k: &WinKernel, list: bool, out: &mut dyn RowSink) -> Result<()> {
+    let (pre, plan) = with_prereq(ctx, k, |table| if list { plan_service_list(k, table) } else { plan_service_scan(k, table) })?;
+    let enc = out.encoder();
+    run_plan(plan, &pre.binary_map, enc.as_ref(), !list, &mut |row| row.emit(out))
 }
 
 /// python's `get_prereq_info(...)` followed by `plan(table)`, with the registry part of the
@@ -947,9 +994,7 @@ impl Plugin for SvcScan {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        let (pre, plan) = with_prereq(ctx, k, |table| plan_service_scan(k, table))?;
-        let enc = out.encoder();
-        replay_services(plan, &pre.binary_map, enc.as_ref(), true, &mut |row| row.emit(out))
+        run_service_plugin(ctx, k, false, out)
     }
 }
 
@@ -1039,7 +1084,7 @@ mod tests {
             let pre = get_prereq_info(&ctx, k).unwrap();
             let mut got = Vec::new();
             service_scan(k, &pre, None, &mut |r| {
-                got.push(r.values);
+                got.push(r.values.clone());
                 Ok(())
             })
             .unwrap();
@@ -1048,7 +1093,7 @@ mod tests {
             assert_eq!(format!("{got:?}"), format!("{want:?}"), "{img} svcscan");
             let mut got = Vec::new();
             service_list(k, &pre, None, &mut |r| {
-                got.push(r.values);
+                got.push(r.values.clone());
                 Ok(())
             })
             .unwrap();

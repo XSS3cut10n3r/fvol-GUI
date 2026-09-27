@@ -5,7 +5,7 @@
 
 use crate::context::Context;
 use crate::error::Result;
-use crate::plugins::windows::svcscan::{columns, plan_service_list, replay_services, with_prereq};
+use crate::plugins::windows::svcscan::{columns, run_service_plugin};
 use crate::plugins::{Config, Plugin};
 use crate::renderers::RowSink;
 
@@ -21,8 +21,6 @@ impl Plugin for SvcList {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        let (pre, plan) = with_prereq(ctx, k, |table| plan_service_list(k, table))?;
-        let enc = out.encoder();
-        replay_services(plan, &pre.binary_map, enc.as_ref(), false, &mut |row| row.emit(out))
+        run_service_plugin(ctx, k, true, out)
     }
 }
