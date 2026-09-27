@@ -9,6 +9,7 @@
 //!   5. run the plugin into the renderer; map failures to python's messages / exit status.
 
 pub mod argparse;
+pub mod complete;
 pub mod files;
 pub mod filter;
 pub mod help;
@@ -70,9 +71,15 @@ impl Write for RawStdout {
 /// Entry point; returns the process exit code.
 pub fn main() -> i32 {
     let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
-    // `vol serve ...`: the built-in web UI (python volatility has no plugin or option by that name)
-    if argv.get(1).map(String::as_str) == Some("serve") {
-        return crate::web::main(&argv[2..]);
+    // `vol serve ...`: the built-in web UI; `vol completion` / `vol __complete`: shell tab
+    // completion (python volatility has no plugin or option by these names)
+    match argv.get(1).map(String::as_str) {
+        Some("serve") => return crate::web::main(&argv[2..]),
+        Some("completion") => return complete::script(&argv, &mut std::io::stdout(), &mut std::io::stderr()),
+        Some("__complete") => {
+            return complete::complete(&argv[2..], &crate::plugins::registered(), &mut std::io::stdout());
+        }
+        _ => {}
     }
     // one run, then exit: big ISFs load lazily, their blobs are written after the output
     crate::symbols::store::set_lazy_tables(true);

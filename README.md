@@ -64,6 +64,7 @@ vol -h                                                   # list plugins
 vol -s ./symbols -f linux.lime linux.pslist.PsList       # Linux/macOS: symbol dir
 vol -f memory.raw -o out/ windows.dlllist.DllList --dump # dump files
 vol -f memory.raw -r json windows.pslist.PsList          # quick, pretty, csv, json, jsonl
+eval "$(vol completion bash)"                            # TAB-complete plugins and options
 ```
 
 Windows symbols are downloaded automatically. See [docs/usage.md](docs/usage.md).

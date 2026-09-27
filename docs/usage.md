@@ -6,6 +6,7 @@ volatility3 plugin are. For the browser interface, see [web-ui.md](web-ui.md).
 Applies to rsvol 0.1.0, which reproduces volatility3 2.28.2.
 
 - [Run a plugin](#run-a-plugin)
+- [Complete commands with TAB](#complete-commands-with-tab)
 - [Analyze a Windows image](#analyze-a-windows-image)
 - [Analyze a Linux image](#analyze-a-linux-image)
 - [Analyze a macOS image](#analyze-a-macos-image)
@@ -87,6 +88,31 @@ vol -f memory.raw.xz windows.psscan.PsScan     # later runs: no decompression
 
 The exit status is 0 on success, 1 when the plugin cannot run or fails, and 2 for a usage error.
 rsvol prints no progress output, so `-q` is accepted but changes nothing.
+
+## Complete commands with TAB
+
+`vol completion bash` prints a bash completion script. Load it in the current shell, or install it
+for new shells (the second form needs the bash-completion package, which most distributions
+ship):
+
+```bash
+eval "$(vol completion bash)"
+vol completion bash > ~/.local/share/bash-completion/completions/vol
+```
+
+TAB then completes:
+
+- plugin names, by prefix (`windows.psl` -> `windows.pslist.PsList`); a word that starts no
+  plugin name matches inside the names, so `registry.printk` -> `windows.registry.printkey.PrintKey`
+- global options before the plugin, and the plugin's own options after it (an empty word after
+  the plugin lists them); options already given are not offered again
+- option values: the choices of `-r`, `--parallelism` and plugin choice options, file names for
+  `-f`, `-c`, `--save-config` and plugin file options such as `--yara-file`, directories for
+  `-o`, `-s`, `-p` and `--cache-path`, both as `-r json` and `--renderer=json`
+- `vol serve` and its options
+
+The script calls `vol __complete` for each TAB (about 0.5 ms), so the candidates always match the
+binary that runs. Only bash is supported.
 
 ## Analyze a Windows image
 

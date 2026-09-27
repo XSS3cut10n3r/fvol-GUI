@@ -97,7 +97,7 @@ impl App {
     }
 }
 
-const USAGE: &str = "usage: vol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
+pub(crate) const USAGE: &str = "usage: vol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
                  [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
                  [--max-conns N] [--parallel N] [--max-memory SIZE]
 
