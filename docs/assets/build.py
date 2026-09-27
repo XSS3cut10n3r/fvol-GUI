@@ -179,8 +179,8 @@ def build_chart():
                     ("first run", seconds(total["vol-rs cold"]), None, None),
                     ("repeat run", seconds(total["vol-rs warm"]), None, None)]),
                 ("fastvol", "accent", [
-                    ("first run", seconds(total["rsvol cold"]), None, speedup(speed["rsvol cold"], 0)),
-                    ("repeat run", seconds(total["rsvol warm"]), None, speedup(speed["rsvol warm"], 0))]),
+                    ("first run", seconds(total["fastvol cold"]), None, speedup(speed["fastvol cold"], 0)),
+                    ("repeat run", seconds(total["fastvol warm"]), None, speedup(speed["fastvol warm"], 0))]),
             ]))
 
     def render(theme):

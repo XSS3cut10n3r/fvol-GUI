@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Build bench/vm/BENCHMARKS.md + results2.tsv from the run-2 result files.
-Usage: `cd bench/vm && python3 scripts/report2.py raw2 raw .`
+"""Build bench/vm/BENCHMARKS-run2.md + results2.tsv from the run-2 result files.
+Usage: `cd bench/vm && python3 scripts/report2.py raw2 raw /tmp/run2` (the committed BENCHMARKS-run2.md
+also has the hand-added section "First runs with lazy symbol tables", so do not point it at `.`).
 raw2/ holds win.tsv, linux.tsv, startup.tsv (bench2_vm.py / startup2_vm.py), notes2.tsv, meta2.env,
 checks2.md (by hand); raw/ is run 1 (win_pass1.tsv, win_pass2.tsv, linux.tsv, startup.tsv)."""
 import math, os, statistics, sys
@@ -200,7 +201,7 @@ def table(rows):
 
 
 heavy = {"windows.statistics.Statistics", "timeliner.Timeliner"}
-L = ["# rsvol vs vol-rs vs python volatility3 — quiet-VM benchmark (final)", ""]
+L = ["# rsvol vs vol-rs vs python volatility3 — quiet-VM benchmark, run 2 (superseded by BENCHMARKS.md)", ""]
 L.append(f"{meta['DATE']} · dedicated KVM guest: {meta['CPU']}, {meta['NCPU']} vCPU, {meta['MEM']} RAM, {meta['OS']}, "
          f"kernel {meta['KERNEL']}; nothing else running (see [machine.txt](machine.txt), [method.md](method.md)).")
 L.append("")
@@ -325,7 +326,7 @@ extra = os.path.join(D2, "checks2.md")
 if os.path.exists(extra):
     L += open(extra).read().rstrip("\n").split("\n")
 L.append("")
-open(os.path.join(OUT, "BENCHMARKS.md"), "w").write("\n".join(L) + "\n")
+open(os.path.join(OUT, "BENCHMARKS-run2.md"), "w").write("\n".join(L) + "\n")
 
 cols = ["os", "plugin", "py_src", "py_runs"]
 for t in COLS:
@@ -344,4 +345,4 @@ with open(os.path.join(OUT, "results2.tsv"), "w") as f:
               f"{r['py']/r['rs_steady']:.1f}", r["rs_run1"] or "", r["vr_run1"] or "", r["files_py"], r["files_rs"],
               r["files_vr"], r["load"], r["note"]]
         f.write("\t".join(str(x) for x in v) + "\n")
-print(open(os.path.join(OUT, "BENCHMARKS.md")).read())
+print(open(os.path.join(OUT, "BENCHMARKS-run2.md")).read())

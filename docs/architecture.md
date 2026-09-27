@@ -94,7 +94,7 @@ specially (repeated names, for python's dictionary semantics), is not taken lazi
 64 MB Ubuntu 24.04 kernel ISF, the lazy index takes about 13 ms instead of the full build's
 47 ms on a 20-thread desktop CPU; on the 32-vCPU benchmark VM a first `linux.pslist` went from
 0.51 s to 0.11 s, faster than vol-rs with a warm cache (see
-[bench/vm/BENCHMARKS.md](../bench/vm/BENCHMARKS.md)).
+[bench/vm/BENCHMARKS-run2.md](../bench/vm/BENCHMARKS-run2.md#first-runs-with-lazy-symbol-tables-rsvol-cold-rerun)).
 
 The full binary table of a lazy table is built after the plugin's output is complete: `main`
 flushes the output and then hands each such ISF to a helper process, this executable started in
@@ -251,7 +251,7 @@ The design rule is to know the hardware and do the minimum work. The techniques,
 | Caching                       | Symbol tables, the identifier index, automagic results and raw scan hits. |
 | Speculation                   | Likely kernel symbol tables are built while the scans that confirm them run. |
 | Laziness                      | A first run resolves only the types and symbols it uses; the full symbol table is built by a detached helper after the output. |
-| Fixed per-run cost            | A static-pie binary without dynamic loading, hot code laid out together and mapped with huge pages where the kernel allows, a C `main` that skips most of the Rust runtime setup, a lazy `Context`, cache writes on background threads that finish after the output, and the address-space teardown moved to a helper that finishes after the exit ([building.md](building.md#startup)). A warm `windows.pslist.PsList` takes about 2 ms on the benchmark VM. |
+| Fixed per-run cost            | A static-pie binary without dynamic loading, hot code laid out together and mapped with huge pages where the kernel allows, a C `main` that skips most of the Rust runtime setup, a lazy `Context`, cache writes on background threads that finish after the output, and the address-space teardown moved to a helper that finishes after the exit ([building.md](building.md#startup)). A warm `windows.pslist.PsList` takes 2.5 ms on the benchmark VM ([bench/vm/BENCHMARKS.md](../bench/vm/BENCHMARKS.md)). |
 | Allocation-free inner loops   | Precomputed member offsets, compact 8-byte rows in the timeliner merge, table-driven cell formatting. |
 
 Each from-scratch library is benchmarked against its reference implementation on the same input
