@@ -267,10 +267,10 @@ fn dump_hive(ctx: &Context, k: &WinKernel, hive: &'static RegistryHive) -> Resul
     while i < maxaddr {
         let n = CHUNK.min(maxaddr - i) as usize;
         hive.read_padded(i, &mut buf[..n]);
-        f.write_all(&buf[..n])?;
+        // the same bytes after the header, all-zero pages (unmapped cells) left as holes
+        crate::cli::files::write_sparse(&f, &buf[..n], head.len() as u64 + i)?;
         i += CHUNK;
     }
-    f.flush()?;
     Ok(name)
 }
 
