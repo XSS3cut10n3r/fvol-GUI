@@ -82,48 +82,11 @@ pub fn vad_dump(ctx: &Context, proc: &Obj, vad: &Obj, maxsize: i128) -> Option<S
     let pl = proc.add_process_layer().ok()?;
     let name = format!("pid.{pid}.vad.{start:#x}-{end:#x}.dmp");
     let (f, final_name) = ctx.create_output_file(&name).ok()?;
-    if size > 0 {
-        let mut w = crate::cli::files::SparseDump::new(&f);
-        if dump_padded_reads(pl, start, size as u128, &mut w).is_err() || w.finish().is_err() {
-            return None;
-        }
+    // python's `read(off, 10 MiB, pad=True)` loop; zero pages stay holes
+    if size > 0 && crate::cli::files::dump_padded_reads(&f, pl, start, size as u128).is_err() {
+        return None;
     }
     Some(final_name)
-}
-
-/// python `vad_dump`'s loop: `read(off, 10 MiB, pad=True)` over `[start, start + size)`, each
-/// read written after the previous one. Every read is one page-table walk whose chunks come
-/// straight from the target layers (the long read's own fault / large-page skips decide which
-/// bytes are zeros); zero pages stay holes of the same file.
-fn dump_padded_reads(pl: crate::objects::LayerRef, start: u64, size: u128, w: &mut crate::cli::files::SparseDump<'_>) -> std::io::Result<()> {
-    const CHUNK: u128 = 10 << 20;
-    let mut res = Ok(());
-    match pl.as_intel() {
-        Some(il) => {
-            let mut done = 0u128;
-            while done < size && res.is_ok() {
-                let n = CHUNK.min(size - done);
-                // python reads past 2**64 as zeros (nothing is mapped there)
-                if let Ok(off) = u64::try_from(start as u128 + done) {
-                    il.padded_read_chunks(off, n as u64, &mut |o, len, mapped, tl| {
-                        res = w.range(tl, mapped, len, o.wrapping_sub(start));
-                        res.is_ok()
-                    });
-                }
-                done += n;
-            }
-        }
-        None => {
-            let len = u64::try_from(size).unwrap_or(u64::MAX);
-            pl.mapping_targets(start, len, &mut |m, _| {
-                res = w.range(pl, m.offset, m.len, m.offset - start);
-                res.is_ok()
-            })
-        }
-    }
-    res?;
-    w.set_size(u64::try_from(size).unwrap_or(u64::MAX));
-    Ok(())
 }
 
 impl Plugin for VadInfo {

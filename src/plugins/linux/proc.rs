@@ -10,7 +10,6 @@ use crate::plugins::linux::pslist::{collect_tasks, pid_filter};
 use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::prelude::*;
-use std::io::Write;
 
 pub struct Maps;
 
@@ -68,18 +67,10 @@ pub fn vma_dump(ctx: &Context, task: &Obj, vm_start: u64, vm_end: u64, maxsize: 
     let proc_layer = proc_layer.ok_or_else(|| crate::error::Error::msg("KeyError: None"))?;
     let file_name = format!("pid.{pid}.vma.{vm_start:#x}-{vm_end:#x}.dmp");
     let r = (|| -> Result<String> {
-        let (mut f, name) = ctx.create_output_file(&file_name)?;
-        const CHUNK: u64 = 1024 * 1024 * 10;
-        let mut buf = vec![0u8; CHUNK.min(vm_size as u64) as usize];
-        let mut off = vm_start;
-        let end = vm_start + vm_size as u64;
-        while off < end {
-            let n = CHUNK.min(end - off) as usize;
-            proc_layer.read_padded(off, &mut buf[..n]);
-            f.write_all(&buf[..n])?;
-            off += n as u64;
-        }
-        f.flush()?;
+        let (f, name) = ctx.create_output_file(&file_name)?;
+        // python's `read(off, 10 MiB, pad=True)` loop, zero pages as holes (most of a process's
+        // mappings were never paged in)
+        crate::cli::files::dump_padded_reads(&f, proc_layer, vm_start, vm_size as u128)?;
         Ok(name)
     })();
     // python: `except Exception: return None`

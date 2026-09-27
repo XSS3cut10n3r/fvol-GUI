@@ -13,7 +13,6 @@ use crate::plugins::{Config, ConfigValue, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::mac::MacExt;
 use crate::symbols::mac::vm::{MacVmExt, map_entries};
-use std::io::Write;
 
 pub struct Maps;
 
@@ -58,18 +57,10 @@ pub fn vma_dump(ctx: &Context, task: &Obj, vm_start: u64, vm_end: u64, maxsize: 
     // python: `context.layers[None]` -> KeyError, a crash with traceback
     let Some(layer) = layer else { panic!("KeyError: None") };
     let file_name = format!("pid.{pid}.vma.{vm_start:#x}-{vm_end:#x}.dmp");
-    let Ok((mut f, final_name)) = ctx.create_output_file(&file_name) else { return Ok(None) };
-    const CHUNK: u64 = 1024 * 1024 * 10;
-    let end = vm_start + vm_size as u64;
-    let mut buf = vec![0u8; CHUNK.min(vm_size as u64) as usize];
-    let mut offset = vm_start;
-    while offset < end {
-        let n = CHUNK.min(end - offset) as usize;
-        layer.read_padded(offset, &mut buf[..n]);
-        if f.write_all(&buf[..n]).is_err() {
-            return Ok(None);
-        }
-        offset += n as u64;
+    let Ok((f, final_name)) = ctx.create_output_file(&file_name) else { return Ok(None) };
+    // python's `read(off, 10 MiB, pad=True)` loop, zero pages as holes
+    if crate::cli::files::dump_padded_reads(&f, layer, vm_start, vm_size as u128).is_err() {
+        return Ok(None);
     }
     Ok(Some(final_name))
 }

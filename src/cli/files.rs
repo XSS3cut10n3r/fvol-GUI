@@ -82,6 +82,89 @@ pub fn create(output_dir: &str, preferred_name: &str) -> Result<(File, String)> 
 
 // ------------------------------------------------------------------------ sparse dumps
 
+/// python's dump loop `while off < end: f.write(layer.read(off, min(10 MiB, end - off),
+/// pad=True))` over `[start, start + size)` (vadinfo / malfind `vad_dump`, linux and mac Maps
+/// `vma_dump`) into the fresh file `f`, with the same resulting bytes. Each read is one
+/// page-table walk ([`crate::layers::intel::IntelLayer::padded_read_chunks`]: a long read is
+/// NOT the same as reading its pages one by one) whose chunks are written straight from the
+/// target layers; zero pages stay holes. Other layers: the padded reads themselves, zero pages
+/// as holes.
+pub fn dump_padded_reads(f: &File, layer: &dyn crate::layers::Layer, start: u64, size: u128) -> std::io::Result<()> {
+    dump_padded_reads_at(f, layer, start, size, 10 << 20, 0)
+}
+
+/// [`dump_padded_reads`] with python's read size `chunk` (> 0), written at file offset
+/// `file_off` (the file's bytes from there on must still be zeros / holes).
+pub fn dump_padded_reads_at(f: &File, layer: &dyn crate::layers::Layer, start: u64, size: u128, chunk: u128, file_off: u64) -> std::io::Result<()> {
+    let mut done = 0u128;
+    let end = u64::try_from(file_off as u128 + size).unwrap_or(u64::MAX);
+    match layer.as_intel() {
+        Some(il) => {
+            let mut w = SparseDump::new(f);
+            let mut res = Ok(());
+            while done < size && res.is_ok() {
+                let n = chunk.min(size - done);
+                // python reads past 2**64 as zeros (nothing is mapped there)
+                if let Ok(off) = u64::try_from(start as u128 + done) {
+                    il.padded_read_chunks(off, n as u64, &mut |o, len, mapped, tl| {
+                        res = w.range(tl, mapped, len, file_off.wrapping_add(o.wrapping_sub(start)));
+                        res.is_ok()
+                    });
+                }
+                done += n;
+            }
+            res?;
+            w.set_size(end);
+            w.finish()
+        }
+        None => {
+            let mut buf = Vec::new();
+            while done < size {
+                let n = chunk.min(size - done);
+                buf.clear();
+                buf.resize(n as usize, 0);
+                if let Ok(off) = u64::try_from(start as u128 + done) {
+                    layer.read_padded(off, &mut buf);
+                }
+                write_sparse(f, &buf, file_off + done as u64)?;
+                done += n;
+            }
+            if size == 0 && f.metadata()?.len() < end {
+                f.set_len(end)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Write `data` at `off` of a fresh file whose bytes from `off` on are still zeros (holes):
+/// the all-zero 4 KiB pages of `data` are skipped, and the file ends up at least `off +
+/// data.len()` bytes long.
+pub fn write_sparse(f: &File, data: &[u8], off: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    const PG: usize = 0x1000;
+    let zero = |a: usize| is_zero(&data[a..(a + PG).min(data.len())]);
+    let mut p = 0;
+    while p < data.len() {
+        if zero(p) {
+            p += PG;
+            continue;
+        }
+        let mut q = p + PG;
+        while q < data.len() && !zero(q) {
+            q += PG;
+        }
+        let q = q.min(data.len());
+        f.write_all_at(&data[p..q], off + p as u64)?;
+        p = q;
+    }
+    let end = off + data.len() as u64;
+    if f.metadata()?.len() < end {
+        f.set_len(end)?;
+    }
+    Ok(())
+}
+
 #[repr(C)]
 struct IoVec {
     base: *const u8,
@@ -256,6 +339,30 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(dir.join("x.dmp")).unwrap().permissions().mode() & 0o177, 0);
         assert!(create(d, "a/b").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sparse_write_same_bytes() {
+        let dir = std::env::temp_dir().join(format!("rsvol-files-sparse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut data = vec![0u8; 5 * 0x1000 + 123];
+        data[0x1000] = 1; // page 1
+        data[0x2fff] = 2; // page 2
+        data[5 * 0x1000 + 100] = 3; // the short tail
+        for (i, (tail_zero, off)) in [(false, 0u64), (true, 0x10)].into_iter().enumerate() {
+            let mut d = data.clone();
+            if tail_zero {
+                d[5 * 0x1000 + 100] = 0; // an all-zero tail: the length comes from set_len
+            }
+            let path = dir.join(format!("s{i}"));
+            let f = open_new(&path).unwrap();
+            write_sparse(&f, &d, off).unwrap();
+            drop(f);
+            let mut want = vec![0u8; off as usize];
+            want.extend_from_slice(&d);
+            assert!(std::fs::read(&path).unwrap() == want);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -204,7 +204,7 @@ pub fn write_reconstructed(f: &std::fs::File, dos: &Obj) -> (std::io::Result<()>
                         f.write_all_at(nv, *o as u64)?;
                     }
                 }
-                _ => write_sparse(f, &r.materialize(), 0)?,
+                _ => crate::cli::files::write_sparse(f, &r.materialize(), 0)?,
             }
         }
         for (off, data) in &headers {
@@ -217,34 +217,6 @@ pub fn write_reconstructed(f: &std::fs::File, dos: &Obj) -> (std::io::Result<()>
         Ok(())
     })();
     (io, err)
-}
-
-/// Write `data` at `off` of a fresh file whose bytes from `off` on are still zeros (holes):
-/// the all-zero 4 KiB pages of `data` are skipped, and the file ends up at least `off +
-/// data.len()` bytes long.
-pub fn write_sparse(f: &std::fs::File, data: &[u8], off: u64) -> std::io::Result<()> {
-    use std::os::unix::fs::FileExt;
-    const PG: usize = 0x1000;
-    let zero = |a: usize| crate::cli::files::is_zero(&data[a..(a + PG).min(data.len())]);
-    let mut p = 0;
-    while p < data.len() {
-        if zero(p) {
-            p += PG;
-            continue;
-        }
-        let mut q = p + PG;
-        while q < data.len() && !zero(q) {
-            q += PG;
-        }
-        let q = q.min(data.len());
-        f.write_all_at(&data[p..q], off + p as u64)?;
-        p = q;
-    }
-    let end = off + data.len() as u64;
-    if f.metadata()?.len() < end {
-        f.set_len(end)?;
-    }
-    Ok(())
 }
 
 /// Write reconstruct() pieces into a file like python (`seek(offset); write(data)`).
@@ -667,27 +639,42 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// vad / vma dumps (`cli::files::dump_padded_reads`): python's 10 MiB padded reads, each
+    /// one long read, from a start inside the large page too.
     #[test]
-    fn sparse_write_same_bytes() {
-        let dir = std::env::temp_dir().join(format!("rsvol-pe-sparse-{}", std::process::id()));
+    fn padded_reads_dump() {
+        let (l, _) = large_page_pe();
+        let dir = std::env::temp_dir().join(format!("rsvol-pe-vad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut data = vec![0u8; 5 * 0x1000 + 123];
-        data[0x1000] = 1; // page 1
-        data[0x2fff] = 2; // page 2
-        data[5 * 0x1000 + 100] = 3; // the short tail
-        for (i, (tail_zero, off)) in [(false, 0u64), (true, 0x10)].into_iter().enumerate() {
-            let mut d = data.clone();
-            if tail_zero {
-                d[5 * 0x1000 + 100] = 0; // an all-zero tail: the length comes from set_len
+        let cases = [(0x3fe000u64, 0x302000u128), (0x3ff000, 0x1234), (0x401000, 0x2ff000), (0x3fe800, 0x1800), (0x0, 0x0), (0x3fd000, 0x503000)];
+        for (i, (start, size)) in cases.into_iter().enumerate() {
+            for chunk in [10u128 << 20, 0x100000, 0x3000] {
+                let path = dir.join(format!("v{i}-{chunk}"));
+                let f = crate::cli::files::open_new(&path).unwrap();
+                crate::cli::files::dump_padded_reads_at(&f, l, start, size, chunk, 0).unwrap();
+                drop(f);
+                // python: the padded reads of each chunk, one after the other
+                let mut want = Vec::new();
+                let mut off = 0;
+                while off < size {
+                    let n = chunk.min(size - off);
+                    want.extend_from_slice(&l.read_vec_padded(start + off as u64, n as usize));
+                    off += n;
+                }
+                assert!(std::fs::read(&path).unwrap() == want, "{start:#x}+{size:#x} chunks of {chunk:#x}");
             }
-            let path = dir.join(format!("s{i}"));
-            let f = crate::cli::files::open_new(&path).unwrap();
-            write_sparse(&f, &d, off).unwrap();
-            drop(f);
-            let mut want = vec![0u8; off as usize];
-            want.extend_from_slice(&d);
-            assert!(std::fs::read(&path).unwrap() == want);
         }
+        // ELF-style: sections concatenated, one read each (the last ones all zeros)
+        let path = dir.join("elf");
+        let f = crate::cli::files::open_new(&path).unwrap();
+        let (mut off, mut want) = (0u64, Vec::new());
+        for (s, n) in [(0x3fe000u64, 0x2000u128), (0x400000, 0x1000), (0x3ff000, 0x3000), (0x500000, 0x2000)] {
+            crate::cli::files::dump_padded_reads_at(&f, l, s, n, n, off).unwrap();
+            want.extend_from_slice(&l.read_vec_padded(s, n as usize));
+            off += n as u64;
+        }
+        drop(f);
+        assert!(std::fs::read(&path).unwrap() == want);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
