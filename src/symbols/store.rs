@@ -968,9 +968,61 @@ pub fn run_helper(spec: &std::ffi::OsStr) -> i32 {
     }
     idle();
     let Some(loc) = spec.to_str().and_then(parse_helper_spec) else { return 2 };
-    match write_blob_locked(&loc, None) {
+    let r = write_blob_locked(&loc, None);
+    if let IsfLocation::File(p) = &loc {
+        prebuild_siblings(p);
+    }
+    match r {
         Some(()) => 0,
         None => 1,
+    }
+}
+
+/// Symbol tables pre-built by one helper (see [`prebuild_siblings`]); `RSVOL_PREBUILD=<N>`
+/// (0: none).
+const PREBUILD_PER_RUN: usize = 3;
+/// No pre-building once the binary tables in the cache take this much.
+const PREBUILD_BUDGET: u64 = 512 << 20;
+
+/// The helper, done with the table a run just loaded, builds the tables of a few other ISFs
+/// of its directory too (the other kernels of a symbol pack, the other builds of a Windows
+/// PDB), newest first, those without one yet: a later first run on another image of that
+/// kind maps a finished table instead of decoding and indexing its ISF (a 64 MB Linux ISF:
+/// ~100 ms). Bounded: [`PREBUILD_PER_RUN`] per helper, nothing once the cached tables
+/// reach [`PREBUILD_BUDGET`]; at idle CPU priority, one at a time, each under the same lock as
+/// any helper's build.
+fn prebuild_siblings(isf: &Path) {
+    let per_run = std::env::var("RSVOL_PREBUILD").ok().and_then(|v| v.parse().ok()).unwrap_or(PREBUILD_PER_RUN);
+    if per_run == 0 {
+        return;
+    }
+    let Some(dir) = isf.parent() else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut cands: Vec<(std::time::SystemTime, PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .filter(|p| p != isf && ISF_EXTENSIONS.iter().any(|x| p.as_os_str().as_encoded_bytes().ends_with(x.as_bytes())))
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .collect();
+    cands.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let isf_dir = paths::rsvol_cache_dir().join("isf");
+    let cached = || -> u64 {
+        std::fs::read_dir(&isf_dir).map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "isfb")).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()).unwrap_or(0)
+    };
+    let opts = BuildOptions::default();
+    let mut built = 0;
+    for (_, p) in cands {
+        if built >= per_run || cached() >= PREBUILD_BUDGET {
+            return;
+        }
+        let loc = IsfLocation::File(p);
+        let url = loc.url();
+        let Some((cf, key)) = cache_file(&loc, &url, &opts) else { continue };
+        let present = std::fs::File::open(&cf).ok().and_then(|f| Mmap::map(&f).ok()).is_some_and(|m| cached_blob_matches(m.as_slice(), &key));
+        if !present && write_blob_locked(&loc, None).is_some() {
+            built += 1;
+        }
     }
 }
 
