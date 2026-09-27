@@ -198,7 +198,7 @@ def timeliner():
 
 @step("light")
 def light():
-    c.eval("localStorage.setItem('rsvol.theme', 'light')")
+    c.eval("localStorage.setItem('fastvol.theme', 'light')")
     login()
     ready()
     c.pump(0.8)
@@ -208,7 +208,7 @@ def light():
     c.wait("document.querySelector('.subpanes .vt-row:not(.loading)') || document.querySelector('.subpanes .errcard')", 30)
     c.pump(0.8)
     shot("10-process-light")
-    c.eval("localStorage.setItem('rsvol.theme', 'dark')")
+    c.eval("localStorage.setItem('fastvol.theme', 'dark')")
 
 
 @step("laptop")

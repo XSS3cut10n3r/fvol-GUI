@@ -1,4 +1,4 @@
-"""Minimal Chrome DevTools Protocol driver for UI checks of `vol serve` (headless chromium).
+"""Minimal Chrome DevTools Protocol driver for UI checks of `fvol serve` (headless chromium).
 
 Collects console errors / uncaught exceptions so UI regressions show up as failures.
 Run it through bench/scripts/limit.sh (chromium is memory hungry)."""
