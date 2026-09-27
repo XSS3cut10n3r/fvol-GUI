@@ -220,25 +220,50 @@ pub fn list_hive_objects(ctx: &Context, k: &WinKernel, filter: Option<&str>) -> 
 /// hive_offsets)`: the hive layers (hives whose construction hits an invalid address are
 /// skipped, like python). A trailing `Err` is where python raised.
 pub fn list_hives(ctx: &Context, k: &WinKernel, filter: Option<&str>, hive_offsets: Option<&[u64]>) -> Vec<Result<&'static RegistryHive>> {
-    let offsets: Vec<u64> = match hive_offsets {
-        Some(o) => o.to_vec(),
-        None => {
-            let mut v = Vec::new();
-            for h in list_hive_objects(ctx, k, filter) {
-                match h {
-                    Ok(h) => v.push(h.addr),
-                    // python computes the offsets eagerly: an error surfaces before any hive
-                    Err(e) => return vec![Err(e)],
-                }
-            }
-            v
-        }
+    let offsets = match hive_offsets_of(ctx, k, filter, hive_offsets) {
+        Ok(o) => o,
+        Err(e) => return vec![Err(e)],
     };
     let mut out = Vec::with_capacity(offsets.len());
     for off in offsets {
         match hive_at(k, off) {
             Ok(h) => out.push(Ok(h)),
             Err(e) if e.is_invalid_address() => continue,
+            Err(e) => {
+                out.push(Err(e));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The hive offsets `list_hives` visits (python computes them eagerly: an error surfaces
+/// before any hive).
+fn hive_offsets_of(ctx: &Context, k: &WinKernel, filter: Option<&str>, hive_offsets: Option<&[u64]>) -> Result<Vec<u64>> {
+    match hive_offsets {
+        Some(o) => Ok(o.to_vec()),
+        None => list_hive_objects(ctx, k, filter).into_iter().map(|h| h.map(|h| h.addr)).collect(),
+    }
+}
+
+/// [`list_hives`] with `f` applied to every hive, the hive layers built and `f` run in
+/// parallel: `f`'s results in python's hive order (a trailing `Err` = python raised there).
+pub fn list_hives_map<R: Send>(ctx: &Context, k: &WinKernel, filter: Option<&str>, hive_offsets: Option<&[u64]>, f: impl Fn(&'static RegistryHive) -> R + Sync) -> Vec<Result<R>> {
+    let offsets = match hive_offsets_of(ctx, k, filter, hive_offsets) {
+        Ok(o) => o,
+        Err(e) => return vec![Err(e)],
+    };
+    let per = crate::util::par::par_map(offsets.len(), |i| match hive_at(k, offsets[i]) {
+        Ok(h) => Ok(Some(f(h))),
+        Err(e) if e.is_invalid_address() => Ok(None),
+        Err(e) => Err(e),
+    });
+    let mut out = Vec::with_capacity(per.len());
+    for r in per {
+        match r {
+            Ok(Some(v)) => out.push(Ok(v)),
+            Ok(None) => {}
             Err(e) => {
                 out.push(Err(e));
                 break;
