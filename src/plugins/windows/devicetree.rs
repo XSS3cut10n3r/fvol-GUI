@@ -4,7 +4,7 @@
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
 use crate::context::Context;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::objects::Obj;
 use crate::plugins::windows::driverscan::scan_drivers_each;
 use crate::plugins::{Config, Plugin};
@@ -89,29 +89,37 @@ fn name_or_unparsable(r: Result<String>) -> Result<Value> {
     }
 }
 
-/// The rows of one driver (python's try block around it); stops at the first error.
-fn driver_rows(driver: &Obj, out: &mut dyn RowSink) -> Result<()> {
-    let off = Value::Int(driver.addr as i128);
-    let driver_name = name_or_unparsable(driver.get_driver_name())?;
-    out.row(0, vec![off.clone(), Value::SStr("DRV"), driver_name.clone(), Value::NotApplicable, Value::NotApplicable, Value::NotApplicable])?;
-    for device in driver.get_devices() {
-        let device = device?;
-        let device_name = name_or_unparsable(device.get_device_name())?;
-        let device_type = device_code(device.m("DeviceType")?.int()?);
-        out.row(1, vec![off.clone(), Value::SStr("DEV"), driver_name.clone(), device_name, Value::NotApplicable, Value::SStr(device_type)])?;
-        for (i, attached) in device.get_attached_devices().into_iter().enumerate() {
-            let attached = attached?;
-            let device_name = name_or_unparsable(attached.get_device_name())?;
-            let att_driver_name = attached.m("DriverObject")?.m("DriverName")?.get_string()?;
-            let att_type = device_code(attached.m("DeviceType")?.int()?);
-            out.row(
-                i + 2,
-                vec![off.clone(), Value::SStr("ATT"), driver_name.clone(), device_name, Value::Str(att_driver_name), Value::SStr(att_type)],
-            )?;
+/// The rows (tree depth, values) of one driver (python's try block around it) and the error
+/// that ended them.
+fn driver_rows(driver: &Obj) -> (Vec<(usize, Vec<Value>)>, Option<Error>) {
+    let mut rows = Vec::new();
+    let r = (|| -> Result<()> {
+        let off = Value::Int(driver.addr as i128);
+        let driver_name = name_or_unparsable(driver.get_driver_name())?;
+        rows.push((0, vec![off.clone(), Value::SStr("DRV"), driver_name.clone(), Value::NotApplicable, Value::NotApplicable, Value::NotApplicable]));
+        for device in driver.get_devices() {
+            let device = device?;
+            let device_name = name_or_unparsable(device.get_device_name())?;
+            let device_type = device_code(device.m("DeviceType")?.int()?);
+            rows.push((1, vec![off.clone(), Value::SStr("DEV"), driver_name.clone(), device_name, Value::NotApplicable, Value::SStr(device_type)]));
+            for (i, attached) in device.get_attached_devices().into_iter().enumerate() {
+                let attached = attached?;
+                let device_name = name_or_unparsable(attached.get_device_name())?;
+                let att_driver_name = attached.m("DriverObject")?.m("DriverName")?.get_string()?;
+                let att_type = device_code(attached.m("DeviceType")?.int()?);
+                rows.push((
+                    i + 2,
+                    vec![off.clone(), Value::SStr("ATT"), driver_name.clone(), device_name, Value::Str(att_driver_name), Value::SStr(att_type)],
+                ));
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    (rows, r.err())
 }
+
+/// Drivers whose rows are computed at once (bounds the rows held in memory).
+const WINDOW: usize = 512;
 
 impl Plugin for DeviceTree {
     fn name(&self) -> &'static str {
@@ -130,13 +138,29 @@ impl Plugin for DeviceTree {
             Column::new("DeviceType", ColType::Str),
         ])?;
         let k = ctx.windows_kernel()?;
-        scan_drivers_each(ctx, k, |driver| {
-            match driver_rows(&driver, out) {
-                Ok(()) => {}
-                Err(e) if e.is_invalid_address() => {}
-                Err(e) => return Err(e),
-            }
+        // the scan first (python's order of drivers, and where it raised), then the drivers'
+        // rows in parallel, emitted in order
+        let mut drivers: Vec<Obj> = Vec::new();
+        let scan_err = scan_drivers_each(ctx, k, |driver| {
+            drivers.push(driver);
             Ok(true)
         })
+        .err();
+        for window in drivers.chunks(WINDOW) {
+            for (rows, err) in crate::util::par::par_map(window.len(), |i| driver_rows(&window[i])) {
+                for (depth, values) in rows {
+                    out.row(depth, values)?;
+                }
+                match err {
+                    None => {}
+                    Some(e) if e.is_invalid_address() => {}
+                    Some(e) => return Err(e),
+                }
+            }
+        }
+        match scan_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }

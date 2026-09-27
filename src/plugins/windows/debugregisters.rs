@@ -6,7 +6,7 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::objects::Obj;
-use crate::plugins::windows::pe_symbols::{CollectedModules, Range, get_process_modules_cached, get_vads_for_process_cache, path_and_symbol_for_address};
+use crate::plugins::windows::pe_symbols::{CollectedModules, Range, SymbolCache, get_process_modules_cached, get_vads_for_process_cache, path_and_symbol_for_address_cached, prefetch_vads};
 use crate::plugins::windows::threads::list_process_threads;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -68,10 +68,20 @@ impl Plugin for DebugRegisters {
         let k = ctx.windows_kernel()?;
         let mut vads_cache: FxHashMap<u64, Vec<Range>> = FxHashMap::default();
         let mut proc_modules: Option<CollectedModules> = None;
+        let sym_cache = SymbolCache::new();
         let threads = list_process_threads(k);
         // the per-thread trap frame reads are independent (and touch cold kernel stacks): do
         // them in parallel, consume in python's order
         let infos = crate::util::par::par_map(threads.len(), |i| threads[i].as_ref().ok().map(get_debug_info));
+        // the first thread with debug registers makes python walk its owner's VADs, then
+        // (usually) every process' VADs: walk them all at once
+        let owners: Vec<Obj> = infos.iter().filter_map(|r| match r {
+            Some(Ok(Some(v))) => Some(v.0),
+            _ => None,
+        }).collect();
+        if !owners.is_empty() {
+            prefetch_vads(k, &owners, &mut vads_cache);
+        }
         for (thread, info) in threads.into_iter().zip(infos) {
             let thread = thread?;
             let Some((owner, dr7, drs)) = info.unwrap_or(Ok(None))? else { continue };
@@ -86,7 +96,7 @@ impl Plugin for DebugRegisters {
             let vads = &vads_cache[&owner.addr];
             let mut resolved = Vec::with_capacity(4);
             for d in drs {
-                resolved.push(path_and_symbol_for_address(ctx, pm, vads, d)?);
+                resolved.push(path_and_symbol_for_address_cached(ctx, pm, vads, d, &sym_cache)?);
             }
             // if none map to an actual file VAD then bail
             if resolved.iter().all(|(f, _)| f.as_deref().is_none_or(str::is_empty)) {

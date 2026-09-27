@@ -50,12 +50,7 @@ impl Plugin for CmdLine {
             };
             Ok(vec![Value::Int(proc.m("UniqueProcessId")?.int()?), Value::Str(name), args])
         };
-        // independent per-process reads: compute in parallel, emit in python order
-        let rows = crate::util::par::par_map(procs.len(), |i| procs[i].as_ref().ok().map(row));
-        for (p, r) in procs.into_iter().zip(rows) {
-            p?;
-            out.row(0, r.expect("row computed for every listed process")?)?;
-        }
-        Ok(())
+        // independent per-process reads: in parallel, rows formatted on the workers
+        crate::plugins::emit_par_rows(out, procs, |p| vec![row(p)])
     }
 }

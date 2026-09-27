@@ -426,25 +426,24 @@ impl PoolExt for Obj {
     }
 
     fn name_info(&self) -> Result<Obj> {
-        let t = self.table();
         let kvo = self
             .native()
             .as_intel()
             .and_then(|i| i.kernel_virtual_offset())
             .ok_or_else(|| Error::Symbol(format!("AttributeError: Could not find kernel_virtual_offset for layer: {}", self.layer().name())))?;
-        let nt = Module { sp: Space::get(self.layer(), self.native(), t), offset: kvo };
+        // (this object's space is (layer, native, table): python's module on this layer)
         let header_offset: u64 = if self.has_member("NameInfoOffset") {
             self.m("NameInfoOffset")?.int()? as u64
         } else {
+            let nt = Module { sp: self.sp, offset: kvo };
             let address = nt.get_symbol("ObpInfoMaskToOffset")?.address;
             let index = (self.m("InfoMask")?.int()? as u64) & 3;
-            let sp = Space::get(self.native(), self.native(), t);
-            Obj::named(sp, "unsigned char", kvo.wrapping_add(address).wrapping_add(index))?.int()? as u64
+            Obj::named(self.sp.native_space(), "unsigned char", kvo.wrapping_add(address).wrapping_add(index))?.int()? as u64
         };
         if header_offset == 0 {
             return Err(Error::msg(format!("{NAME_INFO_ZERO} for object at {} of layer {}", self.addr, self.layer().name())));
         }
-        Obj::named(Space::get(self.layer(), self.native(), t), "_OBJECT_HEADER_NAME_INFO", self.addr.wrapping_sub(header_offset))
+        Obj::named(self.sp, "_OBJECT_HEADER_NAME_INFO", self.addr.wrapping_sub(header_offset))
     }
 
     fn header_name(&self) -> Result<Option<String>> {

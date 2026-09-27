@@ -255,14 +255,12 @@ impl Plugin for PIDHashTable {
         let k = ctx.linux_kernel()?;
         let decorate = cfg.get_bool("decorate_comm");
         let Some(tasks) = get_tasks(k)? else { return Ok(()) };
-        let rows = crate::util::par::par_map(tasks.len(), |i| {
-            get_task_fields(&tasks[i], decorate)
-                .map(|tf| vec![Value::Int(tf.offset as i128), Value::Int(tf.user_pid), Value::Int(tf.user_tid), Value::Int(tf.user_ppid), Value::Str(tf.name)])
-        });
-        for r in rows {
-            out.row(0, r?)?;
-        }
-        Ok(())
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, tasks.into_iter().map(Ok).collect(), |t, b| {
+            let tf = get_task_fields(t, decorate)?;
+            b.push_ref(&[Value::Int(tf.offset as i128), Value::Int(tf.user_pid), Value::Int(tf.user_tid), Value::Int(tf.user_ppid), Value::Str(tf.name)]);
+            Ok(())
+        })
     }
 }
 

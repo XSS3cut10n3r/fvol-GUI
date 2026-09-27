@@ -13,7 +13,6 @@ use crate::plugins::mac::pslist::{PSLIST_METHODS, list_tasks, pid_filter};
 use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::mac::files::{files_descriptors_for_process, raise_python};
-use crate::util::par::par_map;
 
 pub struct Lsof;
 
@@ -33,21 +32,46 @@ impl Plugin for Lsof {
         let pids = cfg.get_ints("pid");
         let filter = pid_filter(&pids);
         let tasks = list_tasks(k, cfg.get_str("pslist_method").unwrap_or(PSLIST_METHODS[0]), &filter);
-        // per-process work in parallel, emitted in python order
-        let per_task = par_map(tasks.len(), |i| match &tasks[i] {
-            Ok(task) => Some(task.m("p_pid").and_then(|p| p.int()).map(|pid| (pid, files_descriptors_for_process(task)))),
-            Err(_) => None,
-        });
-        for (t, res) in tasks.into_iter().zip(per_task) {
-            t?;
-            let (pid, fds) = res.expect("computed for Ok tasks")?;
-            for e in fds {
-                let e = e.map_err(raise_python)?;
-                if !e.path.is_empty() {
-                    out.row(0, vec![Value::Int(pid), Value::Int(e.fd as i128), Value::Str(e.path)])?;
+        // per task in parallel, rows formatted on the workers, emitted in python's order; a
+        // python builtin exception (`raise_python` crashes like python) is raised here, on the
+        // output thread, after the rows before it
+        let (tasks, mut task_errs): (Vec<Option<crate::objects::Obj>>, Vec<Option<crate::error::Error>>) = tasks
+            .into_iter()
+            .map(|t| match t {
+                Ok(t) => (Some(t), None),
+                Err(e) => (None, Some(e)),
+            })
+            .unzip();
+        let enc = out.encoder();
+        crate::plugins::stream_blocks(
+            enc.as_ref(),
+            tasks.len(),
+            |i, b| -> Option<(crate::error::Error, bool)> {
+                let task = tasks[i].as_ref()?;
+                let pid = match task.m("p_pid").and_then(|p| p.int()) {
+                    Ok(p) => p,
+                    Err(e) => return Some((e, false)),
+                };
+                for e in files_descriptors_for_process(task) {
+                    match e {
+                        Ok(e) if e.path.is_empty() => {}
+                        Ok(e) => b.push_ref(&[Value::Int(pid), Value::Int(e.fd as i128), Value::Str(e.path)]),
+                        Err(e) => return Some((e, true)),
+                    }
                 }
-            }
-        }
-        Ok(())
+                None
+            },
+            |i, b, err| {
+                if let Some(e) = task_errs[i].take() {
+                    return Err(e);
+                }
+                b.emit(out)?;
+                match err.flatten() {
+                    Some((e, true)) => Err(raise_python(e)),
+                    Some((e, false)) => Err(e),
+                    None => Ok(true),
+                }
+            },
+        )
     }
 }

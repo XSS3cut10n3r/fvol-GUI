@@ -5,7 +5,9 @@
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::plugins::{Config, Plugin, Requirement};
-use crate::renderers::{ColType, Column, RowSink, Value};
+use crate::renderers::{ColType, Column, RowBlock, RowSink, Value};
+use std::borrow::Cow;
+use std::sync::Mutex;
 use crate::symbols::linux::kallsyms::{KasSymbol, Kallsyms as Kas};
 
 pub struct Kallsyms;
@@ -16,7 +18,7 @@ fn none_in_str_column(index: usize, column: &str) -> Error {
 }
 
 /// python `Kallsyms._generator` row for one symbol.
-fn row(s: KasSymbol) -> Result<Vec<Value>> {
+fn row(s: KasSymbol) -> Result<[Value; 8]> {
     // python `_get_symbol_size`: falsy or negative sizes are N/A
     let size = match s.size {
         Some(z) if z > 0 => Value::Int(z),
@@ -25,20 +27,59 @@ fn row(s: KasSymbol) -> Result<Vec<Value>> {
     let exported = s.exported.map_or(Value::NotAvailable, Value::Bool);
     let type_description = s.type_description();
     let subsystem = s.subsystem.ok_or_else(|| none_in_str_column(4, "SubSystem"))?;
-    let module_name = s.module_name.ok_or_else(|| none_in_str_column(5, "ModuleName"))?;
-    Ok(vec![
+    let module_name = match s.module_name.ok_or_else(|| none_in_str_column(5, "ModuleName"))? {
+        Cow::Borrowed(m) => Value::SStr(m),
+        Cow::Owned(m) => Value::Str(m),
+    };
+    Ok([
         Value::Int(s.address as i128),
         match s.type_ {
-            Some(t) if !t.is_empty() => Value::Str(t),
+            Some(Cow::Borrowed(t)) if !t.is_empty() => Value::SStr(t),
+            Some(Cow::Owned(t)) if !t.is_empty() => Value::Str(t),
             _ => Value::NotAvailable,
         },
         size,
         exported,
         Value::SStr(subsystem),
-        Value::Str(module_name),
+        module_name,
         Value::Str(s.name),
         type_description.map_or(Value::NotAvailable, Value::SStr),
     ])
+}
+
+/// Appends `s`'s row to `b`; false (the error in `err`) where python raises.
+fn push_symbol(b: &mut RowBlock, err: &mut Option<Error>, s: Result<KasSymbol>) -> bool {
+    match s.and_then(row) {
+        Ok(r) => {
+            b.push_ref(&r);
+            true
+        }
+        Err(e) => {
+            *err = Some(e);
+            false
+        }
+    }
+}
+
+/// python `for symbol in symbols: yield row(symbol)` over a collected part (a trailing `Err` =
+/// python raised there), the rows built and formatted on all cores.
+fn emit_symbols(out: &mut dyn RowSink, symbols: Vec<Result<KasSymbol>>) -> Result<()> {
+    const CHUNK: usize = 2048;
+    let n = symbols.len();
+    let mut chunks: Vec<Mutex<Vec<Result<KasSymbol>>>> = Vec::with_capacity(n.div_ceil(CHUNK));
+    let mut it = symbols.into_iter().peekable();
+    while it.peek().is_some() {
+        chunks.push(Mutex::new(it.by_ref().take(CHUNK).collect()));
+    }
+    super::stream_chunks(out, n, CHUNK, |r, b| {
+        let mut err = None;
+        for s in std::mem::take(&mut *chunks[r.start / CHUNK].lock().unwrap()) {
+            if !push_symbol(b, &mut err, s) {
+                break;
+            }
+        }
+        err
+    })
 }
 
 impl Plugin for Kallsyms {
@@ -78,30 +119,30 @@ impl Plugin for Kallsyms {
         if !flags.iter().any(|&f| f) {
             flags = [true; 4];
         }
+        let enc = out.encoder();
+        let enc = enc.as_ref();
         for (part, _) in flags.iter().enumerate().filter(|(_, f)| **f) {
             let symbols = match part {
                 0 => {
-                    // streamed: rows are rendered while the next symbols expand on all cores
-                    let mut err = None;
-                    kas.for_each_core_symbol(&mut |s| match s.and_then(row).and_then(|r| out.row(0, r)) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            err = Some(e);
-                            false
-                        }
-                    });
-                    if let Some(e) = err {
-                        return Err(e);
-                    }
+                    // streamed: rows are built and formatted on the cores that expanded the
+                    // symbols, and written here in kallsyms order
+                    let mut res = Ok(());
+                    kas.for_each_core_block(
+                        &|| (RowBlock::new(enc), None),
+                        &|(b, err): &mut (RowBlock, Option<Error>), s| push_symbol(b, err, s),
+                        &mut |(b, err)| {
+                            res = b.emit(out).and(err.map_or(Ok(()), Err));
+                            res.is_ok()
+                        },
+                    );
+                    res?;
                     continue;
                 }
                 1 => kas.get_modules_symbols(None),
                 2 => kas.get_ftrace_symbols(),
                 _ => kas.get_bpf_symbols(),
             };
-            for s in symbols {
-                out.row(0, row(s?)?)?;
-            }
+            emit_symbols(out, symbols)?;
         }
         Ok(())
     }

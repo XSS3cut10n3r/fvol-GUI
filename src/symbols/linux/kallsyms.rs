@@ -39,6 +39,7 @@ use crate::layers::{Layer, LayerExt};
 use crate::objects::util::{array_to_string, pointer_to_string};
 use crate::objects::{LayerRef, Module, Obj};
 use crate::util::FxHashMap;
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Largest plausible `kallsyms_num_syms`. Real kernels have well under a million core symbols;
@@ -153,12 +154,12 @@ impl KasConfig {
 pub struct KasSymbol {
     pub name: String,
     /// nm-style type letter (python `type`, may be None).
-    pub type_: Option<String>,
+    pub type_: Option<Cow<'static, str>>,
     pub address: u64,
     /// python `size` (None when the core symbol position could not be computed).
     pub size: Option<i128>,
     /// python `module_name` (None when a module name is unreadable).
-    pub module_name: Option<String>,
+    pub module_name: Option<Cow<'static, str>>,
     /// python `exported` (True / False / None).
     pub exported: Option<bool>,
     /// python `subsystem`: "core", "module", "ftrace", "bpf" (or None).
@@ -204,7 +205,22 @@ fn py_isupper(s: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KasSymbolBasic {
     pub name: String,
-    pub type_: Option<String>,
+    pub type_: Option<Cow<'static, str>>,
+}
+
+/// `c` (ASCII) as a one-character static string (no allocation per symbol type letter).
+fn ascii_str(c: u8) -> &'static str {
+    static ASCII: [u8; 128] = {
+        let mut a = [0u8; 128];
+        let mut i = 0;
+        while i < 128 {
+            a[i] = i as u8;
+            i += 1;
+        }
+        a
+    };
+    let c = (c & 0x7f) as usize;
+    std::str::from_utf8(&ASCII[c..c + 1]).unwrap_or("")
 }
 
 /// One-page read cache over a layer for byte-at-a-time decoding (python `_KallsymsIO`).
@@ -295,8 +311,9 @@ const NONE_ADDR: u64 = u64::MAX;
 enum Token {
     /// `token_index[i]` is None (python raises a TypeError when the token is used)
     NoIndex,
-    /// the bytes before the NUL; `tail`: the read error python hits after them (no NUL)
-    Bytes { bytes: Vec<u8>, tail: Option<Error> },
+    /// the bytes before the NUL; `tail`: the read error python hits after them (no NUL);
+    /// `ascii`: every byte is ASCII (decoded without a per-byte check)
+    Bytes { bytes: Vec<u8>, tail: Option<Error>, ascii: bool },
     /// no NUL within the first MiB: expanded byte by byte from memory
     Uncached(u64),
 }
@@ -324,10 +341,19 @@ impl AddrTable {
         let (mut run_start, mut next_greater) = (Vec::new(), Vec::new());
         if complete {
             run_start = vec![0u32; n];
+            let mut sorted = true;
             for i in 1..n {
                 run_start[i] = if addrs[i - 1] == addrs[i] { run_start[i - 1] } else { i as u32 };
+                sorted &= addrs[i - 1] <= addrs[i];
             }
             next_greater = vec![u32::MAX; n];
+            if sorted {
+                // (the kernel sorts them) the next greater is the end of the equal run
+                for i in (0..n.saturating_sub(1)).rev() {
+                    next_greater[i] = if addrs[i + 1] > addrs[i] { i as u32 + 1 } else { next_greater[i + 1] };
+                }
+                return AddrTable { addrs, complete, run_start, next_greater };
+            }
             let mut stack: Vec<u32> = Vec::new();
             for i in (0..n).rev() {
                 while let Some(&top) = stack.last() {
@@ -468,17 +494,35 @@ impl Kallsyms {
         Some(self.addrs.get_or_init(|| {
             let n = n as usize;
             let mut v = vec![NONE_ADDR; n];
-            // fast path: one read of the whole offsets array
+            // fast path: the whole offsets array, straight from the image pages when they are
+            // image-backed, else with one read
             if truthy(self.cfg.offsets_address) && self.relative_base.is_some() {
+                let base = self.cfg.offsets_address.unwrap();
+                // python: `relative_base - 1 - offset` for a negative offset (the u64
+                // wrapping arithmetic is the i128 result truncated)
+                let rb = self.relative_base.unwrap();
+                let addr_of = |x: i32| if x < 0 { rb.wrapping_sub(1).wrapping_sub(x as i64 as u64) } else { x as u64 & self.mask };
+                let mut done = 0usize;
+                while done < n {
+                    let a = base.wrapping_add(done as u64 * 4);
+                    let k = ((0x1000 - (a & 0xfff) as usize) / 4).min(n - done);
+                    let Some(page) = (a & 3 == 0).then(|| self.layer.slice(a, k * 4)).flatten() else { break };
+                    for (slot, c) in v[done..done + k].iter_mut().zip(page.chunks_exact(4)) {
+                        *slot = addr_of(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+                    }
+                    done += k;
+                }
+                if done == n {
+                    return Ok(AddrTable::new(v));
+                }
                 let mut raw = vec![0u8; n * 4];
-                if self.layer.read(self.cfg.offsets_address.unwrap(), &mut raw).is_ok() {
-                    let rb = self.relative_base.unwrap() as i128;
-                    for (i, c) in raw.chunks_exact(4).enumerate() {
-                        let x = i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64;
-                        v[i] = if x < 0 { (rb - 1 - x as i128) as u64 } else { x as u64 & self.mask };
+                if self.layer.read(base, &mut raw).is_ok() {
+                    for (slot, c) in v.iter_mut().zip(raw.chunks_exact(4)) {
+                        *slot = addr_of(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
                     }
                     return Ok(AddrTable::new(v));
                 }
+                v.fill(NONE_ADDR);
             }
             for (i, slot) in v.iter_mut().enumerate() {
                 if let Some(a) = self.read_symbol_address(i as u64)? {
@@ -639,9 +683,9 @@ impl Kallsyms {
                             return Token::Uncached(start);
                         }
                         match rd.byte(start.wrapping_add(bytes.len() as u64)) {
-                            Ok(0) => return Token::Bytes { bytes, tail: None },
+                            Ok(0) => return Token::Bytes { ascii: bytes.is_ascii(), bytes, tail: None },
                             Ok(c) => bytes.push(c),
-                            Err(e) => return Token::Bytes { bytes, tail: Some(e) },
+                            Err(e) => return Token::Bytes { ascii: bytes.is_ascii(), bytes, tail: Some(e) },
                         }
                     }
                 })
@@ -661,14 +705,14 @@ impl Kallsyms {
             len = (upper << 7) | (len & 0x7F);
         }
         let table = self.token_table();
-        let mut sym_type: Option<String> = None;
-        let mut name = String::new();
-        let mut push = |c: u8| -> Result<()> {
+        let mut sym_type: Option<Cow<'static, str>> = None;
+        let mut name = String::with_capacity((len as usize * 4).min(256));
+        let push = |sym_type: &mut Option<Cow<'static, str>>, name: &mut String, c: u8| -> Result<()> {
             if c >= 0x80 {
                 return Err(Error::msg("UnicodeDecodeError: 'utf-8' codec can't decode byte"));
             }
             if sym_type.is_none() {
-                sym_type = Some((c as char).to_string());
+                *sym_type = Some(Cow::Borrowed(ascii_str(c)));
             } else {
                 name.push(c as char);
             }
@@ -679,9 +723,20 @@ impl Kallsyms {
             pos = pos.wrapping_add(1);
             match &table[tii as usize] {
                 Token::NoIndex => return Err(type_error("unsupported operand type(s) for +: 'int' and 'NoneType'")),
-                Token::Bytes { bytes, tail } => {
-                    for &c in bytes {
-                        push(c)?;
+                Token::Bytes { bytes, tail, ascii } => {
+                    if *ascii {
+                        let mut bs = &bytes[..];
+                        if sym_type.is_none() {
+                            if let Some((&c, rest)) = bs.split_first() {
+                                sym_type = Some(Cow::Borrowed(ascii_str(c)));
+                                bs = rest;
+                            }
+                        }
+                        name.push_str(std::str::from_utf8(bs).unwrap_or_default());
+                    } else {
+                        for &c in bytes {
+                            push(&mut sym_type, &mut name, c)?;
+                        }
                     }
                     if let Some(e) = tail {
                         return Err(clone_err(e));
@@ -696,7 +751,7 @@ impl Kallsyms {
                         if c == 0 {
                             break;
                         }
-                        push(c)?;
+                        push(&mut sym_type, &mut name, c)?;
                     }
                 }
             }
@@ -928,9 +983,9 @@ impl Kallsyms {
             _ => return Ok(None),
         };
         let address = sym.st_value()? & self.mask;
-        let type_ = module.get_symbol_type(sym, idx)?;
+        let type_ = module.get_symbol_type(sym, idx)?.map(Cow::Owned);
         let size = sym.st_size()? as i128;
-        let module_name = module.get_name()?;
+        let module_name = module.get_name()?.map(Cow::Owned);
         let mut s = KasSymbol { name, type_, address, size: Some(size), module_name, exported: Some(false), subsystem };
         s.set_exported_from_type();
         Ok(Some(s))
@@ -1061,7 +1116,7 @@ impl Kallsyms {
 
     fn ftrace_func_symbol(f: &Ftrace, func: &FtraceFunc) -> Result<KasSymbol> {
         let module_name = clone_res(&f.maps[func.map])?;
-        let mut s = KasSymbol { name: func.name.clone(), type_: Some("T".into()), address: func.addr, size: Some(func.size), module_name: Some(module_name), exported: None, subsystem: Some("ftrace") };
+        let mut s = KasSymbol { name: func.name.clone(), type_: Some("T".into()), address: func.addr, size: Some(func.size), module_name: Some(Cow::Owned(module_name)), exported: None, subsystem: Some("ftrace") };
         s.set_exported_from_type();
         Ok(s)
     }
@@ -1131,16 +1186,37 @@ impl Kallsyms {
     /// Streaming [`get_core_symbols`](Self::get_core_symbols): `f` gets each symbol (or the
     /// `Err` python raises, after which nothing follows) in kallsyms order on the calling thread
     /// while the next ones are expanded on all cores; `f` returns false to stop.
+    pub fn for_each_core_symbol(&self, f: &mut dyn FnMut(Result<KasSymbol>) -> bool) {
+        self.for_each_core_block(
+            &Vec::new,
+            &|v: &mut Vec<Result<KasSymbol>>, r| {
+                let ok = r.is_ok();
+                v.push(r);
+                ok
+            },
+            &mut |v| v.into_iter().all(|r| f(r)),
+        );
+    }
+
+    /// [`for_each_core_symbol`](Self::for_each_core_symbol) with the per-symbol work done where
+    /// the symbol was expanded: the symbols (or the `Err` python raises, after which nothing
+    /// follows) go in kallsyms order through `push` into blocks made by `new_block`, on the
+    /// worker threads; `push` returns false to stop after that symbol (python raised there).
+    /// `emit` gets the blocks in order on the calling thread and returns false to stop.
     ///
     /// The symbols' stream offsets come from one pass over the length bytes; chunks of symbols
     /// are then expanded in parallel. python's `continue` on an unreadable symbol does not
     /// advance the stream offset, so from the first such symbol on the walk continues
     /// sequentially (the chunks before it are exactly what the sequential walk yields).
-    pub fn for_each_core_symbol(&self, f: &mut dyn FnMut(Result<KasSymbol>) -> bool) {
+    pub fn for_each_core_block<B: Send>(&self, new_block: &(dyn Fn() -> B + Sync), push: &(dyn Fn(&mut B, Result<KasSymbol>) -> bool + Sync), emit: &mut dyn FnMut(B) -> bool) {
+        /// symbols per block of the sequential walk
+        const SEQ_BLOCK: usize = 2048;
         let n = match self.num_syms() {
             Ok(n) => n,
             Err(e) => {
-                f(Err(e));
+                let mut b = new_block();
+                push(&mut b, Err(e));
+                emit(b);
                 return;
             }
         };
@@ -1153,40 +1229,70 @@ impl Kallsyms {
             return;
         }
         let (mut start, mut off) = (0u64, 0u64);
-        if let Some(offsets) = self.core_offsets(n) {
-            const CHUNK: usize = 2048;
+        // the address and token tables every symbol needs are built (once, single-threaded)
+        // while the length bytes are walked
+        let offsets = if crate::util::par::threads() > 1 {
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let _t = crate::util::trace::span("kallsyms: address + token tables");
+                    let _ = self.addr_table();
+                    let _ = self.token_table();
+                });
+                let _t = crate::util::trace::span("kallsyms: core offsets");
+                self.core_offsets(n)
+            })
+        } else {
+            self.core_offsets(n)
+        };
+        if let Some(offsets) = offsets {
+            // big enough that a formatted block (~100 bytes a row) is handed to the output
+            // without another copy, small enough to keep all cores busy
+            const CHUNK: usize = 4096;
             let chunks = offsets.len().div_ceil(CHUNK);
             let mut done = false;
             let mut resume: Option<usize> = None;
+            let mut panicked = None;
             let threads = crate::util::par::threads();
             crate::util::par::par_map_stream(
                 chunks,
                 4 * threads,
-                |c| -> (Vec<Result<KasSymbol>>, Option<usize>) {
-                    let mut names = PageReader::new(self.layer);
-                    let mut tokens = PageReader::new(self.layer);
-                    let lo = c * CHUNK;
-                    let hi = (lo + CHUNK).min(offsets.len());
-                    let mut v = Vec::with_capacity(hi - lo);
-                    for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
-                        match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
-                            Ok((s, _)) => v.push(Ok(s)),
-                            Err(e) if e.is_invalid_address() => return (v, Some(i)),
-                            Err(e) => {
-                                v.push(Err(e));
-                                break;
+                // (block, stopped, first unreadable symbol)
+                // (block, stopped, first unreadable symbol, panic): a panic is caught on the
+                // worker and resumed on the calling thread after the block's symbols (an
+                // uncaught worker panic would leave the stream waiting forever)
+                |c| {
+                    let mut b = new_block();
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> (bool, Option<usize>) {
+                        let mut names = PageReader::new(self.layer);
+                        let mut tokens = PageReader::new(self.layer);
+                        let lo = c * CHUNK;
+                        let hi = (lo + CHUNK).min(offsets.len());
+                        for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
+                            let r = match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
+                                Ok((s, _)) => Ok(s),
+                                Err(e) if e.is_invalid_address() => return (false, Some(i)),
+                                Err(e) => Err(e),
+                            };
+                            if !push(&mut b, r) {
+                                return (true, None);
                             }
                         }
+                        (false, None)
+                    }));
+                    match r {
+                        Ok((stopped, invalid)) => (b, stopped, invalid, None),
+                        Err(p) => (b, true, None, Some(p)),
                     }
-                    (v, None)
                 },
-                |_, (v, invalid)| {
-                    for r in v {
-                        let failed = r.is_err();
-                        if !f(r) || failed {
-                            done = true;
-                            return false;
+                |_, (b, stopped, invalid, p)| {
+                    let emitted = emit(b);
+                    if !emitted || stopped {
+                        // (a stop inside the block: python never got to the panic)
+                        if emitted {
+                            panicked = p;
                         }
+                        done = true;
+                        return false;
                     }
                     if let Some(i) = invalid {
                         resume = Some(i);
@@ -1195,6 +1301,9 @@ impl Kallsyms {
                     true
                 },
             );
+            if let Some(p) = panicked {
+                std::panic::resume_unwind(p);
+            }
             match resume {
                 _ if done => return,
                 None => return,
@@ -1208,20 +1317,32 @@ impl Kallsyms {
         // the length bytes could not all be read)
         let mut names = PageReader::new(self.layer);
         let mut tokens = PageReader::new(self.layer);
+        let mut b = new_block();
+        let mut in_block = 0usize;
         for idx in start..n {
-            match self.get_symbol_at(&mut names, &mut tokens, off, idx) {
+            let r = match self.get_symbol_at(&mut names, &mut tokens, off, idx) {
                 Ok((s, len)) => {
-                    if !f(Ok(s)) {
-                        return;
-                    }
                     off += len + 1;
+                    Ok(s)
                 }
                 Err(e) if e.is_invalid_address() => continue,
-                Err(e) => {
-                    f(Err(e));
+                Err(e) => Err(e),
+            };
+            let failed = r.is_err();
+            if !push(&mut b, r) || failed {
+                emit(b);
+                return;
+            }
+            in_block += 1;
+            if in_block == SEQ_BLOCK {
+                in_block = 0;
+                if !emit(std::mem::replace(&mut b, new_block())) {
                     return;
                 }
             }
+        }
+        if in_block > 0 {
+            emit(b);
         }
     }
 
@@ -1320,7 +1441,7 @@ impl Kallsyms {
                     let exported = self.is_symbol_exported(&sym_name, address, Some(&module))?;
                     let t = sym_type.ok_or_else(|| Error::msg("AttributeError: 'NoneType' object has no attribute 'lower'"))?;
                     let t = if exported == Some(true) { t.to_uppercase() } else { t.to_lowercase() };
-                    out.push(Ok(KasSymbol { name: sym_name, type_: Some(t), address, size: Some(size), module_name: Some(module_name.clone()), exported, subsystem: Some("module") }));
+                    out.push(Ok(KasSymbol { name: sym_name, type_: Some(Cow::Owned(t)), address, size: Some(size), module_name: Some(Cow::Owned(module_name.clone())), exported, subsystem: Some("module") }));
                 }
             }
             Ok(())
@@ -1675,6 +1796,46 @@ mod tests_lookup {
 }
 
 #[cfg(test)]
+mod tests_addr_table {
+    use super::*;
+
+    /// `run_start` / `next_greater` against their definitions, for sorted address lists (the
+    /// kernel's, fast path) and unsorted ones (the monotonic stack).
+    #[test]
+    fn runs_and_next_greater() {
+        let mut x: u64 = 7;
+        let mut lists: Vec<Vec<u64>> = vec![vec![], vec![5], vec![3, 3, 3], vec![1, 2, 2, 2, 5, 5, 9], vec![9, 1, 1, 4, 2, 2, 8, 8, 3]];
+        for len in [10usize, 100, 1000] {
+            let mut sorted = Vec::new();
+            let mut unsorted = Vec::new();
+            let mut a = 0x1000u64;
+            for _ in 0..len {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                a += (x >> 61) & 3; // runs of equal addresses
+                sorted.push(a);
+                unsorted.push((x >> 40) & 15);
+            }
+            lists.push(sorted);
+            lists.push(unsorted);
+        }
+        for addrs in lists {
+            let t = AddrTable::new(addrs.clone());
+            assert!(t.complete);
+            for i in 0..addrs.len() {
+                let mut rs = i;
+                while rs > 0 && addrs[rs - 1] == addrs[i] {
+                    rs -= 1;
+                }
+                assert_eq!(t.run_start[i] as usize, rs, "{addrs:?} run_start[{i}]");
+                let ng = (i + 1..addrs.len()).find(|&j| addrs[j] > addrs[i]).map_or(u32::MAX, |j| j as u32);
+                assert_eq!(t.next_greater[i], ng, "{addrs:?} next_greater[{i}]");
+            }
+        }
+        assert!(!AddrTable::new(vec![1, NONE_ADDR]).complete);
+    }
+}
+
+#[cfg(test)]
 mod tests_robustness {
     //! Regression: a corrupted `kallsyms_num_syms` must not drive an unbounded loop.
     //!
@@ -1723,7 +1884,10 @@ mod tests_robustness {
 
     fn leak_layer() -> LayerRef {
         // a tiny raw image: every kallsyms symbol address is readable (all zeros)
-        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-fuzz-{}", std::process::id()));
+        // one file per call: the tests run concurrently and each removes its file
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-fuzz-{}-{k}", std::process::id()));
         std::fs::write(&p, vec![0u8; 8192]).unwrap();
         let l = FileLayer::open(&p).unwrap();
         let _ = std::fs::remove_file(&p); // the mmap keeps the mapping alive
@@ -1748,6 +1912,104 @@ mod tests_robustness {
             assert_eq!(rows, 0, "num_syms={n}: core enumeration should be skipped, not looped");
             assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
             assert!(t.elapsed() < std::time::Duration::from_secs(5), "num_syms={n}: took too long");
+        }
+    }
+
+    /// A zero-filled image of `size` bytes with a table whose symbol addresses are
+    /// `kallsyms_addresses` at 8192 (so symbol `i` is readable iff `8192 + 8 * i < size`) and
+    /// `_end` set: every symbol has an empty name, address 0 and a size.
+    fn zero_kallsyms(size: usize) -> Module {
+        let isf = ISF.replace(
+            "\"kallsyms_names\":",
+            "\"kallsyms_addresses\": {\"address\": 8192, \"type\": {\"kind\": \"base\", \"name\": \"unsigned long\"}},
+             \"_end\": {\"address\": 1048576, \"type\": {\"kind\": \"base\", \"name\": \"unsigned char\"}},
+             \"kallsyms_names\":",
+        );
+        let blob = build_blob(isf.as_bytes(), &BuildOptions::default()).expect("build_blob");
+        let t: TableRef = Box::leak(Box::new(SymbolTable::from_blob(Blob::Owned(blob), "t", "u").expect("from_blob")));
+        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-blocks-{}-{size}", std::process::id()));
+        std::fs::write(&p, vec![0u8; size]).unwrap();
+        let l = FileLayer::open(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        Module::new(Box::leak(Box::new(l)), t, 0)
+    }
+
+    /// `for_each_core_block` yields exactly `for_each_core_symbol`'s stream, in order, in
+    /// blocks, on the parallel path (several chunks) and on the sequential one (the length
+    /// bytes run past the image), with python's stop at the first failing symbol; `push` and
+    /// `emit` stop it where they return false.
+    #[test]
+    fn core_blocks_match_the_symbol_stream() {
+        // symbols 0..5000 have readable addresses; symbol 5000 raises
+        let vm = zero_kallsyms(8192 + 5000 * 8);
+        let mut kas = Kallsyms::new(&vm).expect("Kallsyms::new");
+        for n in [6000u64, 60_000] {
+            kas.num_syms = Some(n);
+            kas.addrs = OnceLock::new();
+            let mut stream: Vec<Option<KasSymbol>> = Vec::new();
+            kas.for_each_core_symbol(&mut |r| {
+                stream.push(r.ok());
+                true
+            });
+            assert_eq!(stream.len(), 5001, "num_syms={n}");
+            assert!(stream[..5000].iter().all(|s| s.as_ref().is_some_and(|s| s.module_name.as_deref() == Some("kernel") && s.type_.is_none())));
+            assert!(stream[5000].is_none());
+            let mut blocks: Vec<Vec<Option<KasSymbol>>> = Vec::new();
+            kas.for_each_core_block(
+                &Vec::new,
+                &|b: &mut Vec<Option<KasSymbol>>, r| {
+                    let ok = r.is_ok();
+                    b.push(r.ok());
+                    ok
+                },
+                &mut |b| {
+                    blocks.push(b);
+                    true
+                },
+            );
+            assert!(blocks.len() >= 2 && blocks.iter().all(|b| !b.is_empty() && b.len() <= 4096), "num_syms={n}");
+            assert_eq!(blocks.concat(), stream, "num_syms={n}");
+            // emit stops after the first block
+            let mut got = 0;
+            kas.for_each_core_block(&Vec::new, &|b: &mut Vec<bool>, r| {
+                b.push(r.is_ok());
+                true
+            }, &mut |_| {
+                got += 1;
+                false
+            });
+            assert_eq!(got, 1, "num_syms={n}");
+            // push stops after symbol 100
+            let mut seen = Vec::new();
+            kas.for_each_core_block(&Vec::new, &|b: &mut Vec<usize>, _| {
+                b.push(0);
+                b.len() < 101
+            }, &mut |b| {
+                seen.push(b.len());
+                true
+            });
+            assert_eq!(seen, vec![101], "num_syms={n}");
+            // a panic in `push` on a worker comes back here (the stream does not hang)
+            let pushes = std::sync::atomic::AtomicUsize::new(0);
+            let mut got = 0usize;
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                kas.for_each_core_block(
+                    &Vec::new,
+                    &|b: &mut Vec<u8>, _| {
+                        if pushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 3000 {
+                            panic!("boom");
+                        }
+                        b.push(0);
+                        true
+                    },
+                    &mut |b| {
+                        got += b.len();
+                        true
+                    },
+                )
+            }));
+            assert!(r.is_err(), "num_syms={n}");
+            assert!(got < n as usize, "num_syms={n}");
         }
     }
 

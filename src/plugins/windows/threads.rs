@@ -8,7 +8,7 @@ use crate::context::{Context, WinKernel};
 use crate::error::Result;
 use crate::objects::Obj;
 use crate::plugins::windows::pslist::list_processes;
-use crate::plugins::windows::thrdscan::{columns, thread_rows, timeline_of};
+use crate::plugins::windows::thrdscan::{columns, thread_rows_out, timeline_of};
 use crate::plugins::{Config, Plugin, TimelineEvent};
 use crate::renderers::RowSink;
 use crate::symbols::windows::WinExt;
@@ -78,7 +78,7 @@ impl Plugin for Threads {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        thread_rows(list_process_threads(k), &mut |r| out.row(0, r))
+        thread_rows_out(list_process_threads(k), out)
     }
     fn timeline(&self, ctx: &Context, _cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
         Some(ctx.windows_kernel().and_then(|k| timeline_of(list_process_threads(k))))

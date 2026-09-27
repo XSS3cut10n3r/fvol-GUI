@@ -24,6 +24,7 @@ use crate::layers::{Layer, LayerExt};
 use crate::symbols::table::{Prim, PrimKind, StrEnc, StrErrors, SymbolTable, Ty};
 use crate::symbols::{TableRef, resolve_ref};
 use crate::util::FxHashMap;
+use std::cell::{Cell, UnsafeCell};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// A process-lifetime layer reference.
@@ -38,6 +39,112 @@ pub fn leak_layer(l: Arc<dyn Layer>) -> LayerRef {
 #[inline(always)]
 fn lkey(l: LayerRef) -> usize {
     l as *const dyn Layer as *const u8 as usize
+}
+
+// ---------------------------------------------------------------------------------------------
+// zero-copy page cache
+
+/// A page-cache entry: layer key, virtual page number, host address of the page's 4 KiB
+/// (0 = the layer does not hand this page out whole: read through the layer).
+#[derive(Clone, Copy)]
+struct PageEnt {
+    layer: usize,
+    vpn: u64,
+    host: usize,
+}
+const PCACHE_BITS: u32 = 9;
+thread_local! {
+    /// Per-thread, direct-mapped: (layer, page) -> where the page's bytes are in the image
+    /// mapping. Layers are `'static` and immutable, and `Layer::slice` data lives as long as
+    /// its layer, so an entry never goes stale.
+    static PCACHE: UnsafeCell<[PageEnt; 1 << PCACHE_BITS]> = const { UnsafeCell::new([PageEnt { layer: 0, vpn: 0, host: 0 }; 1 << PCACHE_BITS]) };
+}
+
+/// Zero-copy view of `[addr, addr + len)` on `layer` when the range lies inside one 4 KiB page
+/// that the layer hands out whole through [`Layer::slice`] (every image-backed page of raw,
+/// ELF, LiME and crash-dump images, and of the translation layers over them). `None` means
+/// "read through the layer" (other layers, unmapped / partial pages, ranges crossing a page):
+/// the bytes, when present, are exactly what `layer.read` would return.
+#[inline]
+pub fn page_bytes(layer: LayerRef, addr: u64, len: usize) -> Option<&'static [u8]> {
+    let off = (addr & 0xfff) as usize;
+    if len > 0x1000 - off {
+        return None;
+    }
+    let lk = lkey(layer);
+    let vpn = addr >> 12;
+    let slot = ((vpn ^ (lk as u64).rotate_left(29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - PCACHE_BITS)) as usize;
+    // SAFETY: thread-local, no reference escapes the closure
+    let e = PCACHE.with(|c| unsafe { (*c.get())[slot] });
+    let host = if e.layer == lk && e.vpn == vpn {
+        e.host
+    } else {
+        // (outside the cache borrow: a layer's slice may itself read objects)
+        let host = layer.slice(addr & !0xfff, 0x1000).map_or(0, |s| s.as_ptr() as usize);
+        PCACHE.with(|c| unsafe { (*c.get())[slot] = PageEnt { layer: lk, vpn, host } });
+        host
+    };
+    if host == 0 {
+        return None;
+    }
+    // SAFETY: `host` is the start of this page's 4 KiB inside a mapping owned by the
+    // (`'static`, never freed) layer; `off + len <= 0x1000`
+    Some(unsafe { std::slice::from_raw_parts((host as *const u8).add(off), len) })
+}
+
+/// Hint that the byte at `addr` of `layer` will be read soon: a software prefetch of its cache
+/// line in the image mapping (when the page is mapped whole; otherwise nothing). Issuing these
+/// for a batch of objects before reading them overlaps their memory latencies.
+#[inline]
+pub fn prefetch(layer: LayerRef, addr: u64) {
+    if let Some(s) = page_bytes(layer, addr, 1) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: a prefetch hint never faults; the address is inside the mapping anyway
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(s.as_ptr() as *const i8);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = s;
+    }
+}
+
+/// `layer.read(addr, buf)` through the page cache.
+#[inline]
+pub fn read_into(layer: LayerRef, addr: u64, buf: &mut [u8]) -> Result<()> {
+    match page_bytes(layer, addr, buf.len()) {
+        Some(s) => {
+            buf.copy_from_slice(s);
+            Ok(())
+        }
+        None => layer.read(addr, buf),
+    }
+}
+
+/// python's int of an `n`-byte (1..=8) little-endian integer loaded as `raw`.
+#[inline(always)]
+fn le_int(raw: u64, n: usize, signed: bool) -> i128 {
+    if !signed || n == 0 {
+        raw as i128
+    } else {
+        let shift = 64 - 8 * n as u32;
+        (((raw << shift) as i64) >> shift) as i128
+    }
+}
+
+/// Little-endian unsigned load of `n <= 8` bytes.
+#[inline(always)]
+fn load_le(s: &[u8]) -> u64 {
+    match *s {
+        [a] => a as u64,
+        [a, b] => u16::from_le_bytes([a, b]) as u64,
+        [a, b, c, d] => u32::from_le_bytes([a, b, c, d]) as u64,
+        [a, b, c, d, e, f, g, h] => u64::from_le_bytes([a, b, c, d, e, f, g, h]),
+        _ => {
+            let mut b = [0u8; 8];
+            b[..s.len()].copy_from_slice(s);
+            u64::from_le_bytes(b)
+        }
+    }
 }
 
 /// The binding every object carries: python `vol.layer_name`, `vol.native_layer_name` and the
@@ -58,11 +165,35 @@ pub struct Space {
 
 type SpaceKey = (usize, usize, usize);
 static SPACES: Mutex<Option<FxHashMap<SpaceKey, &'static Space>>> = Mutex::new(None);
+type SpaceSlot = Cell<(SpaceKey, Option<&'static Space>)>;
+const SPACE_TLS_SLOTS: usize = 16;
+thread_local! {
+    /// Per-thread front cache of [`Space::get`]: the interned map sits behind a mutex that
+    /// worker threads would otherwise contend on (spaces are never freed, keys never reused:
+    /// layers and tables are `'static`).
+    static SPACE_TLS: [SpaceSlot; SPACE_TLS_SLOTS] = const { [const { Cell::new(((0, 0, 0), None)) }; SPACE_TLS_SLOTS] };
+}
 
 impl Space {
     /// Get (or create) the space for (layer, native layer, table).
+    #[inline]
     pub fn get(layer: LayerRef, native: LayerRef, table: TableRef) -> &'static Space {
         let key = (lkey(layer), lkey(native), table as *const SymbolTable as usize);
+        let slot = ((key.0 ^ key.1.rotate_left(17) ^ key.2.rotate_left(34)) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 60;
+        let slot = slot as usize % SPACE_TLS_SLOTS;
+        if let Some(s) = SPACE_TLS.with(|c| {
+            let e = c[slot].get();
+            if e.0 == key { e.1 } else { None }
+        }) {
+            return s;
+        }
+        let s = Self::get_slow(key, layer, native, table);
+        SPACE_TLS.with(|c| c[slot].set((key, Some(s))));
+        s
+    }
+
+    #[cold]
+    fn get_slow(key: SpaceKey, layer: LayerRef, native: LayerRef, table: TableRef) -> &'static Space {
         let mut g = SPACES.lock().unwrap();
         let map = g.get_or_insert_with(Default::default);
         if let Some(s) = map.get(&key) {
@@ -390,8 +521,20 @@ impl Obj {
         if n == 0 {
             return Ok(0);
         }
+        if n <= 8 && !p.big_endian {
+            // the common case: a little-endian scalar, straight from the image mapping
+            let raw = match page_bytes(self.sp.layer, self.addr, n) {
+                Some(s) => load_le(s),
+                None => {
+                    let mut b = [0u8; 8];
+                    self.sp.layer.read(self.addr, &mut b[..n])?;
+                    u64::from_le_bytes(b)
+                }
+            };
+            return Ok(le_int(raw, n, p.signed));
+        }
         let mut b = [0u8; 16];
-        self.sp.layer.read(self.addr, &mut b[..n])?;
+        read_into(self.sp.layer, self.addr, &mut b[..n])?;
         Ok(p.decode_int(&b[..n]))
     }
 
@@ -451,7 +594,7 @@ impl Obj {
                 if !(n == 2 || n == 4 || n == 8) {
                     return Err(Error::msg("Invalid float size"));
                 }
-                self.sp.layer.read(self.addr, &mut b[..n])?;
+                read_into(self.sp.layer, self.addr, &mut b[..n])?;
                 let v = match (n, p.big_endian) {
                     (8, false) => f64::from_le_bytes(b),
                     (8, true) => f64::from_be_bytes(b),
@@ -500,12 +643,18 @@ impl Obj {
                 if max_len == 0 {
                     return Ok(String::new());
                 }
+                if let Some(data) = page_bytes(self.sp.layer, self.addr, max_len as usize) {
+                    return strings::decode_cstring(data, enc, errors);
+                }
                 let data = self.sp.layer.read_vec(self.addr, max_len as usize)?;
                 strings::decode_cstring(&data, enc, errors)
             }
-            Ty::Array { count, .. } => {
-                let data = self.sp.layer.read_vec(self.addr, self.size() as usize)?;
-                let _ = count;
+            Ty::Array { .. } => {
+                let n = self.size() as usize;
+                if n > 0 && let Some(data) = page_bytes(self.sp.layer, self.addr, n) {
+                    return strings::decode_cstring(data, StrEnc::Utf8, StrErrors::Replace);
+                }
+                let data = self.sp.layer.read_vec(self.addr, n)?;
                 strings::decode_cstring(&data, StrEnc::Utf8, StrErrors::Replace)
             }
             Ty::Bytes(_) => {
@@ -524,6 +673,9 @@ impl Obj {
         let n = self.size() as usize;
         if n == 0 {
             return Ok(Vec::new());
+        }
+        if let Some(data) = page_bytes(self.sp.layer, self.addr, n) {
+            return Ok(data.to_vec());
         }
         self.sp.layer.read_vec(self.addr, n)
     }
@@ -626,8 +778,12 @@ impl Obj {
             Ty::Array { count, elem } => match self.sp.table.node(elem) {
                 Ty::Int(p) => {
                     let sz = p.size as usize;
-                    let data = self.sp.layer.read_vec(self.addr, sz * count as usize)?;
-                    Ok(data.chunks_exact(sz.max(1)).map(|c| p.decode_int(c)).collect())
+                    let n = sz * count as usize;
+                    let decode = |data: &[u8]| data.chunks_exact(sz.max(1)).map(|c| p.decode_int(c)).collect();
+                    if let Some(data) = page_bytes(self.sp.layer, self.addr, n) {
+                        return Ok(decode(data));
+                    }
+                    Ok(decode(&self.sp.layer.read_vec(self.addr, n)?))
                 }
                 _ => self.elements().map(|e| e.int()).collect(),
             },
@@ -654,20 +810,24 @@ fn half_to_f64(h: u16) -> f64 {
 }
 
 /// Resolve an `Unresolved` type (cross-table `table!Type` references) into (space, type).
-#[inline]
+#[inline(always)]
 fn fix_ty(sp: &'static Space, ty: Ty, addr: u64) -> Result<Obj> {
     match ty {
-        Ty::Unresolved(i) => {
-            let name = sp.table.unresolved_name(i);
-            match resolve_ref(sp.table, name) {
-                Some((t, ty)) => {
-                    let sp2 = sp.with_table(t);
-                    Ok(Obj { sp: sp2, ty, addr: addr & sp2.layer_mask })
-                }
-                None => Err(Error::Symbol(format!("Unknown symbol: {name}"))),
-            }
-        }
+        Ty::Unresolved(i) => fix_unresolved(sp, i, addr),
         _ => Ok(Obj { sp, ty, addr }),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn fix_unresolved(sp: &'static Space, i: crate::symbols::TypeIdx, addr: u64) -> Result<Obj> {
+    let name = sp.table.unresolved_name(i);
+    match resolve_ref(sp.table, name) {
+        Some((t, ty)) => {
+            let sp2 = sp.with_table(t);
+            Ok(Obj { sp: sp2, ty, addr: addr & sp2.layer_mask })
+        }
+        None => Err(Error::Symbol(format!("Unknown symbol: {name}"))),
     }
 }
 
@@ -716,6 +876,34 @@ impl Field {
             ty = m.ty;
         }
         Ok(Field { offset: off, ty, sp: None })
+    }
+
+    /// The python int value of this member, decoded from `rec` = the bytes of the containing
+    /// struct (from its start), exactly as `obj.f(self).int()` reads it: integers, bitfields
+    /// and pointers (masked with `native_mask`, the native layer's address mask). `None` for
+    /// other types (enums, floats, ...) or when `rec` is too short: read the object instead.
+    #[inline]
+    pub fn int_from(&self, rec: &[u8], native_mask: u64) -> Option<i128> {
+        let prim_at = |p: Prim| -> Option<i128> {
+            let o = usize::try_from(self.offset).ok()?;
+            let n = p.size as usize;
+            let b = rec.get(o..o.checked_add(n)?)?;
+            Some(if n <= 8 && !p.big_endian { le_int(load_le(b), n, p.signed) } else { p.decode_int(b) })
+        };
+        match self.ty {
+            Ty::Int(p) if self.sp.is_none() => prim_at(p),
+            Ty::Pointer { prim, .. } if self.sp.is_none() => {
+                let mut p = prim;
+                p.signed = false;
+                Some((prim_at(p)? as u128 as u64 & native_mask) as i128)
+            }
+            Ty::BitField { start, end, base } if self.sp.is_none() => {
+                let v = prim_at(base)?;
+                let mask = if end >= 127 { -1i128 } else { (1i128 << end) - 1 };
+                Some((v & mask) >> start)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -898,6 +1086,123 @@ mod tests {
         let t = crate::symbols::register(load_table(ISF.as_bytes(), "t", "test", &BuildOptions::default()).unwrap(), "objtest");
         let sp = Space::on(layer, t);
         (sp, Obj::named(sp, "_S", 0).unwrap())
+    }
+
+    /// A layer over a buffer that hands out slices (like the image mapping), except for the
+    /// pages in `no_slice` (read-only through `read`, like a compressed or pagefile page).
+    struct SliceMem {
+        m: Vec<u8>,
+        no_slice: Vec<u64>,
+    }
+    impl Layer for SliceMem {
+        fn name(&self) -> &str {
+            "slicemem"
+        }
+        fn max_address(&self) -> u64 {
+            (1 << 48) - 1
+        }
+        fn read(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+            let a = addr as usize;
+            match self.m.get(a..a + buf.len()) {
+                Some(s) => {
+                    buf.copy_from_slice(s);
+                    Ok(())
+                }
+                None => Err(Error::invalid(addr)),
+            }
+        }
+        fn is_valid(&self, addr: u64, len: u64) -> bool {
+            addr.checked_add(len).is_some_and(|e| e <= self.m.len() as u64)
+        }
+        fn mapping(&self, addr: u64, len: u64, f: &mut dyn FnMut(Mapping) -> bool) {
+            f(Mapping { offset: addr, len, mapped: addr });
+        }
+        fn slice(&self, addr: u64, len: usize) -> Option<&[u8]> {
+            if self.no_slice.contains(&(addr >> 12)) {
+                return None;
+            }
+            self.m.get(addr as usize..addr as usize + len)
+        }
+    }
+
+    /// Reads through the zero-copy page cache return exactly what `layer.read` returns, for
+    /// sliceable pages, pages the layer only reads, the partial last page, ranges crossing a
+    /// page and missing bytes; with two layers sharing cache slots.
+    #[test]
+    fn page_cache_matches_reads() {
+        let n = 3 * 0x1000 + 0x800;
+        let data: Vec<u8> = (0..n).map(|i| (i * 7 + i / 4096) as u8).collect();
+        let a = leak_layer(Arc::new(SliceMem { m: data.clone(), no_slice: vec![1] }));
+        let b = leak_layer(Arc::new(SliceMem { m: data.iter().map(|x| !x).collect(), no_slice: vec![] }));
+        for round in 0..2 {
+            for layer in [a, b] {
+                for addr in [0u64, 8, 0xff8, 0xffc, 0x1000, 0x1ff9, 0x2000, 0x3000, 0x37f8, 0x37fc, 0x3800, 0x5000] {
+                    for len in [1usize, 2, 4, 8, 16, 0x1000] {
+                        let mut want = vec![0u8; len];
+                        let wr = layer.read(addr, &mut want);
+                        let mut got = vec![0u8; len];
+                        let gr = read_into(layer, addr, &mut got);
+                        assert_eq!(wr.is_ok(), gr.is_ok(), "round {round} addr {addr:#x} len {len}");
+                        if wr.is_ok() {
+                            assert_eq!(want, got, "round {round} addr {addr:#x} len {len}");
+                        }
+                        if let Some(s) = page_bytes(layer, addr, len) {
+                            assert_eq!(s, &want[..], "slice {addr:#x} {len}");
+                        }
+                    }
+                }
+            }
+        }
+        // the non-sliceable page and the partial last page are never handed out
+        assert!(page_bytes(a, 0x1010, 4).is_none());
+        assert!(page_bytes(a, 0x3010, 4).is_none());
+        assert!(page_bytes(b, 0x1010, 4).is_some());
+        // scalars through objects
+        let t = crate::symbols::register(load_table(ISF.as_bytes(), "t", "test", &BuildOptions::default()).unwrap(), "objtest-pc");
+        for (layer, flip) in [(a, false), (b, true)] {
+            let s = Obj::named(Space::on(layer, t), "_S", 0xffc).unwrap();
+            let v = |i: usize| if flip { !data[i] } else { data[i] };
+            let u = u32::from_le_bytes([v(0xffc), v(0xffd), v(0xffe), v(0xfff)]);
+            assert_eq!(s.m("u").unwrap().int().unwrap(), u as i128);
+            let sv = i32::from_le_bytes([v(0x1000), v(0x1001), v(0x1002), v(0x1003)]);
+            assert_eq!(s.m("s").unwrap().int().unwrap(), sv as i128);
+        }
+    }
+
+    /// The per-thread member / type caches never answer for another name (a reused name
+    /// buffer), another table (same layout, other offsets) or a dropped table.
+    #[test]
+    fn lookup_caches_are_exact() {
+        let t1 = load_table(ISF.as_bytes(), "t", "test", &BuildOptions::default()).unwrap();
+        let t2 = load_table(ISF.replace("\"offset\": 4,", "\"offset\": 12,").as_bytes(), "t", "test", &BuildOptions::default()).unwrap();
+        let ut1 = t1.user_type("_S").unwrap();
+        let ut2 = t2.user_type("_S").unwrap();
+        // one name buffer, rewritten in place: same address, other names
+        let mut buf = String::with_capacity(8);
+        for (name, off1) in [("s", Some(4)), ("u", Some(0)), ("e", Some(24)), ("x", None), ("s", Some(4))] {
+            buf.clear();
+            buf.push_str(name);
+            for _ in 0..2 {
+                assert_eq!(t1.member(ut1, &buf).map(|m| m.offset), off1, "{name}");
+                assert_eq!(t2.member(ut2, &buf).map(|m| m.offset), off1.map(|o| if o == 4 { 12 } else { o }), "{name}");
+            }
+        }
+        let mut tb = String::with_capacity(16);
+        for (name, ok) in [("_S", true), ("_T", false), ("long", true), ("_S", true)] {
+            tb.clear();
+            tb.push_str(name);
+            for _ in 0..2 {
+                assert_eq!(t1.get_type(&tb).is_ok(), ok, "{name}");
+            }
+        }
+        assert!(matches!(t1.get_type("_S").unwrap(), Ty::Struct(_)));
+        assert!(matches!(t1.get_type("long").unwrap(), Ty::Int(p) if p.signed && p.size == 4));
+        // a new table after the old one is gone (possibly at the same address) misses
+        let hot = "s";
+        assert_eq!(t2.member(ut2, hot).unwrap().offset, 12);
+        drop(t2);
+        let t3 = load_table(ISF.replace("\"offset\": 4,", "\"offset\": 16,").as_bytes(), "t", "test", &BuildOptions::default()).unwrap();
+        assert_eq!(t3.member(t3.user_type("_S").unwrap(), hot).unwrap().offset, 16);
     }
 
     #[test]

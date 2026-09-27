@@ -166,17 +166,7 @@ impl Plugin for GetSIDs {
         let procs = super::pslist::list_processes(k, &filter);
         // python: the generator starts with lookup_user_sids(), before the first process
         let user_sids = lookup_user_sids(ctx, k)?;
-        let per_proc = crate::util::par::par_map(procs.len(), |i| match &procs[i] {
-            Ok(p) => proc_rows(p, &user_sids),
-            Err(_) => Vec::new(),
-        });
-        for (p, rows) in procs.into_iter().zip(per_proc) {
-            p?;
-            for r in rows {
-                out.row(0, r?)?;
-            }
-        }
-        Ok(())
+        crate::plugins::emit_par_rows(out, procs, |p| proc_rows(p, &user_sids))
     }
 }
 

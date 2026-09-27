@@ -98,6 +98,60 @@ pub fn list_big_pools_each(ctx: &Context, k: &WinKernel, tags: Option<&[String]>
     Ok(())
 }
 
+/// The row of a tracker entry (python `_generator`'s tuple) with the entry's members resolved
+/// once: `NumberOfBytes`, `Va`, the tag and the first `_POOL_TYPE` name of `PoolType`.
+struct RowMaker {
+    va: Field,
+    key: Field,
+    /// None: no such member (python's NotApplicable)
+    pool_type: Option<Field>,
+    number_of_bytes: Option<Field>,
+    /// `_POOL_TYPE`'s constants in ISF order (python's first name for a value)
+    pool_types: Vec<(i64, &'static str)>,
+}
+
+impl RowMaker {
+    fn new(t: TableRef) -> Result<RowMaker> {
+        let pool_types = match t.enumeration("_POOL_TYPE") {
+            Some(e) => t.enum_constants(e).map(|(n, v)| (v, n)).collect(),
+            None => Vec::new(),
+        };
+        Ok(RowMaker {
+            va: Field::new(t, "_POOL_TRACKER_BIG_PAGES", "Va")?,
+            key: Field::new(t, "_POOL_TRACKER_BIG_PAGES", "Key")?,
+            pool_type: Field::new(t, "_POOL_TRACKER_BIG_PAGES", "PoolType").ok(),
+            number_of_bytes: Field::new(t, "_POOL_TRACKER_BIG_PAGES", "NumberOfBytes").ok(),
+            pool_types,
+        })
+    }
+
+    fn row(&self, bp: &Obj) -> Result<Vec<Value>> {
+        // get_number_of_bytes()
+        let num_bytes = match &self.number_of_bytes {
+            Some(f) => Value::Int(bp.f(f).int()?),
+            None => Value::NotApplicable,
+        };
+        let va = bp.f(&self.va).int()?;
+        let status = if va & 1 == 1 { "Free" } else { "Allocated" };
+        let key = big_page_key_str(bp.f(&self.key).int()? as u32);
+        // get_pool_type()
+        let pool_type = match &self.pool_type {
+            Some(f) => {
+                let v = bp.f(f).int()?;
+                match self.pool_types.iter().find(|(c, _)| *c as i128 == v) {
+                    Some((_, n)) => Value::SStr(n),
+                    None => Value::Str(format!("Unknown choice {v}")),
+                }
+            }
+            None => Value::NotApplicable,
+        };
+        Ok(vec![Value::Int(va), Value::Str(key), pool_type, num_bytes, Value::SStr(status)])
+    }
+}
+
+/// Entries whose rows one worker builds at a time.
+const CHUNK: usize = 256;
+
 impl Plugin for BigPools {
     fn name(&self) -> &'static str {
         "windows.bigpools.BigPools"
@@ -122,11 +176,23 @@ impl Plugin for BigPools {
         let k = ctx.windows_kernel()?;
         let tags: Option<Vec<String>> = cfg.get_str("tags").filter(|s| !s.is_empty()).map(|s| s.split(',').map(|x| x.to_string()).collect());
         let show_free = cfg.get_bool("show-free");
-        list_big_pools_each(ctx, k, tags.as_deref(), show_free, |bp| {
-            let num_bytes = bp.get_number_of_bytes()?;
-            let status = if bp.is_free()? { "Free" } else { "Allocated" };
-            out.row(0, vec![Value::Int(bp.m("Va")?.int()?), Value::Str(bp.get_key()?), bp.get_pool_type()?, num_bytes, Value::SStr(status)])?;
+        // the table walk first (python's entries, and where it raised), then the rows in
+        // parallel, emitted in order
+        let mut entries: Vec<Obj> = Vec::new();
+        let walk_err = list_big_pools_each(ctx, k, tags.as_deref(), show_free, |bp| {
+            entries.push(bp);
             Ok(true)
+        })
+        .err();
+        let Some(first) = entries.first() else { return walk_err.map_or(Ok(()), Err) };
+        let maker = RowMaker::new(first.table())?;
+        let mut items: Vec<Result<&[Obj]>> = entries.chunks(CHUNK).map(Ok).collect();
+        items.extend(walk_err.map(Err));
+        crate::plugins::emit_par_blocks(out, items, |chunk, block| {
+            for bp in *chunk {
+                block.push(maker.row(bp)?);
+            }
+            Ok(())
         })
     }
 }

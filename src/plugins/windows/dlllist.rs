@@ -4,10 +4,10 @@
 
 use crate::cli::regex::Regex;
 use crate::context::Context;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::objects::Obj;
 use crate::plugins::{Config, Plugin, ReqKind, Requirement, TimelineEvent};
-use crate::renderers::{ColType, Column, RowSink, Value};
+use crate::renderers::{ColType, Column, RowBlock, RowSink, Value};
 use crate::symbols::TableRef;
 use crate::symbols::windows::WinExt;
 use crate::util::time::wintime_to_datetime;
@@ -111,8 +111,34 @@ fn proc_items(o: &Opts, proc: &Obj) -> Vec<Result<Item>> {
     out
 }
 
+/// How one process' rows ended.
+enum Tail {
+    Done,
+    /// python's `return None` (the generator ends)
+    Stop,
+    Raise(Error),
+}
+
+/// One process' rows into `block` (formatted there when the sink has an encoder).
+fn proc_block(o: &Opts, proc: &Obj, block: &mut RowBlock) -> Tail {
+    for it in proc_items(o, proc) {
+        match it {
+            Ok(Item::Row(r)) => block.push(r),
+            Ok(Item::Stop) => return Tail::Stop,
+            Err(e) => return Tail::Raise(e),
+        }
+    }
+    Tail::Done
+}
+
+/// Where python's rows go.
+enum Emit<'a> {
+    Values(&'a mut dyn FnMut(Vec<Value>) -> Result<()>),
+    Sink(&'a mut dyn RowSink),
+}
+
 /// Runs python's generator, handing each row to `emit`.
-fn rows(ctx: &Context, cfg: &Config, dump: bool, emit: &mut dyn FnMut(Vec<Value>) -> Result<()>) -> Result<()> {
+fn rows(ctx: &Context, cfg: &Config, dump: bool, emit: Emit) -> Result<()> {
     let k = ctx.windows_kernel()?;
     let pids = cfg.get_ints("pid");
     let pid_filter = super::pslist::pid_filter(&pids);
@@ -140,6 +166,52 @@ fn rows(ctx: &Context, cfg: &Config, dump: bool, emit: &mut dyn FnMut(Vec<Value>
     };
     // processes are independent: compute in parallel, emit in python order. With --dump stay
     // sequential so an error stops before later dumps exactly like python.
+    let mut sink_row;
+    let emit: &mut dyn FnMut(Vec<Value>) -> Result<()> = match emit {
+        Emit::Sink(out) if !dump => {
+            // the rows formatted on the workers
+            let enc = out.encoder();
+            let mut errs: Vec<Option<Error>> = Vec::with_capacity(procs.len());
+            let oks: Vec<Option<Obj>> = procs
+                .into_iter()
+                .map(|p| match p {
+                    Ok(p) => {
+                        errs.push(None);
+                        Some(p)
+                    }
+                    Err(e) => {
+                        errs.push(Some(e));
+                        None
+                    }
+                })
+                .collect();
+            return crate::plugins::stream_blocks(
+                enc.as_ref(),
+                oks.len(),
+                |i, block| match &oks[i] {
+                    Some(p) => proc_block(&o, p, block),
+                    None => Tail::Done,
+                },
+                |i, block, tail| {
+                    if let Some(e) = errs[i].take() {
+                        return Err(e);
+                    }
+                    block.emit(out)?;
+                    // (None: the process panicked after these rows, resumed by stream_blocks)
+                    match tail {
+                        None | Some(Tail::Done) => Ok(true),
+                        Some(Tail::Stop) => Ok(false),
+                        Some(Tail::Raise(e)) => Err(e),
+                    }
+                },
+            );
+        }
+        Emit::Sink(out) => {
+            sink_row = move |r: Vec<Value>| out.row(0, r);
+            &mut sink_row
+        }
+        Emit::Values(f) => f,
+    };
     let mut per_proc = if dump {
         Vec::new()
     } else {
@@ -191,7 +263,7 @@ impl Plugin for DllList {
             Column::new("LoadTime", ColType::DateTime),
             Column::new("File output", ColType::Str),
         ])?;
-        rows(ctx, cfg, cfg.get_bool("dump"), &mut |r| out.row(0, r))
+        rows(ctx, cfg, cfg.get_bool("dump"), Emit::Sink(out))
     }
     fn timeline(&self, ctx: &Context, cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
         // python checks `isinstance(row_data[6], datetime.datetime)`, but column 6 is LoadCount
@@ -200,6 +272,6 @@ impl Plugin for DllList {
         let mut c = cfg.clone();
         c.values.remove("offset");
         c.values.remove("pid");
-        Some(rows(ctx, &c, cfg.get_bool("dump"), &mut |_| Ok(())).map(|_| Vec::new()))
+        Some(rows(ctx, &c, cfg.get_bool("dump"), Emit::Values(&mut |_| Ok(()))).map(|_| Vec::new()))
     }
 }

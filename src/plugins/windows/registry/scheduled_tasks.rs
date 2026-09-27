@@ -893,11 +893,30 @@ fn generate(ctx: &Context, cfg: &Config) -> Result<Vec<Row>> {
     if let Some(tree) = task_tree {
         build_guid_name_map(&tree, &mut guid_map);
     }
+    // the task keys are independent: parsed in parallel, rows in python's order (python
+    // raises at the first failing key, or where listing the keys failed)
+    let mut keys: Vec<Obj> = Vec::new();
+    let mut list_err = None;
     for key in task_key.get_subkeys() {
-        let key = key?;
-        parse_task_key(&key, &guid_map, &mut rows)?;
+        match key {
+            Ok(k) => keys.push(k),
+            Err(e) => {
+                list_err = Some(e);
+                break;
+            }
+        }
     }
-    Ok(rows)
+    let parsed = crate::util::par::par_map(keys.len(), |i| {
+        let mut r = Vec::new();
+        parse_task_key(&keys[i], &guid_map, &mut r).map(|_| r)
+    });
+    for p in parsed {
+        rows.extend(p?);
+    }
+    match list_err {
+        Some(e) => Err(e),
+        None => Ok(rows),
+    }
 }
 
 /// python `_get_task_keys` (KeyError / RegistryException -> None).

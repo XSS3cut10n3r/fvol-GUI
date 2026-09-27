@@ -612,38 +612,45 @@ impl Plugin for Sockstat {
         let pids = cfg.get_ints("pids");
         let netns_arg = cfg.get_int("netns");
         let filter = pid_filter(&pids);
-        for s in list_sockets(k, &filter) {
-            let s = s?;
+        let sockets = list_sockets(k, &filter);
+        // the rows are built (task fields read) and formatted on all cores, in python's order
+        let row = |s: &SocketEntry| -> Result<Option<[Value; 15]>> {
             // python `if netns_id_arg and netns_id_arg != netns_id: continue`
             if let Some(arg) = netns_arg
                 && arg != 0
                 && Some(arg) != s.netns_id
             {
-                continue;
+                return Ok(None);
             }
             let st = &s.fields.stat;
-            out.row(
-                0,
-                vec![
-                    s.netns_id.map_or(Value::NotAvailable, Value::Int),
-                    Value::Str(array_to_string(&s.task.m("comm")?, None)?),
-                    Value::Int(s.task.m("tgid")?.int()?),
-                    Value::Int(s.task.m("pid")?.int()?),
-                    Value::Int(s.fd_num as i128),
-                    Value::Int(s.fields.sock.addr as i128),
-                    Value::Str(s.family),
-                    Value::SStr(s.sock_type),
-                    s.protocol.map_or(Value::NotAvailable, Value::Str),
-                    st[0].to_value(),
-                    st[1].to_value(),
-                    st[2].to_value(),
-                    st[3].to_value(),
-                    st[4].to_value(),
-                    s.fields.filter.to_value(),
-                ],
-            )?;
-        }
-        Ok(())
+            Ok(Some([
+                s.netns_id.map_or(Value::NotAvailable, Value::Int),
+                Value::Str(array_to_string(&s.task.m("comm")?, None)?),
+                Value::Int(s.task.m("tgid")?.int()?),
+                Value::Int(s.task.m("pid")?.int()?),
+                Value::Int(s.fd_num as i128),
+                Value::Int(s.fields.sock.addr as i128),
+                Value::Str(s.family.clone()),
+                Value::SStr(s.sock_type),
+                s.protocol.clone().map_or(Value::NotAvailable, Value::Str),
+                st[0].to_value(),
+                st[1].to_value(),
+                st[2].to_value(),
+                st[3].to_value(),
+                st[4].to_value(),
+                s.fields.filter.to_value(),
+            ]))
+        };
+        super::stream_chunks(out, sockets.len(), 16, |r, b| {
+            for s in &sockets[r] {
+                match s.as_ref().map_err(super::clone_err).and_then(row) {
+                    Ok(Some(v)) => b.push_ref(&v),
+                    Ok(None) => {}
+                    Err(e) => return Some(e),
+                }
+            }
+            None
+        })
     }
 }
 

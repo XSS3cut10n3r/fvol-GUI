@@ -187,12 +187,17 @@ impl Plugin for Kevents {
         ])?;
         let pids = cfg.get_ints("pid");
         let filter = pid_filter(&pids);
-        for item in list_kernel_events(k, &filter) {
-            let (name, pid, kn) = item?;
-            if let Some(row) = knote_row(&name, pid, &kn)? {
-                out.row(0, row)?;
+        // per task in parallel (its knotes and their rows), formatted on the workers, emitted
+        // in python's order
+        let tasks = list_tasks(k, PSLIST_METHODS[0], &filter);
+        crate::plugins::emit_par_blocks(out, tasks, |t, b| {
+            for item in task_events(k, t) {
+                let (name, pid, kn) = item?;
+                if let Some(row) = knote_row(&name, pid, &kn)? {
+                    b.push(row);
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }

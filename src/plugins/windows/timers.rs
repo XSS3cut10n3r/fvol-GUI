@@ -7,9 +7,9 @@ use crate::context::{Context, WinKernel};
 use crate::error::{Error, Result};
 use crate::objects::Obj;
 use crate::plugins::windows::kpcrs::list_kpcrs;
-use crate::plugins::windows::ssdt::build_module_collection;
+use crate::plugins::windows::ssdt::{ModuleCollection, build_module_collection};
 use crate::plugins::{Config, Plugin};
-use crate::renderers::{ColType, Column, RowSink, Value};
+use crate::renderers::{ColType, Column, RowBlock, RowSink, Value};
 use crate::symbols::windows::prelude::*;
 use crate::symbols::windows::versions;
 
@@ -65,6 +65,56 @@ pub fn list_timers_each(k: &WinKernel, mut f: impl FnMut(Obj) -> Result<bool>) -
     }
 }
 
+/// python `_generator`'s rows for one timer, pushed to `block` (an error = python raised
+/// after them).
+fn timer_rows(timer: &Obj, collection: &ModuleCollection, block: &mut RowBlock) -> Result<()> {
+    if !timer.valid_type()? {
+        return Ok(());
+    }
+    let routine = (|| -> Result<Option<u64>> {
+        let dpc = timer.get_dpc()?;
+        // `dpc == 0` is only ever true for the raw pointer (a struct never equals 0)
+        if dpc.is_pointer() && dpc.u64()? == 0 {
+            return Ok(None);
+        }
+        let r = dpc.m("DeferredRoutine")?.u64()?;
+        Ok(if r == 0 { None } else { Some(r) })
+    })();
+    let routine = match routine {
+        Ok(Some(r)) => r,
+        Ok(None) => return Ok(()),
+        Err(e) if e.is_invalid_address() => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let row = |module: Value, symbol: Value| -> Result<Vec<Value>> {
+        Ok(vec![
+            Value::Int(timer.addr as i128),
+            Value::Str(timer.get_due_time()?),
+            Value::Int(timer.m("Period")?.int()?),
+            Value::SStr(timer.get_signaled()?),
+            Value::Int(routine as i128),
+            module,
+            symbol,
+        ])
+    };
+    let found = collection.module_symbols(routine);
+    if found.is_empty() {
+        block.push(row(Value::NotAvailable, Value::NotAvailable)?);
+    }
+    for (module_name, syms) in found {
+        if syms.is_empty() {
+            block.push(row(Value::str(module_name), Value::NotAvailable)?);
+        }
+        for s in syms {
+            block.push(row(Value::str(module_name), Value::str(s))?);
+        }
+    }
+    Ok(())
+}
+
+/// Timers whose rows one worker builds at a time.
+const CHUNK: usize = 128;
+
 impl Plugin for Timers {
     fn name(&self) -> &'static str {
         "windows.timers.Timers"
@@ -83,50 +133,28 @@ impl Plugin for Timers {
             Column::new("Symbol", ColType::Str),
         ])?;
         let k = ctx.windows_kernel()?;
+        // the rows look up the kernel symbols at many routines: build the table's address
+        // index on another core while the modules and timer lists are walked
+        let table = k.table;
+        std::thread::spawn(move || {
+            table.symbols_at(0, 1);
+        });
         let collection = build_module_collection(k)?;
-        list_timers_each(k, |timer| {
-            if !timer.valid_type()? {
-                return Ok(true);
-            }
-            let routine = (|| -> Result<Option<u64>> {
-                let dpc = timer.get_dpc()?;
-                // `dpc == 0` is only ever true for the raw pointer (a struct never equals 0)
-                if dpc.is_pointer() && dpc.u64()? == 0 {
-                    return Ok(None);
-                }
-                let r = dpc.m("DeferredRoutine")?.u64()?;
-                Ok(if r == 0 { None } else { Some(r) })
-            })();
-            let routine = match routine {
-                Ok(Some(r)) => r,
-                Ok(None) => return Ok(true),
-                Err(e) if e.is_invalid_address() => return Ok(true),
-                Err(e) => return Err(e),
-            };
-            let row = |module: Value, symbol: Value| -> Result<Vec<Value>> {
-                Ok(vec![
-                    Value::Int(timer.addr as i128),
-                    Value::Str(timer.get_due_time()?),
-                    Value::Int(timer.m("Period")?.int()?),
-                    Value::SStr(timer.get_signaled()?),
-                    Value::Int(routine as i128),
-                    module,
-                    symbol,
-                ])
-            };
-            let found = collection.module_symbols(routine);
-            if found.is_empty() {
-                out.row(0, row(Value::NotAvailable, Value::NotAvailable)?)?;
-            }
-            for (module_name, syms) in found {
-                if syms.is_empty() {
-                    out.row(0, row(Value::str(module_name), Value::NotAvailable)?)?;
-                }
-                for s in syms {
-                    out.row(0, row(Value::str(module_name), Value::str(s))?)?;
-                }
-            }
+        // the timer lists first (python's order, and where the walk raised), then the rows
+        // (module + symbol lookups) in parallel, emitted in order
+        let mut timers: Vec<Obj> = Vec::new();
+        let walk_err = list_timers_each(k, |timer| {
+            timers.push(timer);
             Ok(true)
+        })
+        .err();
+        let mut items: Vec<Result<&[Obj]>> = timers.chunks(CHUNK).map(Ok).collect();
+        items.extend(walk_err.map(Err));
+        crate::plugins::emit_par_blocks(out, items, |chunk, block| {
+            for timer in *chunk {
+                timer_rows(timer, &collection, block)?;
+            }
+            Ok(())
         })
     }
 }

@@ -7,6 +7,7 @@ use super::{LayerRef, Obj};
 use crate::error::{Error, Result};
 use crate::layers::Layer;
 use crate::symbols::Ty;
+use crate::symbols::table::{StrEnc, StrErrors};
 
 /// python `utility.rol(value, count, max_bits=64)`.
 pub fn rol(value: u64, count: u32, max_bits: u32) -> u64 {
@@ -61,8 +62,30 @@ pub fn address_to_string(layer: LayerRef, address: u64, count: u64, errors: &str
     if count < 1 {
         return Err(Error::msg("Count must be greater than 0"));
     }
+    let (enc, errs) = (parse_encoding(encoding), parse_errors(errors));
+    // One readable page holds the whole range (process names, short arrays): these are the
+    // bytes `gather_contiguous_bytes` would collect (a translation layer's mapping covers the
+    // range in one run; a physical layer reads it when it ends below max_address).
+    if let Some(data) = super::page_bytes(layer, address, count as usize)
+        && (layer.lower().is_some() || address.saturating_add(count) < layer.max_address())
+    {
+        return decoded_prefix(data, enc, errs);
+    }
     let data = gather_contiguous_bytes(layer, address, count)?;
-    bytes_to_decoded_string(&data, parse_encoding(encoding), parse_errors(errors))
+    decoded_prefix(&data, enc, errs)
+}
+
+/// `bytes_to_decoded_string`, with a shortcut for UTF-8 data that is ASCII up to its first
+/// NUL (the decode / cut / encode / decode round trip returns exactly that prefix).
+fn decoded_prefix(data: &[u8], enc: StrEnc, errors: StrErrors) -> Result<String> {
+    if enc == StrEnc::Utf8 {
+        let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+        if data[..end].is_ascii() {
+            // SAFETY: ASCII
+            return Ok(unsafe { String::from_utf8_unchecked(data[..end].to_vec()) });
+        }
+    }
+    bytes_to_decoded_string(data, enc, errors)
 }
 
 /// python `utility.array_to_string(array, count=None, errors="replace")`.

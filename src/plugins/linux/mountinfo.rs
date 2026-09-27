@@ -22,7 +22,8 @@ use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::fs::ptr_ok;
 use crate::symbols::linux::prelude::*;
 use crate::symbols::linux::utilities::get_path_mnt;
-use crate::util::FxHashSet;
+use crate::symbols::linux::fs::tgt;
+use crate::util::{FxHashMap, FxHashSet};
 use crate::util::pyset::{PySet, py_hash_str_seed0};
 
 pub struct MountInfo;
@@ -92,8 +93,12 @@ pub fn get_mountinfo(mnt: &Obj, task: &Obj) -> Result<Option<MountInfoData>> {
 /// mnt_ns_id)` for every mount point of every task's mount namespace (deduplicated by mount
 /// id unless `filtered_by_pids`); `mnt_ns_id` is `None` where python uses NotAvailableValue.
 /// `f` returns false to stop. `Err` where python raises.
+///
+/// python walks the mount list of a namespace again for every task in it; the list (same
+/// memory, same result, errors included) is read once per namespace here.
 pub fn tasks_mountpoints(tasks: &mut dyn FnMut(&mut dyn FnMut(Obj) -> Result<bool>) -> Result<()>, filtered_by_pids: bool, f: &mut dyn FnMut(&Obj, &Obj, Option<i128>) -> Result<bool>) -> Result<()> {
     let mut seen = FxHashSet::default();
+    let mut namespaces: FxHashMap<u64, NsMounts> = FxHashMap::default();
     tasks(&mut |task| {
         let fs = task.m("fs")?;
         if !ptr_ok(&fs)? {
@@ -107,28 +112,61 @@ pub fn tasks_mountpoints(tasks: &mut dyn FnMut(&mut dyn FnMut(Obj) -> Result<boo
         if !ptr_ok(&mnt_ns)? {
             return Ok(true);
         }
-        let mnt_ns_id = match mnt_ns.get_mnt_ns_inode() {
-            Ok(v) => Some(v),
-            Err(e) if is_attribute_error(&e) => None,
-            Err(e) => return Err(e),
+        let uncached;
+        let ns = match tgt(&mnt_ns) {
+            Ok(t) => namespaces.entry(t.addr).or_insert_with(|| NsMounts::read(&mnt_ns)),
+            Err(_) => {
+                uncached = NsMounts::read(&mnt_ns);
+                &uncached
+            }
         };
-        for m in mnt_ns.get_mount_points() {
-            let Some(mount) = m? else {
+        let mnt_ns_id = match &ns.id {
+            Ok(v) => *v,
+            Err(e) => return Err(super::clone_err(e)),
+        };
+        for m in &ns.mounts {
+            let (mount, mnt_id) = match m {
+                Ok(Some(x)) => x,
                 // python: `mount.mnt_id` on None
-                return Err(crate::error::Error::msg("AttributeError: 'NoneType' object has no attribute 'mnt_id'"));
+                Ok(None) => return Err(crate::error::Error::msg("AttributeError: 'NoneType' object has no attribute 'mnt_id'")),
+                Err(e) => return Err(super::clone_err(e)),
             };
             if !filtered_by_pids {
-                let mnt_id = mount.m("mnt_id")?.int()?;
+                let mnt_id = match mnt_id {
+                    Ok(v) => *v,
+                    Err(e) => return Err(super::clone_err(e)),
+                };
                 if !seen.insert(mnt_id) {
                     continue;
                 }
             }
-            if !f(&task, &mount, mnt_ns_id)? {
+            if !f(&task, mount, mnt_ns_id)? {
                 return Ok(false);
             }
         }
         Ok(true)
     })
+}
+
+/// What `_get_tasks_mountpoints` reads from a task's mount namespace.
+struct NsMounts {
+    /// python `mnt_ns.get_mnt_ns_inode()` (`None`: an AttributeError, NotAvailableValue)
+    id: Result<Option<i128>>,
+    /// python `mnt_ns.get_mount_points()` (a trailing `Err` = python raised), each mount with
+    /// its `mnt_id` (read by python only when not filtering by pid)
+    mounts: Vec<Result<Option<(Obj, Result<i128>)>>>,
+}
+
+impl NsMounts {
+    fn read(mnt_ns: &Obj) -> NsMounts {
+        let id = match mnt_ns.get_mnt_ns_inode() {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if is_attribute_error(&e) => Ok(None),
+            Err(e) => Err(e),
+        };
+        let mounts = mnt_ns.get_mount_points().into_iter().map(|m| m.map(|m| m.map(|m| (m, m.m("mnt_id").and_then(|i| i.int()))))).collect();
+        NsMounts { id, mounts }
+    }
 }
 
 fn is_attribute_error(e: &crate::error::Error) -> bool {
@@ -138,33 +176,61 @@ fn is_attribute_error(e: &crate::error::Error) -> bool {
 /// python `MountInfo.get_superblocks(context, kernel)`: `(super_block, mount point path)` for
 /// each distinct readable superblock reachable from the tasks' mount namespaces, in python's
 /// order. A trailing `Err` = python raised there.
+///
+/// The mount points are listed first; their paths and superblocks are read in parallel and
+/// then deduplicated in python's order (every error is kept where python would raise it).
 pub fn get_superblocks(k: &LinuxKernel) -> Vec<Result<(Obj, String)>> {
+    let (mounts, tail) = collect_mountpoints(k, &|_: &Obj| Ok(false), false);
+    // per mount point: None = python `continue`s before the seen check; else the superblock
+    // pointer value and python's `(sb.dereference(), path_root)`
+    let infos = crate::util::par::par_map(mounts.len(), |i| -> Result<Option<(u64, Result<(Obj, String)>)>> {
+        let (task, mnt, _) = &mounts[i];
+        let path_root = get_path_mnt(task, mnt)?;
+        if path_root.is_empty() {
+            return Ok(None);
+        }
+        let sb = mnt.get_mnt_sb()?;
+        if !ptr_ok(&sb)? {
+            return Ok(None);
+        }
+        Ok(Some((sb.u64()?, sb.deref().map(|d| (d, path_root)))))
+    });
     let mut out = Vec::new();
     let mut seen_sb = FxHashSet::default();
-    let no_filter = |_: &Obj| Ok(false);
-    let r = tasks_mountpoints(
-        &mut |f| list_tasks(k, &no_filter, false, f),
-        false,
-        &mut |task, mnt, _| {
-            let path_root = get_path_mnt(task, mnt)?;
-            if path_root.is_empty() {
-                return Ok(true);
+    for info in infos {
+        match info {
+            Ok(None) => {}
+            Ok(Some((sb, r))) => {
+                if !seen_sb.insert(sb) {
+                    continue;
+                }
+                let stop = r.is_err();
+                out.push(r);
+                if stop {
+                    return out;
+                }
             }
-            let sb = mnt.get_mnt_sb()?;
-            if !ptr_ok(&sb)? {
-                return Ok(true);
+            Err(e) => {
+                out.push(Err(e));
+                return out;
             }
-            if !seen_sb.insert(sb.u64()?) {
-                return Ok(true);
-            }
-            out.push(Ok((sb.deref()?, path_root)));
-            Ok(true)
-        },
-    );
-    if let Err(e) = r {
+        }
+    }
+    if let Some(e) = tail {
         out.push(Err(e));
     }
     out
+}
+
+/// [`tasks_mountpoints`] over [`list_tasks`]`(k, filter)` collected: `(task, mount,
+/// mnt_ns_id)` in python's order, and the `Err` python raised after them, if any.
+fn collect_mountpoints(k: &LinuxKernel, filter: &dyn Fn(&Obj) -> Result<bool>, filtered_by_pids: bool) -> (Vec<(Obj, Obj, Option<i128>)>, Option<crate::error::Error>) {
+    let mut v = Vec::new();
+    let r = tasks_mountpoints(&mut |f| list_tasks(k, filter, false, f), filtered_by_pids, &mut |task, mnt, id| {
+        v.push((*task, *mnt, id));
+        Ok(true)
+    });
+    (v, r.err())
 }
 
 /// python `",".join(set(mnt_opts) | set(sb_opts))` in CPython set order (`PYTHONHASHSEED=0`).
@@ -219,14 +285,17 @@ impl Plugin for MountInfo {
         out.begin(cols)?;
         let k = ctx.linux_kernel()?;
         let filter = pid_filter(&pids);
-        tasks_mountpoints(&mut |f| list_tasks(k, &filter, false, f), filtered_by_pids, &mut |task, mnt, mnt_ns_id| {
+        let (mounts, tail) = collect_mountpoints(k, &filter, filtered_by_pids);
+        // the rows (python's `get_mountinfo` per mount point) are built on all cores
+        let row = |task: &Obj, mnt: &Obj, mnt_ns_id: Option<i128>| -> Result<Option<Vec<Value>>> {
             if let Some(id) = mnt_ns_id {
                 if !mnt_ns_ids.is_empty() && !mnt_ns_ids.contains(&id) {
-                    return Ok(true);
+                    return Ok(None);
                 }
             }
-            let Some(mi) = get_mountinfo(mnt, task)? else { return Ok(true) };
-            let mut row = vec![mnt_ns_id.map_or(Value::NotAvailable, Value::Int)];
+            let Some(mi) = get_mountinfo(mnt, task)? else { return Ok(None) };
+            let mut row = Vec::with_capacity(12);
+            row.push(mnt_ns_id.map_or(Value::NotAvailable, Value::Int));
             if filtered_by_pids {
                 row.push(Value::Int(task.m("pid")?.int()?));
             }
@@ -254,8 +323,18 @@ impl Plugin for MountInfo {
                     Value::Str(mi.sb_opts.join(",")),
                 ]);
             }
-            out.row(0, row)?;
-            Ok(true)
-        })
+            Ok(Some(row))
+        };
+        super::stream_chunks(out, mounts.len(), 4, |r, b| {
+            for (task, mnt, id) in &mounts[r] {
+                match row(task, mnt, *id) {
+                    Ok(Some(v)) => b.push(v),
+                    Ok(None) => {}
+                    Err(e) => return Some(e),
+                }
+            }
+            None
+        })?;
+        tail.map_or(Ok(()), Err)
     }
 }

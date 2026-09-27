@@ -54,6 +54,60 @@ fn ci_index(haystack: &str, needle: &str) -> Option<usize> {
     haystack.to_lowercase().find(&needle.to_lowercase())
 }
 
+/// One certificate row and, with `--dump`, its file (name, certificate data).
+struct CertRow {
+    values: Vec<Value>,
+    dump: Option<(String, Vec<u8>)>,
+}
+
+/// python `_generator`'s rows for one hive, and the error python raised after them.
+fn hive_rows(hive: &'static crate::layers::registry::RegistryHive, dump: bool) -> (Vec<CertRow>, Option<Error>) {
+    let mut rows = Vec::new();
+    for top_key in TOP_KEYS {
+        let node_path = match hive.get_key(top_key) {
+            Ok(p) => p,
+            Err(e) if is_key_error(&e) || is_invalid_or_registry(&e) => continue,
+            Err(e) => return (rows, Some(e)),
+        };
+        let r = key_iterator(hive, &node_path, true, &mut |it| {
+            if it.is_key {
+                return Ok(true);
+            }
+            let is_binary = matches!(it.node.get_value_type(), Ok(RegValueType::Binary));
+            if !is_binary {
+                return Ok(true);
+            }
+            let data = match it.node.decode_data()? {
+                RegData::Bytes(b) => b,
+                RegData::Int(_) => Vec::new(),
+            };
+            let (name, cert_data) = parse_data(&data)?;
+            let kp = it.key_path;
+            let uko = match ci_index(kp, top_key) {
+                Some(i) => i + top_key.len() + 1,
+                None => return Ok(true),
+            };
+            let reg_section = match kp[uko..].find('\\') {
+                Some(rel) => &kp[uko..uko + rel],
+                None => &kp[uko..],
+            };
+            let key_hash = kp.rsplit('\\').next().unwrap_or("");
+            let dump = match (dump, cert_data) {
+                (true, Some(cd)) => Some((format!("{}-{}-{}.crt", hive.hive_offset(), reg_section, key_hash), cd)),
+                _ => None,
+            };
+            rows.push(CertRow { values: vec![Value::SStr(top_key), Value::Str(reg_section.to_string()), Value::Str(key_hash.to_string()), name], dump });
+            Ok(true)
+        });
+        match r {
+            Ok(_) => {}
+            Err(e) if is_key_error(&e) || is_invalid_or_registry(&e) => continue,
+            Err(e) => return (rows, Some(e)),
+        }
+    }
+    (rows, None)
+}
+
 impl Plugin for Certificates {
     fn name(&self) -> &'static str {
         "windows.registry.certificates.Certificates"
@@ -73,54 +127,20 @@ impl Plugin for Certificates {
         ])?;
         let k = ctx.windows_kernel()?;
         let dump = cfg.get_bool("dump");
-        for hive in super::hivelist::list_hives(ctx, k, None, None) {
-            let hive = hive?;
-            for top_key in TOP_KEYS {
-                let node_path = match hive.get_key(top_key) {
-                    Ok(p) => p,
-                    Err(e) if is_key_error(&e) || is_invalid_or_registry(&e) => continue,
-                    Err(e) => return Err(e),
-                };
-                let r = key_iterator(hive, &node_path, true, &mut |it| {
-                    if it.is_key {
-                        return Ok(true);
+        // the hives in parallel; rows (and --dump files) in python's order
+        for item in super::hivelist::list_hives_map(ctx, k, None, None, |hive| hive_rows(hive, dump)) {
+            let (rows, err) = item?;
+            for r in rows {
+                if let Some((dump_name, data)) = r.dump {
+                    if let Ok((mut f, _)) = ctx.create_output_file(&dump_name) {
+                        let _ = f.write_all(&data);
+                        let _ = f.flush();
                     }
-                    let is_binary = matches!(it.node.get_value_type(), Ok(RegValueType::Binary));
-                    if !is_binary {
-                        return Ok(true);
-                    }
-                    let data = match it.node.decode_data()? {
-                        RegData::Bytes(b) => b,
-                        RegData::Int(_) => Vec::new(),
-                    };
-                    let (name, cert_data) = parse_data(&data)?;
-                    let kp = it.key_path;
-                    let uko = match ci_index(kp, top_key) {
-                        Some(i) => i + top_key.len() + 1,
-                        None => return Ok(true),
-                    };
-                    let reg_section = match kp[uko..].find('\\') {
-                        Some(rel) => &kp[uko..uko + rel],
-                        None => &kp[uko..],
-                    };
-                    let key_hash = kp.rsplit('\\').next().unwrap_or("");
-                    if dump {
-                        if let Some(cd) = &cert_data {
-                            let dump_name = format!("{}-{}-{}.crt", hive.hive_offset(), reg_section, key_hash);
-                            if let Ok((mut f, _)) = ctx.create_output_file(&dump_name) {
-                                let _ = f.write_all(cd);
-                                let _ = f.flush();
-                            }
-                        }
-                    }
-                    out.row(0, vec![Value::SStr(top_key), Value::Str(reg_section.to_string()), Value::Str(key_hash.to_string()), name])?;
-                    Ok(true)
-                });
-                match r {
-                    Ok(_) => {}
-                    Err(e) if is_key_error(&e) || is_invalid_or_registry(&e) => continue,
-                    Err(e) => return Err(e),
                 }
+                out.row(0, r.values)?;
+            }
+            if let Some(e) = err {
+                return Err(e);
             }
         }
         Ok(())

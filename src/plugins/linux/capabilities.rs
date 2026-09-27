@@ -78,13 +78,10 @@ impl Plugin for Capabilities {
         let pids = cfg.get_ints("pids");
         let filter = pid_filter(&pids);
         let (tasks, tail) = collect_tasks(k, &filter, false);
-        let rows = crate::util::par::par_map(tasks.len(), |i| task_row(&tasks[i]));
-        for r in rows {
-            out.row(0, r?)?;
-        }
-        match tail {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, super::task_items(tasks, tail), |t, b| {
+            b.push(task_row(t)?);
+            Ok(())
+        })
     }
 }
