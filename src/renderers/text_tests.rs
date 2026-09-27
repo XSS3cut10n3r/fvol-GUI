@@ -317,6 +317,106 @@ fn encoded_rows_match_row_path() {
     assert!(r.encoder().is_none());
 }
 
+/// json / jsonl blocks of complete trees (`RowEncoder::tree_row` / `trees_end`, handed over with
+/// `rows_encoded_trees`) mixed with ordinary rows render exactly like ordinary rows: random
+/// trees (including depth jumps python clamps), blocks of every size cut at tree boundaries,
+/// with and without hidden columns, blocks bigger than the flush size.
+#[test]
+fn json_tree_blocks_match_row_path() {
+    let grid = fixture("render_grid.json");
+    let cols = grid_columns(&grid);
+    let base: Vec<Vec<Value>> = grid_rows(&grid).into_iter().map(|(_, v)| v).collect();
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for n in [1usize, 40, 3000] {
+        let mut d = 0usize;
+        let depths: Vec<usize> = (0..n)
+            .map(|k| {
+                d = match rnd() % 9 {
+                    _ if k == 0 => 0,
+                    0 | 1 => d + 1,
+                    2 => d.saturating_sub(1),
+                    3 | 4 => 0,
+                    5 => d + 3,
+                    _ => d,
+                };
+                d
+            })
+            .collect();
+        let rows: Vec<Vec<Value>> = (0..n).map(|i| base[i % base.len()].clone()).collect();
+        // tree starts: the only places a block may begin or end
+        let starts: Vec<usize> = (0..n).filter(|&i| depths[i] == 0).chain([n]).collect();
+        for name in ["jsonl", "json"] {
+            for hide in [None, Some(vec!["name".to_string(), "off".to_string(), "dump".to_string()])] {
+                let opts = || RenderOptions { filters: Vec::new(), hide_columns: hide.clone(), flush_rows: false };
+                let plain = {
+                    let mut out: Vec<u8> = Vec::new();
+                    {
+                        let mut r = create(name, &mut out, opts()).unwrap();
+                        r.begin(cols.clone()).unwrap();
+                        for (v, &d) in rows.iter().zip(&depths) {
+                            r.row_ref(d, v).unwrap();
+                        }
+                        r.finish().unwrap();
+                    }
+                    out
+                };
+                for mode in 0..4 {
+                    let mut out: Vec<u8> = Vec::new();
+                    {
+                        let mut r = create(name, &mut out, opts()).unwrap();
+                        r.begin(cols.clone()).unwrap();
+                        let enc = r.encoder().unwrap();
+                        assert!(enc.supports_trees());
+                        let mut t = crate::renderers::text::JsonTrees::default();
+                        let mut blk = Vec::new();
+                        let mut k = 0;
+                        while starts[k] < n {
+                            // the next segment: 1..=8 trees, or everything left (mode 3)
+                            let m = if mode == 3 { starts.len() - 1 - k } else { 1 + (rnd() % 8) as usize };
+                            let e = starts[(k + m).min(starts.len() - 1)];
+                            let s = starts[k];
+                            k = (k + m).min(starts.len() - 1);
+                            // mode 0: every other segment row by row; 1: all blocks; 2: random
+                            let as_block = match mode {
+                                0 => k % 2 == 0,
+                                2 => rnd() % 2 == 0,
+                                _ => true,
+                            };
+                            if as_block {
+                                blk.clear();
+                                for i in s..e {
+                                    enc.tree_row(&mut t, &mut blk, depths[i], &rows[i]);
+                                }
+                                let (nr, last) = enc.trees_end(&mut t, &mut blk);
+                                assert_eq!(nr, e - s);
+                                assert!(r.rows_encoded_trees(&mut blk, nr, last).unwrap());
+                            } else {
+                                for i in s..e {
+                                    r.row_ref(depths[i], &rows[i]).unwrap();
+                                }
+                            }
+                        }
+                        r.finish().unwrap();
+                    }
+                    assert!(out == plain, "{name} hide={hide:?} n={n} mode={mode}");
+                }
+            }
+        }
+    }
+    // the other renderers don't take tree blocks
+    let mut out: Vec<u8> = Vec::new();
+    let mut r = create("quick", &mut out, RenderOptions::default()).unwrap();
+    r.begin(cols.clone()).unwrap();
+    assert!(!r.encoder().unwrap().supports_trees());
+    assert!(!r.rows_encoded_trees(&mut vec![b'x'], 1, 0).unwrap());
+}
+
 /// Throughput of every renderer on 1M pslist-like rows written to /dev/null (values are built
 /// per row, as a plugin would). Run:
 ///   cargo test --profile fast bench_renderers -- --ignored --nocapture

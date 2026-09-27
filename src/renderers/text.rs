@@ -1561,6 +1561,116 @@ fn write_json_node(out: &mut Vec<u8>, node: &JNode, lines: bool) {
     out.extend_from_slice(&node.data[node.split..]);
 }
 
+/// Worker-side state of [`RowEncoder::tree_row`] (json / jsonl): the open nodes of the trees
+/// being encoded into a block. Reusable: [`RowEncoder::trees_end`] resets it.
+#[derive(Default, Debug)]
+pub struct JsonTrees {
+    /// the bytes after the `__children` list of each open node, then of the pending row
+    suffixes: Vec<u8>,
+    /// open nodes (with children): where their suffix starts; the node at depth i is `stack[i]`
+    stack: Vec<usize>,
+    /// the last row, whose children are not known yet: (depth, where its suffix starts)
+    pending: Option<(usize, usize)>,
+    rows: usize,
+    /// TreeGrid population within the block: `len(prev_nodes)`
+    depth_len: usize,
+    scratch: Vec<u8>,
+}
+
+impl JsonTrees {
+    /// Close the open nodes at depth `depth` and below.
+    fn close_to(&mut self, out: &mut Vec<u8>, depth: usize, lines: bool) {
+        while self.stack.len() > depth {
+            let s = self.stack.pop().unwrap_or_default();
+            if !lines {
+                // the node at depth d has indentation level 1 + 2d
+                push_newline_indent(out, 2 + 2 * self.stack.len());
+            }
+            out.push(b']');
+            out.extend_from_slice(&self.suffixes[s..]);
+            self.suffixes.truncate(s);
+        }
+    }
+
+    /// The pending row has no children: finish it.
+    fn leaf(&mut self, out: &mut Vec<u8>, s: usize) {
+        out.extend_from_slice(b"[]");
+        out.extend_from_slice(&self.suffixes[s..]);
+        self.suffixes.truncate(s);
+    }
+}
+
+// complete json / jsonl trees encoded off the renderer's thread (see `RowSink::rows_encoded_trees`)
+impl RowEncoder {
+    /// Whether [`RowEncoder::tree_row`] is available (json / jsonl).
+    pub fn supports_trees(&self) -> bool {
+        matches!(self.kind, EncKind::Jsonl | EncKind::Json)
+    }
+
+    /// Append one row to a block of complete trees (json / jsonl), exactly as the renderer
+    /// would nest it: the block's first row must be at depth 0, a deeper row than the previous
+    /// one's + 1 is clamped like python's TreeGrid does. Close the block with
+    /// [`RowEncoder::trees_end`] and hand it to [`RowSink::rows_encoded_trees`] when the row
+    /// after it (if any) is at depth 0.
+    pub fn tree_row(&self, t: &mut JsonTrees, out: &mut Vec<u8>, depth: usize, values: &[Value]) {
+        assert!(self.supports_trees() && values.len() == self.ncols, "RowEncoder::tree_row: json / jsonl rows only");
+        assert!(t.pending.is_some() || depth == 0, "RowEncoder::tree_row: a block starts at depth 0");
+        let lines = self.kind == EncKind::Jsonl;
+        let d = depth.min(t.depth_len);
+        t.depth_len = d + 1;
+        match t.pending.take() {
+            Some((pd, s)) if d == pd + 1 => {
+                // the pending row has children: open its list
+                out.push(b'[');
+                if !lines {
+                    push_newline_indent(out, 1 + 2 * d);
+                }
+                t.stack.push(s);
+            }
+            Some((_, s)) => {
+                t.leaf(out, s);
+                t.close_to(out, d, lines);
+                out.push(if d == 0 && lines { b'\n' } else { b',' });
+                if !lines {
+                    push_newline_indent(out, 1 + 2 * d);
+                } else if d > 0 {
+                    out.push(b' ');
+                }
+            }
+            None => {
+                if !lines {
+                    out.push(b',');
+                    push_newline_indent(out, 1);
+                }
+            }
+        }
+        let split = push_json_node(out, &self.keys, &self.types, values, 1 + 2 * d, lines, false, &mut t.scratch, usize::MAX, &mut None);
+        let s = t.suffixes.len();
+        t.suffixes.extend_from_slice(&out[split..]);
+        out.truncate(split);
+        t.pending = Some((d, s));
+        t.rows += 1;
+    }
+
+    /// Close every tree of the block ([`RowEncoder::tree_row`]); returns (rows, depth of the
+    /// last row) for [`RowSink::rows_encoded_trees`] and resets `t` for the next block.
+    pub fn trees_end(&self, t: &mut JsonTrees, out: &mut Vec<u8>) -> (usize, usize) {
+        let lines = self.kind == EncKind::Jsonl;
+        let last = t.depth_len.saturating_sub(1);
+        if let Some((_, s)) = t.pending.take() {
+            t.leaf(out, s);
+            t.close_to(out, 0, lines);
+            if lines {
+                out.push(b'\n');
+            }
+        }
+        let r = (t.rows, last);
+        t.rows = 0;
+        t.depth_len = 0;
+        r
+    }
+}
+
 impl<'a> Json<'a> {
     fn new(b: Base<'a>, lines: bool) -> Json<'a> {
         Json {
@@ -1793,7 +1903,29 @@ impl RowSink for Json<'_> {
     }
 
     // rows_encoded_at: json nests child rows in their parents, which a block can't (its rows
-    // would be closed before the next row arrives): the default (not taken) applies
+    // would be closed before the next row arrives): the default (not taken) applies. Blocks
+    // of complete trees can:
+    fn rows_encoded_trees(&mut self, block: &mut Vec<u8>, nrows: usize, last_depth: usize) -> Result<bool> {
+        if nrows == 0 {
+            return Ok(true);
+        }
+        // everything emitted so far comes first; its trees are complete (the block starts at
+        // depth 0)
+        self.spec = None;
+        self.close_to(0);
+        self.emit_ready()?;
+        if self.lines {
+            self.b.append_encoded(block, nrows, last_depth)?;
+        } else {
+            // json keeps everything until the end: keep the block itself
+            if !self.done.is_empty() {
+                self.pieces.push(std::mem::take(&mut self.done));
+            }
+            self.pieces.push(std::mem::take(block));
+            self.b.encoded_rows(nrows, last_depth);
+        }
+        Ok(true)
+    }
 }
 
 impl TextRenderer for Json<'_> {
