@@ -26,28 +26,75 @@ can copy `target/release/vol` anywhere on your `PATH`.
 
 ## Compiler flags
 
-The repository's [.cargo/config.toml](../.cargo/config.toml) adds two compiler flags to every
-build:
+The repository's [.cargo/config.toml](../.cargo/config.toml) adds these flags to every build:
 
 - `-C target-cpu=native` compiles for the CPU of the build machine. The binary may use
   instructions such as AVX2 or BMI2 without checking for them, so it can crash with an illegal
   instruction on an older or different CPU.
 - `-C target-feature=+crt-static` links a static-pie binary, which skips the dynamic loader and
   runs on any x86-64 Linux with no shared library requirements.
+- `-z max-page-size=0x200000 -z separate-code` (linker) align the segments to 2 MB and start the
+  code on a 2 MB boundary, so the kernel can map the code and read-only data with huge pages
+  (see [Startup](#startup)). The file gets up to ~4 MB of sparse padding, and the randomized load
+  address has 9 fewer bits of entropy; the binary stays position-independent.
+- `-z pack-relative-relocs` (linker) stores the ~10,500 relocations the static-pie applies to
+  itself at startup as a 3 KB bitmap (RELR, glibc 2.36 or newer) instead of 250 KB of entries.
 
 The same file limits a build to 6 parallel jobs; pass `-j <N>` to cargo to use more.
+
+## Startup
+
+A warm run of a small plugin takes well under a millisecond, so the fixed cost of starting and
+ending the process matters as much as the plugin. Three measures cut it by about a third; none of
+them changes any output.
+
+**Hot-text ordering.** The release link goes through
+[.cargo/linker.sh](../.cargo/linker.sh), which passes the functions listed in
+[.cargo/symbol-order.txt](../.cargo/symbol-order.txt) to lld's `--symbol-ordering-file`. The
+~1,200 functions that typical runs execute then sit together at the start of the code (~850 KB)
+instead of being spread over 10 MB, so a run takes a dozen page faults on its code instead of
+~90. The list holds demangled names, so crate-hash changes do not invalidate it, and the wrapper
+translates them to the symbols of the object being linked. A stale list only costs speed: names
+that no longer exist are ignored, and a missing list or `nm` links without ordering.
+`RSVOL_SYMBOL_ORDER=0` turns it off. Regenerate the list after larger code changes:
+
+```bash
+bench/scripts/gen-symbol-order.sh      # a few minutes: builds, traces 9 typical runs, writes the list
+cargo build --release
+```
+
+**Teardown after the exit.** When a process exits, the kernel unmaps its address space before
+the parent learns about the exit: 0.1 to 0.7 ms for a run that maps a multi-GB image. After its
+output is flushed and every descriptor closed, a one-shot `vol` run hands its address space to a
+small helper process that shares it (`clone(CLONE_VM)`), waits for `vol` to exit and then exits
+itself, so the unmapping happens after the caller's `wait` has returned. The exit status, the
+output and pipes behave exactly as before. Caveat: the teardown's CPU time is charged to the
+helper, which init reaps, so `time`, `wait4` and `getrusage(RUSAGE_CHILDREN)` in the caller no
+longer include it (the cgroup's accounting still does). `vol serve`, the test suite and code
+embedding rsvol never use the helper. `RSVOL_EXIT_HELPER=0` turns it off.
+
+**Huge pages for the code.** With `CONFIG_READ_ONLY_THP_FOR_FS` (Linux 6.1 or newer for
+`MADV_COLLAPSE`), the helper above checks whether the run's code was mapped with 2 MB pages and,
+if not, asks the kernel to collapse the executable's code and read-only data into 2 MB page-cache
+folios. That takes a few milliseconds once, off everyone's clock; later runs then map the hot code
+with a single TLB entry and almost no page faults. Memory pressure may split the folios again, in
+which case the next run collapses them again. Where the kernel does not support it (Ubuntu's
+kernels, for example, do not enable `CONFIG_READ_ONLY_THP_FOR_FS`), nothing happens.
+`RSVOL_EXIT_HELPER=nothp` keeps the helper and skips the collapse.
 
 ## Build for other machines
 
 To build a binary for other machines, override the flags with `RUSTFLAGS`, which replaces the
-`rustflags` of the config file:
+`rustflags` of the config file (keep the linker flags, they only affect the layout):
 
 ```bash
+L="-C link-arg=-Wl,-z,max-page-size=0x200000 -C link-arg=-Wl,-z,separate-code -C link-arg=-Wl,-z,pack-relative-relocs"
+
 # generic x86-64, still static
-RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
+RUSTFLAGS="-C target-feature=+crt-static $L" cargo build --release
 
 # CPUs with AVX2, such as Intel Haswell and AMD Zen or newer
-RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static" cargo build --release
+RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static $L" cargo build --release
 ```
 
 The SIMD code paths, which cover scanning, JSON parsing, crypto, the snappy, Xpress and bzip2
