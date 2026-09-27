@@ -171,20 +171,39 @@ fn rows(ctx: &Context, cfg: &Config, dump: bool, emit: Emit) -> Result<()> {
         Emit::Sink(out) if !dump => {
             // the rows formatted on the workers
             let enc = out.encoder();
-            let blocks = crate::plugins::par_blocks(enc.as_ref(), procs.len(), |i, block| match &procs[i] {
-                Ok(p) => proc_block(&o, p, block),
-                Err(_) => Tail::Done,
-            });
-            for (p, (block, tail)) in procs.into_iter().zip(blocks) {
-                p?;
-                block.emit(out)?;
-                match tail {
-                    Tail::Done => {}
-                    Tail::Stop => return Ok(()),
-                    Tail::Raise(e) => return Err(e),
-                }
-            }
-            return Ok(());
+            let mut errs: Vec<Option<Error>> = Vec::with_capacity(procs.len());
+            let oks: Vec<Option<Obj>> = procs
+                .into_iter()
+                .map(|p| match p {
+                    Ok(p) => {
+                        errs.push(None);
+                        Some(p)
+                    }
+                    Err(e) => {
+                        errs.push(Some(e));
+                        None
+                    }
+                })
+                .collect();
+            return crate::plugins::stream_blocks(
+                enc.as_ref(),
+                oks.len(),
+                |i, block| match &oks[i] {
+                    Some(p) => proc_block(&o, p, block),
+                    None => Tail::Done,
+                },
+                |i, block, tail| {
+                    if let Some(e) = errs[i].take() {
+                        return Err(e);
+                    }
+                    block.emit(out)?;
+                    match tail {
+                        Tail::Done => Ok(true),
+                        Tail::Stop => Ok(false),
+                        Tail::Raise(e) => Err(e),
+                    }
+                },
+            );
         }
         Emit::Sink(out) => {
             sink_row = move |r: Vec<Value>| out.row(0, r);

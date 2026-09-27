@@ -239,15 +239,19 @@ pub fn thread_rows_out(threads: Vec<Result<Obj>>, out: &mut dyn RowSink) -> Resu
     let vads = OwnerVads::default();
     let chunks: Vec<&[Obj]> = objs.chunks(THREAD_CHUNK).collect();
     let enc = out.encoder();
-    let blocks = crate::plugins::par_blocks(enc.as_ref(), chunks.len(), |i, block| chunk_infos(chunks[i], &vads, &mut |info| block.push(info_row(info))));
-    for (block, stop) in blocks {
-        block.emit(out)?;
-        match stop {
-            Some(Stop::Raise(e)) => return Err(e),
-            Some(Stop::Owner(o)) => return Err(vads.take_err(o)),
-            None => {}
-        }
-    }
+    crate::plugins::stream_blocks(
+        enc.as_ref(),
+        chunks.len(),
+        |i, block| chunk_infos(chunks[i], &vads, &mut |info| block.push(info_row(info))),
+        |_, block, stop| {
+            block.emit(out)?;
+            match stop {
+                Some(Stop::Raise(e)) => Err(e),
+                Some(Stop::Owner(o)) => Err(vads.take_err(o)),
+                None => Ok(true),
+            }
+        },
+    )?;
     tail.map_or(Ok(()), Err)
 }
 
