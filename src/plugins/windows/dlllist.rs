@@ -197,10 +197,11 @@ fn rows(ctx: &Context, cfg: &Config, dump: bool, emit: Emit) -> Result<()> {
                         return Err(e);
                     }
                     block.emit(out)?;
+                    // (None: the process panicked after these rows, resumed by stream_blocks)
                     match tail {
-                        Tail::Done => Ok(true),
-                        Tail::Stop => Ok(false),
-                        Tail::Raise(e) => Err(e),
+                        None | Some(Tail::Done) => Ok(true),
+                        Some(Tail::Stop) => Ok(false),
+                        Some(Tail::Raise(e)) => Err(e),
                     }
                 },
             );

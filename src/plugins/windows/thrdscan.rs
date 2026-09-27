@@ -245,7 +245,8 @@ pub fn thread_rows_out(threads: Vec<Result<Obj>>, out: &mut dyn RowSink) -> Resu
         |i, block| chunk_infos(chunks[i], &vads, &mut |info| block.push(info_row(info))),
         |_, block, stop| {
             block.emit(out)?;
-            match stop {
+            // (outer None: the chunk panicked after these rows, resumed by stream_blocks)
+            match stop.flatten() {
                 Some(Stop::Raise(e)) => Err(e),
                 Some(Stop::Owner(o)) => Err(vads.take_err(o)),
                 None => Ok(true),
