@@ -301,6 +301,16 @@ impl<T> Shared<T> {
         // SAFETY: in bounds; see the Sync impl
         unsafe { *self.0.add(i) = x }
     }
+    /// Index `i`, written by this thread or by one this thread synchronized with since.
+    #[inline]
+    fn get(&self, i: usize) -> T
+    where
+        T: Copy,
+    {
+        assert!(i < self.1);
+        // SAFETY: in bounds; the write happened before (see the callers)
+        unsafe { *self.0.add(i) }
+    }
 }
 
 /// Ranges of about `per` bytes over `keys` (sorted positions).
@@ -869,6 +879,35 @@ impl LazyCore {
         let mut addr_v = start_with(pre.saddr, s0, sk.len(), 0u64);
         let mut shash_v = start_with(pre.shash, s0, sk.len(), 0u64);
         let (uh, ul, sl, sa, sh_) = (Shared::new(&mut uhash_v), Shared::new(&mut ulen_v), Shared::new(&mut slen_v), Shared::new(&mut addr_v), Shared::new(&mut shash_v));
+        // the symbol name index is filled during the pass: key indexes (into `sk`)
+        // compare-and-swapped into shared slots, each key's hash written before (Release /
+        // Acquire: a thread meeting a slot sees its hash); a repeated name ends the lazy path
+        let nslots = if sk.is_empty() { 0 } else { (2 * sk.len()).next_power_of_two() };
+        let stab = zeroed_atomic(nslots);
+        let sdup = std::sync::atomic::AtomicBool::new(false);
+        let sinsert = |j: usize, h: u64| {
+            let mask = nslots - 1;
+            let mut k = h as usize & mask;
+            loop {
+                match stab[k].compare_exchange(0, j as u32 + 1, Ordering::Release, Ordering::Acquire) {
+                    Ok(_) => return,
+                    Err(o) => {
+                        let o = (o - 1) as usize;
+                        if sh_.get(o) == h {
+                            let same = match (crate::util::jsonidx::string_value(json, sk[o] as usize), crate::util::jsonidx::string_value(json, sk[j] as usize)) {
+                                (Some(a), Some(b)) => a == b,
+                                _ => true,
+                            };
+                            if same {
+                                sdup.store(true, Ordering::Relaxed);
+                                return;
+                            }
+                        }
+                        k = (k + 1) & mask;
+                    }
+                }
+            }
+        };
         let run = |i: usize| -> Option<Checked> {
             thread_local! {
                 static POS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -908,7 +947,9 @@ impl LazyCore {
                         }
                         arena.clear();
                         let (address, _, _) = fast::read_symbol(p, &mut arena)?;
-                        sh_.set(j, hash_bytes(name.as_bytes()));
+                        let h = hash_bytes(name.as_bytes());
+                        sh_.set(j, h);
+                        sinsert(j, h);
                         sa.set(j, address as u64);
                         sl.set(j, len_of(sk[j], name));
                         Ok(())
@@ -957,13 +998,34 @@ impl LazyCore {
                 let key = |p: u32, len: u32| -> &str { name_at(json, &escaped, p, len) };
                 let unames = NameIndex::build(&uhash_v, |_| true, |a, b| key(uk[a as usize], ulen_v[a as usize]) == key(uk[b as usize], ulen_v[b as usize]))?;
                 // symbol names: the members of `symbols` that are symbols, by key index
-                let snames = NameIndex::build(&shash_v, |j| slen_v[j] != NOT_SYMBOL, |a, b| key(sk[a as usize], slen_v[a as usize]) == key(sk[b as usize], slen_v[b as usize]))?;
-                Some((escaped, unames, snames))
+                // (the symbols checked while decoding: their hashes are there, the slots not yet)
+                if s0 > 0 {
+                    const CHUNK: usize = 4096;
+                    let insert = |c: usize| {
+                        for j in c * CHUNK..((c + 1) * CHUNK).min(s0) {
+                            if sl.get(j) != NOT_SYMBOL {
+                                sinsert(j, sh_.get(j));
+                            }
+                        }
+                    };
+                    let n = s0.div_ceil(CHUNK);
+                    if n > 1 && par {
+                        crate::util::pool::for_each(n, &insert);
+                    } else {
+                        (0..n).for_each(insert);
+                    }
+                }
+                if sdup.load(Ordering::Relaxed) {
+                    return None;
+                }
+                Some((escaped, unames))
             })();
             (side.join().ok().flatten(), names)
         });
         let (skeleton, enum_idx, enum_bases) = side?;
-        let (escaped, unames, snames) = names?;
+        let (escaped, unames) = names?;
+        // SAFETY: AtomicU32 has the size, alignment and bit validity of u32
+        let snames = NameIndex { slots: unsafe { std::mem::transmute::<Vec<AtomicU32>, Vec<u32>>(stab) }.into_boxed_slice() };
         drop(_t);
         // the symbols: every member of `symbols` (the usual case), or those whose value is an
         // object (then a key index -> ordinal map)

@@ -1189,10 +1189,43 @@ fn spec_decision(identifier: &[u8]) -> Spec {
 fn lazy_identifier(loc: &IsfLocation, os: &str, json: Vec<u8>) -> std::result::Result<Option<(String, Vec<u8>)>, Vec<u8>> {
     let opts = BuildOptions::default();
     let core = match LazyCore::build(JsonBuf::Owned(json), &opts) {
-        Ok(c) => std::sync::Arc::new(c),
+        Ok(c) => c,
         Err(JsonBuf::Owned(v)) => return Err(v),
         Err(_) => return Ok(None), // (never: the JSON went in owned)
     };
+    Ok(core_identifier(loc, os, core))
+}
+
+/// [`lazy_identifier`] of a `.xz` ISF file decoded while its lazy index reads it (see
+/// [`super::stream`]); `None` when that does not apply. `Err` = unreadable (a decode error).
+fn streamed_identifier(loc: &IsfLocation, os: &str) -> Option<std::result::Result<Option<(String, Vec<u8>)>, ()>> {
+    let IsfLocation::File(p) = loc else { return None };
+    if !p.as_os_str().as_encoded_bytes().ends_with(b".xz") || std::env::var_os("RSVOL_STREAM_ISF").is_some_and(|v| v == "0") {
+        return None;
+    }
+    let f = std::fs::File::open(p).ok()?;
+    let raw = Mmap::map(&f).ok()?;
+    let plan = super::stream::plan(raw.as_slice()).filter(|pl| pl.total >= LAZY_MIN)?;
+    Some(match LazyCore::build_streaming(raw.as_slice(), &plan, &BuildOptions::default()) {
+        super::lazy::Streamed::Table(core) => Ok(core_identifier(loc, os, core)),
+        super::lazy::Streamed::Json(v) => {
+            let id = extract_identifier(&v);
+            if let Some((ios, iid)) = &id
+                && ios == os
+            {
+                speculate(loc, iid, v, true);
+            }
+            Ok(id)
+        }
+        super::lazy::Streamed::Failed => Err(()),
+    })
+}
+
+/// The identifier of an ISF from its lazy table; the table is kept when [`speculate`] would
+/// build it.
+fn core_identifier(loc: &IsfLocation, os: &str, core: LazyCore) -> Option<(String, Vec<u8>)> {
+    let opts = BuildOptions::default();
+    let core = std::sync::Arc::new(core);
     let (win, mac, linux) = core.identifier_fields();
     let ident = identifier_from(win, mac, linux);
     if let Some((ios, iid)) = &ident
@@ -1207,7 +1240,7 @@ fn lazy_identifier(loc: &IsfLocation, os: &str, json: Vec<u8>) -> std::result::R
             lazy_register(loc, &url, &cf, &core);
         }
     }
-    Ok(ident)
+    ident
 }
 
 /// A speculative table of `loc` from its decoded `json` (see [`speculate`]): a lazy table when
@@ -2061,6 +2094,10 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
     let big_par = est.iter().filter(|&&e| e >= BIG).count() * 3 <= crate::util::par::threads();
     let next = AtomicUsize::new(0);
     let keep_os = *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner());
+    // the two biggest of them decode while their lazy index follows (the index waits for the
+    // slowest file; a streamed build runs threads of its own: not for all)
+    let lazy_candidate = |k: usize| keep_os.is_some_and(|os| lazy_tables_on() && est[k] >= LAZY_MIN as u64 && locs[todo[k]].url().contains(&format!("/{os}/")));
+    let streamed: Vec<usize> = order.iter().copied().filter(|&k| lazy_candidate(k)).take(2).collect();
     let work = |out: &mut Vec<(usize, R)>| {
         let mut buf = Vec::new();
         loop {
@@ -2072,7 +2109,18 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
             let mut t1 = None;
             // a big compressed ISF in a `<os>/` directory while the automagic waits for that
             // OS's kernel table: its lazy table gives the identifier (no separate pass)
-            let lazy_first = keep_os.is_some_and(|os| lazy_tables_on() && est[k] >= LAZY_MIN as u64 && loc.url().contains(&format!("/{os}/")));
+            let lazy_first = lazy_candidate(k);
+            // few of them (the index is waiting for this decode): the lazy index follows it
+            if lazy_first
+                && streamed.contains(&k)
+                && let Some(ident) = streamed_identifier(loc, keep_os.unwrap_or(""))
+            {
+                if let Some(t0) = t0 {
+                    crate::util::trace::note(|| format!("identifier index: {} decode + lazy index (streamed) {:.1} ms", loc.url(), t0.elapsed().as_secs_f64() * 1e3));
+                }
+                out.push((k, make(k, ident)));
+                continue;
+            }
             let ident = with_json_len(loc, &mut buf, big_par && est[k] >= BIG, |json, n| {
                 decoded = n;
                 t1 = t0.map(|_| std::time::Instant::now());
