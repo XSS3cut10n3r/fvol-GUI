@@ -110,12 +110,12 @@ fn row(pid: i128, comm: &str, e: StackEntry) -> Result<Vec<Value>> {
     let (name, ty, module) = match e.symbol {
         Some(s) => {
             let ty = match s.type_ {
-                Some(t) => Value::Str(t),
+                Some(t) => Value::Str(t.into_owned()),
                 // python's TreeGrid rejects None in a str column
                 None => return Err(Error::msg("TypeError: Values item with index 6 is the wrong type for column Type")),
             };
             let module = match s.module_name {
-                Some(m) if !m.is_empty() => Value::Str(m),
+                Some(m) if !m.is_empty() => Value::Str(m.into_owned()),
                 _ => Value::NotAvailable,
             };
             (Value::Str(s.name), ty, module)

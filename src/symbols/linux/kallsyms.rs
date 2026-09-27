@@ -39,6 +39,7 @@ use crate::layers::{Layer, LayerExt};
 use crate::objects::util::{array_to_string, pointer_to_string};
 use crate::objects::{LayerRef, Module, Obj};
 use crate::util::FxHashMap;
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Largest plausible `kallsyms_num_syms`. Real kernels have well under a million core symbols;
@@ -153,12 +154,12 @@ impl KasConfig {
 pub struct KasSymbol {
     pub name: String,
     /// nm-style type letter (python `type`, may be None).
-    pub type_: Option<String>,
+    pub type_: Option<Cow<'static, str>>,
     pub address: u64,
     /// python `size` (None when the core symbol position could not be computed).
     pub size: Option<i128>,
     /// python `module_name` (None when a module name is unreadable).
-    pub module_name: Option<String>,
+    pub module_name: Option<Cow<'static, str>>,
     /// python `exported` (True / False / None).
     pub exported: Option<bool>,
     /// python `subsystem`: "core", "module", "ftrace", "bpf" (or None).
@@ -204,7 +205,22 @@ fn py_isupper(s: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KasSymbolBasic {
     pub name: String,
-    pub type_: Option<String>,
+    pub type_: Option<Cow<'static, str>>,
+}
+
+/// `c` (ASCII) as a one-character static string (no allocation per symbol type letter).
+fn ascii_str(c: u8) -> &'static str {
+    static ASCII: [u8; 128] = {
+        let mut a = [0u8; 128];
+        let mut i = 0;
+        while i < 128 {
+            a[i] = i as u8;
+            i += 1;
+        }
+        a
+    };
+    let c = (c & 0x7f) as usize;
+    std::str::from_utf8(&ASCII[c..c + 1]).unwrap_or("")
 }
 
 /// One-page read cache over a layer for byte-at-a-time decoding (python `_KallsymsIO`).
@@ -295,8 +311,9 @@ const NONE_ADDR: u64 = u64::MAX;
 enum Token {
     /// `token_index[i]` is None (python raises a TypeError when the token is used)
     NoIndex,
-    /// the bytes before the NUL; `tail`: the read error python hits after them (no NUL)
-    Bytes { bytes: Vec<u8>, tail: Option<Error> },
+    /// the bytes before the NUL; `tail`: the read error python hits after them (no NUL);
+    /// `ascii`: every byte is ASCII (decoded without a per-byte check)
+    Bytes { bytes: Vec<u8>, tail: Option<Error>, ascii: bool },
     /// no NUL within the first MiB: expanded byte by byte from memory
     Uncached(u64),
 }
@@ -639,9 +656,9 @@ impl Kallsyms {
                             return Token::Uncached(start);
                         }
                         match rd.byte(start.wrapping_add(bytes.len() as u64)) {
-                            Ok(0) => return Token::Bytes { bytes, tail: None },
+                            Ok(0) => return Token::Bytes { ascii: bytes.is_ascii(), bytes, tail: None },
                             Ok(c) => bytes.push(c),
-                            Err(e) => return Token::Bytes { bytes, tail: Some(e) },
+                            Err(e) => return Token::Bytes { ascii: bytes.is_ascii(), bytes, tail: Some(e) },
                         }
                     }
                 })
@@ -661,14 +678,14 @@ impl Kallsyms {
             len = (upper << 7) | (len & 0x7F);
         }
         let table = self.token_table();
-        let mut sym_type: Option<String> = None;
-        let mut name = String::new();
-        let mut push = |c: u8| -> Result<()> {
+        let mut sym_type: Option<Cow<'static, str>> = None;
+        let mut name = String::with_capacity((len as usize * 4).min(256));
+        let push = |sym_type: &mut Option<Cow<'static, str>>, name: &mut String, c: u8| -> Result<()> {
             if c >= 0x80 {
                 return Err(Error::msg("UnicodeDecodeError: 'utf-8' codec can't decode byte"));
             }
             if sym_type.is_none() {
-                sym_type = Some((c as char).to_string());
+                *sym_type = Some(Cow::Borrowed(ascii_str(c)));
             } else {
                 name.push(c as char);
             }
@@ -679,9 +696,20 @@ impl Kallsyms {
             pos = pos.wrapping_add(1);
             match &table[tii as usize] {
                 Token::NoIndex => return Err(type_error("unsupported operand type(s) for +: 'int' and 'NoneType'")),
-                Token::Bytes { bytes, tail } => {
-                    for &c in bytes {
-                        push(c)?;
+                Token::Bytes { bytes, tail, ascii } => {
+                    if *ascii {
+                        let mut bs = &bytes[..];
+                        if sym_type.is_none() {
+                            if let Some((&c, rest)) = bs.split_first() {
+                                sym_type = Some(Cow::Borrowed(ascii_str(c)));
+                                bs = rest;
+                            }
+                        }
+                        name.push_str(std::str::from_utf8(bs).unwrap_or_default());
+                    } else {
+                        for &c in bytes {
+                            push(&mut sym_type, &mut name, c)?;
+                        }
                     }
                     if let Some(e) = tail {
                         return Err(clone_err(e));
@@ -696,7 +724,7 @@ impl Kallsyms {
                         if c == 0 {
                             break;
                         }
-                        push(c)?;
+                        push(&mut sym_type, &mut name, c)?;
                     }
                 }
             }
@@ -928,9 +956,9 @@ impl Kallsyms {
             _ => return Ok(None),
         };
         let address = sym.st_value()? & self.mask;
-        let type_ = module.get_symbol_type(sym, idx)?;
+        let type_ = module.get_symbol_type(sym, idx)?.map(Cow::Owned);
         let size = sym.st_size()? as i128;
-        let module_name = module.get_name()?;
+        let module_name = module.get_name()?.map(Cow::Owned);
         let mut s = KasSymbol { name, type_, address, size: Some(size), module_name, exported: Some(false), subsystem };
         s.set_exported_from_type();
         Ok(Some(s))
@@ -1061,7 +1089,7 @@ impl Kallsyms {
 
     fn ftrace_func_symbol(f: &Ftrace, func: &FtraceFunc) -> Result<KasSymbol> {
         let module_name = clone_res(&f.maps[func.map])?;
-        let mut s = KasSymbol { name: func.name.clone(), type_: Some("T".into()), address: func.addr, size: Some(func.size), module_name: Some(module_name), exported: None, subsystem: Some("ftrace") };
+        let mut s = KasSymbol { name: func.name.clone(), type_: Some("T".into()), address: func.addr, size: Some(func.size), module_name: Some(Cow::Owned(module_name)), exported: None, subsystem: Some("ftrace") };
         s.set_exported_from_type();
         Ok(s)
     }
@@ -1175,7 +1203,9 @@ impl Kallsyms {
         }
         let (mut start, mut off) = (0u64, 0u64);
         if let Some(offsets) = self.core_offsets(n) {
-            const CHUNK: usize = 2048;
+            // big enough that a formatted block (~100 bytes a row) is handed to the output
+            // without another copy, small enough to keep all cores busy
+            const CHUNK: usize = 4096;
             let chunks = offsets.len().div_ceil(CHUNK);
             let mut done = false;
             let mut resume: Option<usize> = None;
@@ -1351,7 +1381,7 @@ impl Kallsyms {
                     let exported = self.is_symbol_exported(&sym_name, address, Some(&module))?;
                     let t = sym_type.ok_or_else(|| Error::msg("AttributeError: 'NoneType' object has no attribute 'lower'"))?;
                     let t = if exported == Some(true) { t.to_uppercase() } else { t.to_lowercase() };
-                    out.push(Ok(KasSymbol { name: sym_name, type_: Some(t), address, size: Some(size), module_name: Some(module_name.clone()), exported, subsystem: Some("module") }));
+                    out.push(Ok(KasSymbol { name: sym_name, type_: Some(Cow::Owned(t)), address, size: Some(size), module_name: Some(Cow::Owned(module_name.clone())), exported, subsystem: Some("module") }));
                 }
             }
             Ok(())
@@ -1754,7 +1784,10 @@ mod tests_robustness {
 
     fn leak_layer() -> LayerRef {
         // a tiny raw image: every kallsyms symbol address is readable (all zeros)
-        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-fuzz-{}", std::process::id()));
+        // one file per call: the tests run concurrently and each removes its file
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let k = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-fuzz-{}-{k}", std::process::id()));
         std::fs::write(&p, vec![0u8; 8192]).unwrap();
         let l = FileLayer::open(&p).unwrap();
         let _ = std::fs::remove_file(&p); // the mmap keeps the mapping alive
@@ -1807,10 +1840,10 @@ mod tests_robustness {
     /// `emit` stop it where they return false.
     #[test]
     fn core_blocks_match_the_symbol_stream() {
-        // symbols 0..2600 have readable addresses; symbol 2600 raises
-        let vm = zero_kallsyms(8192 + 2600 * 8);
+        // symbols 0..5000 have readable addresses; symbol 5000 raises
+        let vm = zero_kallsyms(8192 + 5000 * 8);
         let mut kas = Kallsyms::new(&vm).expect("Kallsyms::new");
-        for n in [3000u64, 30_000] {
+        for n in [6000u64, 60_000] {
             kas.num_syms = Some(n);
             kas.addrs = OnceLock::new();
             let mut stream: Vec<Option<KasSymbol>> = Vec::new();
@@ -1818,9 +1851,9 @@ mod tests_robustness {
                 stream.push(r.ok());
                 true
             });
-            assert_eq!(stream.len(), 2601, "num_syms={n}");
-            assert!(stream[..2600].iter().all(|s| s.as_ref().is_some_and(|s| s.module_name.as_deref() == Some("kernel"))));
-            assert!(stream[2600].is_none());
+            assert_eq!(stream.len(), 5001, "num_syms={n}");
+            assert!(stream[..5000].iter().all(|s| s.as_ref().is_some_and(|s| s.module_name.as_deref() == Some("kernel") && s.type_.is_none())));
+            assert!(stream[5000].is_none());
             let mut blocks: Vec<Vec<Option<KasSymbol>>> = Vec::new();
             kas.for_each_core_block(
                 &Vec::new,
@@ -1834,7 +1867,7 @@ mod tests_robustness {
                     true
                 },
             );
-            assert!(blocks.len() >= 2 && blocks.iter().all(|b| !b.is_empty() && b.len() <= 2048), "num_syms={n}");
+            assert!(blocks.len() >= 2 && blocks.iter().all(|b| !b.is_empty() && b.len() <= 4096), "num_syms={n}");
             assert_eq!(blocks.concat(), stream, "num_syms={n}");
             // emit stops after the first block
             let mut got = 0;

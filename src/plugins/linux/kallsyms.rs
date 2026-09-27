@@ -6,6 +6,7 @@ use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::plugins::{Config, Plugin, Requirement};
 use crate::renderers::{ColType, Column, RowBlock, RowSink, Value};
+use std::borrow::Cow;
 use std::sync::Mutex;
 use crate::symbols::linux::kallsyms::{KasSymbol, Kallsyms as Kas};
 
@@ -26,17 +27,21 @@ fn row(s: KasSymbol) -> Result<[Value; 8]> {
     let exported = s.exported.map_or(Value::NotAvailable, Value::Bool);
     let type_description = s.type_description();
     let subsystem = s.subsystem.ok_or_else(|| none_in_str_column(4, "SubSystem"))?;
-    let module_name = s.module_name.ok_or_else(|| none_in_str_column(5, "ModuleName"))?;
+    let module_name = match s.module_name.ok_or_else(|| none_in_str_column(5, "ModuleName"))? {
+        Cow::Borrowed(m) => Value::SStr(m),
+        Cow::Owned(m) => Value::Str(m),
+    };
     Ok([
         Value::Int(s.address as i128),
         match s.type_ {
-            Some(t) if !t.is_empty() => Value::Str(t),
+            Some(Cow::Borrowed(t)) if !t.is_empty() => Value::SStr(t),
+            Some(Cow::Owned(t)) if !t.is_empty() => Value::Str(t),
             _ => Value::NotAvailable,
         },
         size,
         exported,
         Value::SStr(subsystem),
-        Value::Str(module_name),
+        module_name,
         Value::Str(s.name),
         type_description.map_or(Value::NotAvailable, Value::SStr),
     ])
