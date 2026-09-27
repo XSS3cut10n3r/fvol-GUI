@@ -193,7 +193,7 @@ mod tests {
         for mode in [Colors::True, Colors::Xterm256] {
             let s = render(mode);
             assert_eq!(s.lines().count(), grid().len() / 2);
-            assert!(s.contains("fastvol 0.1.0") && s.contains("Volatility 3 Framework"));
+            assert!(s.contains(&format!("fastvol {}", env!("CARGO_PKG_VERSION"))) && s.contains("Volatility 3 Framework"));
         }
         let mono = render(Colors::Mono);
         assert!(!mono.contains("\x1b[38"));

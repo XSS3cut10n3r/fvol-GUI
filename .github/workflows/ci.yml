@@ -1,0 +1,89 @@
+# Every commit: a warning-free build and the unit tests, on the latest stable Rust and on the
+# minimum supported version (Cargo.toml `rust-version`), plus a check that the generated README
+# artwork matches its sources. The release workflow runs this workflow first.
+#
+# The parity gates against python volatility3 (bench/scripts/check_*.sh) need GBs of memory
+# images and python reference outputs that are not in the repository; run them locally before a
+# release (docs/development.md). Tests that need those files are #[ignore]d or skip themselves.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    name: test (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, "1.95"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+          rustup override set ${{ matrix.toolchain }}
+          rustc --version && cargo --version
+
+      # `fast` = release optimizations without fat LTO (Cargo.toml); the repo config builds for the
+      # runner's CPU (target-cpu=native), fine for a build that is tested on the same machine
+      - name: Build (no warnings allowed)
+        run: |
+          cargo build --profile fast --locked 2>&1 | tee build.log
+          if grep -E '^(warning|error)' build.log; then
+            echo "::error::the build printed warnings"
+            exit 1
+          fi
+
+      - name: Unit tests
+        run: cargo test --profile fast --locked
+
+      - name: Smoke test the binary
+        run: |
+          fvol=target/fast/fvol
+          "$fvol" -h | head -3
+          "$fvol" --version
+          "$fvol" completion bash | grep -q 'complete -F _fvol_complete fvol'
+          # python-compatible error path: no image given
+          set +e
+          "$fvol" -q windows.pslist.PsList > out.txt 2> err.txt
+          echo "exit code $?"
+          set -e
+          cat out.txt err.txt | tail -3
+
+  assets:
+    name: README artwork is up to date
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate from the sources (mark.txt, favicon.txt, bench/vm/BENCHMARKS.md)
+        run: python3 docs/assets/build.py
+      - name: No changes
+        run: |
+          if ! git diff --exit-code -- docs/assets; then
+            echo "::error::docs/assets is out of date: run python3 docs/assets/build.py and commit the result"
+            exit 1
+          fi

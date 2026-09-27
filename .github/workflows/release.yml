@@ -1,0 +1,137 @@
+# Release: pushing a tag vX.Y.Z (made by bench/scripts/release.sh) runs CI, builds portable static
+# binaries, and publishes them as a GitHub release with SHA-256 sums and the commit list since the
+# previous tag. Run it by hand (workflow_dispatch) for a dry run: same builds, artifacts only.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # any x86-64 CPU; the SIMD paths still pick AVX2 / SHA-NI / AES-NI at run time
+          - name: x86_64-linux
+            cpu: x86-64
+          # CPUs with AVX2 (Intel Haswell, AMD Zen and newer): a few helpers compile to AVX2 / BMI2
+          - name: x86_64-v3-linux
+            cpu: x86-64-v3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup override set stable
+          rustc --version
+
+      - name: Version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      # RUSTFLAGS replaces the repo config's rustflags (target-cpu=native): keep its static-pie and
+      # linker flags, pick a portable CPU (docs/building.md)
+      - name: Build (fat LTO, static)
+        env:
+          RUSTFLAGS: >-
+            -C target-cpu=${{ matrix.cpu }} -C target-feature=+crt-static
+            -C link-arg=-Wl,-z,max-page-size=0x200000 -C link-arg=-Wl,-z,separate-code
+            -C link-arg=-Wl,-z,pack-relative-relocs
+        run: cargo build --release --locked
+
+      - name: Check the binary
+        run: |
+          bin=target/release/fvol
+          file "$bin"
+          file "$bin" | grep -Eq 'static-pie linked|statically linked'
+          "$bin" --version
+          "$bin" -h > /dev/null
+
+      - name: Package
+        run: |
+          name=fastvol-${{ steps.version.outputs.version }}-${{ matrix.name }}
+          mkdir -p "dist/$name"
+          cp target/release/fvol LICENSE.txt README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" --owner=0 --group=0 --sort=name "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fastvol-${{ matrix.name }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2> /dev/null || true)
+          {
+            echo "fastvol ${GITHUB_REF_NAME#v}: output byte-identical to python volatility3 $(sed -n 's/.*"Volatility 3 Framework \(.*\)".*/\1/p' src/main.rs | head -1)."
+            echo
+            echo "Static Linux binaries: \`x86_64-linux\` runs on any x86-64 CPU, \`x86_64-v3-linux\` needs AVX2 (Haswell / Zen or newer)."
+            echo
+            echo "## Changes"
+            echo
+            if [ -n "$prev" ]; then range="$prev..$GITHUB_REF_NAME"; else range="$GITHUB_REF_NAME"; fi
+            git log --no-merges --pretty='- %s (%h)' "$range"
+            echo
+            echo "## SHA-256"
+            echo
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+          } > notes.md
+          cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --title "fastvol ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag

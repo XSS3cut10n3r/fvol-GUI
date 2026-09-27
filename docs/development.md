@@ -366,3 +366,28 @@ cd bench/vm && python3 scripts/report.py raw .
   bench/scripts/cargo.sh test --profile fast
   bench/scripts/gates.sh $PWD/target/release/fvol
   ```
+
+## CI and releases
+
+GitHub Actions (`.github/workflows/`, also runnable by Forgejo Actions):
+
+| Workflow      | Runs on                                   | What it does                                                                 |
+| ------------- | ----------------------------------------- | ---------------------------------------------------------------------------- |
+| `ci.yml`      | every push to any branch, pull requests   | warning-free build, unit tests and a smoke test of `fvol`, on stable Rust and on the minimum version (1.95); checks that `docs/assets` matches `python3 docs/assets/build.py` |
+| `release.yml` | tags `vX.Y.Z` (or by hand, as a dry run)  | runs `ci.yml`, builds static fat-LTO binaries for any x86-64 CPU and for x86-64-v3 (AVX2), and publishes them as a GitHub release with SHA-256 sums and the commits since the previous tag |
+
+CI cannot run the parity gates: they need GBs of memory images and python reference outputs that
+are not in the repository. Tests that use those files are `#[ignore]`d or skip themselves, so the
+unit tests pass on a clean checkout. Run the gates locally before a release.
+
+To release:
+
+```bash
+bench/scripts/gates.sh $PWD/target/release/fvol   # the parity gates, locally
+bench/scripts/release.sh 0.2.0                    # unit tests, version bump, commit, tag vX.Y.Z
+git push origin main v0.2.0                       # starts release.yml
+```
+
+`release.sh` refuses a dirty tree, a branch other than `main`, an existing tag or a version that
+is not greater than the current one. It sets the version in `Cargo.toml`, `Cargo.lock` and the
+"Applies to fastvol X" line of every doc. It does not push.
