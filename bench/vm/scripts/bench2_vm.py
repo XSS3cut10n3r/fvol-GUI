@@ -21,8 +21,11 @@ rs_cold, rs_steady, rs_warm, vr_cold, vr_warm (+ py in the first --py-runs round
 Wall = perf_counter spawn..reap, CPU/max RSS from wait4 of that child. stdout sha256 (without the
 banner line) is recorded for every run.
 
-Usage: bench2_vm.py PLUGIN_LIST OUT.tsv RAW.jsonl [--runs 5] [--py-runs 1] [--py-ref PASS1.jsonl]
-       [--py-fresh a,b] [--py-nowarm a,b] [--keep a,b] [--keep-dir DIR]
+--vr-ref PASS2.jsonl reuses vol-rs's timed runs from an earlier pass (same machine, same vol-rs build)
+instead of running it again: only the three rsvol columns are measured (pass 3).
+
+Usage: bench2_vm.py PLUGIN_LIST OUT.tsv RAW.jsonl [--runs 5] [--py-runs 1] [--py-ref A.jsonl[,B.jsonl]]
+       [--vr-ref PASS2.jsonl] [--py-fresh a,b] [--py-nowarm a,b] [--keep a,b] [--keep-dir DIR]
 """
 import hashlib, json, os, shutil, statistics, subprocess, sys, tempfile, time
 
@@ -37,8 +40,9 @@ PY = [f"{B}/venv314/bin/python", f"{B}/volatility3/vol.py"]
 EXTRA = os.environ.get("EXTRA", "").split()  # "-s ~/rsvol-bench/isf" for the linux round
 os.environ["XDG_CACHE_HOME"] = C
 os.environ["XDG_DATA_HOME"] = f"{B}/home/.local/share"
-for k in ("RSVOL_CACHE", "RSVOL_NO_SCAN_CACHE", "RSVOL_THREADS", "RSVOL_TRACE"):
-    os.environ.pop(k, None)
+for k in ("CACHE", "NO_SCAN_CACHE", "THREADS", "TRACE"):
+    os.environ.pop("RSVOL_" + k, None)
+    os.environ.pop("FASTVOL_" + k, None)
 
 
 def wipe_rs_cold():
@@ -77,10 +81,23 @@ keep = set(filter(None, opt("--keep", "").split(",")))
 keep_dir = opt("--keep-dir", f"{B}/p2/keep")
 py_ref = {}
 if "--py-ref" in args:
-    for l in open(opt("--py-ref", "")):
+    for fn in opt("--py-ref", "").split(","):  # later files override earlier ones per plugin
+        got = {}
+        for l in open(fn):
+            r = json.loads(l)
+            if r["tool"] == "py" and not r.get("warmup"):
+                got.setdefault(r["plugin"], []).append(r)
+        py_ref.update(got)
+vr_ref = {}
+if "--vr-ref" in args:
+    for l in open(opt("--vr-ref", "")):
         r = json.loads(l)
-        if r["tool"] == "py" and not r.get("warmup"):
-            py_ref.setdefault(r["plugin"], []).append(r)
+        if r["tool"] in ("vr_cold", "vr_warm") and not r.get("warmup"):
+            vr_ref.setdefault(r["plugin"], {}).setdefault(r["tool"], []).append(r)
+    ORDER_RUN = [t for t in ORDER if not t.startswith("vr_")]
+    WARM_RUN = [t for t in WARM if not t.startswith("vr_")]
+else:
+    ORDER_RUN, WARM_RUN = ORDER, WARM
 os.makedirs(OUTROOT, exist_ok=True)
 os.makedirs(C2, exist_ok=True)
 os.makedirs(keep_dir, exist_ok=True)
@@ -147,16 +164,19 @@ else:
 for plugin in [l.strip() for l in open(plist) if l.strip() and not l.startswith("#")]:
     if plugin in done:
         continue
+    if vr_ref and plugin not in vr_ref:
+        print(f"{plugin}: not in --vr-ref, skipped", flush=True)
+        continue
     load = os.getloadavg()[0]
     py_live = plugin in py_fresh or plugin not in py_ref
     rec = {t: [] for t in T}
     rawf = open(raw, "a")
-    for t in WARM + (["py"] if py_live and plugin not in py_nowarm else []):
+    for t in WARM_RUN + (["py"] if py_live and plugin not in py_nowarm else []):
         r = run(t, plugin)
         r["warmup"] = True
         rawf.write(json.dumps(r) + "\n"); rawf.flush()
     for i in range(runs):
-        for t in ORDER + (["py"] if py_live and i < py_runs else []):
+        for t in ORDER_RUN + (["py"] if py_live and i < py_runs else []):
             r = run(t, plugin, keep_out=(plugin in keep and t in ("rs_warm", "py") and (i == runs - 1 or t == "py")))
             r["round"] = i
             rawf.write(json.dumps(r) + "\n"); rawf.flush()
@@ -164,6 +184,8 @@ for plugin in [l.strip() for l in open(plist) if l.strip() and not l.startswith(
     rawf.close()
     if not py_live:
         rec["py"] = py_ref[plugin]
+    if vr_ref:
+        rec["vr_cold"], rec["vr_warm"] = vr_ref[plugin]["vr_cold"], vr_ref[plugin]["vr_warm"]
     pb = min(rec["py"], key=lambda r: r["wall"])
     row = [plugin, f"{load:.2f}", "fresh" if py_live else "pass1", str(len(rec["py"]))]
     best = {}
