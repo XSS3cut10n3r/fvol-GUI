@@ -798,6 +798,55 @@ impl IsfSpeculation {
     }
 }
 
+/// The identifier index, built while the kernel is searched for (the DTB scan and pdbscan
+/// take 1-2 ms, reading python's identifier cache about as long). When the index has to read
+/// ISFs (python's cache lacks rows), it first waits for the kernel's identifier
+/// ([`EarlyIndex::kernel`]) so it builds that ISF's table on the way, as the lookup's own
+/// index build would. The kernel lookup then finds the index built (it is memoized).
+/// Give the identifier (or `None`) before any ISF lookup: the lookup waits for this index.
+pub struct EarlyIndex {
+    ident: std::sync::Arc<(std::sync::Mutex<Option<Option<Vec<u8>>>>, std::sync::Condvar)>,
+}
+
+impl EarlyIndex {
+    /// Start building the index of `path` on another thread.
+    pub fn start(path: &'static crate::symbols::SymbolPath) -> EarlyIndex {
+        type Slot = (std::sync::Mutex<Option<Option<Vec<u8>>>>, std::sync::Condvar);
+        let ident: std::sync::Arc<Slot> = std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+        let i = ident.clone();
+        let _ = std::thread::Builder::new().name("rsvol-index".into()).spawn(move || {
+            let _t = crate::util::trace::span("identifier index (early)");
+            crate::symbols::store::identifier_index_with(path, &|| {
+                let (m, cv) = &*i;
+                let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+                while g.is_none() {
+                    g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                }
+                if let Some(Some(id)) = &*g {
+                    crate::symbols::store::index_for(id.as_slice(), "windows");
+                }
+            });
+        });
+        EarlyIndex { ident }
+    }
+
+    /// The kernel's `pdb|GUID|age` identifier, or `None` (no kernel); the first call counts.
+    pub fn kernel(&self, pdb_name: Option<(&str, &str, u32)>) {
+        let (m, cv) = &*self.ident;
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            *g = Some(pdb_name.map(|(p, guid, age)| format!("{}|{}|{}", p.trim_matches('\0'), guid.to_uppercase(), age).into_bytes()));
+            cv.notify_all();
+        }
+    }
+}
+
+impl Drop for EarlyIndex {
+    fn drop(&mut self) {
+        self.kernel(None);
+    }
+}
+
 /// Everything the Windows automagic determines for an image (cacheable).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinAutomagic {

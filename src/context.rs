@@ -299,7 +299,9 @@ impl Context {
         let am = match cached {
             Some(a) => a,
             None => {
-                use crate::automagic::windows::{KernelFound, WinAutomagic, find_dtb, find_kernel_with};
+                use crate::automagic::windows::{EarlyIndex, KernelFound, WinAutomagic, find_dtb, find_kernel_with};
+                // the identifier index builds meanwhile (the lookup below waits for it)
+                let early = EarlyIndex::start(self.symbol_path());
                 let d = {
                     let _t = crate::util::trace::span("windows dtb scan");
                     find_dtb(phys_arc).map_err(|e| self.unsatisfied(&e, LAYER))?.ok_or_else(|| self.unsatisfied(&Error::msg("no Windows DTB found"), LAYER))?
@@ -309,11 +311,15 @@ impl Context {
                     let _t = crate::util::trace::span("windows pdbscan");
                     let path = self.symbol_path();
                     let offline = self.opts.offline;
-                    let on_candidate = |k: &KernelFound| spec.start(path, k, offline);
+                    let on_candidate = |k: &KernelFound| {
+                        early.kernel(Some((&k.pdb.pdb_name, &k.pdb.guid, k.pdb.age)));
+                        spec.start(path, k, offline)
+                    };
                     find_kernel_with(&vl, *phys, &on_candidate)
                         .map_err(|e| self.unsatisfied(&e, SYMS))?
                         .ok_or_else(|| self.unsatisfied(&Error::msg("No suitable kernels found during pdbscan"), SYMS))?
                 };
+                early.kernel(Some((&k.pdb.pdb_name, &k.pdb.guid, k.pdb.age)));
                 let a = WinAutomagic { dtb: d.dtb, mode: d.mode, kvo: k.kvo, pdb_name: k.pdb.pdb_name, guid: k.pdb.guid, age: k.pdb.age };
                 crate::automagic::cache::store(
                     &image,

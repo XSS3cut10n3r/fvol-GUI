@@ -2356,6 +2356,14 @@ fn choice_cached(path: &SymbolPath, identifier: &[u8], os: &str) -> Option<Optio
     Some((!loc.is_empty()).then(|| super::pycache::location_of(&unhex(&loc).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default())))
 }
 
+/// An identifier index about to read ISFs builds the tables of exactly the ISFs with
+/// `identifier` (of `os`) on the way: the ones loaded next (see [`choice_from_index`], which
+/// resets this once it has the index).
+pub(crate) fn index_for(identifier: &[u8], os: &str) {
+    set_banner_hint(Some(identifier.to_vec()));
+    *KEEP_OS.lock().unwrap_or_else(|e| e.into_inner()) = static_os(os);
+}
+
 /// The [`find_location_cached`] answer from the identifier index (built or refreshed now when
 /// needed), kept for later runs.
 fn choice_from_index(path: &SymbolPath, identifier: &[u8], os: &str) -> Option<IsfLocation> {
