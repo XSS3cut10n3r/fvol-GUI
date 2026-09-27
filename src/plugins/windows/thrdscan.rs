@@ -124,53 +124,131 @@ pub fn gather_thread_info(ethread: &Obj, vads_cache: Option<&mut FxHashMap<u64, 
     Ok(Some(info))
 }
 
-/// python `ThrdScan._generator` over the threads of `implementation` (a trailing `Err` = the
-/// implementation raised there): one row per [`ThreadInfo`], in order. The per-thread reads and
-/// the per-process VAD walks (python's `vads_cache`) run in parallel; errors surface exactly
-/// where python would raise.
-pub fn thread_rows(threads: Vec<Result<Obj>>, out: &mut dyn FnMut(Vec<Value>) -> Result<()>) -> Result<()> {
-    let n_ok = threads.iter().take_while(|t| t.is_ok()).count();
-    let objs: Vec<Obj> = threads[..n_ok].iter().map(|t| *t.as_ref().unwrap()).collect();
-    let pres = crate::util::par::par_map(objs.len(), |i| gather_thread_pre(&objs[i], true));
-    // the processes python would walk the VADs of (first-occurrence order), walked in parallel
-    let mut owners: Vec<Obj> = Vec::new();
-    let mut index: FxHashMap<u64, usize> = FxHashMap::default();
-    for p in pres.iter() {
-        match p {
-            Ok(Some(ThreadPre { owner: Some(o), .. })) => {
-                index.entry(o.addr).or_insert_with(|| {
-                    owners.push(*o);
-                    owners.len() - 1
-                });
+/// python's `vads_cache` shared by the workers: each owning process' file-mapping VADs,
+/// walked once by the first thread that needs them.
+#[derive(Default)]
+struct OwnerVads {
+    slots: std::sync::Mutex<FxHashMap<u64, std::sync::Arc<OwnerSlot>>>,
+}
+
+#[derive(Default)]
+struct OwnerSlot {
+    /// None: the walk raised (the error is in `err`)
+    vads: std::sync::OnceLock<Option<Vec<Range>>>,
+    err: std::sync::Mutex<Option<crate::error::Error>>,
+}
+
+impl OwnerVads {
+    fn slot(&self, owner: &Obj) -> std::sync::Arc<OwnerSlot> {
+        let slot = self.slots.lock().unwrap_or_else(|e| e.into_inner()).entry(owner.addr).or_default().clone();
+        slot.vads.get_or_init(|| match get_proc_vads_with_file_paths(owner) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                *slot.err.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+                None
             }
-            Ok(_) => {}
-            Err(_) => break,
-        }
+        });
+        slot
     }
-    let vads = crate::util::par::par_map(owners.len(), |i| get_proc_vads_with_file_paths(&owners[i]));
-    let mut vads: Vec<Option<Result<Vec<Range>>>> = vads.into_iter().map(Some).collect();
-    for pre in pres {
-        let Some(pre) = pre? else { continue };
+
+    /// The error of `owner`'s VAD walk (once).
+    fn take_err(&self, owner: u64) -> crate::error::Error {
+        let slot = self.slots.lock().unwrap_or_else(|e| e.into_inner()).get(&owner).cloned();
+        slot.and_then(|s| s.err.lock().unwrap_or_else(|e| e.into_inner()).take()).unwrap_or_else(|| crate::error::Error::msg("thread_rows: VAD walk error already taken"))
+    }
+}
+
+/// Where python raised in a run of threads.
+enum Stop {
+    Raise(crate::error::Error),
+    /// the VAD walk of this owning process raised
+    Owner(u64),
+}
+
+/// python `gather_thread_info(thread, vads_cache)` for each of `objs` in order: `add` gets the
+/// [`ThreadInfo`] of every thread python yields a row for; the result is where python raised.
+fn chunk_infos(objs: &[Obj], vads: &OwnerVads, add: &mut dyn FnMut(ThreadInfo)) -> Option<Stop> {
+    for obj in objs {
+        let pre = match gather_thread_pre(obj, true) {
+            Ok(Some(p)) => p,
+            Ok(None) => continue,
+            Err(e) => return Some(Stop::Raise(e)),
+        };
         let mut info = pre.info;
         if let Some(owner) = pre.owner {
-            let slot = &mut vads[index[&owner.addr]];
-            if let Some(Err(_)) = slot {
-                // python raised while building this process' VAD list
-                return Err(slot.take().unwrap().unwrap_err());
-            }
-            if let Some(Ok(v)) = slot {
-                if !v.is_empty() {
-                    info.start_path = filepath_for_address(v, info.start_addr).map(str::to_string);
-                    info.win32_start_path = filepath_for_address(v, info.win32_start_addr).map(str::to_string);
+            let slot = vads.slot(&owner);
+            match slot.vads.get() {
+                Some(Some(v)) => {
+                    if !v.is_empty() {
+                        info.start_path = filepath_for_address(v, info.start_addr).map(str::to_string);
+                        info.win32_start_path = filepath_for_address(v, info.win32_start_addr).map(str::to_string);
+                    }
                 }
+                _ => return Some(Stop::Owner(owner.addr)),
             }
         }
-        out(info_row(info))?;
+        add(info);
     }
-    if let Some(Err(e)) = threads.into_iter().nth(n_ok) {
-        return Err(e);
+    None
+}
+
+/// Threads handled by one worker at a time.
+const THREAD_CHUNK: usize = 64;
+
+/// The threads before the implementation raised, and its error.
+fn split_threads(threads: Vec<Result<Obj>>) -> (Vec<Obj>, Option<crate::error::Error>) {
+    let mut objs = Vec::with_capacity(threads.len());
+    for t in threads {
+        match t {
+            Ok(o) => objs.push(o),
+            Err(e) => return (objs, Some(e)),
+        }
     }
-    Ok(())
+    (objs, None)
+}
+
+/// python `ThrdScan._generator` over the threads of `implementation` (a trailing `Err` = the
+/// implementation raised there): one row per [`ThreadInfo`], in order. The per-thread reads,
+/// the per-process VAD walks (python's `vads_cache`, each walked once) and the rows run in
+/// parallel; errors surface exactly where python would raise.
+pub fn thread_rows(threads: Vec<Result<Obj>>, out: &mut dyn FnMut(Vec<Value>) -> Result<()>) -> Result<()> {
+    let (objs, tail) = split_threads(threads);
+    let vads = OwnerVads::default();
+    let chunks: Vec<&[Obj]> = objs.chunks(THREAD_CHUNK).collect();
+    let per = crate::util::par::par_map(chunks.len(), |i| {
+        let mut infos = Vec::new();
+        let stop = chunk_infos(chunks[i], &vads, &mut |info| infos.push(info));
+        (infos, stop)
+    });
+    for (infos, stop) in per {
+        for info in infos {
+            out(info_row(info))?;
+        }
+        match stop {
+            Some(Stop::Raise(e)) => return Err(e),
+            Some(Stop::Owner(o)) => return Err(vads.take_err(o)),
+            None => {}
+        }
+    }
+    tail.map_or(Ok(()), Err)
+}
+
+/// [`thread_rows`] into `out`, the rows formatted on the workers.
+pub fn thread_rows_out(threads: Vec<Result<Obj>>, out: &mut dyn RowSink) -> Result<()> {
+    let (objs, tail) = split_threads(threads);
+    let vads = OwnerVads::default();
+    let chunks: Vec<&[Obj]> = objs.chunks(THREAD_CHUNK).collect();
+    let enc = out.encoder();
+    let blocks = crate::plugins::par_blocks(enc.as_ref(), chunks.len(), |i, block| chunk_infos(chunks[i], &vads, &mut |info| block.push(info_row(info))));
+    for (block, stop) in blocks {
+        block.emit(out)?;
+        match stop {
+            Some(Stop::Raise(e)) => return Err(e),
+            Some(Stop::Owner(o)) => return Err(vads.take_err(o)),
+            None => {}
+        }
+    }
+    tail.map_or(Ok(()), Err)
 }
 
 /// The TreeGrid row of one [`ThreadInfo`] (python `ThrdScan._generator`).
@@ -240,7 +318,7 @@ impl Plugin for ThrdScan {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        thread_rows(scan_threads(ctx, k), &mut |r| out.row(0, r))
+        thread_rows_out(scan_threads(ctx, k), out)
     }
     fn timeline(&self, ctx: &Context, _cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
         Some(ctx.windows_kernel().and_then(|k| timeline_of(scan_threads(ctx, k))))
