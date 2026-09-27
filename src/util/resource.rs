@@ -242,12 +242,15 @@ fn decompress_file_with(codec: Codec, src: &Path, dst: &Path, xz_buf_max: usize)
         return crate::codecs::xz::decompress_to_file_with(input, &out, xz_buf_max).map_err(fail);
     }
     let mut sink = crate::codecs::sink::FileSink::new(out)?;
+    let decode = crate::util::trace::span("decompress: decode");
     let n = match codec {
         Codec::Gzip => crate::codecs::gzip::decompress_to(input, &mut sink),
         Codec::Bzip2 => crate::codecs::bzip2::decompress_to(input, &mut sink),
         Codec::Xz => crate::codecs::lzma::decompress_alone_to(input, &mut sink),
     }
     .map_err(fail)?;
+    drop(decode);
+    let _drain = crate::util::trace::span("decompress: writer drain");
     sink.finish()?;
     Ok(n)
 }
