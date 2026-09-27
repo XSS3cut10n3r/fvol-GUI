@@ -742,7 +742,12 @@ impl IsfSpeculation {
 
     /// Start the speculation for candidate `k` (the first candidate only), with the symbol
     /// search path `path`.
-    pub fn start(&self, path: &'static crate::symbols::SymbolPath, k: &KernelFound, offline: bool) {
+    ///
+    /// `early`: the identifier index being built ([`EarlyIndex`]). When it has to read ISFs
+    /// (python's cache lacks rows) python's choice would wait for that, so the ISF named by the
+    /// PDB loads right away instead (joined only if it is the final choice, which it is unless
+    /// one GUID has several copies); nothing is downloaded then.
+    pub fn start(&self, path: &'static crate::symbols::SymbolPath, k: &KernelFound, offline: bool, early: Option<std::sync::Arc<EarlyState>>) {
         use crate::symbols::{self, BuildOptions};
         let mut g = self.job.lock().unwrap_or_else(|e| e.into_inner());
         if g.is_some() {
@@ -753,12 +758,13 @@ impl IsfSpeculation {
         let (tx, rx) = std::sync::mpsc::channel();
         let job = move || {
             let _t = crate::util::trace::span("kernel isf load (speculative)");
-            let loc = symbols::store::find_windows_isf_no_download(path, &pdb, &guid, age);
+            let cheap = early.is_none_or(|e| e.cheap());
+            let loc = if cheap { symbols::store::find_windows_isf_no_download(path, &pdb, &guid, age) } else { symbols::store::find_windows_isf_local(path, &pdb, &guid, age) };
             let _ = tx.send(loc.clone());
             match loc {
                 Some(loc) => symbols::store::load(&loc, "symbol_table_name", &BuildOptions::default()).ok(),
                 None => {
-                    if !offline {
+                    if !offline && cheap {
                         symbols::windows::pdb::convert_ahead(pdb.trim_matches('\0'), &guid, age, true);
                     }
                     None
@@ -800,44 +806,89 @@ impl IsfSpeculation {
 
 /// The identifier index, built while the kernel is searched for (the DTB scan and pdbscan
 /// take 1-2 ms, reading python's identifier cache about as long). When the index has to read
-/// ISFs (python's cache lacks rows), it first waits for the kernel's identifier
-/// ([`EarlyIndex::kernel`]) so it builds that ISF's table on the way, as the lookup's own
-/// index build would. The kernel lookup then finds the index built (it is memoized).
-/// Give the identifier (or `None`) before any ISF lookup: the lookup waits for this index.
+/// ISFs (python's cache lacks rows) it waits for the kernel search to end
+/// ([`EarlyIndex::kernel`]): decoding ISFs beside a whole-image KDBG scan only slows both
+/// down, and with the kernel's identifier the index builds that ISF's table on the way, as
+/// the lookup's own index build would. The kernel lookup then finds the index built (it is
+/// memoized). Give the kernel (or `None`) before any ISF lookup: the lookup waits for this
+/// index.
 pub struct EarlyIndex {
-    ident: std::sync::Arc<(std::sync::Mutex<Option<Option<Vec<u8>>>>, std::sync::Condvar)>,
+    st: std::sync::Arc<EarlyState>,
+}
+
+/// What [`EarlyIndex`] shares with its thread and the speculative load.
+pub struct EarlyState {
+    m: std::sync::Mutex<EarlyPhase>,
+    cv: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct EarlyPhase {
+    /// the kernel's identifier once the search ended (`Some(None)`: no kernel)
+    kernel: Option<Option<Vec<u8>>>,
+    /// the index reads ISFs (it waits for the kernel first)
+    reading: bool,
+    /// the index is built
+    done: bool,
+}
+
+impl EarlyState {
+    fn wait_until(&self, cond: impl Fn(&EarlyPhase) -> bool) -> std::sync::MutexGuard<'_, EarlyPhase> {
+        let mut g = self.m.lock().unwrap_or_else(|e| e.into_inner());
+        while !cond(&g) {
+            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g
+    }
+
+    fn update(&self, f: impl FnOnce(&mut EarlyPhase)) {
+        let mut g = self.m.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut g);
+        self.cv.notify_all();
+    }
+
+    /// Whether python's identifier-cache choice is at hand without reading ISFs: waits until
+    /// the index is built (`true`) or turns out to need ISFs read (`false`).
+    pub fn cheap(&self) -> bool {
+        self.wait_until(|p| p.done || p.reading).done
+    }
 }
 
 impl EarlyIndex {
     /// Start building the index of `path` on another thread.
     pub fn start(path: &'static crate::symbols::SymbolPath) -> EarlyIndex {
-        type Slot = (std::sync::Mutex<Option<Option<Vec<u8>>>>, std::sync::Condvar);
-        let ident: std::sync::Arc<Slot> = std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
-        let i = ident.clone();
-        let _ = std::thread::Builder::new().name("rsvol-index".into()).spawn(move || {
+        let st = std::sync::Arc::new(EarlyState { m: Default::default(), cv: Default::default() });
+        let s = st.clone();
+        let spawned = std::thread::Builder::new().name("rsvol-index".into()).spawn(move || {
             let _t = crate::util::trace::span("identifier index (early)");
             crate::symbols::store::identifier_index_with(path, &|| {
-                let (m, cv) = &*i;
-                let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
-                while g.is_none() {
-                    g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
-                }
-                if let Some(Some(id)) = &*g {
+                s.update(|p| p.reading = true);
+                if let Some(Some(id)) = &s.wait_until(|p| p.kernel.is_some()).kernel {
                     crate::symbols::store::index_for(id.as_slice(), "windows");
                 }
             });
+            s.update(|p| p.done = true);
         });
-        EarlyIndex { ident }
+        if spawned.is_err() {
+            // (no thread: nothing is built early; nobody waits for it)
+            st.update(|p| p.reading = true);
+        }
+        EarlyIndex { st }
     }
 
-    /// The kernel's `pdb|GUID|age` identifier, or `None` (no kernel); the first call counts.
+    /// The state the speculative kernel table load consults ([`EarlyState::cheap`]).
+    pub fn state(&self) -> std::sync::Arc<EarlyState> {
+        self.st.clone()
+    }
+
+    /// The kernel search ended with this kernel (`pdb`, `GUID`, `age`) or none; the first
+    /// call counts.
     pub fn kernel(&self, pdb_name: Option<(&str, &str, u32)>) {
-        let (m, cv) = &*self.ident;
-        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
-        if g.is_none() {
-            *g = Some(pdb_name.map(|(p, guid, age)| format!("{}|{}|{}", p.trim_matches('\0'), guid.to_uppercase(), age).into_bytes()));
-            cv.notify_all();
-        }
+        self.st.update(|p| {
+            if p.kernel.is_none() {
+                p.kernel = Some(pdb_name.map(|(pdb, guid, age)| format!("{}|{}|{}", pdb.trim_matches('\0'), guid.to_uppercase(), age).into_bytes()));
+            }
+        });
     }
 }
 
@@ -921,6 +972,36 @@ mod tests {
         });
         assert!(s.take("k.pdb", "AB", 1, &a).is_none());
         assert!(IsfSpeculation::new().take("k.pdb", "AB", 1, &a).is_none());
+    }
+
+    /// The speculative load asks the early index whether python's choice is at hand: yes once
+    /// the index is built, no as soon as it has to read ISFs (it then waits for the kernel).
+    #[test]
+    fn early_index_phases() {
+        use std::sync::Arc;
+        for reading in [false, true] {
+            let st = Arc::new(EarlyState { m: Default::default(), cv: Default::default() });
+            let s = st.clone();
+            let h = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                s.update(|p| if reading { p.reading = true } else { p.done = true });
+                if reading {
+                    // the index waits for the kernel search to end, then finishes
+                    let id = s.wait_until(|p| p.kernel.is_some()).kernel.clone();
+                    s.update(|p| p.done = true);
+                    return id;
+                }
+                None
+            });
+            assert_eq!(st.cheap(), !reading);
+            let e = EarlyIndex { st: st.clone() };
+            e.kernel(Some(("k.pdb\0", "ab", 3)));
+            e.kernel(None); // the first call counts
+            drop(e);
+            let got = h.join().unwrap();
+            assert_eq!(got, if reading { Some(Some(b"k.pdb|AB|3".to_vec())) } else { None });
+            assert!(st.cheap());
+        }
     }
 
     fn page_with(entries: &[(usize, u64)]) -> Vec<u8> {

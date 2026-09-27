@@ -405,6 +405,8 @@ struct Pre {
     esc: Vec<(u32, Box<str>)>,
     /// `enums`: its `{`, its keys, the enumerations (the whole section)
     enums: Option<(u32, Vec<u32>, Vec<EnumDef<'static>>)>,
+    /// the symbol name table filled while decoding
+    stab: Option<SymTable>,
 }
 
 /// What [`LazyCore::build_streaming`] made of an `.xz` ISF.
@@ -420,6 +422,65 @@ pub(crate) enum Streamed {
 /// Member ranges checked while decoding (tests: the streaming really overlapped).
 #[cfg(test)]
 static STREAMED_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The symbol name table filled while the document is decoded, from the moment the `symbols`
+/// section's `}` is decoded (its size is known then): key indexes compare-and-swapped into
+/// slots, each key's hash stored before (a thread meeting a slot sees its hash). The same
+/// table [`LazyCore::index_pre`] builds for the section.
+struct SymTable {
+    /// the section's key positions
+    keys: Vec<u32>,
+    /// decoded bytes when it was made (every key of the section is below)
+    ready: usize,
+    slots: Vec<AtomicU32>,
+    hashes: Vec<std::sync::atomic::AtomicU64>,
+    dup: std::sync::atomic::AtomicBool,
+    /// keys inserted (symbols or not)
+    inserted: std::sync::atomic::AtomicUsize,
+}
+
+impl SymTable {
+    fn new(keys: Vec<u32>, ready: usize) -> SymTable {
+        let n = keys.len();
+        let nslots = if n == 0 { 0 } else { (2 * n).next_power_of_two() };
+        let hashes = std::iter::repeat_with(|| std::sync::atomic::AtomicU64::new(0)).take(n).collect();
+        SymTable { keys, ready, slots: zeroed_atomic(nslots), hashes, dup: Default::default(), inserted: Default::default() }
+    }
+
+    /// Insert the keys `first..` with their hashes and name lengths (a checked range).
+    fn insert(&self, json: &[u8], first: usize, hash: &[u64], len: &[u32]) {
+        let json = &json[..self.ready.min(json.len())];
+        let mask = self.slots.len().wrapping_sub(1);
+        for (k, (&h, &l)) in hash.iter().zip(len).enumerate() {
+            let j = first + k;
+            if l == NOT_SYMBOL {
+                continue;
+            }
+            self.hashes[j].store(h, Ordering::Relaxed);
+            let mut at = h as usize & mask;
+            loop {
+                match self.slots[at].compare_exchange(0, j as u32 + 1, Ordering::Release, Ordering::Acquire) {
+                    Ok(_) => break,
+                    Err(o) => {
+                        let o = (o - 1) as usize;
+                        if self.hashes[o].load(Ordering::Relaxed) == h {
+                            let same = match (crate::util::jsonidx::string_value(json, self.keys[o] as usize), crate::util::jsonidx::string_value(json, self.keys[j] as usize)) {
+                                (Some(a), Some(b)) => a == b,
+                                _ => true,
+                            };
+                            if same {
+                                self.dup.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                        at = (at + 1) & mask;
+                    }
+                }
+            }
+        }
+        self.inserted.fetch_add(hash.len(), Ordering::AcqRel);
+    }
+}
 
 /// One range of section members checked while the document is decoded.
 struct Job {
@@ -445,12 +506,14 @@ struct JobOut {
     addr: Vec<u64>,
     esc: Vec<(u32, Box<str>)>,
     enums: Vec<EnumDef<'static>>,
+    /// (symbols) its keys are in the streamed [`SymTable`]
+    inserted: bool,
 }
 
 impl JobOut {
     fn run(json: &[u8], j: Job, pos: &mut Vec<u32>) -> Option<JobOut> {
         let n = if j.close.is_some() { j.keys.len() } else { j.keys.len() - 1 };
-        let mut o = JobOut { s: j.s, first: j.first, keys: Vec::new(), hash: Vec::with_capacity(n), len: Vec::with_capacity(n), addr: Vec::new(), esc: Vec::new(), enums: Vec::new() };
+        let mut o = JobOut { s: j.s, first: j.first, keys: Vec::new(), hash: Vec::with_capacity(n), len: Vec::with_capacity(n), addr: Vec::new(), esc: Vec::new(), enums: Vec::new(), inserted: false };
         let json = json.get(..j.ready)?;
         let mut arena: Vec<Desc> = Vec::new();
         let keys = &j.keys;
@@ -508,6 +571,8 @@ struct Follow {
     /// per big section (user_types, enums, symbols): its `{`, its first key's index in
     /// `keys`, the next key not handed out, its `}` once seen
     sec: [Option<(u32, usize, usize, Option<u32>)>; 3],
+    /// jobs handed out
+    sent: usize,
 }
 
 impl Follow {
@@ -558,11 +623,13 @@ impl Follow {
                 if e >= end {
                     if let Some(c) = close {
                         send(Job { s, first: *next - first, keys: self.keys[*next..end].to_vec(), close: Some(c), ready: self.at });
+                        self.sent += 1;
                         *next = end;
                     }
                     break;
                 }
                 send(Job { s, first: *next - first, keys: self.keys[*next..=e].to_vec(), close: None, ready: self.at });
+                self.sent += 1;
                 *next = e;
             }
         }
@@ -597,15 +664,40 @@ impl LazyCore {
             let (tx, rx) = std::sync::mpsc::channel::<Job>();
             let rx = Mutex::new(rx);
             let (otx, orx) = std::sync::mpsc::channel::<Option<JobOut>>();
-            std::thread::scope(|sc| {
+            let table: OnceLock<SymTable> = OnceLock::new();
+            let (itx, irx) = std::sync::mpsc::channel::<(usize, Vec<u64>, Vec<u32>)>();
+            let irx = Mutex::new(irx);
+            let r = std::thread::scope(|sc| {
                 for _ in 0..workers {
-                    let (rx, otx) = (&rx, otx.clone());
+                    let (rx, otx, table, irx) = (&rx, otx.clone(), &table, &irx);
                     let _ = std::thread::Builder::new().name("rsvol-lazyidx".into()).spawn_scoped(sc, move || {
                         let mut pos = Vec::new();
                         loop {
+                            // symbol names first (the checks they come from are done)
+                            let ins = irx.lock().unwrap_or_else(|e| e.into_inner()).try_recv();
+                            if let Ok((first, hash, len)) = ins {
+                                if let Some(t) = table.get() {
+                                    t.insert(dec.prefix(t.ready), first, &hash, &len);
+                                }
+                                continue;
+                            }
                             let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                            let Ok(job) = job else { return };
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| JobOut::run(dec.prefix(job.ready), job, &mut pos))).ok().flatten();
+                            let Ok(job) = job else {
+                                while let Ok((first, hash, len)) = irx.lock().unwrap_or_else(|e| e.into_inner()).try_recv() {
+                                    if let Some(t) = table.get() {
+                                        t.insert(dec.prefix(t.ready), first, &hash, &len);
+                                    }
+                                }
+                                return;
+                            };
+                            let mut r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| JobOut::run(dec.prefix(job.ready), job, &mut pos))).ok().flatten();
+                            if let Some(o) = r.as_mut()
+                                && o.s == 2
+                                && let Some(t) = table.get()
+                            {
+                                t.insert(dec.prefix(t.ready), o.first, &o.hash, &o.len);
+                                o.inserted = true;
+                            }
                             if otx.send(r).is_err() {
                                 return;
                             }
@@ -617,6 +709,28 @@ impl LazyCore {
                 let mut ok = true;
                 let mut have = 0usize;
                 let total = dec.total();
+                let mut outs: Vec<Option<JobOut>> = Vec::new();
+                // once `symbols` is closed: its name table, and the checked ranges' names in it
+                let tabled = |f: &Follow, outs: &mut Vec<Option<JobOut>>, have: usize, direct: bool| {
+                    outs.extend(orx.try_iter());
+                    if table.get().is_none()
+                        && let Some((_, first, _, Some(c))) = f.sec[2]
+                    {
+                        let end = f.keys.partition_point(|&p| p < c);
+                        let _ = table.set(SymTable::new(f.keys[first..end].to_vec(), have));
+                    }
+                    if table.get().is_some() {
+                        for o in outs.iter_mut().flatten().filter(|o| o.s == 2 && !o.inserted) {
+                            match (direct, table.get()) {
+                                (true, Some(t)) => t.insert(dec.prefix(t.ready), o.first, &o.hash, &o.len),
+                                _ => {
+                                    let _ = itx.send((o.first, o.hash.clone(), o.len.clone()));
+                                }
+                            }
+                            o.inserted = true;
+                        }
+                    }
+                };
                 let mut send = |j: Job| {
                     let _ = tx.send(j);
                 };
@@ -638,6 +752,7 @@ impl LazyCore {
                     };
                     if end > f.at {
                         ok = f.feed(buf, end, &mut send);
+                        tabled(&f, &mut outs, have, false);
                     }
                     if f.at == total {
                         break;
@@ -645,12 +760,21 @@ impl LazyCore {
                 }
                 drop(tx);
                 crate::util::trace::note(|| format!("isf lazy index: everything fed at {:.2} ms", t0.elapsed().as_secs_f64() * 1e3));
-                let outs: Vec<Option<JobOut>> = orx.iter().collect();
+                // the last checks (and their names); then the name insertions still queued
+                while outs.len() < f.sent {
+                    match orx.recv() {
+                        Ok(o) => outs.push(o),
+                        Err(_) => break,
+                    }
+                    tabled(&f, &mut outs, have, true);
+                }
+                drop(itx);
                 crate::util::trace::note(|| format!("isf lazy index: every range checked at {:.2} ms", t0.elapsed().as_secs_f64() * 1e3));
                 (ok, f, outs)
-            })
+            });
+            (r.0, r.1, r.2, table.into_inner())
         });
-        let Some((res, dec, (ok, mut f, outs))) = r else { return Streamed::Failed };
+        let Some((res, dec, (ok, mut f, outs, table))) = r else { return Streamed::Failed };
         if res.is_err() {
             return Streamed::Failed;
         }
@@ -675,6 +799,7 @@ impl LazyCore {
             }
         };
         let _tc = crate::util::trace::span("isf lazy: collect");
+        pre.stab = table.filter(|t| t.inserted.load(Ordering::Acquire) == t.keys.len());
         outs.sort_by_key(|o| (o.s, o.first));
         for (s, o) in [(0usize, f.sec[0]), (1, f.sec[1]), (2, f.sec[2])] {
             let Some((open, ..)) = o else { continue };
@@ -894,9 +1019,14 @@ impl LazyCore {
         // the symbol name index is filled during the pass: key indexes (into `sk`)
         // compare-and-swapped into shared slots, each key's hash written before (Release /
         // Acquire: a thread meeting a slot sees its hash); a repeated name ends the lazy path
+        // (filled while decoding when it covers the whole section)
+        let streamed = pre.stab.filter(|t| s0 == sk.len() && t.keys[..] == sk[..]);
         let nslots = if sk.is_empty() { 0 } else { (2 * sk.len()).next_power_of_two() };
-        let stab = zeroed_atomic(nslots);
-        let sdup = std::sync::atomic::AtomicBool::new(false);
+        let (stab, sdup, s_done) = match streamed {
+            Some(t) => (t.slots, t.dup, true),
+            None => (zeroed_atomic(nslots), std::sync::atomic::AtomicBool::new(false), false),
+        };
+        crate::util::trace::note(|| format!("isf lazy index: symbol names indexed while decoding: {s_done}"));
         let sinsert = |j: usize, h: u64| {
             let mask = nslots - 1;
             let mut k = h as usize & mask;
@@ -1011,7 +1141,7 @@ impl LazyCore {
                 let unames = NameIndex::build(&uhash_v, |_| true, |a, b| key(uk[a as usize], ulen_v[a as usize]) == key(uk[b as usize], ulen_v[b as usize]))?;
                 // symbol names: the members of `symbols` that are symbols, by key index
                 // (the symbols checked while decoding: their hashes are there, the slots not yet)
-                if s0 > 0 {
+                if s0 > 0 && !s_done {
                     const CHUNK: usize = 4096;
                     let insert = |c: usize| {
                         for j in c * CHUNK..((c + 1) * CHUNK).min(s0) {
@@ -1039,6 +1169,7 @@ impl LazyCore {
         // SAFETY: AtomicU32 has the size, alignment and bit validity of u32
         let snames = NameIndex { slots: unsafe { std::mem::transmute::<Vec<AtomicU32>, Vec<u32>>(stab) }.into_boxed_slice() };
         drop(_t);
+        let _t = crate::util::trace::span("isf lazy: symbol records");
         // the symbols: every member of `symbols` (the usual case), or those whose value is an
         // object (then a key index -> ordinal map)
         let (skeys, slen, addrs, sord): (Vec<u32>, Vec<u32>, Vec<u64>, Option<Box<[u32]>>) = if slen_v.iter().all(|&l| l != NOT_SYMBOL) {

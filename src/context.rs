@@ -311,10 +311,7 @@ impl Context {
                     let _t = crate::util::trace::span("windows pdbscan");
                     let path = self.symbol_path();
                     let offline = self.opts.offline;
-                    let on_candidate = |k: &KernelFound| {
-                        early.kernel(Some((&k.pdb.pdb_name, &k.pdb.guid, k.pdb.age)));
-                        spec.start(path, k, offline)
-                    };
+                    let on_candidate = |k: &KernelFound| spec.start(path, k, offline, Some(early.state()));
                     find_kernel_with(&vl, *phys, &on_candidate)
                         .map_err(|e| self.unsatisfied(&e, SYMS))?
                         .ok_or_else(|| self.unsatisfied(&Error::msg("No suitable kernels found during pdbscan"), SYMS))?
