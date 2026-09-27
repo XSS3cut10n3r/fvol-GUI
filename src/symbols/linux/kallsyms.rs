@@ -341,10 +341,19 @@ impl AddrTable {
         let (mut run_start, mut next_greater) = (Vec::new(), Vec::new());
         if complete {
             run_start = vec![0u32; n];
+            let mut sorted = true;
             for i in 1..n {
                 run_start[i] = if addrs[i - 1] == addrs[i] { run_start[i - 1] } else { i as u32 };
+                sorted &= addrs[i - 1] <= addrs[i];
             }
             next_greater = vec![u32::MAX; n];
+            if sorted {
+                // (the kernel sorts them) the next greater is the end of the equal run
+                for i in (0..n.saturating_sub(1)).rev() {
+                    next_greater[i] = if addrs[i + 1] > addrs[i] { i as u32 + 1 } else { next_greater[i + 1] };
+                }
+                return AddrTable { addrs, complete, run_start, next_greater };
+            }
             let mut stack: Vec<u32> = Vec::new();
             for i in (0..n).rev() {
                 while let Some(&top) = stack.last() {
@@ -485,17 +494,35 @@ impl Kallsyms {
         Some(self.addrs.get_or_init(|| {
             let n = n as usize;
             let mut v = vec![NONE_ADDR; n];
-            // fast path: one read of the whole offsets array
+            // fast path: the whole offsets array, straight from the image pages when they are
+            // image-backed, else with one read
             if truthy(self.cfg.offsets_address) && self.relative_base.is_some() {
+                let base = self.cfg.offsets_address.unwrap();
+                // python: `relative_base - 1 - offset` for a negative offset (the u64
+                // wrapping arithmetic is the i128 result truncated)
+                let rb = self.relative_base.unwrap();
+                let addr_of = |x: i32| if x < 0 { rb.wrapping_sub(1).wrapping_sub(x as i64 as u64) } else { x as u64 & self.mask };
+                let mut done = 0usize;
+                while done < n {
+                    let a = base.wrapping_add(done as u64 * 4);
+                    let k = ((0x1000 - (a & 0xfff) as usize) / 4).min(n - done);
+                    let Some(page) = (a & 3 == 0).then(|| self.layer.slice(a, k * 4)).flatten() else { break };
+                    for (slot, c) in v[done..done + k].iter_mut().zip(page.chunks_exact(4)) {
+                        *slot = addr_of(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+                    }
+                    done += k;
+                }
+                if done == n {
+                    return Ok(AddrTable::new(v));
+                }
                 let mut raw = vec![0u8; n * 4];
-                if self.layer.read(self.cfg.offsets_address.unwrap(), &mut raw).is_ok() {
-                    let rb = self.relative_base.unwrap() as i128;
-                    for (i, c) in raw.chunks_exact(4).enumerate() {
-                        let x = i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i64;
-                        v[i] = if x < 0 { (rb - 1 - x as i128) as u64 } else { x as u64 & self.mask };
+                if self.layer.read(base, &mut raw).is_ok() {
+                    for (slot, c) in v.iter_mut().zip(raw.chunks_exact(4)) {
+                        *slot = addr_of(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
                     }
                     return Ok(AddrTable::new(v));
                 }
+                v.fill(NONE_ADDR);
             }
             for (i, slot) in v.iter_mut().enumerate() {
                 if let Some(a) = self.read_symbol_address(i as u64)? {
@@ -1202,7 +1229,22 @@ impl Kallsyms {
             return;
         }
         let (mut start, mut off) = (0u64, 0u64);
-        if let Some(offsets) = self.core_offsets(n) {
+        // the address and token tables every symbol needs are built (once, single-threaded)
+        // while the length bytes are walked
+        let offsets = if crate::util::par::threads() > 1 {
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let _t = crate::util::trace::span("kallsyms: address + token tables");
+                    let _ = self.addr_table();
+                    let _ = self.token_table();
+                });
+                let _t = crate::util::trace::span("kallsyms: core offsets");
+                self.core_offsets(n)
+            })
+        } else {
+            self.core_offsets(n)
+        };
+        if let Some(offsets) = offsets {
             // big enough that a formatted block (~100 bytes a row) is handed to the output
             // without another copy, small enough to keep all cores busy
             const CHUNK: usize = 4096;
@@ -1732,6 +1774,46 @@ mod tests_lookup {
             }
         }
         assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests_addr_table {
+    use super::*;
+
+    /// `run_start` / `next_greater` against their definitions, for sorted address lists (the
+    /// kernel's, fast path) and unsorted ones (the monotonic stack).
+    #[test]
+    fn runs_and_next_greater() {
+        let mut x: u64 = 7;
+        let mut lists: Vec<Vec<u64>> = vec![vec![], vec![5], vec![3, 3, 3], vec![1, 2, 2, 2, 5, 5, 9], vec![9, 1, 1, 4, 2, 2, 8, 8, 3]];
+        for len in [10usize, 100, 1000] {
+            let mut sorted = Vec::new();
+            let mut unsorted = Vec::new();
+            let mut a = 0x1000u64;
+            for _ in 0..len {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                a += (x >> 61) & 3; // runs of equal addresses
+                sorted.push(a);
+                unsorted.push((x >> 40) & 15);
+            }
+            lists.push(sorted);
+            lists.push(unsorted);
+        }
+        for addrs in lists {
+            let t = AddrTable::new(addrs.clone());
+            assert!(t.complete);
+            for i in 0..addrs.len() {
+                let mut rs = i;
+                while rs > 0 && addrs[rs - 1] == addrs[i] {
+                    rs -= 1;
+                }
+                assert_eq!(t.run_start[i] as usize, rs, "{addrs:?} run_start[{i}]");
+                let ng = (i + 1..addrs.len()).find(|&j| addrs[j] > addrs[i]).map_or(u32::MAX, |j| j as u32);
+                assert_eq!(t.next_greater[i], ng, "{addrs:?} next_greater[{i}]");
+            }
+        }
+        assert!(!AddrTable::new(vec![1, NONE_ADDR]).complete);
     }
 }
 
