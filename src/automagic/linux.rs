@@ -495,23 +495,34 @@ pub fn run(phys: LayerRef, banners: &[(Vec<u8>, IsfLocation)], allow: &dyn Fn(&s
 
 /// [`run`] with VMCOREINFO notes collected beforehand (see [`collect_notes`]).
 pub fn run_with(phys: LayerRef, banners: &[(Vec<u8>, IsfLocation)], allow: &dyn Fn(&str) -> bool, notes: Option<Notes>) -> Option<LinuxAutomagic> {
+    run_checked(phys, banners, allow, notes).0
+}
+
+/// [`run_with`], and whether no stacker raised (python logs the exception and goes on): only
+/// then does a failure depend on nothing but the image and `banners` (and may be remembered).
+fn run_checked(phys: LayerRef, banners: &[(Vec<u8>, IsfLocation)], allow: &dyn Fn(&str) -> bool, notes: Option<Notes>) -> (Option<LinuxAutomagic>, bool) {
     // "Never stack on top of an intel layer"; no banners -> nothing to do
     if phys.as_intel().is_some() || banners.is_empty() {
-        return None;
+        return (None, true);
     }
+    let mut clean = true;
     if allow(VMCOREINFO_STACKER) {
         let _t = span("linux vmcoreinfo stacker");
-        if let Ok(Some(a)) = vmcoreinfo_stack_notes(phys, banners, notes) {
-            return Some(a);
+        match vmcoreinfo_stack_notes(phys, banners, notes) {
+            Ok(Some(a)) => return (Some(a), true),
+            Ok(None) => {}
+            Err(_) => clean = false,
         }
     }
     if allow(INTEL_STACKER) {
         let _t = span("linux intel stacker");
-        if let Ok(Some(a)) = intel_stack(phys, banners) {
-            return Some(a);
+        match intel_stack(phys, banners) {
+            Ok(Some(a)) => return (Some(a), true),
+            Ok(None) => {}
+            Err(_) => clean = false,
         }
     }
-    None
+    (None, clean)
 }
 
 // ------------------------------------------------------------------------------------------
@@ -648,6 +659,11 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
     let am = match load_cached(&image, &kind) {
         Some(a) => a,
         None => {
+            // a remembered failure (e.g. timeliner's Linux plugins on a Windows image): fail the
+            // same way without the scans, as long as every banner's ISF choice is unchanged
+            if let Some(kv) = crate::automagic::cache::load_failure(&image, &kind, crate::symbols::store::choice_deps_hold) {
+                return Err(unsatisfied(&crate::automagic::cache::get(&kv, "detail").unwrap_or_default()));
+            }
             // the kernel ISF's decompression and lazy index run on the worker pool soon: start
             // its threads now, off the critical path
             crate::util::pool::warm();
@@ -693,16 +709,21 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                 (index, d, notes)
             };
             let allow = |name: &str| crate::automagic::stacker_enabled(ctx.opts.stackers.as_deref(), name);
-            let found = run_with(*phys, &banners, &allow, notes);
+            let (found, clean) = run_checked(*phys, &banners, &allow, notes);
             crate::symbols::store::keep_decoded_for(None);
-            let a = found.ok_or_else(|| {
+            let Some(a) = found else {
                 let why = if banners.is_empty() {
                     "No Linux banners found - if this is a linux plugin, please check your symbol files location"
                 } else {
                     "No suitable linux banner could be matched"
                 };
-                unsatisfied(&why)
-            })?;
+                if clean {
+                    let mut kv = vec![("detail", why.to_string())];
+                    kv.extend(index.os_deps("linux"));
+                    crate::automagic::cache::store_failure(&image, &kind, &kv);
+                }
+                return Err(unsatisfied(&why));
+            };
             store_cached(&image, &kind, &a, index.choice_deps("linux", &a.banner));
             a
         }

@@ -24,7 +24,7 @@ files downloaded by either tool are shared.
 | Binary symbol tables               | `~/.cache/rsvol/isf/*.isfb`                     | A warm symbol table load is one `mmap`, with no JSON parse |
 | Symbol file identifier index       | `~/.cache/rsvol/identifiers.cache`              | Finds the ISF for a kernel banner or PDB without rereading |
 | python's identifier cache (read)   | `~/.cache/volatility3/identifier.cache`         | Seeds the identifier index, and picks python's ISF        |
-| Kernel discovery results           | `~/.cache/rsvol/automagic/`                     | Warm runs skip the DTB, KDBG and banner scans              |
+| Kernel discovery results           | `~/.cache/rsvol/automagic/`                     | Warm runs skip the DTB, KDBG and banner scans, also where an OS's kernel is not found (timeliner) |
 | Windows ISF choices                | `~/.cache/rsvol/isfchoice/`                     | Warm runs skip the identifier index for Windows PDBs       |
 | Raw scan hits                      | `~/.cache/rsvol/scan/`, capped at 256 MiB       | Scanning plugins replay hits instead of rereading memory   |
 | `isfinfo --live` results           | `~/.cache/rsvol/isfinfo.cache`                  | Warm `isfinfo` runs parse no files                         |
@@ -95,7 +95,10 @@ A cache can make a run faster but cannot change its output:
 - Keys identify their inputs. Image-based caches use the canonical path, size and modification
   time of the image; the scan cache adds the inode and the identity of the rsvol executable, so a
   rebuilt binary never trusts scans recorded by an older one. Symbol tables are keyed by the
-  source file's URL, size and modification time and the table format version.
+  source file's URL, size and modification time and the table format version. A remembered
+  failure to find a kernel ("no Linux kernel in this image") is also keyed by the rsvol
+  executable and, for Linux and macOS, by the state of every ISF of that OS on the search path
+  and of python's identifier cache: adding, removing or changing one looks for the kernel again.
 - The scan cache stores raw byte matches (and, for `vmscan.Vmscan`, the few hundred image bytes of
   each matched page that its checks read), never a plugin's results. On a replay every plugin
   still runs all of its python-equivalent validation on those matches, in python's order.
@@ -113,6 +116,7 @@ same contents. If you modify an image in place and restore its timestamp, clear 
 | `XDG_CACHE_HOME=<DIR>`   | Base directory of both the rsvol and the python volatility3 caches.                 |
 | `RSVOL_NO_SCAN_CACHE=1`  | Disable the scan cache.                                                             |
 | `RSVOL_THREADS=<N>`      | Number of worker threads. The default is every logical CPU.                         |
+| `RSVOL_POOL_SPIN_US=<N>` | How long an idle worker thread looks for new work before it sleeps (default 20). |
 | `RSVOL_NO_SIMD=1`        | Use the scalar search kernels for scanning instead of AVX2.                         |
 | `RSVOL_TRACE=1`          | Print timing spans to stderr.                                                       |
 | `RSVOL_VOL3_ROOT=<DIR>`  | Use the symbol directories of the python volatility3 checkout at `<DIR>`.           |
