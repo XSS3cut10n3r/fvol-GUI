@@ -102,8 +102,13 @@ fn grow(s: &mut State, k: usize) -> bool {
     true
 }
 
+/// Stack of a worker: nested sections run their items on the thread that waits for them, below
+/// the frames of the item it is in (a scoped thread used to start with a fresh 2 MiB stack for
+/// each), so workers get the main thread's usual 8 MiB (reserved, touched only as used).
+const WORKER_STACK: usize = 8 << 20;
+
 fn spawn_worker() {
-    let started = std::thread::Builder::new().name("rsvol-pool".into()).spawn(|| {
+    let started = std::thread::Builder::new().name("rsvol-pool".into()).stack_size(WORKER_STACK).spawn(|| {
         // start the others still due first (each start is ~10-20 us of kernel work)
         loop {
             let mut s = lock(&POOL.state);
@@ -234,23 +239,22 @@ pub(crate) fn run_job<R>(work: &(dyn Work + '_), max_helpers: usize, owner: impl
             }
         }
     }
-    {
-        let p = &POOL;
-        let mut s = lock(&p.state);
-        s.jobs.push(&h);
-        p.epoch.fetch_add(1, Ordering::Release);
-        // wake sleepers; start workers when too few are around (busy ones join when their
-        // items are done)
-        let (wake, all) = (max_helpers.min(s.idle), max_helpers >= s.idle);
-        let short = max_helpers.saturating_sub(s.idle + s.spinning);
-        let spawn = short > 0 && grow(&mut s, short);
-        drop(s);
-        notify(wake, all);
-        if spawn {
-            spawn_worker();
-        }
-    }
+    let p = &POOL;
+    // (before the job is published: it is taken back whatever happens next)
     let _unpublish = Unpublish(&h);
+    let mut s = lock(&p.state);
+    s.jobs.push(&h);
+    p.epoch.fetch_add(1, Ordering::Release);
+    // wake sleepers; start workers when too few are around (busy ones join when their items
+    // are done)
+    let (wake, all) = (max_helpers.min(s.idle), max_helpers >= s.idle);
+    let short = max_helpers.saturating_sub(s.idle + s.spinning);
+    let spawn = short > 0 && grow(&mut s, short);
+    drop(s);
+    notify(wake, all);
+    if spawn {
+        spawn_worker();
+    }
     owner()
 }
 
