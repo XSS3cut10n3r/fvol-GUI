@@ -446,8 +446,14 @@ pub(crate) fn embedded_file(rel: &str) -> Option<&'static [u8]> {
 
 /// Relative path of embedded file `i`, from the compact name table.
 fn embedded_rel(i: usize) -> &'static str {
+    std::str::from_utf8(embedded_rel_bytes(i)).unwrap_or("")
+}
+
+/// [`embedded_rel`] without the UTF-8 check (the names are UTF-8, see the tests): the binary
+/// search of [`embedded_named`] compares ~11 of them per lookup, several lookups per run.
+fn embedded_rel_bytes(i: usize) -> &'static [u8] {
     use super::embedded::{NAME_OFFSETS, NAMES};
-    std::str::from_utf8(&NAMES[NAME_OFFSETS[i] as usize..NAME_OFFSETS[i + 1] as usize]).unwrap_or("")
+    &NAMES[NAME_OFFSETS[i] as usize..NAME_OFFSETS[i + 1] as usize]
 }
 
 /// Indices of the embedded files whose file name (last path component) is `name`, in
@@ -455,7 +461,7 @@ fn embedded_rel(i: usize) -> &'static str {
 fn embedded_named(name: &str) -> &'static [u16] {
     use super::embedded::{BY_NAME, file_name_start};
     let key = |i: u16| {
-        let r = embedded_rel(i as usize).as_bytes();
+        let r = embedded_rel_bytes(i as usize);
         &r[file_name_start(r)..]
     };
     let lo = BY_NAME.partition_point(|&i| key(i) < name.as_bytes());
@@ -1460,13 +1466,54 @@ fn stamps_hold(hex: &str) -> bool {
     true
 }
 
+/// Hex (either case) to bytes; `None` for an odd length or a non-hex digit. On the warm path
+/// (the `isfchoice` stamps, ~4 KB per run): 8 digits at a time as one word (~2 instructions per
+/// byte instead of ~30 with `char::to_digit` per nibble), a table for the tail.
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    let h = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    const NIB: [u8; 256] = {
+        let mut t = [0xffu8; 256];
+        let mut i = 0;
+        while i < 10 {
+            t[b'0' as usize + i] = i as u8;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < 6 {
+            t[b'a' as usize + i] = 10 + i as u8;
+            t[b'A' as usize + i] = 10 + i as u8;
+            i += 1;
+        }
+        t
+    };
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
     let b = s.as_bytes();
     if b.len() % 2 != 0 {
         return None;
     }
-    b.chunks(2).map(|p| Some(h(p[0])? << 4 | h(p[1])?)).collect()
+    let mut out = vec![0u8; b.len() / 2];
+    let (mut ok, mut bad) = (HIGH, 0u8);
+    let (words, tail) = b.as_chunks::<8>();
+    let (outw, outtail) = out.as_chunks_mut::<4>();
+    for (o, w) in outw.iter_mut().zip(words) {
+        let x = u64::from_le_bytes(*w);
+        // per byte (all < 0x80, so the additions never carry into the next byte):
+        // '0'..='9', and 'a'..='f' after folding 'A'..='F' to lower case
+        let digit = x.wrapping_add(0x50 * ONES) & !x.wrapping_add(0x46 * ONES);
+        let lx = x | 0x20 * ONES;
+        let alpha = lx.wrapping_add(0x1f * ONES) & !lx.wrapping_add(0x19 * ONES);
+        ok &= (digit | alpha) & !x;
+        let nib = (x & 0x0f * ONES) + ((alpha & HIGH) >> 7) * 9;
+        // high nibble of each pair from the even bytes, low nibble from the odd ones
+        let pairs = (nib << 4) | (nib >> 8);
+        *o = [pairs as u8, (pairs >> 16) as u8, (pairs >> 32) as u8, (pairs >> 48) as u8];
+    }
+    for (o, p) in outtail.iter_mut().zip(tail.chunks_exact(2)) {
+        let (h, l) = (NIB[p[0] as usize], NIB[p[1] as usize]);
+        bad |= h | l;
+        *o = h << 4 | l;
+    }
+    (ok == HIGH && bad & 0x80 == 0).then_some(out)
 }
 
 /// (size, mtime) of a file as 24 bytes (all ones when it cannot be stat'ed).
@@ -2190,6 +2237,41 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unhex_accepts_exactly_hex_pairs() {
+        let old = |s: &str| -> Option<Vec<u8>> {
+            let h = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+            let b = s.as_bytes();
+            if b.len() % 2 != 0 {
+                return None;
+            }
+            b.chunks(2).map(|p| Some(h(p[0])? << 4 | h(p[1])?)).collect()
+        };
+        let all: String = (0..=255u8).map(|b| format!("{b:02x}{b:02X}")).collect();
+        for s in ["", "0", "00", "0g", "g0", "ff", "FF", "fF", "123", "  ", "0x", "é0", &all, "zz", "7f80", "a:"] {
+            assert_eq!(unhex(s), old(s), "{s:?}");
+        }
+        for b in 0..=255u8 {
+            let s = format!("{}0", b as char);
+            assert_eq!(unhex(&s), old(&s), "{s:?}");
+        }
+        // every ASCII byte at every position of a string long enough for the 8-digit words
+        let base = "0123456789abcdefABCDEF0f";
+        for pos in 0..base.len() {
+            for b in 0..0x80u8 {
+                let mut v = base.as_bytes().to_vec();
+                v[pos] = b;
+                let s = String::from_utf8(v).unwrap();
+                assert_eq!(unhex(&s), old(&s), "{s:?}");
+            }
+            if pos + 2 <= base.len() {
+                // a 2-byte character in place of two digits (same length)
+                let s = format!("{}é{}", &base[..pos], &base[pos + 2..]);
+                assert_eq!(unhex(&s), old(&s), "{s:?}");
+            }
+        }
+    }
 
     /// Lookup cost of shipped ISFs with this machine's search path:
     ///   cargo test --release isf_lookup_timing -- --ignored --nocapture

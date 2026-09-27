@@ -21,7 +21,6 @@ pub mod windows;
 use crate::context::Context;
 use crate::error::Result;
 use crate::renderers::{RowBlock, RowSink, Value};
-use std::collections::HashMap;
 
 /// Kind of a CLI-visible requirement (mirrors volatility3's SimpleTypeRequirement subclasses,
 /// ListRequirement and ChoiceRequirement).
@@ -85,10 +84,12 @@ impl Requirement {
     }
 }
 
-/// Values for one plugin run (CLI options after parsing, defaults applied).
+/// Values for one plugin run (CLI options after parsing, defaults applied). (FxHash: std's
+/// randomly seeded SipHash costs a `getrandom` system call per process for nothing; every user
+/// of the map sorts or looks up, none depends on its order.)
 #[derive(Clone, Debug, Default)]
 pub struct Config {
-    pub values: HashMap<String, ConfigValue>,
+    pub values: crate::util::FxHashMap<String, ConfigValue>,
 }
 
 impl Config {
@@ -356,14 +357,21 @@ pub fn unsatisfied_described(reqs: &[(&str, UnsatKind, &str)]) -> crate::error::
     crate::error::Error::Unsatisfied(lines.join("\n"))
 }
 
-/// Every registered plugin, sorted by name.
-pub fn all() -> Vec<&'static dyn Plugin> {
-    let mut v: Vec<&'static dyn Plugin> = Vec::new();
+/// Every registered plugin, in registration order (not sorted, see [`all`]).
+pub fn registered() -> Vec<&'static dyn Plugin> {
+    let mut v: Vec<&'static dyn Plugin> = Vec::with_capacity(256);
     generic::register(&mut v);
     windows::register(&mut v);
     linux::register(&mut v);
     mac::register(&mut v);
-    // Sorted by name. Every run pays for this, so compare cached keys: the first 16 name bytes
+    v
+}
+
+/// Every registered plugin, sorted by name.
+pub fn all() -> Vec<&'static dyn Plugin> {
+    let mut v = registered();
+    // Sorted by name (help, the web UI and the timeliner pay for this; a CLI run does not, see
+    // `cli::main`). Compare cached keys: the first 16 name bytes
     // as a big-endian integer (orders like the bytes), the full name only on a tie. ~4x fewer
     // instructions than comparing the (long, shared-prefix) names through `name()` calls.
     let prefix = |s: &str| -> u128 {
@@ -382,8 +390,9 @@ pub fn find(name: &str) -> Option<&'static dyn Plugin> {
 }
 
 /// `f(i, block)` for every `i in 0..n` in parallel, each pushing its rows into its own
-/// [`RowBlock`] (formatted on the worker when `out` has a row encoder); the blocks come back
+/// [`RowBlock`] (formatted on the worker when the sink has a row encoder); the blocks come back
 /// in index order with `f`'s results, for the caller to [`RowBlock::emit`] in python's order.
+/// Every block is alive at the end: for outputs that can be large use [`stream_blocks`].
 pub fn par_blocks<'e, X: Send>(enc: Option<&'e crate::renderers::text::RowEncoder>, n: usize, f: impl Fn(usize, &mut RowBlock<'e>) -> X + Sync) -> Vec<(RowBlock<'e>, X)> {
     crate::util::par::par_map(n, |i| {
         let mut b = RowBlock::new(enc);
@@ -392,23 +401,67 @@ pub fn par_blocks<'e, X: Send>(enc: Option<&'e crate::renderers::text::RowEncode
     })
 }
 
-/// python `for item in items: yield from rows(item)` with the items' rows computed (and
-/// formatted, see [`RowBlock`]) in parallel and emitted in order. An `Err` item = python raised
-/// there (before its rows); `f` returning `Err` = python raised after the rows it pushed.
-pub fn emit_par_blocks<T: Sync>(out: &mut dyn RowSink, items: Vec<Result<T>>, f: impl Fn(&T, &mut RowBlock) -> Result<()> + Sync) -> Result<()> {
-    let enc = out.encoder();
-    let blocks = par_blocks(enc.as_ref(), items.len(), |i, b| match &items[i] {
-        Ok(t) => f(t, b).err(),
-        Err(_) => None,
-    });
-    for (item, (b, err)) in items.into_iter().zip(blocks) {
-        item?;
-        b.emit(out)?;
-        if let Some(e) = err {
-            return Err(e);
+/// Items computed per window by [`stream_blocks`] (bounds the output held in memory).
+fn stream_window() -> usize {
+    8 * crate::util::par::threads().max(2)
+}
+
+/// [`par_blocks`] with bounded memory: the items are computed in windows of a few per core and
+/// `consume(i, block, x)` gets each on the calling thread in index order before the next
+/// window starts. `consume` returning `Ok(false)` or an error stops (later windows are not
+/// computed).
+pub fn stream_blocks<'e, X: Send>(
+    enc: Option<&'e crate::renderers::text::RowEncoder>,
+    n: usize,
+    f: impl Fn(usize, &mut RowBlock<'e>) -> X + Sync,
+    mut consume: impl FnMut(usize, RowBlock<'e>, X) -> Result<bool>,
+) -> Result<()> {
+    let w = stream_window();
+    let mut start = 0;
+    while start < n {
+        let end = (start + w).min(n);
+        let blocks = par_blocks(enc, end - start, |j, b| f(start + j, b));
+        for (j, (b, x)) in blocks.into_iter().enumerate() {
+            if !consume(start + j, b, x)? {
+                return Ok(());
+            }
         }
+        start = end;
     }
     Ok(())
+}
+
+/// python `for item in items: yield from rows(item)` with the items' rows computed (and
+/// formatted, see [`RowBlock`]) in parallel and emitted in order, with bounded memory (see
+/// [`stream_blocks`]). An `Err` item = python raised there (before its rows); `f` returning
+/// `Err` = python raised after the rows it pushed.
+pub fn emit_par_blocks<T: Sync>(out: &mut dyn RowSink, items: Vec<Result<T>>, f: impl Fn(&T, &mut RowBlock) -> Result<()> + Sync) -> Result<()> {
+    let enc = out.encoder();
+    let (oks, mut errs): (Vec<Option<T>>, Vec<Option<crate::error::Error>>) = items
+        .into_iter()
+        .map(|r| match r {
+            Ok(t) => (Some(t), None),
+            Err(e) => (None, Some(e)),
+        })
+        .unzip();
+    stream_blocks(
+        enc.as_ref(),
+        oks.len(),
+        |i, b| match &oks[i] {
+            Some(t) => f(t, b).err(),
+            None => None,
+        },
+        |i, b, err| {
+            if let Some(e) = errs[i].take() {
+                return Err(e);
+            }
+            b.emit(out)?;
+            match err {
+                Some(e) => Err(e),
+                None => Ok(true),
+            }
+        },
+    )
 }
 
 /// [`emit_par_blocks`] for a per-item row function returning python's rows in order (a

@@ -92,6 +92,22 @@ pub fn page_bytes(layer: LayerRef, addr: u64, len: usize) -> Option<&'static [u8
     Some(unsafe { std::slice::from_raw_parts((host as *const u8).add(off), len) })
 }
 
+/// Hint that the byte at `addr` of `layer` will be read soon: a software prefetch of its cache
+/// line in the image mapping (when the page is mapped whole; otherwise nothing). Issuing these
+/// for a batch of objects before reading them overlaps their memory latencies.
+#[inline]
+pub fn prefetch(layer: LayerRef, addr: u64) {
+    if let Some(s) = page_bytes(layer, addr, 1) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: a prefetch hint never faults; the address is inside the mapping anyway
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(s.as_ptr() as *const i8);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = s;
+    }
+}
+
 /// `layer.read(addr, buf)` through the page cache.
 #[inline]
 pub fn read_into(layer: LayerRef, addr: u64, buf: &mut [u8]) -> Result<()> {
@@ -101,6 +117,17 @@ pub fn read_into(layer: LayerRef, addr: u64, buf: &mut [u8]) -> Result<()> {
             Ok(())
         }
         None => layer.read(addr, buf),
+    }
+}
+
+/// python's int of an `n`-byte (1..=8) little-endian integer loaded as `raw`.
+#[inline(always)]
+fn le_int(raw: u64, n: usize, signed: bool) -> i128 {
+    if !signed || n == 0 {
+        raw as i128
+    } else {
+        let shift = 64 - 8 * n as u32;
+        (((raw << shift) as i64) >> shift) as i128
     }
 }
 
@@ -504,12 +531,7 @@ impl Obj {
                     u64::from_le_bytes(b)
                 }
             };
-            return Ok(if !p.signed {
-                raw as i128
-            } else {
-                let shift = 64 - 8 * n as u32;
-                (((raw << shift) as i64) >> shift) as i128
-            });
+            return Ok(le_int(raw, n, p.signed));
         }
         let mut b = [0u8; 16];
         read_into(self.sp.layer, self.addr, &mut b[..n])?;
@@ -788,20 +810,24 @@ fn half_to_f64(h: u16) -> f64 {
 }
 
 /// Resolve an `Unresolved` type (cross-table `table!Type` references) into (space, type).
-#[inline]
+#[inline(always)]
 fn fix_ty(sp: &'static Space, ty: Ty, addr: u64) -> Result<Obj> {
     match ty {
-        Ty::Unresolved(i) => {
-            let name = sp.table.unresolved_name(i);
-            match resolve_ref(sp.table, name) {
-                Some((t, ty)) => {
-                    let sp2 = sp.with_table(t);
-                    Ok(Obj { sp: sp2, ty, addr: addr & sp2.layer_mask })
-                }
-                None => Err(Error::Symbol(format!("Unknown symbol: {name}"))),
-            }
-        }
+        Ty::Unresolved(i) => fix_unresolved(sp, i, addr),
         _ => Ok(Obj { sp, ty, addr }),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn fix_unresolved(sp: &'static Space, i: crate::symbols::TypeIdx, addr: u64) -> Result<Obj> {
+    let name = sp.table.unresolved_name(i);
+    match resolve_ref(sp.table, name) {
+        Some((t, ty)) => {
+            let sp2 = sp.with_table(t);
+            Ok(Obj { sp: sp2, ty, addr: addr & sp2.layer_mask })
+        }
+        None => Err(Error::Symbol(format!("Unknown symbol: {name}"))),
     }
 }
 
@@ -850,6 +876,34 @@ impl Field {
             ty = m.ty;
         }
         Ok(Field { offset: off, ty, sp: None })
+    }
+
+    /// The python int value of this member, decoded from `rec` = the bytes of the containing
+    /// struct (from its start), exactly as `obj.f(self).int()` reads it: integers, bitfields
+    /// and pointers (masked with `native_mask`, the native layer's address mask). `None` for
+    /// other types (enums, floats, ...) or when `rec` is too short: read the object instead.
+    #[inline]
+    pub fn int_from(&self, rec: &[u8], native_mask: u64) -> Option<i128> {
+        let prim_at = |p: Prim| -> Option<i128> {
+            let o = usize::try_from(self.offset).ok()?;
+            let n = p.size as usize;
+            let b = rec.get(o..o.checked_add(n)?)?;
+            Some(if n <= 8 && !p.big_endian { le_int(load_le(b), n, p.signed) } else { p.decode_int(b) })
+        };
+        match self.ty {
+            Ty::Int(p) if self.sp.is_none() => prim_at(p),
+            Ty::Pointer { prim, .. } if self.sp.is_none() => {
+                let mut p = prim;
+                p.signed = false;
+                Some((prim_at(p)? as u128 as u64 & native_mask) as i128)
+            }
+            Ty::BitField { start, end, base } if self.sp.is_none() => {
+                let v = prim_at(base)?;
+                let mask = if end >= 127 { -1i128 } else { (1i128 << end) - 1 };
+                Some((v & mask) >> start)
+            }
+            _ => None,
+        }
     }
 }
 
