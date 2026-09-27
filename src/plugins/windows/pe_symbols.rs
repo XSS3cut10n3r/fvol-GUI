@@ -112,8 +112,57 @@ pub fn filename_for_path(filepath: &str) -> String {
 enum Finder {
     /// the module's PDB symbols, based at the module start
     Pdb(Module),
-    /// the module's export table (`pefile` ExportData list)
-    Exports { start: u64, exports: Vec<Export> },
+    /// the answers of the module's export table (`pefile` ExportData list) to every wanted
+    /// name / address, computed where the table was parsed (see [`ExportAnswers`])
+    Exports(ExportAnswers),
+}
+
+/// python `ExportSymbolFinder.get_address_for_name(name)` over `exports` of the module at
+/// `start` (`Err`: python's TypeError).
+fn export_address_for_name(start: u64, exports: &[Export], name: &str) -> std::result::Result<Option<u128>, &'static str> {
+    for e in exports {
+        // export.name.decode("ascii") (AttributeError -> None for ordinal-only)
+        if let Some(n) = &e.name {
+            if !n.is_empty() && n.as_slice() == name.as_bytes() {
+                return match e.address {
+                    Some(a) => Ok(Some(start as u128 + a as u128)),
+                    None => Err("TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'"),
+                };
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// python `ExportSymbolFinder.get_name_for_address(address)` over `exports` of the module at
+/// `start` (`Err`: python's TypeError).
+fn export_name_for_address(start: u64, exports: &[Export], address: u64) -> std::result::Result<Option<String>, &'static str> {
+    for e in exports {
+        let Some(a) = e.address else {
+            return Err("TypeError: unsupported operand type(s) for +: 'NoneType' and 'int'");
+        };
+        if a as u128 + start as u128 == address as u128 {
+            return Ok(e.name.as_ref().map(|n| String::from_utf8_lossy(n).into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// An export table's answers to every name / address of a [`WantedSymbols`] (the lookups are
+/// pure functions of the table, so they are done on the worker that parsed it and the table
+/// itself never reaches the consuming thread).
+struct ExportAnswers {
+    names: Vec<(String, std::result::Result<Option<u128>, &'static str>)>,
+    addresses: Vec<(u64, std::result::Result<Option<String>, &'static str>)>,
+}
+
+impl ExportAnswers {
+    fn new(start: u64, exports: &[Export], wanted: &WantedSymbols) -> ExportAnswers {
+        ExportAnswers {
+            names: wanted.names.iter().flatten().map(|n| (n.clone(), export_address_for_name(start, exports, n))).collect(),
+            addresses: wanted.addresses.iter().flatten().map(|&a| (a, export_name_for_address(start, exports, a))).collect(),
+        }
+    }
 }
 
 impl Finder {
@@ -125,20 +174,10 @@ impl Finder {
                 Err(Error::Symbol(_)) => Ok(None),
                 Err(e) => Err(e),
             },
-            Finder::Exports { start, exports } => {
-                for e in exports {
-                    // export.name.decode("ascii") (AttributeError -> None for ordinal-only)
-                    if let Some(n) = &e.name {
-                        if !n.is_empty() && n.as_slice() == name.as_bytes() {
-                            return match e.address {
-                                Some(a) => Ok(Some(*start as u128 + a as u128)),
-                                None => Err(Error::msg("TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'")),
-                            };
-                        }
-                    }
-                }
-                Ok(None)
-            }
+            Finder::Exports(a) => match a.names.iter().find(|(n, _)| n == name) {
+                Some((_, r)) => r.clone().map_err(Error::msg),
+                None => Ok(None),
+            },
         }
     }
 
@@ -146,17 +185,10 @@ impl Finder {
     fn name_for_address(&self, address: u64) -> Result<Option<String>> {
         match self {
             Finder::Pdb(m) => Ok(m.symbols_at(address, 0).first().map(|n| n.split('!').next().unwrap_or("").to_string())),
-            Finder::Exports { start, exports } => {
-                for e in exports {
-                    let Some(a) = e.address else {
-                        return Err(Error::msg("TypeError: unsupported operand type(s) for +: 'NoneType' and 'int'"));
-                    };
-                    if a as u128 + *start as u128 == address as u128 {
-                        return Ok(e.name.as_ref().map(|n| String::from_utf8_lossy(n).into_owned()));
-                    }
-                }
-                Ok(None)
-            }
+            Finder::Exports(a) => match a.addresses.iter().find(|(x, _)| *x == address) {
+                Some((_, r)) => r.clone().map_err(Error::msg),
+                None => Ok(None),
+            },
         }
     }
 }
@@ -199,6 +231,150 @@ fn pdb_candidates(mod_name: &str) -> Vec<String> {
     vec![lower, first_upper]
 }
 
+/// Where "RSDS" occurs in one 4 KiB page (usually nowhere), and its first / last 3 bytes (for
+/// occurrences straddling two pages).
+#[derive(Clone)]
+struct PageRsds {
+    at: Box<[u16]>,
+    head: [u8; 3],
+    tail: [u8; 3],
+}
+
+impl PageRsds {
+    fn of(page: &[u8]) -> PageRsds {
+        let mut at = Vec::new();
+        let mut pos = 0;
+        while let Some(p) = crate::symbols::windows::pdb::find_rsds(page, pos) {
+            at.push(p as u16);
+            pos = p + 1;
+        }
+        let n = page.len();
+        PageRsds { at: at.into_boxed_slice(), head: [page[0], page[1], page[2]], tail: [page[n - 3], page[n - 2], page[n - 1]] }
+    }
+}
+
+/// Caches shared by the symbol resolutions of one plugin run. python redoes all of this work
+/// for every module instance and every call; the answers are the same.
+///
+/// * Per physical page (of any layer a module instance maps), where "RSDS" occurs in it: the
+///   instances of a module mostly share their pages, and an instance none of whose pages holds
+///   a possible PDB signature record needs no signature scan at all ([`rsds_free`]).
+/// * The PDB symbol tables loaded (or not found) per PDB identity.
+#[derive(Default)]
+pub struct SymbolCache {
+    /// (page number, target layer) -> "RSDS" positions (the page number first: FxHash spreads
+    /// it into the bucket bits, a page-aligned address would not)
+    pages: std::sync::Mutex<FxHashMap<(u64, usize), PageRsds>>,
+    pdbs: std::sync::Mutex<FxHashMap<(String, String, u32), Option<TableRef>>>,
+}
+
+impl SymbolCache {
+    pub fn new() -> SymbolCache {
+        SymbolCache::default()
+    }
+
+    /// `context.load_windows_pdb(...)`, remembered per PDB identity.
+    fn load_pdb(&self, ctx: &Context, sig: &PdbSig) -> Option<TableRef> {
+        let key = (sig.pdb_name.clone(), sig.guid.clone(), sig.age);
+        if let Some(t) = self.pdbs.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return *t;
+        }
+        let t = ctx.load_windows_pdb(&sig.pdb_name, &sig.guid, sig.age).ok();
+        self.pdbs.lock().unwrap_or_else(|e| e.into_inner()).insert(key, t);
+        t
+    }
+}
+
+/// Whether the bytes at `addr` of `layer` are provably not `name` + NUL for every name (an
+/// unreadable byte proves nothing).
+fn no_name_at(layer: LayerRef, addr: u64, names: &[&[u8]]) -> bool {
+    let mut buf = [0u8; 272];
+    names.iter().all(|n| {
+        let len = n.len() + 1;
+        if len > buf.len() {
+            return false;
+        }
+        match layer.read(addr, &mut buf[..len]) {
+            Ok(()) => &buf[..n.len()] != *n || buf[n.len()] != 0,
+            Err(_) => false,
+        }
+    })
+}
+
+/// Whether `pdbname_scan(layer, names, start, start + size)` provably finds nothing: no page
+/// the instance maps holds "RSDS" (within a page or across two consecutive ones) followed 20
+/// bytes later by one of `names` and a NUL. A scan only ever reports such bytes, so then its
+/// result is empty whatever the chunking. The pages' "RSDS" positions come from `cache`
+/// (instances of a module share most of their physical pages). False = unknown (scan).
+fn rsds_free(inst: &ModuleInstance, names: &[&[u8]], cache: &SymbolCache) -> bool {
+    const PAGE: u64 = 0x1000;
+    if inst.start % PAGE != 0 || inst.size == 0 || inst.size > 1 << 32 {
+        return false;
+    }
+    let layer = inst.layer;
+    // (virtual page, page key) of every mapped page, in address order
+    let mut pages: Vec<(u64, (u64, usize))> = Vec::new();
+    let mut ok = true;
+    layer.mapping_targets(inst.start, inst.size, &mut |m, target| {
+        if m.offset % PAGE != 0 || m.len % PAGE != 0 || m.mapped % PAGE != 0 {
+            ok = false;
+            return false;
+        }
+        let id = target as *const dyn crate::layers::Layer as *const u8 as usize;
+        for i in 0..m.len / PAGE {
+            pages.push((m.offset + i * PAGE, ((m.mapped >> 12) + i, id)));
+        }
+        true
+    });
+    if !ok {
+        return false;
+    }
+    let mut infos: Vec<Option<PageRsds>> = {
+        let memo = cache.pages.lock().unwrap_or_else(|e| e.into_inner());
+        pages.iter().map(|(_, k)| memo.get(k).cloned()).collect()
+    };
+    let mut buf = vec![0u8; PAGE as usize];
+    let mut new = Vec::new();
+    for (i, info) in infos.iter_mut().enumerate() {
+        if info.is_none() {
+            let p = match layer.slice(pages[i].0, PAGE as usize) {
+                Some(page) => PageRsds::of(page),
+                None => {
+                    if layer.read(pages[i].0, &mut buf).is_err() {
+                        return false;
+                    }
+                    PageRsds::of(&buf)
+                }
+            };
+            new.push((pages[i].1, p.clone()));
+            *info = Some(p);
+        }
+    }
+    if !new.is_empty() {
+        cache.pages.lock().unwrap_or_else(|e| e.into_inner()).extend(new);
+    }
+    for (i, info) in infos.iter().enumerate() {
+        let info = info.as_ref().expect("filled above");
+        let va = pages[i].0;
+        if !info.at.iter().all(|&o| no_name_at(layer, va + o as u64 + 24, names)) {
+            return false;
+        }
+        if i > 0 {
+            let prev = infos[i - 1].as_ref().expect("filled above");
+            let w = [prev.tail[0], prev.tail[1], prev.tail[2], info.head[0], info.head[1], info.head[2]];
+            for k in 0..3 {
+                if &w[k..k + 4] == b"RSDS" {
+                    let pv = pages[i - 1].0;
+                    if pv + PAGE != va || !no_name_at(layer, pv + PAGE - 3 + k as u64 + 24, names) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 /// python `PDBUtility.pdbname_scan(...)` over one module instance: the first RSDS record
 /// naming `pdb_name` (what `symbol_table_from_pdb` uses).
 fn scan_pdb_name(inst: &ModuleInstance, pdb_name: &str) -> Option<PdbSig> {
@@ -212,7 +388,11 @@ fn scan_pdb_name(inst: &ModuleInstance, pdb_name: &str) -> Option<PdbSig> {
 
 /// The pure (memory-scanning) part of `_get_pdb_module` for one instance: the scan result of
 /// each candidate name, up to the first one that found an RSDS record.
-fn scan_pdb_names(inst: &ModuleInstance, names: &[String]) -> Vec<Option<PdbSig>> {
+fn scan_pdb_names(inst: &ModuleInstance, names: &[String], cache: &SymbolCache) -> Vec<Option<PdbSig>> {
+    let bytes: Vec<&[u8]> = names.iter().map(|n| n.as_bytes()).collect();
+    if rsds_free(inst, &bytes, cache) {
+        return vec![None; names.len()];
+    }
     let mut out = Vec::new();
     for n in names {
         let s = scan_pdb_name(inst, n);
@@ -227,7 +407,7 @@ fn scan_pdb_names(inst: &ModuleInstance, names: &[String]) -> Vec<Option<PdbSig>
 
 /// python `PESymbols._get_pdb_module(...)` given the scan results of [`scan_pdb_names`]: load
 /// (or download) the symbol table of the first candidate that works.
-fn pdb_module_from_scans(ctx: &Context, inst: &ModuleInstance, names: &[String], scans: &[Option<PdbSig>]) -> Option<Module> {
+fn pdb_module_from_scans(ctx: &Context, inst: &ModuleInstance, names: &[String], scans: &[Option<PdbSig>], cache: &SymbolCache) -> Option<Module> {
     for (j, name) in names.iter().enumerate() {
         let sig = match scans.get(j) {
             Some(s) => s.clone(),
@@ -235,7 +415,7 @@ fn pdb_module_from_scans(ctx: &Context, inst: &ModuleInstance, names: &[String],
         };
         // SymbolSpaceError (no GUID in the module / no symbols for it) -> next name
         let Some(sig) = sig else { continue };
-        if let Ok(t) = ctx.load_windows_pdb(&sig.pdb_name, &sig.guid, sig.age) {
+        if let Some(t) = cache.load_pdb(ctx, &sig) {
             return Some(Module::new(inst.layer, t, inst.start));
         }
     }
@@ -252,7 +432,7 @@ fn lookahead() -> usize {
 /// wanted value is exhausted. Returns (found, remaining). The per-instance work (PDB name
 /// scans, export table parsing) runs ahead in parallel; results are consumed in python's
 /// order.
-fn resolve_symbols_through_methods(ctx: &Context, instances: &[ModuleInstance], wanted: &WantedSymbols, mod_name: &str) -> Result<(Vec<(String, u64)>, WantedSymbols)> {
+fn resolve_symbols_through_methods(ctx: &Context, instances: &[ModuleInstance], wanted: &WantedSymbols, mod_name: &str, cache: &SymbolCache) -> Result<(Vec<(String, u64)>, WantedSymbols)> {
     let mut found: Vec<(String, u64)> = Vec::new();
     let mut remaining = wanted.clone();
     let pe_table = ctx.load_isf("windows/pe")?;
@@ -262,9 +442,9 @@ fn resolve_symbols_through_methods(ctx: &Context, instances: &[ModuleInstance], 
     crate::util::par::par_map_stream(
         instances.len(),
         lookahead(),
-        |i| scan_pdb_names(&instances[i], &names),
+        |i| scan_pdb_names(&instances[i], &names, cache),
         |i, scans| {
-            let Some(m) = pdb_module_from_scans(ctx, &instances[i], &names, &scans) else { return true };
+            let Some(m) = pdb_module_from_scans(ctx, &instances[i], &names, &scans, cache) else { return true };
             match get_symbol_values(&mut remaining, &Finder::Pdb(m), &mut found) {
                 Ok(false) => true,
                 Ok(true) => {
@@ -287,17 +467,17 @@ fn resolve_symbols_through_methods(ctx: &Context, instances: &[ModuleInstance], 
     crate::util::par::par_map_stream(
         instances.len(),
         lookahead(),
-        |i| get_exports(pe_table, instances[i].layer, instances[i].start),
-        |i, r| {
-            let exports = match r {
-                Ok(Some(e)) => e,
+        |i| get_exports(pe_table, instances[i].layer, instances[i].start).map(|r| r.map(|e| ExportAnswers::new(instances[i].start, &e, wanted))),
+        |_, r| {
+            let answers = match r {
+                Ok(Some(a)) => a,
                 Ok(None) => return true,
                 Err(e) => {
                     err = Some(e);
                     return false;
                 }
             };
-            match get_symbol_values(&mut remaining, &Finder::Exports { start: instances[i].start, exports }, &mut found) {
+            match get_symbol_values(&mut remaining, &Finder::Exports(answers), &mut found) {
                 Ok(false) => true,
                 Ok(true) => false,
                 Err(e) => {
@@ -362,11 +542,16 @@ fn get_symbol_values(remaining: &mut WantedSymbols, finder: &Finder, found: &mut
 /// python `PESymbols.find_symbols(context, config_path, wanted_modules, collected_modules)`:
 /// (found symbols, missing symbols) per module, in `wanted` order.
 pub fn find_symbols(ctx: &Context, wanted: &FilterModules, collected: &CollectedModules) -> Result<(FoundSymbols, FilterModules)> {
+    find_symbols_cached(ctx, wanted, collected, &SymbolCache::new())
+}
+
+/// [`find_symbols`] sharing `cache` with the other resolutions of the plugin run.
+pub fn find_symbols_cached(ctx: &Context, wanted: &FilterModules, collected: &CollectedModules, cache: &SymbolCache) -> Result<(FoundSymbols, FilterModules)> {
     let mut found = Vec::new();
     let mut missing = Vec::new();
     for (mod_name, w) in wanted {
         let Some(instances) = collected.get(mod_name) else { continue };
-        let (f, m) = resolve_symbols_through_methods(ctx, instances, w, mod_name)?;
+        let (f, m) = resolve_symbols_through_methods(ctx, instances, w, mod_name, cache)?;
         if !f.is_empty() {
             found.push((mod_name.clone(), f));
         }
@@ -544,6 +729,11 @@ pub fn addresses_for_process_symbols(ctx: &Context, k: &WinKernel, symbols: &Fil
 /// python `PESymbols.path_and_symbol_for_address(context, config_path, collected_modules,
 /// ranges, address)`: (file path, symbol name) for an address inside `ranges`.
 pub fn path_and_symbol_for_address(ctx: &Context, collected: &CollectedModules, ranges: &[Range], address: u64) -> Result<(Option<String>, Option<String>)> {
+    path_and_symbol_for_address_cached(ctx, collected, ranges, address, &SymbolCache::new())
+}
+
+/// [`path_and_symbol_for_address`] sharing `cache` with the other resolutions of the plugin run.
+pub fn path_and_symbol_for_address_cached(ctx: &Context, collected: &CollectedModules, ranges: &[Range], address: u64, cache: &SymbolCache) -> Result<(Option<String>, Option<String>)> {
     if address == 0 {
         return Ok((None, None));
     }
@@ -553,7 +743,7 @@ pub fn path_and_symbol_for_address(ctx: &Context, collected: &CollectedModules, 
     }
     let filename = filename_for_path(filepath);
     let wanted: FilterModules = vec![(filename.clone(), WantedSymbols::addresses(&[address]))];
-    let (found, _missing) = find_symbols(ctx, &wanted, collected)?;
+    let (found, _missing) = find_symbols_cached(ctx, &wanted, collected, cache)?;
     match found.iter().find(|(m, _)| *m == filename) {
         Some((_, syms)) if !syms.is_empty() => Ok((Some(filepath.to_string()), Some(syms[0].0.clone()))),
         _ => Ok((Some(filepath.to_string()), None)),
@@ -598,5 +788,59 @@ impl Plugin for PESymbols {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::GlobalOptions;
+
+    #[test]
+    fn page_rsds_positions_and_edges() {
+        let mut page = vec![0u8; 0x1000];
+        page[..3].copy_from_slice(b"SDS");
+        page[100..104].copy_from_slice(b"RSDS");
+        page[0xffd..].copy_from_slice(b"RSD");
+        let p = PageRsds::of(&page);
+        assert_eq!(&*p.at, &[100]);
+        assert_eq!(p.head, *b"SDS");
+        assert_eq!(p.tail, *b"RSD");
+        assert!(PageRsds::of(&[0u8; 0x1000]).at.is_empty());
+    }
+
+    /// Soundness of the no-signature proof on the test images: every module instance proven
+    /// free of PDB signature records scans to nothing, for the candidate names of its module.
+    #[test]
+    #[ignore]
+    fn rsds_free_instances_scan_to_nothing() {
+        for img in ["/home/user/cbc2/task2/memory-dirty.raw", "/home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw"] {
+            if !std::path::Path::new(img).exists() {
+                continue;
+            }
+            let ctx = Context::new(GlobalOptions { file: Some(img.into()), ..Default::default() }).unwrap();
+            let k = ctx.windows_kernel().unwrap();
+            let collected = get_process_modules(k, None).unwrap();
+            let cache = SymbolCache::new();
+            let (mut proven, mut scanned) = (0, 0);
+            let mut mods: Vec<&String> = collected.keys().filter(|m| m.ends_with(".dll")).collect();
+            mods.sort();
+            for m in mods.into_iter().take(40) {
+                let names = pdb_candidates(m);
+                let bytes: Vec<&[u8]> = names.iter().map(|n| n.as_bytes()).collect();
+                for inst in collected[m].iter().take(12) {
+                    if rsds_free(inst, &bytes, &cache) {
+                        proven += 1;
+                        for n in &names {
+                            assert!(scan_pdb_name(inst, n).is_none(), "{img} {m} @ {:#x}: {n}", inst.start);
+                        }
+                    } else {
+                        scanned += 1;
+                    }
+                }
+            }
+            println!("{img}: {proven} instances proven free, {scanned} left to the scan");
+            assert!(proven > 50);
+        }
     }
 }

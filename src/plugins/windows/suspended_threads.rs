@@ -6,7 +6,7 @@
 use crate::context::Context;
 use crate::error::Result;
 use crate::objects::util::array_to_string;
-use crate::plugins::windows::pe_symbols::{CollectedModules, Range, get_process_modules_cached, get_vads_for_process_cache, path_and_symbol_for_address};
+use crate::plugins::windows::pe_symbols::{CollectedModules, Range, SymbolCache, get_process_modules_cached, get_vads_for_process_cache, path_and_symbol_for_address_cached};
 use crate::plugins::windows::threads::list_process_threads;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -45,6 +45,7 @@ impl Plugin for SuspendedThreads {
         let k = ctx.windows_kernel()?;
         let mut vads_cache: FxHashMap<u64, Vec<Range>> = FxHashMap::default();
         let mut proc_modules: Option<CollectedModules> = None;
+        let sym_cache = SymbolCache::new();
         let threads = list_process_threads(k);
         // python's per-thread try block; independent reads, done in parallel
         let pre = |thread: &crate::objects::Obj| -> Result<Option<(crate::objects::Obj, u64, String, u64, u64, u64)>> {
@@ -83,8 +84,8 @@ impl Plugin for SuspendedThreads {
             }
             let pm = proc_modules.as_ref().unwrap();
             let vads = &vads_cache[&owner.addr];
-            let (start_file, start_sym) = path_and_symbol_for_address(ctx, pm, vads, start)?;
-            let (win32_file, win32_sym) = path_and_symbol_for_address(ctx, pm, vads, win32)?;
+            let (start_file, start_sym) = path_and_symbol_for_address_cached(ctx, pm, vads, start, &sym_cache)?;
+            let (win32_file, win32_sym) = path_and_symbol_for_address_cached(ctx, pm, vads, win32, &sym_cache)?;
             // the only false positive found in mass scanning of samples
             if start_file.as_deref().is_some_and(|f| f.ends_with("\\WorkFoldersShell.dll")) || win32_file.as_deref().is_some_and(|f| f.ends_with("\\WorkFoldersShell.dll")) {
                 continue;
