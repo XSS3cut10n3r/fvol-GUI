@@ -3,12 +3,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// `$XDG_CACHE_HOME` or `~/.cache`.
+/// `$XDG_CACHE_HOME` or `~/.cache`. (Looked up once: rsvol never changes its environment, and
+/// every `getenv` scans the whole environment, ~200 variables in a desktop session.)
 pub fn xdg_cache_home() -> PathBuf {
-    if let Some(x) = std::env::var_os("XDG_CACHE_HOME").filter(|x| !x.is_empty()) {
-        return PathBuf::from(x);
-    }
-    home_dir().join(".cache")
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| match std::env::var_os("XDG_CACHE_HOME").filter(|x| !x.is_empty()) {
+        Some(x) => PathBuf::from(x),
+        None => home_dir().join(".cache"),
+    })
+    .clone()
 }
 
 /// The user's home directory (`$HOME`).
@@ -19,10 +22,13 @@ pub fn home_dir() -> PathBuf {
 /// rsvol's cache directory (`~/.cache/rsvol`, override with `RSVOL_CACHE`). Created lazily by
 /// writers; readers just try to open files in it.
 pub fn rsvol_cache_dir() -> PathBuf {
-    if let Some(x) = std::env::var_os("RSVOL_CACHE").filter(|x| !x.is_empty()) {
-        return PathBuf::from(x);
-    }
-    xdg_cache_home().join("rsvol")
+    // (called ~6 times per run: looked up once, see `xdg_cache_home`)
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| match std::env::var_os("RSVOL_CACHE").filter(|x| !x.is_empty()) {
+        Some(x) => PathBuf::from(x),
+        None => xdg_cache_home().join("rsvol"),
+    })
+    .clone()
 }
 
 /// `--clear-cache` (python `framework.clear_cache()`: every `*.cache` file in `CACHE_PATH`,
@@ -67,12 +73,13 @@ pub fn vol3_cache_dir(cache_path: Option<&str>) -> PathBuf {
 /// Lower-case hex of `b` (cache key material in text files).
 pub fn hex(b: &[u8]) -> String {
     const D: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(b.len() * 2);
-    for &x in b {
-        s.push(D[(x >> 4) as usize] as char);
-        s.push(D[(x & 15) as usize] as char);
+    // (no per-character capacity checks: this runs over every cache key of a warm run)
+    let mut v = vec![0u8; b.len() * 2];
+    for (o, &x) in v.chunks_exact_mut(2).zip(b) {
+        o[0] = D[(x >> 4) as usize];
+        o[1] = D[(x & 15) as usize];
     }
-    s
+    String::from_utf8(v).unwrap_or_default()
 }
 
 /// Write `data` to `path` atomically (temp file + rename), creating parent directories.
@@ -127,17 +134,24 @@ pub fn file_stamp(path: &Path) -> Option<(u64, i128)> {
 /// with safe="/"; pathlib additionally keeps `~` and a few others).
 pub fn path_to_file_uri(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let bytes = path.as_os_str().as_bytes();
-    let mut s = String::from("file://");
-    for &b in bytes {
-        let keep = b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
-        if keep {
-            s.push(b as char);
+    let mut s = Vec::with_capacity(7 + bytes.len());
+    s.extend_from_slice(b"file://");
+    // runs of unreserved bytes are copied as they are (paths rarely need escapes)
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let keep = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
+        let n = rest.iter().position(|b| !keep(b)).unwrap_or(rest.len());
+        s.extend_from_slice(&rest[..n]);
+        if let Some(&b) = rest.get(n) {
+            s.extend_from_slice(&[b'%', HEX[(b >> 4) as usize], HEX[(b & 15) as usize]]);
+            rest = &rest[n + 1..];
         } else {
-            s.push_str(&format!("%{b:02X}"));
+            rest = &[];
         }
     }
-    s
+    String::from_utf8(s).unwrap_or_default()
 }
 
 /// python `urllib.parse.unquote`: only `%` + two hex digits is decoded (bytewise, so a
@@ -190,6 +204,37 @@ pub fn resource_error(url: &str, e: crate::error::Error) -> crate::error::Error 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn file_uri_escapes_like_python() {
+        use std::os::unix::ffi::OsStrExt;
+        let old = |p: &Path| -> String {
+            let mut s = String::from("file://");
+            for &b in p.as_os_str().as_bytes() {
+                if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~') {
+                    s.push(b as char);
+                } else {
+                    s.push_str(&format!("%{b:02X}"));
+                }
+            }
+            s
+        };
+        let all: Vec<u8> = (1..=255).collect();
+        let paths: [&[u8]; 6] = [b"", b"/home/a b/c%d.json", b"/x/\xff\x00y", &all, b"%", b"/plain/path-1_2.3~"];
+        for p in paths {
+            let p = Path::new(std::ffi::OsStr::from_bytes(p));
+            assert_eq!(path_to_file_uri(p), old(p));
+        }
+    }
+
+    #[test]
+    fn hex_is_lower_case_pairs() {
+        assert_eq!(hex(b""), "");
+        assert_eq!(hex(&[0, 1, 0x7f, 0x80, 0xab, 0xff]), "00017f80abff");
+        let all: Vec<u8> = (0..=255).collect();
+        let want: String = all.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex(&all), want);
+    }
+
     #[test]
     fn urlopen_error_text() {
         let e = std::fs::read("/nonexistent/rsvol/strings.txt").unwrap_err();
