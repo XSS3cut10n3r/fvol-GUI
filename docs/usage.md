@@ -7,6 +7,7 @@ Applies to fastvol 0.1.0, which reproduces volatility3 2.28.2.
 
 - [Run a plugin](#run-a-plugin)
 - [Complete commands with TAB](#complete-commands-with-tab)
+- [Show the version](#show-the-version)
 - [Analyze a Windows image](#analyze-a-windows-image)
 - [Analyze a Linux image](#analyze-a-linux-image)
 - [Analyze a macOS image](#analyze-a-macos-image)
@@ -113,6 +114,23 @@ TAB then completes:
 
 The script calls `fvol __complete` for each TAB (about 0.5 ms), so the candidates always match the
 binary that runs. Only bash is supported.
+
+## Show the version
+
+`fvol --version` (or `-V`) prints fastvol's version and the volatility3 release it reproduces. In a
+terminal the fastvol mark is drawn next to them with half-block characters: in 24-bit colour when
+`COLORTERM` is `truecolor` or `24bit`, in the xterm 256-colour palette when `TERM` names one, and in
+plain block characters with `NO_COLOR` set or on other terminals. Piped or redirected, only the
+three text lines are printed:
+
+```text
+fastvol 0.1.0
+Volatility 3 Framework 2.28.2 compatible
+memory forensics in Rust, zero dependencies
+```
+
+python volatility3 has no version option (it rejects `--version` as an unrecognized argument), so
+this applies only when `--version` is the only argument.
 
 ## Analyze a Windows image
 

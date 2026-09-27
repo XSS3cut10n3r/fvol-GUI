@@ -288,7 +288,12 @@ pub fn candidates(words: &[String], cur: &str, plugins: &[&'static dyn Plugin]) 
         };
     }
     if is_opt || (in_plugin && cur.is_empty()) {
-        return option_words(&level.parser, &used, cur);
+        let mut r = option_words(&level.parser, &used, cur);
+        // `--version` (banner.rs) is not in the parser: only as the only argument
+        if let (Reply::Words(w), true) = (&mut r, words.is_empty()) {
+            w.extend(["--version", "-V"].iter().filter(|o| o.starts_with(cur)).map(|o| o.to_string()));
+        }
+        return r;
     }
     if in_plugin {
         return Reply::Nothing;
@@ -478,6 +483,8 @@ mod tests {
         assert!(v.contains(&"--file".to_string()) && v.contains(&"--renderer".to_string()) && v.contains(&"--single-location".to_string()));
         assert!(v.iter().all(|o| o.starts_with("--")));
         assert!(words("-").contains(&"-f".to_string()));
+        assert_eq!(words("--vers"), vec!["--version"]);
+        assert!(!words("-q --").contains(&"--version".to_string()));
         // used options are not offered again; accumulating ones are
         let v = words("-f x.raw --filters a,b --");
         assert!(!v.contains(&"--file".to_string()) && v.contains(&"--filters".to_string()));

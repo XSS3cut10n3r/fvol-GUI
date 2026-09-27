@@ -38,10 +38,10 @@ text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Hel
 <text x="506.3" y="183.5" class="val">148.6 s</text>
 <text x="28" y="224.5" class="tool b">fastvol</text>
 <text x="164" y="213.5" class="run">first run</text>
-<path fill="#9c4a26" d="M256 203.0H320.3A4 4 0 0 1 324.3 207.0V211.0A4 4 0 0 1 320.3 215.0H256Z"/>
+<path fill="#2a7a48" d="M256 203.0H320.3A4 4 0 0 1 324.3 207.0V211.0A4 4 0 0 1 320.3 215.0H256Z"/>
 <text x="331.3" y="213.5" class="val b">4.07 s<tspan class="note" dx="8">1,002x faster than python</tspan></text>
 <text x="164" y="235.5" class="run">repeat run</text>
-<path fill="#e0662b" d="M256 225.0H268.4A4 4 0 0 1 272.4 229.0V233.0A4 4 0 0 1 268.4 237.0H256Z"/>
+<path fill="#46e67a" d="M256 225.0H268.4A4 4 0 0 1 272.4 229.0V233.0A4 4 0 0 1 268.4 237.0H256Z"/>
 <text x="279.4" y="235.5" class="val b">1.40 s<tspan class="note" dx="8">2,905x faster than python</tspan></text>
 <text x="28" y="282" class="h">Ubuntu 24.04, Linux 6.8, 3 GiB ELF core · 59 plugins</text>
 <path d="M256.0 292V422" class="grid"/>
@@ -62,10 +62,10 @@ text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Hel
 <text x="489.5" y="361.5" class="val">105.2 s</text>
 <text x="28" y="402.5" class="tool b">fastvol</text>
 <text x="164" y="391.5" class="run">first run</text>
-<path fill="#9c4a26" d="M256 381.0H355.1A4 4 0 0 1 359.1 385.0V389.0A4 4 0 0 1 355.1 393.0H256Z"/>
+<path fill="#2a7a48" d="M256 381.0H355.1A4 4 0 0 1 359.1 385.0V389.0A4 4 0 0 1 355.1 393.0H256Z"/>
 <text x="366.1" y="391.5" class="val b">8.32 s<tspan class="note" dx="8">337x faster than python</tspan></text>
 <text x="164" y="413.5" class="run">repeat run</text>
-<path fill="#e0662b" d="M256 403.0H301.9A4 4 0 0 1 305.9 407.0V411.0A4 4 0 0 1 301.9 415.0H256Z"/>
+<path fill="#46e67a" d="M256 403.0H301.9A4 4 0 0 1 305.9 407.0V411.0A4 4 0 0 1 301.9 415.0H256Z"/>
 <text x="312.9" y="413.5" class="val b">2.79 s<tspan class="note" dx="8">1,006x faster than python</tspan></text>
 <text x="256.0" y="442" class="tick" text-anchor="middle">1 s</text>
 <text x="368.0" y="442" class="tick" text-anchor="middle">10 s</text>

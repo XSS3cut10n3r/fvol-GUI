@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-    <img alt="fastvol" src="docs/assets/logo.svg" width="480">
+    <img alt="fastvol" src="docs/assets/logo.svg" width="516">
   </picture>
 </p>
 
@@ -65,6 +65,7 @@ fvol -s ./symbols -f linux.lime linux.pslist.PsList      # Linux/macOS: symbol d
 fvol -f memory.raw -o out/ windows.dlllist.DllList --dump # dump files
 fvol -f memory.raw -r json windows.pslist.PsList         # quick, pretty, csv, json, jsonl
 eval "$(fvol completion bash)"                           # TAB-complete plugins and options
+fvol --version                                           # version banner
 ```
 
 Windows symbols are downloaded automatically. See [docs/usage.md](docs/usage.md).

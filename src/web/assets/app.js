@@ -100,7 +100,7 @@ function lockScreen(wrong) {
   const box = el('div.dialog.login-box', { 'aria-label': 'Access token needed' },
     el('div.card-h', {}, el('h3', { text: 'fastvol · locked' })),
     el('div.card-b.openbox', {},
-      el('img.mascot', { src: '/assets/mascot.svg', alt: '' }),
+      el('img.mascot', { src: '/assets/mark.svg', alt: '' }),
       el('p.prose.flush', { text: 'This server gives access to a memory image. Open the URL printed by fvol serve (it carries the token), or paste the token here.' }),
       wrong ? el('p.bad', { role: 'alert', text: 'The saved token is not valid for this server (it changes every time fvol serve starts).' }) : null,
       el('div.row', {}, inp, el('button.btn.primary', { type: 'button', text: 'Unlock', on: { click: go } }))));

@@ -9,6 +9,7 @@
 //!   5. run the plugin into the renderer; map failures to python's messages / exit status.
 
 pub mod argparse;
+pub mod banner;
 pub mod complete;
 pub mod files;
 pub mod filter;
@@ -76,6 +77,7 @@ pub fn main() -> i32 {
     match argv.get(1).map(String::as_str) {
         Some("serve") => return crate::web::main(&argv[2..]),
         Some("completion") => return complete::script(&argv, &mut std::io::stdout(), &mut std::io::stderr()),
+        Some("--version" | "-V") if argv.len() == 2 => return banner::main(&mut std::io::stdout()),
         Some("__complete") => {
             return complete::complete(&argv[2..], &crate::plugins::registered(), &mut std::io::stdout());
         }
