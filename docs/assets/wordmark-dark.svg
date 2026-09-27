@@ -1,25 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 38 256 64" role="img" aria-label="fastvol">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-9 33 264 71" role="img" aria-label="fastvol">
   <!--
-    The "fastvol" wordmark: hand-built monoline lowercase, stroke 10 on a 40-unit x-height,
-    slanted 10 degrees like the mascot's body cuts. No font is needed to render it.
+    The "fastvol" wordmark: hand-built upright monoline lowercase, stroke 8 on a 40-unit x-height.
+    Bowls are rounded rectangles with a centreline radius of 10 (8 in the s), terminals are cut
+    square, and the v is a filled outline whose diagonals match the stems. No font is needed.
     Dark-background variant, generated from wordmark.svg: "fast" in copper, "vol" in ink (#f0f6fc).
     docs/assets/build.py derives wordmark-dark.svg and the logo lockups from it.
-    Baseline y=100, x-height y=60, ascender y=40.
+    Baseline y=100, x-height y=60, ascender y=37 (t: y=44).
   -->
-  <g transform="translate(18 0) skewX(-10)">
-    <g id="fast" fill="none" stroke="#e0662b" stroke-width="10">
-      <path d="M5 100V58A13 13 0 0 1 18 45H27"/>
-      <path d="M-4 65H24"/>
-      <circle cx="52" cy="80" r="15"/>
-      <path d="M67 60V100"/>
-      <path fill="#e0662b" stroke="none" d="M115 60H92A14 12.125 0 0 0 92 84.25H101A4 3.625 0 0 1 101 91.5H78V100H101A14 12.125 0 0 0 101 75.75H92A4 3.625 0 0 1 92 68.5H115Z"/>
-      <path d="M129 46V100"/>
-      <path d="M120 65H141"/>
-    </g>
-    <g id="vol" fill="none" stroke="#f0f6fc" stroke-width="10">
-      <path fill="#f0f6fc" stroke="none" d="M146 60H156.5L164 83.1L171.5 60H182L169 100H159Z"/>
-      <circle cx="206" cy="80" r="15"/>
-      <path d="M236 40V100"/>
-    </g>
+  <g id="fast" fill="none" stroke="#e0662b" stroke-width="8">
+    <path d="M4 100V51A10 10 0 0 1 14 41H24"/>
+    <path d="M-5 64H19"/>
+    <path d="M63 64H39A10 10 0 0 0 29 74V86A10 10 0 0 0 39 96H63"/>
+    <path d="M63 60V100"/>
+    <path d="M108 64H86A8 8 0 0 0 78 72A8 8 0 0 0 86 80H96A8 8 0 0 1 104 88A8 8 0 0 1 96 96H74"/>
+    <path d="M123 44V86A10 10 0 0 0 133 96H141"/>
+    <path d="M114 64H137"/>
+  </g>
+  <g id="vol" fill="none" stroke="#f0f6fc" stroke-width="8">
+    <path fill="#f0f6fc" stroke="none" d="M146 60H154.03L166 91.92L177.97 60H186L171 100H161Z"/>
+    <path d="M205 64H221A10 10 0 0 1 231 74V86A10 10 0 0 1 221 96H205A10 10 0 0 1 195 86V74A10 10 0 0 1 205 64Z"/>
+    <path d="M247 37V100"/>
   </g>
 </svg>
