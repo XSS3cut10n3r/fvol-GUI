@@ -51,24 +51,31 @@ pub fn create(output_dir: &str, preferred_name: &str) -> Result<(File, String)> 
         return Err(Error::msg("FileHandler filenames cannot contain path separators"));
     }
     let dir = if output_dir.is_empty() { "." } else { output_dir };
-    std::fs::create_dir_all(dir)?;
     let first = join(dir, preferred_name);
     let (stem, ext) = splitext(&first);
     let mut counter = 0u64;
+    let mut made_dir = false;
+    // One syscall per file in the usual case: O_EXCL alone decides whether a name is taken
+    // (EEXIST also covers what python's os.path.exists() sees: files, directories, and
+    // dangling symlinks, which O_EXCL refuses too), and the directory is only created when
+    // the open says it is missing.
     loop {
         let candidate = if counter == 0 { first.clone() } else { format!("{stem}-{counter}{ext}") };
-        counter += 1;
-        // os.path.exists() is false for dangling symlinks; python would then overwrite them
-        if Path::new(&candidate).exists() {
-            continue;
-        }
         match open_new(&candidate) {
             Ok(f) => {
                 let name = candidate.rsplit('/').next().unwrap_or(&candidate).to_string();
                 return Ok((f, name));
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => counter += 1,
+            Err(e) => {
+                // the error of creating the directory first, as before; otherwise retry once
+                // it exists
+                std::fs::create_dir_all(dir)?;
+                if made_dir {
+                    return Err(e.into());
+                }
+                made_dir = true;
+            }
         }
     }
 }
@@ -249,6 +256,28 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(dir.join("x.dmp")).unwrap().permissions().mode() & 0o177, 0);
         assert!(create(d, "a/b").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Names taken by anything python's os.path.exists() sees (a directory, a dangling
+    /// symlink) are skipped; missing output directories are created (nested too); an output
+    /// "directory" that is a file fails like create_dir_all.
+    #[test]
+    fn taken_names_and_dirs() {
+        let dir = std::env::temp_dir().join(format!("rsvol-files-test2-{}", std::process::id()));
+        let nested = dir.join("a/b");
+        let d = nested.to_str().unwrap();
+        let (_, a) = create(d, "y.dmp").unwrap();
+        assert_eq!(a, "y.dmp");
+        std::fs::create_dir(nested.join("y-1.dmp")).unwrap();
+        std::os::unix::fs::symlink(nested.join("nowhere"), nested.join("y-2.dmp")).unwrap();
+        let (_, b) = create(d, "y.dmp").unwrap();
+        assert_eq!(b, "y-3.dmp");
+        let (_, c) = create(d, "noext").unwrap();
+        let (_, e) = create(d, "noext").unwrap();
+        assert_eq!((c.as_str(), e.as_str()), ("noext", "noext-1"));
+        let file_dir = nested.join("y.dmp");
+        assert!(create(file_dir.to_str().unwrap(), "z.dmp").is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
