@@ -18,8 +18,8 @@
 //! Execution (all cores, python order, early stop) is described at "Execution plan" below.
 //! Measured on a 5 GiB Windows 10 image (20 threads, warm page cache): a full physical-layer
 //! `MultiStringScanner` scan ~150 ms (~35 GB/s, the machine's read bandwidth; python's trie
-//! regex ~60 s), the kernel virtual layer (330k chunks, 1.8 GB of mapped pages, 0.7 GB
-//! distinct) ~30 ms + 10 ms run enumeration.
+//! regex ~60 s), the kernel virtual layer (330k chunks, 1.8 GB of mapped pages, 0.58 GB
+//! distinct) ~30 ms, its run enumeration and planning overlapped with the scan.
 //!
 //! Search kernels: [`MultiStringScanner`] = AVX2 Teddy prefilter + trie verification (15-19
 //! GB/s per core), [`BytesScanner`] = glibc `memmem`. Scanners may implement the two-phase

@@ -6,13 +6,15 @@
 //!     cold page cache a fault there reads ahead around the page (the bdi's `read_ahead_kb`,
 //!     4 MiB on btrfs), which is what a sequential reader wants;
 //!   * a second mapping advised `MADV_RANDOM` ([`FileLayer::data_random`],
-//!     [`Layer::slice_random`], [`Layer::read_random`]) serves structure reads: page-table walks
-//!     and object reads of the translation layers. A cold fault there reads only the page (on
-//!     btrfs: its compressed extent), not 4 MiB around it -- measured on a cold 5 GiB image:
-//!     windows.pslist 296 -> ~70 ms, dlllist 2.1 -> 0.24 s, handles 3.6 -> 0.5 s. Warm, both
-//!     behave the same (fault-around maps 64 KiB of cached pages either way). The advice is
-//!     per mapping (VMA), so it never slows the bulk readers of the default mapping (advising
-//!     the one mapping `MADV_RANDOM` made a cold vmscan 4.5x and a cold memmap --dump 4x slower).
+//!     [`Layer::slice_random`], [`Layer::read_random`]) serves the translation layers: their
+//!     page-table walks and every structure read made through them. A cold fault there reads
+//!     only the page (on btrfs: its compressed extent), not 4 MiB around it -- measured on a
+//!     cold 5 GiB image: windows.pslist 173 -> 33 ms, dlllist 1.14 -> 0.19 s, handles 1.21 ->
+//!     0.26 s (crash dump: pslist 540 -> 47 ms, dlllist 2.09 -> 0.14 s). Warm, both behave the
+//!     same (fault-around maps 64 KiB of cached pages either way). The advice is per mapping
+//!     (VMA), so it never slows the bulk readers of the default mapping (advising the one
+//!     mapping `MADV_RANDOM` made a cold vmscan 4.5x and a cold memmap --dump 4x slower; memory
+//!     dumps stream through a translation layer on the default mapping: [`Layer::slice_bulk`]).
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
@@ -93,7 +95,8 @@ impl FileLayer {
     /// (`MADV_DONTNEED`; the data stays in the page cache and a later access maps it again).
     /// Called by scan workers right after a big chunk: the entries its structure reads faulted
     /// in are torn down in parallel instead of serially at exit (mftscan: 24-27 ms of exit
-    /// teardown).
+    /// teardown without the CLI's exit helper, see `util::exit`) and do not pile up in a
+    /// long-running process (`vol serve`).
     pub fn release(&self, off: u64, len: u64) {
         let (Ok(off), Ok(len)) = (usize::try_from(off), usize::try_from(len)) else { return };
         self.map.advise(off, len, crate::util::mmap::MADV_DONTNEED);
