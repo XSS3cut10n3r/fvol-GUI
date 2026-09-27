@@ -97,9 +97,9 @@ impl App {
     }
 }
 
-const USAGE: &str = "usage: fvol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
-                 [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
-                 [--max-conns N] [--parallel N] [--max-memory SIZE]
+pub(crate) const USAGE: &str = "usage: fvol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
+                  [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
+                  [--max-conns N] [--parallel N] [--max-memory SIZE]
 
 Serve the fastvol web UI (a local, token-protected web app for analysing a memory image).
 

@@ -64,6 +64,7 @@ fvol -h                                                  # list plugins
 fvol -s ./symbols -f linux.lime linux.pslist.PsList      # Linux/macOS: symbol dir
 fvol -f memory.raw -o out/ windows.dlllist.DllList --dump # dump files
 fvol -f memory.raw -r json windows.pslist.PsList         # quick, pretty, csv, json, jsonl
+eval "$(fvol completion bash)"                           # TAB-complete plugins and options
 ```
 
 Windows symbols are downloaded automatically. See [docs/usage.md](docs/usage.md).
