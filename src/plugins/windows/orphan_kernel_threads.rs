@@ -7,7 +7,7 @@ use crate::context::{Context, WinKernel};
 use crate::error::{Error, Result};
 use crate::objects::Obj;
 use crate::plugins::windows::ssdt::build_module_collection;
-use crate::plugins::windows::thrdscan::{columns, scan_threads_each, thread_rows, timeline_of};
+use crate::plugins::windows::thrdscan::{columns, scan_threads_each, thread_rows_out, timeline_of};
 use crate::plugins::{Config, Plugin, TimelineEvent};
 use crate::renderers::RowSink;
 use crate::symbols::windows::WinExt;
@@ -71,7 +71,7 @@ impl Plugin for Threads {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        thread_rows(list_orphan_kernel_threads(ctx, k), &mut |r| out.row(0, r))
+        thread_rows_out(list_orphan_kernel_threads(ctx, k), out)
     }
     fn timeline(&self, ctx: &Context, _cfg: &Config) -> Option<Result<Vec<TimelineEvent>>> {
         Some(ctx.windows_kernel().and_then(|k| timeline_of(list_orphan_kernel_threads(ctx, k))))
