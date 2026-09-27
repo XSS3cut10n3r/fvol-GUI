@@ -14,7 +14,8 @@
 //! Speed: the walk itself is inherently sequential (dict order), so it only decides WHETHER a
 //! vnode name can be read (`pointer_to_string` fails iff the pointer or the string's first
 //! page is unreadable); the strings are read afterwards in parallel, and the paths are built
-//! in parallel too. Each vnode's four fields come from one zero-copy slice when possible.
+//! (and the rows formatted) in parallel too. Each vnode's four fields come from one zero-copy
+//! slice when possible; a parent's validity is decided once per parent.
 
 use crate::automagic::mac::MacKernel;
 use crate::context::Context;
@@ -102,7 +103,12 @@ struct Walker {
     entries: Vec<Entry>,
     index: FxHashMap<u64, u32>,
     null_valid: Option<bool>,
+    /// `valid_vnode` of recently asked addresses (direct-mapped; siblings share a parent)
+    valid_cache: Vec<(u64, bool)>,
 }
+
+/// Slots of [`Walker::valid_cache`] (a power of two).
+const VALID_CACHE: usize = 1024;
 
 #[inline]
 fn rd(s: &[u8], off: u64, size: u64) -> Option<u64> {
@@ -131,9 +137,11 @@ impl Walker {
             off_v_name: t.offset_of("vnode", "v_name")?,
             off_v_parent: t.offset_of("vnode", "v_parent")?,
             off_tqe_next: mnt.addr + mnt.member_offset("tqe_next")?,
-            entries: Vec::new(),
-            index: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
+            // sized for ~100k vnodes: no regrowth copies (untouched capacity costs nothing)
+            entries: Vec::with_capacity(1 << 17),
+            index: FxHashMap::with_capacity_and_hasher(100_000, Default::default()),
             null_valid: None,
+            valid_cache: vec![(u64::MAX, false); VALID_CACHE],
         })
     }
 
@@ -163,6 +171,20 @@ impl Walker {
         }
     }
 
+    /// Starts loading the walk's fields of the vnode at `base` into the CPU cache (the walk
+    /// visits it next; its lines usually come from DRAM).
+    #[inline]
+    fn prefetch_vnode(&self, base: u64) {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(s) = self.layer.slice(base, self.vnode_size as usize) {
+            use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+            for off in [self.off_v_flag, self.off_v_name, self.off_v_parent, self.off_tqe_next] {
+                // SAFETY: `off` is inside the vnode, which is inside `s`; prefetch never faults
+                unsafe { _mm_prefetch::<_MM_HINT_T0>(s.as_ptr().add(off as usize) as *const i8) };
+            }
+        }
+    }
+
     /// python `_vnode_name(vnode)`, deciding only whether it is None (the string itself is
     /// read later unless python computes `full_path()`).
     fn vnode_name(&self, base: u64, info: &VInfo) -> Result<Option<Name>> {
@@ -188,7 +210,7 @@ impl Walker {
     }
 
     /// python `is_valid(p, vnode.size)` for a vnode struct address (NULL is by far the most
-    /// common invalid one: answered once).
+    /// common invalid one: answered once; parents are asked for again and again: cached).
     #[inline]
     fn valid_vnode(&mut self, p: u64) -> bool {
         if p == 0 {
@@ -199,34 +221,48 @@ impl Walker {
             self.null_valid = Some(v);
             return v;
         }
-        self.layer.is_valid(p, self.vnode_size)
+        let slot = ((p >> 6) ^ (p >> 16)) as usize & (VALID_CACHE - 1);
+        let (a, v) = self.valid_cache[slot];
+        if a == p {
+            return v;
+        }
+        let v = self.layer.is_valid(p, self.vnode_size);
+        self.valid_cache[slot] = (p, v);
+        v
     }
 
-    /// python `_add_vnode(context, vnode, loop_vnodes)`; returns `Some(info)` when added.
-    fn add_vnode(&mut self, v: VObj) -> Result<Option<VInfo>> {
+    /// python `_add_vnode(context, vnode, loop_vnodes)`; returns `Some((info, parent))` when
+    /// added (`parent` = python `_get_parent(vnode)`). `valid`: the vnode is already known to
+    /// pass python's validity check.
+    fn add_vnode(&mut self, v: VObj, valid: bool) -> Result<Option<(VInfo, Option<u64>)>> {
         let key = v.offset();
-        let valid = match v {
-            VObj::Ptr { .. } => self.layer.is_valid(key, self.ptr_size),
-            VObj::Struct { .. } => self.valid_vnode(key),
-        };
+        let valid = valid
+            || match v {
+                VObj::Ptr { .. } => self.layer.is_valid(key, self.ptr_size),
+                VObj::Struct { .. } => self.valid_vnode(key),
+            };
         if !valid || self.index.contains_key(&key) {
             return Ok(None);
         }
         let info = self.vinfo(v.base());
+        if let Some(next) = info.next {
+            self.prefetch_vnode(next);
+        }
         let Some(name) = self.vnode_name(v.base(), &info)? else { return Ok(None) };
         let parent = self.get_parent(&info);
         self.index.insert(key, self.entries.len() as u32);
         self.entries.push(Entry { key, name, parent });
-        Ok(Some(info))
+        Ok(Some((info, parent)))
     }
 
-    /// python `_walk_vnode(context, vnode, loop_vnodes)`.
-    fn walk_vnode(&mut self, v: VObj, depth: usize) -> Result<bool> {
+    /// python `_walk_vnode(context, vnode, loop_vnodes)` (`valid`: see [`Walker::add_vnode`]).
+    fn walk_vnode(&mut self, v: VObj, valid: bool, depth: usize) -> Result<bool> {
         if depth > MAX_DEPTH {
             panic!("RecursionError: maximum recursion depth exceeded");
         }
         let mut added = false;
         let mut vnode = v;
+        let mut valid = valid;
         loop {
             // `while vnode:` and `if vnode in loop_vnodes: return added`
             if let VObj::Ptr { value, .. } = vnode {
@@ -237,12 +273,12 @@ impl Walker {
                     return Ok(added);
                 }
             }
-            let Some(info) = self.add_vnode(vnode)? else { break };
+            let Some((info, mut parent)) = self.add_vnode(vnode, valid)? else { break };
             added = true;
-            let mut parent = self.get_parent(&info);
-            // `while parent and parent not in loop_vnodes` (a struct is never `in`)
+            // `while parent and parent not in loop_vnodes` (a struct is never `in`); a parent
+            // from `_get_parent` passed `is_valid(parent, vnode.size)`
             while let Some(p) = parent {
-                if !self.walk_vnode(VObj::Struct { addr: p }, depth + 1)? {
+                if !self.walk_vnode(VObj::Struct { addr: p }, true, depth + 1)? {
                     break;
                 }
                 let pi = self.vinfo(p);
@@ -252,6 +288,7 @@ impl Walker {
                 Some(next) => vnode = VObj::Struct { addr: next },
                 None => break,
             }
+            valid = false;
         }
         Ok(added)
     }
@@ -261,7 +298,7 @@ impl Walker {
         for vnode in list_head.walk_tailq("v_mntvnodes", MAX_ELEMENTS) {
             let p = vnode?;
             let value = p.u64()?;
-            self.walk_vnode(VObj::Ptr { loc: p.addr, value }, 0)?;
+            self.walk_vnode(VObj::Ptr { loc: p.addr, value }, false, 0)?;
         }
         Ok(())
     }
@@ -270,7 +307,7 @@ impl Walker {
     fn walk_member(&mut self, mnt: &Obj, member: &str) -> Result<()> {
         let p = mnt.m(member)?;
         let value = p.u64()?;
-        self.walk_vnode(VObj::Ptr { loc: p.addr, value }, 0)?;
+        self.walk_vnode(VObj::Ptr { loc: p.addr, value }, false, 0)?;
         Ok(())
     }
 }
@@ -352,22 +389,97 @@ fn build_path(w: &Walker, names: &[String], i: usize) -> String {
     }
 }
 
-/// [`build_path`] for every entry, memoized along the parent chains (they are long: this image
-/// has directories ~600 levels deep). For an acyclic chain python's list is the parent's list
-/// plus the entry's name; a chain that runs into a cycle gives the bare name. When 0 is a key
-/// (python's `parent_offset = 0` could then continue a chain) the direct algorithm is used.
-fn build_paths(w: &Walker, names: &[String]) -> Vec<String> {
-    let n = w.entries.len();
-    if w.index.contains_key(&0) {
-        return par_map(n, |i| build_path(w, names, i));
+/// The walked vnodes with what python's `_build_path` needs.
+struct Listing {
+    w: Walker,
+    /// the entries' names (`vnode_name`)
+    names: Vec<String>,
+    /// the entry of each entry's `parent_offset` ([`NO_PARENT`]: not a key)
+    parent: Vec<u32>,
+    /// the parent chain runs into a cycle (python: the bare name)
+    cyclic: Vec<bool>,
+    /// 0 is a key: python's `parent_offset = 0` could continue a chain (then [`build_path`])
+    zero_key: bool,
+}
+
+const NO_PARENT: u32 = u32::MAX;
+
+impl Listing {
+    /// python `_walk_mounts` plus the names (read in parallel) and the parent links.
+    fn new(k: &MacKernel) -> Result<Listing> {
+        let w = {
+            let _t = crate::util::trace::span("list_files walk");
+            walk_mounts(k)?
+        };
+        let _t = crate::util::trace::span("list_files names");
+        let n = w.entries.len();
+        const CHUNK: usize = 1024;
+        let layer = w.layer;
+        let parts = par_map(n.div_ceil(CHUNK), |c| {
+            let range = c * CHUNK..((c + 1) * CHUNK).min(n);
+            let names: Result<Vec<String>> = w.entries[range.clone()]
+                .iter()
+                .map(|e| match &e.name {
+                    Name::Str(s) => Ok(s.clone()),
+                    Name::Ptr(p) => read_cstring_255(layer, *p),
+                })
+                .collect();
+            let parents: Vec<u32> = w.entries[range].iter().map(|e| e.parent.and_then(|p| w.index.get(&p)).map_or(NO_PARENT, |&j| j)).collect();
+            (names, parents)
+        });
+        let mut names = Vec::with_capacity(n);
+        let mut parent = Vec::with_capacity(n);
+        for (ns, ps) in parts {
+            names.extend(ns?);
+            parent.extend(ps);
+        }
+        let cyclic = cyclic_chains(&parent);
+        let zero_key = w.index.contains_key(&0);
+        Ok(Listing { w, names, parent, cyclic, zero_key })
     }
+
+    /// python `_build_path(vnodes, vnode_name, parent_offset)` of entry `i`.
+    fn path(&self, i: usize) -> String {
+        if self.zero_key {
+            return build_path(&self.w, &self.names, i);
+        }
+        let name = self.names[i].as_str();
+        let mut j = self.parent[i];
+        let path = if self.cyclic[i] || j == NO_PARENT {
+            // python: a cycle gives `path = []`, no parent `[vnode_name]`: the bare name
+            std::borrow::Cow::Borrowed(name)
+        } else {
+            // python: the names of the parent chain joined, root first
+            let mut chain: Vec<u32> = Vec::with_capacity(16);
+            let mut len = name.len();
+            while j != NO_PARENT {
+                chain.push(j);
+                len += self.names[j as usize].len() + 1;
+                j = self.parent[j as usize];
+            }
+            let mut s = String::with_capacity(len);
+            for &j in chain.iter().rev() {
+                s.push_str(&self.names[j as usize]);
+                s.push('/');
+            }
+            s.push_str(name);
+            std::borrow::Cow::Owned(s)
+        };
+        match path.strip_prefix('/') {
+            Some(rest) if rest.starts_with('/') => rest.to_string(),
+            _ => path.into_owned(),
+        }
+    }
+}
+
+/// Which entries' parent chains (`parent` links) run into a cycle.
+fn cyclic_chains(parent: &[u32]) -> Vec<bool> {
     const UNSEEN: u8 = 0;
     const ACTIVE: u8 = 1;
     const DONE: u8 = 2;
     const CYCLIC: u8 = 3;
-    let parent_of = |j: usize| w.entries[j].parent.and_then(|p| w.index.get(&p)).map(|&x| x as usize);
+    let n = parent.len();
     let mut state = vec![UNSEEN; n];
-    let mut joined: Vec<String> = vec![String::new(); n];
     let mut stack: Vec<usize> = Vec::new();
     for i in 0..n {
         if state[i] != UNSEEN {
@@ -377,67 +489,28 @@ fn build_paths(w: &Walker, names: &[String]) -> Vec<String> {
         let cyclic = loop {
             state[j] = ACTIVE;
             stack.push(j);
-            match parent_of(j) {
-                None => break false,
-                Some(p) => match state[p] {
-                    UNSEEN => j = p,
+            match parent[j] {
+                NO_PARENT => break false,
+                p => match state[p as usize] {
+                    UNSEEN => j = p as usize,
                     DONE => break false,
                     _ => break true, // ACTIVE (a cycle) or CYCLIC
                 },
             }
         };
-        while let Some(j) = stack.pop() {
-            if cyclic {
-                state[j] = CYCLIC;
-                continue;
-            }
-            joined[j] = match parent_of(j) {
-                Some(p) => {
-                    let mut s = String::with_capacity(joined[p].len() + 1 + names[j].len());
-                    s.push_str(&joined[p]);
-                    s.push('/');
-                    s.push_str(&names[j]);
-                    s
-                }
-                None => names[j].clone(),
-            };
-            state[j] = DONE;
+        for j in stack.drain(..) {
+            state[j] = if cyclic { CYCLIC } else { DONE };
         }
     }
-    joined
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            if state[i] == CYCLIC {
-                names[i].clone()
-            } else if p.starts_with("//") {
-                p[1..].to_string()
-            } else {
-                p
-            }
-        })
-        .collect()
+    state.into_iter().map(|s| s == CYCLIC).collect()
 }
 
 /// python `List_Files.list_files(context, kernel_module_name)`: `(vnode vol.offset, full
 /// path)` in python order.
 pub fn list_files(k: &MacKernel) -> Result<Vec<(u64, String)>> {
-    let w = {
-        let _t = crate::util::trace::span("list_files walk");
-        walk_mounts(k)?
-    };
-    let names: Vec<String> = {
-        let _t = crate::util::trace::span("list_files names");
-        let layer = w.layer;
-        let res: Vec<Result<String>> = par_map(w.entries.len(), |i| match &w.entries[i].name {
-            Name::Str(s) => Ok(s.clone()),
-            Name::Ptr(p) => read_cstring_255(layer, *p),
-        });
-        res.into_iter().collect::<Result<_>>()?
-    };
+    let l = Listing::new(k)?;
     let _t = crate::util::trace::span("list_files build paths");
-    let paths = build_paths(&w, &names);
-    Ok(w.entries.iter().map(|e| e.key).zip(paths).collect())
+    Ok(par_map(l.names.len(), |i| (l.w.entries[i].key, l.path(i))))
 }
 
 impl Plugin for ListFiles {
@@ -450,11 +523,14 @@ impl Plugin for ListFiles {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         let k = ctx.mac_kernel()?;
         out.begin(vec![Column::new("Address", ColType::Hex), Column::new("File Path", ColType::Str)])?;
-        let files = list_files(k)?;
-        let _t = crate::util::trace::span("list_files render");
-        for (addr, path) in files {
-            out.row(0, vec![Value::Int(addr as i128), Value::Str(path)])?;
-        }
-        Ok(())
+        let l = Listing::new(k)?;
+        // paths built and rows formatted on all cores, in python's order
+        let _t = crate::util::trace::span("list_files paths + render");
+        crate::plugins::linux::stream_chunks(out, l.names.len(), 1024, |r, b| {
+            for i in r {
+                b.push_ref(&[Value::Int(l.w.entries[i].key as i128), Value::Str(l.path(i))]);
+            }
+            None
+        })
     }
 }

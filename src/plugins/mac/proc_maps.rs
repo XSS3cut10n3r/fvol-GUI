@@ -166,8 +166,28 @@ impl Plugin for Maps {
         let maxsize = cfg.get_int("maxsize").unwrap_or(MAXSIZE_DEFAULT);
         let kernel_table = k.table.name();
         let tasks = super::pslist::list_tasks(k, "tasks", &filter);
-        // per task: (pid, name) then the vma rows; tasks are independent, computed in
-        // parallel, emitted (and dumped) in python order
+        if !dump {
+            // per task in parallel, rows formatted on the workers, emitted in python's order
+            return crate::plugins::emit_par_blocks(out, tasks, |task, b| {
+                let name = array_to_string(&task.m("p_comm")?, None)?;
+                let pid = task.m("p_pid")?.int()?;
+                for r in task_rows(task, &addresses, kernel_table) {
+                    let r = r?;
+                    b.push_ref(&[
+                        Value::Int(pid),
+                        Value::Str(name.clone()),
+                        Value::Int(r.start as i128),
+                        Value::Int(r.end as i128),
+                        Value::SStr(r.perms?),
+                        Value::Str(r.path),
+                        Value::SStr("Disabled"),
+                    ]);
+                }
+                Ok(())
+            });
+        }
+        // --dump: per task: (pid, name) then the vma rows; tasks are independent, computed in
+        // parallel, emitted and dumped in python order (a dump before its row)
         let per_task = crate::util::par::par_map(tasks.len(), |i| {
             let Ok(task) = &tasks[i] else { return Err(crate::error::Error::msg("")) };
             // one small leak per task instead of a String per row

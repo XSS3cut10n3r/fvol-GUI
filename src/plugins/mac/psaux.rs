@@ -143,17 +143,13 @@ impl Plugin for Psaux {
         let pids = cfg.get_ints("pid");
         let filter = super::pslist::pid_filter(&pids);
         let tasks = super::pslist::list_tasks(k, "tasks", &filter);
-        let rows = crate::util::par::par_map(tasks.len(), |i| match &tasks[i] {
-            Ok(t) => task_row(t),
-            Err(_) => Ok(None),
-        });
-        for (task, row) in tasks.into_iter().zip(rows) {
-            task?;
-            if let Some(r) = row? {
-                out.row(0, r)?;
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, tasks, |t, b| {
+            if let Some(r) = task_row(t)? {
+                b.push(r);
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 

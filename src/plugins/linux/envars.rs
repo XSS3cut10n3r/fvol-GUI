@@ -84,15 +84,12 @@ impl Plugin for Envars {
         let pids = cfg.get_ints("pid");
         let filter = pid_filter(&pids);
         let (tasks, tail) = collect_tasks(k, &filter, false);
-        let rows = crate::util::par::par_map(tasks.len(), |i| task_rows(&tasks[i]));
-        for r in rows {
-            for row in r? {
-                out.row(0, row)?;
+        // per task in parallel, rows formatted on the workers, emitted in python's order
+        crate::plugins::emit_par_blocks(out, super::task_items(tasks, tail), |t, b| {
+            for row in task_rows(t)? {
+                b.push(row);
             }
-        }
-        match tail {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+            Ok(())
+        })
     }
 }

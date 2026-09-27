@@ -291,13 +291,19 @@ fn prior_to_struct_mount(v: &Obj) -> bool {
 /// python `_time_member_to_datetime(member)`.
 fn inode_time(i: &Obj, member: &str) -> Result<Value> {
     let i = tgt(i)?;
-    let sec = format!("{member}_sec");
-    let nsec = format!("{member}_nsec");
-    let ts = if i.has_member(&sec) && i.has_member(&nsec) {
+    // (`{member}_sec`, `{member}_nsec`, `__{member}`) without formatting them per call
+    let names: (std::borrow::Cow<str>, std::borrow::Cow<str>, std::borrow::Cow<str>) = match member {
+        "i_atime" => ("i_atime_sec".into(), "i_atime_nsec".into(), "__i_atime".into()),
+        "i_mtime" => ("i_mtime_sec".into(), "i_mtime_nsec".into(), "__i_mtime".into()),
+        "i_ctime" => ("i_ctime_sec".into(), "i_ctime_nsec".into(), "__i_ctime".into()),
+        _ => (format!("{member}_sec").into(), format!("{member}_nsec").into(), format!("__{member}").into()),
+    };
+    let (sec, nsec, under) = (&*names.0, &*names.1, &*names.2);
+    let ts = if i.has_member(sec) && i.has_member(nsec) {
         // python adds `has_member(..._nsec) / 1e9` (True / 1e9): replicate
-        Timespec::from_ints(i.m(&sec)?.int()?, 1)
-    } else if i.has_member(&format!("__{member}")) {
-        i.m(&format!("__{member}"))?.timespec()?
+        Timespec::from_ints(i.m(sec)?.int()?, 1)
+    } else if i.has_member(under) {
+        i.m(under)?.timespec()?
     } else if i.has_member(member) {
         i.m(member)?.timespec()?
     } else {

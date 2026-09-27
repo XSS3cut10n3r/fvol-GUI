@@ -386,7 +386,7 @@ fn scan_self_referential(vm: &Module, lo: u64, hi: u64, align: u64, off: u64, mo
     let layer = vm.layer();
     let mask = layer.address_mask();
     // chunks of the address range, a multiple of `align` so chunk starts stay on the grid
-    const CHUNK: u64 = 1 << 18;
+    const CHUNK: u64 = 1 << 16;
     let step = (CHUNK / align).max(1) * align;
     let n = (hi - lo).div_ceil(step);
     let parts = crate::util::par::par_map(n as usize, |i| {
@@ -405,7 +405,9 @@ fn scan_self_referential(vm: &Module, lo: u64, hi: u64, align: u64, off: u64, mo
             }
             true
         });
-        let mut buf = Vec::new();
+        let ms = mod_size as usize;
+        // last candidate offset `d` inside the chunk (`a = cstart + d < cend`)
+        let d_end = cend - cstart - 1;
         for (rs, re) in runs {
             // candidate addresses a with [a+off, a+off+mod_size) inside [rs, re)
             let first_v = rs;
@@ -415,38 +417,34 @@ fn scan_self_referential(vm: &Module, lo: u64, hi: u64, align: u64, off: u64, mo
             };
             // map virtual positions back to candidate addresses: a = cstart + (v - vstart)
             let d0 = first_v - vstart;
-            let d1 = last_v - vstart;
+            let d1 = (last_v - vstart).min(d_end);
             // first grid point >= d0
-            let k0 = d0.div_ceil(align) * align;
-            if k0 > d1 {
-                continue;
-            }
-            buf.resize((re - rs) as usize, 0);
-            if layer.read(rs, &mut buf).is_err() {
-                // fall back to exact per-candidate reads
-                let mut d = k0;
-                while d <= d1 {
-                    let a = cstart + d;
-                    if a < cend {
-                        let mut b = [0u8; 8];
-                        if layer.read(vstart + d, &mut b[..mod_size as usize]).is_ok() && u64::from_le_bytes(b) == a {
-                            hits.push(a);
-                        }
-                    }
-                    d += align;
-                }
-                continue;
-            }
-            let mut d = k0;
+            let mut d = d0.div_ceil(align) * align;
             while d <= d1 {
                 let a = cstart + d;
-                if a >= cend {
-                    break;
+                let v = vstart + d;
+                let (pg, o) = (v & !0xfff, (v & 0xfff) as usize);
+                if o + ms <= 0x1000 {
+                    // every candidate whose value lies in this page, straight from the image
+                    if let Some(p) = layer.slice(pg, 0x1000) {
+                        let k = (((0x1000 - ms - o) as u64) / align).min((d1 - d) / align);
+                        let (mut o, mut a) = (o, a);
+                        for _ in 0..=k {
+                            let mut b = [0u8; 8];
+                            b[..ms].copy_from_slice(&p[o..o + ms]);
+                            if u64::from_le_bytes(b) == a {
+                                hits.push(a);
+                            }
+                            o += align as usize;
+                            a += align;
+                        }
+                        d += (k + 1) * align;
+                        continue;
+                    }
                 }
-                let p = (vstart + d - rs) as usize;
+                // a value across a page boundary, or memory that is not image-backed
                 let mut b = [0u8; 8];
-                b[..mod_size as usize].copy_from_slice(&buf[p..p + mod_size as usize]);
-                if u64::from_le_bytes(b) == a {
+                if layer.read(v, &mut b[..ms]).is_ok() && u64::from_le_bytes(b) == a {
                     hits.push(a);
                 }
                 d += align;
