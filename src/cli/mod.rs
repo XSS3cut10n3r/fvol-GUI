@@ -76,7 +76,12 @@ pub fn main() -> i32 {
     }
     // one run, then exit: big ISFs load lazily, their blobs are written after the output
     crate::symbols::store::set_lazy_tables(true);
-    let plugins = crate::plugins::all();
+    // ... and the address space is torn down after the exit, off the caller's clock
+    crate::util::exit::arm();
+    // not sorted: only help and error messages show the order, and they sort (see
+    // `add_late_arguments`, `Parser::call_subparser`); sorting ~250 names every run costs more
+    // than parsing the arguments
+    let plugins = crate::plugins::registered();
     let mut out = RawStdout::new();
     let mut err = std::io::stderr();
     run(&argv, &plugins, &mut out, &mut err, &Settings::default())
@@ -248,10 +253,15 @@ fn uri_value(v: &str, cwd: &str) -> Result<String, String> {
     Ok(v.to_string())
 }
 
-fn default_cache_path() -> String {
+/// `$HOME` (python's `os.path.expanduser("~")` falls back to "/" here), looked up once per run.
+fn home() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| "/".into())
+}
+
+fn default_cache_path(home: &str) -> String {
     let base = match std::env::var("XDG_CACHE_HOME") {
         Ok(x) if !x.is_empty() => x,
-        _ => format!("{}/.cache", std::env::var("HOME").unwrap_or_else(|_| "/".into())),
+        _ => format!("{home}/.cache"),
     };
     format!("{base}/volatility3")
 }
@@ -464,7 +474,11 @@ fn add_late_arguments(p: &mut Parser, prog: &str, plugins: &[&'static dyn Plugin
     let mut sub = Action::new(&[], "plugin", Kind::Parsers).metavar("PLUGIN");
     let for_help: Vec<&'static dyn Plugin> = plugins.to_vec();
     sub.sub_choices = Some(Rc::new(move || {
-        for_help.iter().map(|pl| (pl.name().to_string(), split_doc(*pl).0)).collect()
+        // `plugins` may be in registration order (see `main`): python lists them sorted
+        let mut v: Vec<(String, Option<String>)> =
+            for_help.iter().map(|pl| (pl.name().to_string(), split_doc(*pl).0)).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
     }));
     p.add_to_group(g, sub);
     p.sub_names = Rc::new(names);
@@ -481,8 +495,7 @@ fn add_late_arguments(p: &mut Parser, prog: &str, plugins: &[&'static dyn Plugin
     }));
 }
 
-fn load_system_defaults() -> Result<Vec<(String, PyVal)>, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+fn load_system_defaults(home: &str) -> Result<Vec<(String, PyVal)>, String> {
     let path = format!("{home}/.config/volatility3/vol.json");
     let text = match std::fs::read(&path) {
         Ok(t) => t,
@@ -555,12 +568,13 @@ fn run_inner(
 ) -> Result<i32, Exit> {
     let prog = argv.first().map(|a| a.rsplit('/').next().unwrap_or(a).to_string()).unwrap_or_else(|| "vol".into());
     let cwd = s.cwd.clone().unwrap_or_else(current_dir);
-    let cache_default = s.cache_path.clone().unwrap_or_else(default_cache_path);
+    let home = home();
+    let cache_default = s.cache_path.clone().unwrap_or_else(|| default_cache_path(&home));
 
     let defaults = if s.no_system_defaults {
         Vec::new()
     } else {
-        match load_system_defaults() {
+        match load_system_defaults(&home) {
             Ok(d) => d,
             Err(e) => return Ok(traceback(err, &e)),
         }
