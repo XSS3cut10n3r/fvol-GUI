@@ -780,56 +780,15 @@ pub struct Shallow {
 /// ends inside a string, or a depth-1 value is not closed before the next opens. Nothing else
 /// is checked: the caller indexes and parses every byte (see `symbols::lazy`).
 pub fn shallow(buf: &[u8]) -> Option<Shallow> {
-    if buf.len() >= u32::MAX as usize - 64 {
-        return None;
-    }
-    let threads = if buf.len() >= PAR_MIN { crate::util::par::threads() } else { 1 };
-    let mut bounds = vec![0usize];
-    if threads > 1 {
-        let target = CHUNK.max(buf.len() / (threads * 2)).max(64 << 10);
-        let mut at = target;
-        while at < buf.len() {
-            match memchr_nl(&buf[at..(at + (64 << 10)).min(buf.len())]) {
-                Some(k) if at + k + 1 < buf.len() => {
-                    bounds.push(at + k + 1);
-                    at = at + k + 1 + target;
-                }
-                _ => break,
-            }
-        }
-    }
-    bounds.push(buf.len());
-    let n = bounds.len() - 1;
-    let run = |c: usize, depth: Option<i64>| shallow_range(buf, bounds[c], bounds[c + 1], depth);
-    // pass 1: each chunk's depth change (chunks start outside strings: checked by the end state)
-    let deltas: Vec<Option<(i64, Shallow)>> = if n > 1 { crate::util::pool::map(n, |c| run(c, None)) } else { vec![Some((0, Shallow::default()))] };
-    let mut starts = Vec::with_capacity(n);
-    let mut d = 0i64;
-    for x in &deltas {
-        starts.push(d);
-        d += x.as_ref()?.0;
-    }
-    if d != 0 {
-        return None;
-    }
-    // pass 2: the events
-    let parts: Vec<Option<(i64, Shallow)>> = if n > 1 { crate::util::pool::map(n, |c| run(c, Some(starts[c]))) } else { vec![run(0, Some(0))] };
-    let mut out = Shallow::default();
+    let (total, mut out) = shallow_span(buf, 0, buf.len(), 0)?;
     let mut opens: Vec<u32> = Vec::new();
     let mut closes: Vec<u32> = Vec::new();
-    let mut total = 0i64;
-    for p in parts {
-        let (dd, s) = p?;
-        total += dd;
-        out.d1.extend(s.d1);
-        out.keys.extend(s.keys);
-        for (o, c) in s.containers {
-            if o != u32::MAX {
-                opens.push(o);
-            }
-            if c != u32::MAX {
-                closes.push(c);
-            }
+    for (o, c) in std::mem::take(&mut out.containers) {
+        if o != u32::MAX {
+            opens.push(o);
+        }
+        if c != u32::MAX {
+            closes.push(c);
         }
     }
     // balanced, and opens and closes alternate
@@ -838,6 +797,59 @@ pub fn shallow(buf: &[u8]) -> Option<Shallow> {
     }
     out.containers = opens.into_iter().zip(closes).collect();
     Some(out)
+}
+
+/// [`shallow`] over one piece `buf[start..end]` of a document read in order (a document still
+/// being decoded, see `symbols::stream`), on all cores when it is big (the two passes of
+/// [`shallow`]): `start` is the end of the previous piece (0 first), outside strings like every
+/// piece boundary (cut the pieces after a newline), and `depth` the depth there (the sum of the
+/// previous pieces' changes). Returns the depth change and the piece's events, containers as
+/// `(open, u32::MAX)` / `(u32::MAX, close)` halves; `None` as [`shallow`] would (a bracket below
+/// depth 0, a piece ending in a string). The caller checks what [`shallow`] checks at the end
+/// (balance, alternating containers).
+pub fn shallow_span(buf: &[u8], start: usize, end: usize, depth: i64) -> Option<(i64, Shallow)> {
+    if end >= u32::MAX as usize - 64 || start > end || end > buf.len() {
+        return None;
+    }
+    let len = end - start;
+    let threads = if len >= PAR_MIN { crate::util::par::threads() } else { 1 };
+    let mut bounds = vec![start];
+    if threads > 1 {
+        let target = CHUNK.max(len / (threads * 2)).max(64 << 10);
+        let mut at = start + target;
+        while at < end {
+            match memchr_nl(&buf[at..(at + (64 << 10)).min(end)]) {
+                Some(k) if at + k + 1 < end => {
+                    bounds.push(at + k + 1);
+                    at = at + k + 1 + target;
+                }
+                _ => break,
+            }
+        }
+    }
+    bounds.push(end);
+    let n = bounds.len() - 1;
+    let run = |c: usize, depth: Option<i64>| shallow_range(buf, bounds[c], bounds[c + 1], depth);
+    // pass 1: each chunk's depth change (chunks start outside strings: checked by the end state)
+    let deltas: Vec<Option<(i64, Shallow)>> = if n > 1 { crate::util::pool::map(n, |c| run(c, None)) } else { vec![Some((0, Shallow::default()))] };
+    let mut starts = Vec::with_capacity(n);
+    let mut d = depth;
+    for x in &deltas {
+        starts.push(d);
+        d += x.as_ref()?.0;
+    }
+    // pass 2: the events
+    let parts: Vec<Option<(i64, Shallow)>> = if n > 1 { crate::util::pool::map(n, |c| run(c, Some(starts[c]))) } else { vec![run(0, Some(depth))] };
+    let mut out = Shallow::default();
+    let mut total = 0i64;
+    for p in parts {
+        let (dd, s) = p?;
+        total += dd;
+        out.d1.extend(s.d1);
+        out.keys.extend(s.keys);
+        out.containers.extend(s.containers);
+    }
+    Some((total, out))
 }
 
 /// [`shallow`] over `buf[start..end]` (starting outside strings): with `depth = None` only the

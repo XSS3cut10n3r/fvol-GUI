@@ -716,19 +716,51 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
     }
     // the build is parallel: start the pool's workers while this thread decompresses
     crate::util::pool::warm();
-    let json = match take_kept(loc, &url) {
-        Some(j) => JsonBuf::Owned(j),
-        None => {
-            let _t = crate::util::trace::span("isf read+decompress");
-            json_for_build(loc)?
-        }
+    let (json, lazy_refused) = match take_kept(loc, &url) {
+        Some(j) => (JsonBuf::Owned(j), false),
+        None => match streamed_load(loc, opts) {
+            Some(super::lazy::Streamed::Table(core)) => {
+                let core = std::sync::Arc::new(core);
+                lazy_register(loc, &url, &cf, &core);
+                return SymbolTable::from_lazy(core, name, &url);
+            }
+            // decoded, but the lazy index does not take it: built eagerly below
+            Some(super::lazy::Streamed::Json(v)) => (JsonBuf::Owned(v), true),
+            // (a failed streamed decode: the codec's own decode reports the error)
+            _ => {
+                let _t = crate::util::trace::span("isf read+decompress");
+                (json_for_build(loc)?, false)
+            }
+        },
     };
-    let json = match lazy_build(loc, &url, &cf, json, opts) {
-        Ok(core) => return SymbolTable::from_lazy(core, name, &url),
-        Err(j) => j,
+    let json = if lazy_refused {
+        json
+    } else {
+        match lazy_build(loc, &url, &cf, json, opts) {
+            Ok(core) => return SymbolTable::from_lazy(core, name, &url),
+            Err(j) => j,
+        }
     };
     let blob = build_remember(&url, cf, json, opts, true)?;
     SymbolTable::from_blob(Blob::Shared(blob), name, &url)
+}
+
+/// A big `.xz` ISF file loading as a lazy table: decoded while its lazy index reads the part
+/// already decoded (see [`super::stream`]). `None` when that does not apply (lazy tables off,
+/// natives given, another kind of file, a layout the streamed decoder leaves to the codec, a
+/// document under [`LAZY_MIN`]). `RSVOL_STREAM_ISF=0` turns it off.
+fn streamed_load(loc: &IsfLocation, opts: &BuildOptions) -> Option<super::lazy::Streamed> {
+    if !lazy_tables_on() || opts.natives.is_some() || std::env::var_os("RSVOL_STREAM_ISF").is_some_and(|v| v == "0") {
+        return None;
+    }
+    let IsfLocation::File(p) = loc else { return None };
+    if !p.as_os_str().as_encoded_bytes().ends_with(b".xz") {
+        return None;
+    }
+    let f = std::fs::File::open(p).ok()?;
+    let raw = Mmap::map(&f).ok()?;
+    let plan = super::stream::plan(raw.as_slice()).filter(|pl| pl.total >= LAZY_MIN)?;
+    Some(super::lazy::LazyCore::build_streaming(raw.as_slice(), &plan, opts))
 }
 
 // ---------------------------------------------------------------------------------------------
