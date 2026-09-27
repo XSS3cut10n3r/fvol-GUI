@@ -250,7 +250,7 @@ The design rule is to know the hardware and do the minimum work. The techniques,
 | Caching                       | Symbol tables, the identifier index, automagic results and raw scan hits. |
 | Speculation                   | Likely kernel symbol tables are built while the scans that confirm them run. |
 | Laziness                      | A first run resolves only the types and symbols it uses; the full symbol table is built by a detached helper after the output. |
-| Fixed per-run cost            | A static-pie binary without dynamic loading, a C `main` that skips most of the Rust runtime setup, a lazy `Context`, and cache writes on background threads that finish after the output. A warm `windows.pslist.PsList` takes about 3 ms. |
+| Fixed per-run cost            | A static-pie binary without dynamic loading, hot code laid out together and mapped with huge pages where the kernel allows, a C `main` that skips most of the Rust runtime setup, a lazy `Context`, cache writes on background threads that finish after the output, and the address-space teardown moved to a helper that finishes after the exit ([building.md](building.md#startup)). A warm `windows.pslist.PsList` takes about 2 ms on the benchmark VM. |
 | Allocation-free inner loops   | Precomputed member offsets, compact 8-byte rows in the timeliner merge, table-driven cell formatting. |
 
 Each from-scratch library is benchmarked against its reference implementation on the same input
