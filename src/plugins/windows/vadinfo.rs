@@ -72,28 +72,19 @@ pub fn vad_dump(ctx: &Context, proc: &Obj, vad: &Obj, maxsize: i128) -> Option<S
         (Ok(s), Ok(e)) => (s, e),
         _ => return None,
     };
-    let size = vad.get_size().ok()?;
-    if 0 < maxsize && maxsize < size as i128 {
+    // python `get_size()`: `end - start + 1` as a python int, negative for a smeared VAD with
+    // start > end (then the maxsize test passes and an empty file is written)
+    let size = end as i128 - start as i128 + 1;
+    if 0 < maxsize && maxsize < size {
         return None;
     }
     let pid = proc.m("UniqueProcessId").and_then(|p| p.int()).ok()?;
     let pl = proc.add_process_layer().ok()?;
     let name = format!("pid.{pid}.vad.{start:#x}-{end:#x}.dmp");
     let (f, final_name) = ctx.create_output_file(&name).ok()?;
-    // python writes `read(off, 10 MiB, pad=True)` chunks of [start, start + size): only the
-    // mapped runs can hold anything but zeros; zero pages stay holes of the same file
-    let stop = start.wrapping_add(size);
-    if start < stop {
-        let mut w = crate::plugins::windows::memmap::SparseDump::new(&f);
-        let mut res = Ok(());
-        pl.mapping_targets(start, stop - start, &mut |m, _| {
-            res = w.range(pl, m.offset, m.len, m.offset - start);
-            res.is_ok()
-        });
-        w.set_size(stop - start);
-        if res.is_err() || w.finish().is_err() {
-            return None;
-        }
+    // python's `read(off, 10 MiB, pad=True)` loop; zero pages stay holes
+    if size > 0 && crate::cli::files::dump_padded_reads(&f, pl, start, size as u128).is_err() {
+        return None;
     }
     Some(final_name)
 }

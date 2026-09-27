@@ -2,6 +2,7 @@
 //! time conversions, cache/config paths.
 
 pub mod bg;
+pub mod bgwrite;
 pub mod download;
 pub mod exit;
 pub mod fxhash;

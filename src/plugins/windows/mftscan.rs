@@ -26,7 +26,7 @@ use crate::layers::Layer;
 use crate::layers::scan::{MultiStringScanner, Scanner, scan_each};
 use crate::objects::LayerRef;
 use crate::plugins::{Config, Plugin, TimeKind, TimelineBatch, TimelineEvent, TimelineGroups, TimelineTime};
-use crate::renderers::text::RowEncoder;
+use crate::renderers::text::{JsonTrees, RowEncoder};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::mft::{MftEntry, mft_flags_name, permission_flags_name, signature_str};
 use crate::util::time::wintime_to_datetime;
@@ -350,6 +350,77 @@ fn run_encoded(layer: &dyn Layer, enc: &RowEncoder, out: &mut dyn RowSink) -> Re
     res
 }
 
+/// MFTScan's rows with a json / jsonl encoder: each scan batch is also encoded on its scan
+/// worker as complete trees (a STANDARD_INFORMATION row with its FILE_NAME children,
+/// `RowEncoder::tree_row`). A batch goes to the renderer as one block when it starts with a
+/// top-level row and so does the batch after it (then no later row belongs to its last tree);
+/// otherwise its rows go one by one. Each batch is therefore held until the next one arrives.
+fn run_trees(layer: &dyn Layer, enc: &RowEncoder, out: &mut dyn RowSink) -> Result<()> {
+    #[derive(Default)]
+    struct Batch {
+        b: MftScanBatch,
+        block: Vec<u8>,
+        t: JsonTrees,
+        /// encoded as trees (its first row is at depth 0)
+        trees: bool,
+    }
+    fn emit(mut x: Batch, next_top: bool, enc: &RowEncoder, out: &mut dyn RowSink) -> Result<()> {
+        if x.trees && next_top {
+            let (n, last) = enc.trees_end(&mut x.t, &mut x.block);
+            if out.rows_encoded_trees(&mut x.block, n, last)? {
+                return x.b.err.map_or(Ok(()), Err);
+            }
+        }
+        for r in &x.b.rows {
+            out.row_ref(r.file_name as usize, &mftscan_values(&x.b, r))?;
+        }
+        x.b.err.map_or(Ok(()), Err)
+    }
+    let mut held: Option<Batch> = None;
+    let mut res = Ok(());
+    enumerate_mft_batches(
+        layer,
+        Batch::default,
+        |x: &mut Batch, e| {
+            let n0 = x.b.rows.len();
+            let more = add_mftscan_record(&mut x.b, e);
+            if n0 == 0 {
+                x.trees = x.b.rows.first().is_some_and(|r| !r.file_name);
+            }
+            if x.trees {
+                for r in &x.b.rows[n0..] {
+                    enc.tree_row(&mut x.t, &mut x.block, r.file_name as usize, &mftscan_values(&x.b, r));
+                }
+            }
+            more
+        },
+        |x| {
+            res = (|| {
+                if x.b.rows.is_empty() && x.b.err.is_none() {
+                    return Ok(());
+                }
+                // python raised after this batch's rows: nothing follows them
+                let next_top = x.b.rows.first().is_none_or(|r| !r.file_name);
+                if let Some(h) = held.take() {
+                    emit(h, next_top, enc, out)?;
+                }
+                if x.b.err.is_some() {
+                    return emit(x, true, enc, out);
+                }
+                held = Some(x);
+                Ok(())
+            })();
+            res.is_ok()
+        },
+    );
+    if res.is_ok()
+        && let Some(h) = held.take()
+    {
+        res = emit(h, true, enc, out);
+    }
+    res
+}
+
 /// python `MFTScan.generate_timeline()` for one record: its events are appended to `g` (four
 /// per STANDARD_INFORMATION / FILE_NAME row, yielded Created, Modified, Changed, Accessed; one
 /// group each); `Err` = python raised after them.
@@ -603,9 +674,10 @@ impl Plugin for MFTScan {
             Column::new("Accessed", ColType::DateTime),
             Column::new("Filename", ColType::Str),
         ])?;
-        match out.encoder().filter(|e| e.supports_depth()) {
-            Some(enc) => run_encoded(layer, &enc, out),
-            None => run_batches(layer, add_mftscan_record, emit_mftscan, out),
+        match out.encoder() {
+            Some(enc) if enc.supports_depth() => run_encoded(layer, &enc, out),
+            Some(enc) if enc.supports_trees() => run_trees(layer, &enc, out),
+            _ => run_batches(layer, add_mftscan_record, emit_mftscan, out),
         }
     }
     /// python `generate_timeline()`. If python raises midway (an unreadable FILE_NAME name or

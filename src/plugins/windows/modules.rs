@@ -10,7 +10,6 @@ use crate::plugins::{Config, Plugin, ReqKind, Requirement};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::TableRef;
 use crate::symbols::windows::{WinExt, pe};
-use std::io::Write;
 
 pub struct Modules;
 
@@ -121,13 +120,13 @@ pub fn find_session_layer(layers: &[LayerRef], base: u64) -> Option<LayerRef> {
 /// python returns `preferred_filename` inside the `with` block (before close), i.e. the
 /// requested name even when the file got a `-N` suffix.
 pub fn dump_pe(ctx: &Context, pe_table: TableRef, layer: LayerRef, file_name: &str, base: u64) -> Option<String> {
-    let (mut f, _final_name) = ctx.create_output_file(file_name).ok()?;
+    let (f, _final_name) = ctx.create_output_file(file_name).ok()?;
     let printed = file_name.to_string();
     let dos = Obj::named(Space::on(layer, pe_table), "_IMAGE_DOS_HEADER", base).ok()?;
-    let (pieces, err) = pe::reconstruct(&dos);
-    let _ = pe::write_pieces(&mut f, &pieces);
-    let _ = f.flush();
-    if err.is_some() { None } else { Some(printed) }
+    // python's bytes, the all-zero pages (most of a module image) left as holes; python
+    // catches OSError / ValueError of the writes too
+    let (io, err) = pe::write_reconstructed(&f, &dos);
+    if err.is_some() || io.is_err() { None } else { Some(printed) }
 }
 
 /// python `ntpath.basename`.

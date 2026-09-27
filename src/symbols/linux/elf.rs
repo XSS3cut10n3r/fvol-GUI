@@ -27,7 +27,6 @@ use crate::objects::util::array_to_string;
 use crate::objects::{LayerRef, Obj, Space};
 use crate::symbols::{TableRef, Ty};
 use crate::util::FxHashSet;
-use std::io::Write;
 
 /// python `linux_constants.ELF_MAX_EXTRACTION_SIZE`.
 pub const ELF_MAX_EXTRACTION_SIZE: i128 = 1024 * 1024 * 1024 * 4 - 1;
@@ -462,18 +461,13 @@ pub fn elf_dump_ex(ctx: &Context, proc_layer: LayerRef, elf_table: TableRef, vma
     let comm = array_to_string(&task.m("comm")?, None)?;
     // not sanitized (python passes it straight to open(); a '/' in comm raises ValueError)
     let name = format!("pid.{pid}.{comm}.{vm_start:#x}.dmp");
-    let (mut f, final_name) = ctx.create_output_file(&name)?;
-    // stream the padded reads (python concatenates them in memory first)
-    let mut buf = vec![0u8; 1 << 20];
+    let (f, final_name) = ctx.create_output_file(&name)?;
+    // python concatenates one padded read per section (a long read is not the same as reading
+    // it piecewise); written straight from the target layers, zero pages as holes
+    let mut file_off = 0u64;
     for (start, size) in sections {
-        let mut done = 0u64;
-        while done < size {
-            let n = (size - done).min(buf.len() as u64) as usize;
-            proc_layer.read_padded(vm_start.wrapping_add(start).wrapping_add(done), &mut buf[..n]);
-            f.write_all(&buf[..n])?;
-            done += n as u64;
-        }
+        crate::cli::files::dump_padded_reads_at(&f, proc_layer, vm_start.wrapping_add(start), size as u128, size as u128, file_off)?;
+        file_off += size;
     }
-    f.flush()?;
     Ok(Some((name, final_name)))
 }

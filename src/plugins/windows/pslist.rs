@@ -10,7 +10,6 @@ use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::windows::{WinExt, pe};
 use crate::symbols::{StrEnc, StrErrors};
 use crate::util::FxHashSet;
-use std::io::Write;
 
 pub struct PsList;
 
@@ -75,10 +74,9 @@ pub fn process_dump(ctx: &Context, k: &WinKernel, proc: &Obj) -> Option<String> 
         let (f, printed) = ctx.create_output_file(&fname)?;
         Ok((f, printed, dos))
     })();
-    let (mut f, printed, dos) = r.ok()?;
-    let (pieces, _err) = pe::reconstruct(&dos);
-    let _ = pe::write_pieces(&mut f, &pieces);
-    let _ = f.flush();
+    let (f, printed, dos) = r.ok()?;
+    // python catches every exception of the writes and still returns the file
+    let _ = pe::write_reconstructed(&f, &dos);
     Some(printed)
 }
 

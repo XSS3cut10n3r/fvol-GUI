@@ -69,7 +69,28 @@ pub fn parse_fb_info(fb_info: &Obj) -> Result<Framebuffer> {
 /// `int.from_bytes(b"")`), values clipped to 0..=255 like pillow's `putpixel`.
 pub fn fb_raw_to_rgba(xres: u64, yres: u64, bits_per_pixel: u64, raw: &[u8], fields: &[(u32, u32, u32); 4]) -> Vec<u8> {
     let bpp = (bits_per_pixel / 8) as usize;
-    let n = (xres * yres) as usize;
+    let n = xres.wrapping_mul(yres) as usize;
+    // the common 32 bpp layouts (every channel one whole byte of the pixel, or absent): a byte
+    // shuffle with the same result as the generic loop
+    if bpp == 4
+        && n.checked_mul(4).is_some_and(|b| raw.len() >= b)
+        && fields.iter().all(|&(o, l, m)| l == 0 || (l == 8 && o % 8 == 0 && o < 32 && m == 0))
+    {
+        // source byte of each output channel: 0..4 = the pixel's bytes, 4 + i = channel i's
+        // default (0, 0, 0, 255) when the channel is absent
+        let src: [usize; 4] = std::array::from_fn(|i| if fields[i].1 == 0 { 4 + i } else { (fields[i].0 / 8) as usize });
+        let mut out = vec![0u8; n * 4];
+        for (px, dst) in raw[..n * 4].chunks_exact(4).zip(out.chunks_exact_mut(4)) {
+            let ext = [px[0], px[1], px[2], px[3], 0, 0, 0, 255];
+            dst.copy_from_slice(&[ext[src[0]], ext[src[1]], ext[src[2]], ext[src[3]]]);
+        }
+        return out;
+    }
+    fb_raw_to_rgba_generic(n, bpp, raw, fields)
+}
+
+/// [`fb_raw_to_rgba`] for any pixel layout: python's per-pixel bit arithmetic.
+fn fb_raw_to_rgba_generic(n: usize, bpp: usize, raw: &[u8], fields: &[(u32, u32, u32); 4]) -> Vec<u8> {
     let mut out = Vec::with_capacity(n * 4);
     let mut pos = 0usize;
     for _ in 0..n {
@@ -206,10 +227,33 @@ impl Plugin for Fbdev {
 
 #[cfg(test)]
 mod tests {
-    use super::fb_raw_to_rgba;
+    use super::{fb_raw_to_rgba, fb_raw_to_rgba_generic};
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// The 32 bpp byte-shuffle path gives the generic path's pixels (whole-byte channels, absent
+    /// channels, a short buffer, layouts the fast path must not take).
+    #[test]
+    fn rgba_fast_path_matches_generic() {
+        let raw: Vec<u8> = (0..4 * 37 * 5 + 3).map(|i: u32| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let layouts: [[(u32, u32, u32); 4]; 7] = [
+            [(16, 8, 0), (8, 8, 0), (0, 8, 0), (24, 8, 0)],
+            [(16, 8, 0), (8, 8, 0), (0, 8, 0), (0, 0, 0)],
+            [(0, 8, 0), (8, 8, 0), (16, 8, 0), (0, 0, 0)],
+            [(24, 8, 0), (16, 8, 0), (8, 8, 0), (0, 8, 0)],
+            [(0, 0, 0), (8, 8, 0), (0, 0, 0), (0, 0, 0)],
+            // generic only: a reversed channel, a 10-bit channel
+            [(16, 8, 1), (8, 8, 0), (0, 8, 0), (0, 0, 0)],
+            [(20, 10, 0), (10, 10, 0), (0, 10, 0), (30, 2, 0)],
+        ];
+        for f in &layouts {
+            for (x, y) in [(37u64, 5u64), (1, 1), (5, 3), (64, 64)] {
+                let n = (x * y) as usize;
+                assert_eq!(fb_raw_to_rgba(x, y, 32, &raw, f), fb_raw_to_rgba_generic(n, 4, &raw, f), "{f:?} {x}x{y}");
+            }
+        }
     }
 
     #[test]

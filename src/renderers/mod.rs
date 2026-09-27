@@ -181,6 +181,16 @@ pub trait RowSink {
     fn rows_encoded_at(&mut self, _block: &[u8], _nrows: usize, _first_depth: usize, _last_depth: usize) -> Result<bool> {
         Ok(false)
     }
+
+    /// Append a block of complete trees encoded with `RowEncoder::tree_row` /
+    /// `RowEncoder::trees_end` (json / jsonl: [`text::JsonTrees`] gives `nrows` and
+    /// `last_depth`), after every row emitted so far. The caller guarantees that the next row
+    /// (if any) is at depth 0, i.e. that no later row belongs to the block's trees. The sink may
+    /// take the buffer (leaving it empty) or copy it. `false` = not taken, nothing appended:
+    /// emit the rows one by one.
+    fn rows_encoded_trees(&mut self, _block: &mut Vec<u8>, _nrows: usize, _last_depth: usize) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Depth-0 rows produced off the output thread (a worker of a parallel plugin), handed to the

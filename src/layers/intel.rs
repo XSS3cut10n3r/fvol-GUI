@@ -1207,6 +1207,27 @@ impl Layer for IntelLayer {
     }
 }
 
+// Used by the dump writers (vadinfo / PE dumps, `PeView`): kept as a separate block so the
+// layer internals above stay untouched.
+impl IntelLayer {
+    /// The chunks a padded read of `[addr, addr + len)` copies, in order: `f(offset, size,
+    /// mapped, target layer)` -- read_impl's single-page fast path, else python's
+    /// `_mapping(offset, length, ignore_errors=True)` walk of the whole range, fault skips
+    /// included. Every other byte of the read is zero. This is exactly `read(addr, len,
+    /// pad=True)`, which is NOT the same as reading the range page by page (a large page whose
+    /// physical range is only partly valid is skipped as a whole by the long read), nor as
+    /// [`Layer::mapping_targets`]. `f` returns false to stop.
+    pub fn padded_read_chunks(&self, addr: u64, len: u64, f: &mut dyn FnMut(u64, u64, u64, &dyn Layer) -> bool) {
+        if len > 0 && (addr & 0xfff) + len <= 0x1000 {
+            if let Some(page) = self.page_fast(addr) {
+                f(addr, len, page + (addr & 0xfff), self.phys.as_ref());
+                return;
+            }
+        }
+        let _ = self.walk(addr, len, true, |off, size, mapped, t| f(off, size, mapped, self.target_layer(t)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

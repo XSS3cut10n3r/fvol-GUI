@@ -1071,16 +1071,20 @@ impl<W: Write + Send> FinishWrite for crate::codecs::gzip_enc::GzipEncoder<W> {
 }
 
 /// Our deflate level for the `.tar.gz`. python uses zlib level 9; the tarball bytes differ from
-/// python's anyway (timestamps), so we pick the level that gives python's compression ratio
-/// or better at a fraction of the CPU (noble ELF image: 3.8 GB tar -> 837.5 MB in ~3 s on 20
-/// threads, python's zlib -9: 842 MB). The gzip header stays python's (XFL = 2).
-const GZ_LEVEL: u32 = 4;
+/// python's anyway (the member mtimes and the gzip MTIME are the time of the run), only the
+/// tar members must match. Level 1 is the single-probe fast finder: half the CPU of level 4
+/// for ~8% more output (noble ELF image: 3.8 GB tar -> 905 MB; level 4: 837 MB; python's zlib
+/// -9: 842 MB), and the run is bound by compression CPU, then by writeback of the output.
+/// The gzip header stays python's (XFL = 2).
+const GZ_LEVEL: u32 = 1;
 
 /// python `tarfile.open(fileobj=..., mode=f"w:{format}")`: gzip (`GzipFile(compresslevel=9)`,
 /// header MTIME `int(time.time())`), bzip2 (`BZ2File(compresslevel=9)`) or xz
 /// (`LZMAFile(preset=None)` = preset 6, CRC64).
 fn open_compressor(format: &str, file: std::fs::File, mtime: u32) -> Result<Box<dyn FinishWrite>> {
-    let w = std::io::BufWriter::with_capacity(1 << 20, file);
+    // the file writes run on their own thread: when the kernel throttles them (dirty-page
+    // writeback), the compressor keeps going
+    let w = crate::util::bgwrite::ThreadWriter::new(file, 1 << 20, 16);
     match format {
         "gz" => {
             let mut opts = crate::codecs::gzip_enc::GzipOptions::python(9, mtime);
@@ -1229,7 +1233,11 @@ fn recover_fs(ctx: &Context, k: &LinuxKernel, ps: u64, format: &str, tmpfs_only:
         std::fs::create_dir_all(dir)?;
         format!("{dir}/tmp_rsvol_recoverfs_{}.vol3", std::process::id())
     };
-    let tmp_file = std::fs::File::create(&tmp_path)?;
+    // python's file handler writes a mkstemp file (mode 0o600) that it renames into place
+    let tmp_file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(crate::cli::files::OUTPUT_FILE_MODE).open(&tmp_path)?
+    };
     drop(prep_span);
     let tar_span = crate::util::trace::span("recoverfs: tar + compress");
     let result = (|| -> Result<()> {
