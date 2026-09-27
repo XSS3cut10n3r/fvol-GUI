@@ -19,7 +19,7 @@ const GROUP: u64 = 80; // "64sQQ"
 /// python `VmwareStacker.stack`: `<name>.vmem` + `<name>.vmss`, else `<name>.vmsn`.
 /// `location` is the local file of the `.vmem`, `url` python's location of it (tested for
 /// the `.vmem` suffix, as python does; when remote, the metadata file next to it is
-/// downloaded into the rsvol cache like the image). Returns the layer and python's location
+/// downloaded into the fastvol cache like the image). Returns the layer and python's location
 /// of the metadata file (the meta_layer's `location` in configurations). `native_table` is set
 /// once the metadata file is open: python then constructs the `VmwareLayer`, whose
 /// `_read_header` first appends a native `vmware` symbol table to the symbol space (it stays

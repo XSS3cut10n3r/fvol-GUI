@@ -2546,7 +2546,7 @@ pub(crate) mod fast {
                 ub += l.nodes.iter().map(|n| NODE_SZ + if let LNode::Holder(_, name) = n { name.len() } else { 0 }).sum::<usize>();
             }
             std::thread::Builder::new()
-                .name("rsvol-prefault".into())
+                .name("fastvol-prefault".into())
                 .spawn(move || {
                     let mut v = vec![0u8; ub];
                     let p = v.as_mut_ptr();
@@ -3167,12 +3167,12 @@ pub(crate) mod tests {
         Ok(h)
     }
 
-    /// `RSVOL_BENCH_JSON=path cargo test --release isf_parse_bench -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_JSON=path cargo test --release isf_parse_bench -- --ignored --nocapture`
     /// (compare with bench/refbench/isf_json_bench.sh: simdjson, yyjson, python json).
     #[test]
     #[ignore]
     fn isf_parse_bench() {
-        let path = std::env::var("RSVOL_BENCH_JSON").expect("RSVOL_BENCH_JSON");
+        let path = crate::util::env::var("BENCH_JSON").expect("FASTVOL_BENCH_JSON");
         let data = std::fs::read(&path).unwrap();
         let mb = data.len() as f64 / 1e6;
         let best = |f: &mut dyn FnMut()| -> f64 {

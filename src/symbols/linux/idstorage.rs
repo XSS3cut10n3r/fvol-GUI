@@ -523,14 +523,14 @@ mod pagecache_tests {
 
     /// Dumps an inode's page cache like python `linux.pagecache.InodePages --inode X --dump`
     /// (`write_inode_content_to_stream`) to check IDStorage / PageCache / page.get_content:
-    /// `RSVOL_BENCH_IMAGE=<image> RSVOL_INODE=0x... RSVOL_TEST_OUT=<file> cargo test --profile fast
+    /// `FASTVOL_BENCH_IMAGE=<image> FASTVOL_INODE=0x... FASTVOL_TEST_OUT=<file> cargo test --profile fast
     /// inode_dump_like -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn inode_dump_like() {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
-        let addr = u64::from_str_radix(std::env::var("RSVOL_INODE").unwrap().trim_start_matches("0x"), 16).unwrap();
-        let out = std::env::var("RSVOL_TEST_OUT").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
+        let addr = u64::from_str_radix(crate::util::env::var("INODE").unwrap().trim_start_matches("0x"), 16).unwrap();
+        let out = crate::util::env::var("TEST_OUT").unwrap();
         let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
         let ctx = Context::new(opts).unwrap();
         let k = ctx.linux_kernel().unwrap();

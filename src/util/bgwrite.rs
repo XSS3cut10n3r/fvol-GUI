@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn in_order_and_flushed() {
-        let path = std::env::temp_dir().join(format!("rsvol-bgwrite-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("fastvol-bgwrite-{}", std::process::id()));
         let f = std::fs::File::create(&path).unwrap();
         let mut w = ThreadWriter::new(f, 1000, 2);
         let mut want = Vec::new();

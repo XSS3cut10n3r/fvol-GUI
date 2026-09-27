@@ -1,6 +1,6 @@
 //! Automagic: stack layers on the input file and discover OS kernels (python
 //! `framework/automagic`). Everything here is lazy -- the `Context` runs it when a plugin
-//! first asks for a kernel -- and results are cached per image in `~/.cache/rsvol/automagic/`
+//! first asks for a kernel -- and results are cached per image in `~/.cache/fastvol/automagic/`
 //! (key: canonical path + size + mtime), so warm runs skip all scanning. Failures ("no Linux
 //! kernel in this image") are remembered too ([`cache::load_failure`]).
 //!
@@ -117,7 +117,7 @@ pub mod cache {
         if let Some(r) = TEST_ROOT.with(|r| r.borrow().clone()) {
             return r;
         }
-        paths::rsvol_cache_dir()
+        paths::cache_dir()
     }
 
     /// Bump when the cached automagic semantics change.
@@ -137,7 +137,10 @@ pub mod cache {
     }
 
     fn load_at(f: &Path, key: &str) -> Option<Vec<(String, String)>> {
-        let s = std::fs::read_to_string(f).ok()?;
+        // (the first read of a run on every OS: a missing file may mean the cache directory of
+        // the project's former name is still to be moved into place, see migrate_legacy_cache)
+        let read = || std::fs::read_to_string(f).ok();
+        let s = read().or_else(|| paths::migrate_legacy_cache().then(read).flatten())?;
         let mut lines = s.lines();
         if lines.next()?.strip_prefix("key=")? != key {
             return None;
@@ -170,7 +173,7 @@ pub mod cache {
     // remembered failures
 
     /// Key material of a remembered failure of the discovery `kind`: `kind` itself and the
-    /// rsvol executable (size, mtime, path), since another build may find a kernel this one
+    /// fastvol executable (size, mtime, path), since another build may find a kernel this one
     /// could not; with `None` for the executable nothing is remembered.
     fn failure_kind(kind: &str) -> Option<String> {
         static EXE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -188,7 +191,7 @@ pub mod cache {
     /// discoveries of the two other OSes (full-image banner and DTB scans, 0.2-2 s).
     ///
     /// A failure is remembered per image (path, size, mtime), per `kind` (which carries what
-    /// the positive result's key carries: symbol path fingerprint, `--stackers`) and per rsvol
+    /// the positive result's key carries: symbol path fingerprint, `--stackers`) and per fastvol
     /// executable; `deps_hold` checks what else the discovery read (e.g. the identifier index
     /// state for every banner of the OS, [`crate::symbols::store::IdentifierIndex::os_deps`]).
     pub fn load_failure(image: &Path, kind: &str, deps_hold: impl FnOnce(&[(String, String)]) -> bool) -> Option<Vec<(String, String)>> {
@@ -215,7 +218,7 @@ pub mod cache {
     /// kind's result.
     #[test]
     fn failures_are_keyed() {
-        let dir = std::env::temp_dir().join(format!("rsvol-amcache-neg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-amcache-neg-{}", std::process::id()));
         let img = dir.join("image.raw");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&img, b"not a memory image").unwrap();
@@ -245,7 +248,7 @@ pub mod cache {
     /// A file found under a colliding name but written for another key is a miss.
     #[test]
     fn key_is_verified() {
-        let dir = std::env::temp_dir().join(format!("rsvol-amcache-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-amcache-{}", std::process::id()));
         let f = dir.join("0123456789abcdef.win");
         store_at(&f, "aa01", &[("dtb", "0x1ad000".to_string())]);
         assert_eq!(load_at(&f, "aa01"), Some(vec![("dtb".to_string(), "0x1ad000".to_string())]));

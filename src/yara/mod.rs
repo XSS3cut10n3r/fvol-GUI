@@ -1,4 +1,4 @@
-//! Pattern matching engines for rsvol (std only, SIMD via std::arch).
+//! Pattern matching engines for fastvol (std only, SIMD via std::arch).
 //!
 //! * [`regex`] — python-`re` compatible regex engine over bytes (what volatility3's
 //!   `RegExScanner`, `regexscan`, `vadregexscan`, `vmaregexscan` use):

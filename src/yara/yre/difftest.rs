@@ -1,5 +1,5 @@
 //! Differential-test driver for YARA hex / regex strings (run by
-//! bench/scripts/yre_diff.py): `$RSVOL_YRE_CASES` -> `$RSVOL_YRE_OUT`.
+//! bench/scripts/yre_diff.py): `$FASTVOL_YRE_CASES` -> `$FASTVOL_YRE_OUT`.
 //!
 //! Case line: `id \t kind(hex|re) \t source_hex \t mods \t data_hex` where mods is a
 //! comma list of: nocase, dotall, wide, ascii, fullword.
@@ -40,10 +40,10 @@ pub fn run_case(kind: &str, src: &[u8], mods: &str, data: &[u8]) -> String {
 #[test]
 #[ignore]
 fn yara_yre_difftest_driver() {
-    let Ok(inp) = std::env::var("RSVOL_YRE_CASES") else { return };
-    let out = std::env::var("RSVOL_YRE_OUT").unwrap_or_else(|_| format!("{inp}.out"));
+    let Ok(inp) = crate::util::env::var("YRE_CASES") else { return };
+    let out = crate::util::env::var("YRE_OUT").unwrap_or_else(|_| format!("{inp}.out"));
     let data = std::fs::read_to_string(&inp).expect("read cases");
-    let trace = std::env::var("RSVOL_YRE_TRACE").is_ok();
+    let trace = crate::util::env::var("YRE_TRACE").is_ok();
     let mut res = String::new();
     for line in data.lines() {
         let f: Vec<&str> = line.split('\t').collect();

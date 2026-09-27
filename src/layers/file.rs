@@ -96,7 +96,7 @@ impl FileLayer {
     /// Called by scan workers right after a big chunk: the entries its structure reads faulted
     /// in are torn down in parallel instead of serially at exit (mftscan: 24-27 ms of exit
     /// teardown without the CLI's exit helper, see `util::exit`) and do not pile up in a
-    /// long-running process (`vol serve`).
+    /// long-running process (`fvol serve`).
     pub fn release(&self, off: u64, len: u64) {
         let (Ok(off), Ok(len)) = (usize::try_from(off), usize::try_from(len)) else { return };
         self.map.advise(off, len, crate::util::mmap::MADV_DONTNEED);
@@ -248,9 +248,9 @@ fn read_padded_from(data: &[u8], addr: u64, buf: &mut [u8]) {
     buf[avail..].fill(0);
 }
 
-/// Whether structure reads use the second, `MADV_RANDOM` mapping (`RSVOL_NO_RANDOM_MAP=1`
+/// Whether structure reads use the second, `MADV_RANDOM` mapping (`FASTVOL_NO_RANDOM_MAP=1`
 /// turns it off, for A/B measurements).
 fn random_map_enabled() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var_os("RSVOL_NO_RANDOM_MAP").is_none_or(|v| v.is_empty() || v == "0"))
+    *E.get_or_init(|| crate::util::env::var_os("NO_RANDOM_MAP").is_none_or(|v| v.is_empty() || v == "0"))
 }

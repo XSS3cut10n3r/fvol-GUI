@@ -189,7 +189,7 @@ fn row(task: &Obj) -> Result<Vec<Value>> {
     let usecs = start.m("tv_usec")?.int()?;
     // datetime.datetime.fromtimestamp(sec + usec / 1e6): naive local time. Garbage times make
     // python raise ValueError (not a volatility exception): the plugin dies with a traceback
-    // and no "\n\n" block -- the rsvol CLI's equivalent of that is a plugin panic.
+    // and no "\n\n" block -- the fastvol CLI's equivalent of that is a plugin panic.
     let start_time = match fromtimestamp_local(secs as f64 + usecs as f64 / 1e6) {
         Ok(t) => t,
         Err(py_exception) => panic!("{py_exception}"),

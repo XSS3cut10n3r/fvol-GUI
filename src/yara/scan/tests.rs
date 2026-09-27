@@ -298,13 +298,13 @@ fn load_data(spec: &str) -> Vec<u8> {
     }
 }
 
-/// Cases from `$RSVOL_YARA_CASES` (`id \t strings(;) \t data \t expected`), results to
-/// `$RSVOL_YARA_OUT`: `id \t OK` or `id \t DIFF \t got`.
+/// Cases from `$FASTVOL_YARA_CASES` (`id \t strings(;) \t data \t expected`), results to
+/// `$FASTVOL_YARA_OUT`: `id \t OK` or `id \t DIFF \t got`.
 #[test]
 #[ignore]
 fn yara_scan_difftest() {
-    let Ok(cases) = std::env::var("RSVOL_YARA_CASES") else { return };
-    let outp = std::env::var("RSVOL_YARA_OUT").unwrap_or_else(|_| "/dev/stdout".into());
+    let Ok(cases) = crate::util::env::var("YARA_CASES") else { return };
+    let outp = crate::util::env::var("YARA_OUT").unwrap_or_else(|_| "/dev/stdout".into());
     let text_in = std::fs::read_to_string(cases).expect("cases");
     let mut res = String::new();
     let (mut ok, mut bad) = (0, 0);
@@ -320,7 +320,7 @@ fn yara_scan_difftest() {
             Ok(mt) => {
                 let mut out = Vec::new();
                 mt.scan(&data, &mut out);
-                if std::env::var("RSVOL_YARA_REF").is_ok() {
+                if crate::util::env::var("YARA_REF").is_ok() {
                     // Cross-check hex/regex strings against the protocol reference.
                     for (i, d) in defs.iter().enumerate() {
                         let rs = match &d.kind {

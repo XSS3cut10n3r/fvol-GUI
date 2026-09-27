@@ -411,7 +411,7 @@ fn t_src(src: &str) -> bool {
 /// The nesting caps keep compilation well inside a small thread stack.
 #[test]
 fn yara_rules_max_depth_fits_small_stack() {
-    let stack_kb: usize = std::env::var("RSVOL_YARA_STACK_KB").ok().and_then(|v| v.parse().ok()).unwrap_or(2048);
+    let stack_kb: usize = crate::util::env::var("YARA_STACK_KB").ok().and_then(|v| v.parse().ok()).unwrap_or(2048);
     let run = || {
         // Every construct below uses exactly MAX_DEPTH - 1 nesting units.
         let n = parser::MAX_DEPTH - 1;

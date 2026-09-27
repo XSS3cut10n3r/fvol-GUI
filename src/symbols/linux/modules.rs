@@ -674,12 +674,12 @@ mod tests {
     use crate::context::{Context, GlobalOptions};
 
     fn ctx() -> Context {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
         Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap()
     }
 
     /// Time each module gatherer and print what it finds:
-    /// `RSVOL_BENCH_IMAGE=<img> cargo test --profile fast gatherers_report -- --ignored --nocapture`.
+    /// `FASTVOL_BENCH_IMAGE=<img> cargo test --profile fast gatherers_report -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn gatherers_report() {

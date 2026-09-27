@@ -616,7 +616,7 @@ mod tests {
         // what a page-by-page read would have produced instead
         assert!(l.read_vec_padded(0x400000, 0x1000).iter().all(|&b| b != 0));
 
-        let dir = std::env::temp_dir().join(format!("rsvol-pe-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-pe-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("x.dmp");
         let f = crate::cli::files::open_new(&path).unwrap();
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn padded_reads_dump() {
         let (l, _) = large_page_pe();
-        let dir = std::env::temp_dir().join(format!("rsvol-pe-vad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-pe-vad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cases = [(0x3fe000u64, 0x302000u128), (0x3ff000, 0x1234), (0x401000, 0x2ff000), (0x3fe800, 0x1800), (0x0, 0x0), (0x3fd000, 0x503000)];
         for (i, (start, size)) in cases.into_iter().enumerate() {

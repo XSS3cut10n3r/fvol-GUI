@@ -267,11 +267,11 @@ impl TimelineBatch {
 pub trait Plugin: Sync {
     /// Full dotted name as volatility3 prints it, e.g. "windows.pslist.PsList".
     fn name(&self) -> &'static str;
-    /// Text shown in the `vol -h` plugin list (python class docstring, first paragraph).
+    /// Text shown in the `fvol -h` plugin list (python class docstring, first paragraph).
     /// Empty when the python class has no docstring.
     fn description(&self) -> &'static str;
     /// The rest of the python docstring after the first blank line (argparse epilog of
-    /// `vol <plugin> -h`), if any.
+    /// `fvol <plugin> -h`), if any.
     fn epilog(&self) -> Option<&'static str> {
         None
     }

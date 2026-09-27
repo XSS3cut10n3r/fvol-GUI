@@ -4,6 +4,7 @@
 pub mod bg;
 pub mod bgwrite;
 pub mod download;
+pub mod env;
 pub mod exit;
 pub mod fxhash;
 pub mod json;

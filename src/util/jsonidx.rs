@@ -1776,11 +1776,11 @@ mod tests {
     }
 
     /// xz decode of an ISF into a fresh buffer vs a pre-faulted one (page-fault share).
-    /// `RSVOL_BENCH_XZ=file.json.xz cargo test --release xz_fault_share -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_XZ=file.json.xz cargo test --release xz_fault_share -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn xz_fault_share() {
-        let raw = std::fs::read(std::env::var("RSVOL_BENCH_XZ").unwrap()).unwrap();
+        let raw = std::fs::read(crate::util::env::var("BENCH_XZ").unwrap()).unwrap();
         let mut reuse = Vec::new();
         crate::codecs::xz::decompress_reuse(&raw, &mut reuse, false).unwrap();
         for _ in 0..3 {
@@ -1835,7 +1835,7 @@ mod tests {
     #[test]
     #[ignore]
     fn crc64_speed() {
-        let raw = std::fs::read(std::env::var("RSVOL_BENCH_XZ").unwrap()).unwrap();
+        let raw = std::fs::read(crate::util::env::var("BENCH_XZ").unwrap()).unwrap();
         let out = crate::codecs::xz::decompress(&raw).unwrap();
         let mut best = f64::MAX;
         for _ in 0..20 {

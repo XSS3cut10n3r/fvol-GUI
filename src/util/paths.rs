@@ -1,9 +1,9 @@
-//! Well-known directories: rsvol's own cache (`~/.cache/rsvol`), python volatility3's cache
+//! Well-known directories: fastvol's own cache (`~/.cache/fastvol`), python volatility3's cache
 //! (`~/.cache/volatility3`, reused for downloaded symbols), and small file helpers.
 
 use std::path::{Path, PathBuf};
 
-/// `$XDG_CACHE_HOME` or `~/.cache`. (Looked up once: rsvol never changes its environment, and
+/// `$XDG_CACHE_HOME` or `~/.cache`. (Looked up once: fastvol never changes its environment, and
 /// every `getenv` scans the whole environment, ~200 variables in a desktop session.)
 pub fn xdg_cache_home() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -19,20 +19,66 @@ pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
-/// rsvol's cache directory (`~/.cache/rsvol`, override with `RSVOL_CACHE`). Created lazily by
-/// writers; readers just try to open files in it.
-pub fn rsvol_cache_dir() -> PathBuf {
+/// The name of the cache directory under `$XDG_CACHE_HOME` before the project was renamed.
+const LEGACY_CACHE_NAME: &str = "rsvol";
+
+/// fastvol's cache directory (`~/.cache/fastvol`, override with `FASTVOL_CACHE`, or its alias
+/// `RSVOL_CACHE`). Created lazily by writers; readers just try to open files in it.
+pub fn cache_dir() -> PathBuf {
+    cache_dir_choice().0.clone()
+}
+
+/// [`cache_dir`] and whether it is the default one (no override in the environment).
+fn cache_dir_choice() -> &'static (PathBuf, bool) {
     // (called ~6 times per run: looked up once, see `xdg_cache_home`)
-    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| match std::env::var_os("RSVOL_CACHE").filter(|x| !x.is_empty()) {
-        Some(x) => PathBuf::from(x),
-        None => xdg_cache_home().join("rsvol"),
+    static DIR: std::sync::OnceLock<(PathBuf, bool)> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| match crate::util::env::var_os("CACHE").filter(|x| !x.is_empty()) {
+        Some(x) => (PathBuf::from(x), false),
+        None => (xdg_cache_home().join("fastvol"), true),
     })
-    .clone()
+}
+
+/// The one-time move of the cache directory of the project's former name (`~/.cache/rsvol`)
+/// to the default [`cache_dir`] (`~/.cache/fastvol`), so the caches built by older versions
+/// are kept: one `rename`, which does nothing (and fails) when the old directory is gone or
+/// the new one already holds anything (an empty new directory is replaced). Called only on
+/// the paths where the cache directory may be missing, never on a fully warm run: when a
+/// cache read misses (the first readers of a run then retry the read) and before a cache
+/// write. The `rename` runs at most once per process (concurrent callers wait for it), and
+/// never when `FASTVOL_CACHE` (`RSVOL_CACHE`) chooses the directory. Returns whether the
+/// directory was moved (by this process), i.e. whether a missed read is worth retrying.
+pub fn migrate_legacy_cache() -> bool {
+    if cfg!(test) {
+        // (unit tests never touch the user's cache directories)
+        return false;
+    }
+    static MOVED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MOVED.get_or_init(|| {
+        let (dir, default) = cache_dir_choice();
+        if !default {
+            return false;
+        }
+        let moved = std::fs::rename(xdg_cache_home().join(LEGACY_CACHE_NAME), dir).is_ok();
+        crate::util::trace::note(|| format!("cache: moved {} to {}: {moved}", LEGACY_CACHE_NAME, dir.display()));
+        moved
+    })
+}
+
+/// `--clear-cache`: [`clear_cache_dir`] of [`cache_dir`] and, when that is the default one,
+/// of the former project name's directory (`~/.cache/rsvol`) if it is still there (removed
+/// when nothing else is left in it).
+pub fn clear_cache() {
+    let (dir, default) = cache_dir_choice();
+    clear_cache_dir(dir);
+    if *default {
+        let old = xdg_cache_home().join(LEGACY_CACHE_NAME);
+        clear_cache_dir(&old);
+        let _ = std::fs::remove_dir(&old);
+    }
 }
 
 /// `--clear-cache` (python `framework.clear_cache()`: every `*.cache` file in `CACHE_PATH`,
-/// downloads included, then `identifier.cache`) for rsvol's cache directory `dir`: every
+/// downloads included, then `identifier.cache`) for fastvol's cache directory `dir`: every
 /// `*.cache` file in it (identifier index, `isfinfo` summaries, downloads `data_*.cache`) and
 /// the directories of the per-image and per-table caches (`automagic`, `isf`, `scan`,
 /// `decompressed` images, and `remote`, where older versions kept downloads). Only these
@@ -91,6 +137,8 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// [`write_atomic`] of the concatenation of `parts` (no joined copy).
 pub fn write_atomic_parts(path: &Path, parts: &[&[u8]]) -> std::io::Result<()> {
     use std::io::Write;
+    // (every caller writes a cache file: first move an old cache directory into place)
+    migrate_legacy_cache();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -237,10 +285,10 @@ mod tests {
 
     #[test]
     fn urlopen_error_text() {
-        let e = std::fs::read("/nonexistent/rsvol/strings.txt").unwrap_err();
+        let e = std::fs::read("/nonexistent/fastvol/strings.txt").unwrap_err();
         assert_eq!(
-            py_urlopen_error("file:///nonexistent/rsvol/strings.txt", &e),
-            "urllib.error.URLError: <urlopen error [Errno 2] No such file or directory: '/nonexistent/rsvol/strings.txt'>"
+            py_urlopen_error("file:///nonexistent/fastvol/strings.txt", &e),
+            "urllib.error.URLError: <urlopen error [Errno 2] No such file or directory: '/nonexistent/fastvol/strings.txt'>"
         );
     }
     #[test]
@@ -266,8 +314,8 @@ mod tests {
 
     #[test]
     fn clear_cache_like_python() {
-        let base = std::env::temp_dir().join(format!("rsvol-clear-{}", std::process::id()));
-        let (dir, outside) = (base.join("rsvol"), base.join("outside"));
+        let base = std::env::temp_dir().join(format!("fastvol-clear-{}", std::process::id()));
+        let (dir, outside) = (base.join("fastvol"), base.join("outside"));
         let _ = std::fs::remove_dir_all(&base);
         for d in ["automagic", "isf", "remote", "decompressed", "keepdir", "dir.cache"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();

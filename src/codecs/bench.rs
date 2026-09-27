@@ -226,8 +226,8 @@ mod perf {
         // perf_event_attr, PERF_ATTR_SIZE_VER0 (64 bytes).
         let mut attr = [0u64; 8];
         // Hybrid CPUs: PERF_TYPE_HARDWARE with the P-core PMU type in config bits 32..63.
-        // RSVOL_PERF_PMU=cpu_atom when pinned to an E-core of a hybrid CPU.
-        let pmu_name = std::env::var("RSVOL_PERF_PMU").unwrap_or_else(|_| "cpu_core".into());
+        // FASTVOL_PERF_PMU=cpu_atom when pinned to an E-core of a hybrid CPU.
+        let pmu_name = crate::util::env::var("PERF_PMU").unwrap_or_else(|_| "cpu_core".into());
         let pmu = std::fs::read_to_string(format!("/sys/bus/event_source/devices/{pmu_name}/type"))
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
@@ -533,7 +533,7 @@ fn encode(codec: &str, level: u32, data: &[u8]) -> Option<Vec<u8>> {
 /// Compression throughput of one file (the Rust side of `bench/refbench/codecs_enc_run.sh`):
 ///
 /// ```text
-/// CODECS_ENC_FILE=f CODECS_ENC_CODEC=deflate CODECS_ENC_LEVEL=6 [CODECS_RUNS=3] [RSVOL_THREADS=1] \
+/// CODECS_ENC_FILE=f CODECS_ENC_CODEC=deflate CODECS_ENC_LEVEL=6 [CODECS_RUNS=3] [FASTVOL_THREADS=1] \
 ///   cargo test --release codecs_enc_bench_file -- --ignored --nocapture
 /// ```
 /// Prints `rust <codec> <level> <file> <in_bytes> <out_bytes> <best_ms> <MB/s> <threads>` (MB/s

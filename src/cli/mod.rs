@@ -70,7 +70,7 @@ impl Write for RawStdout {
 /// Entry point; returns the process exit code.
 pub fn main() -> i32 {
     let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
-    // `vol serve ...`: the built-in web UI (python volatility has no plugin or option by that name)
+    // `fvol serve ...`: the built-in web UI (python volatility has no plugin or option by that name)
     if argv.get(1).map(String::as_str) == Some("serve") {
         return crate::web::main(&argv[2..]);
     }
@@ -566,7 +566,7 @@ fn run_inner(
     err: &mut dyn Write,
     s: &Settings,
 ) -> Result<i32, Exit> {
-    let prog = argv.first().map(|a| a.rsplit('/').next().unwrap_or(a).to_string()).unwrap_or_else(|| "vol".into());
+    let prog = argv.first().map(|a| a.rsplit('/').next().unwrap_or(a).to_string()).unwrap_or_else(|| "fvol".into());
     let cwd = s.cwd.clone().unwrap_or_else(current_dir);
     let home = home();
     let cache_default = s.cache_path.clone().unwrap_or_else(|| default_cache_path(&home));
@@ -591,7 +591,7 @@ fn run_inner(
             let _ = writeln!(f, "volatility3.cli INFO     Logging started");
         }
     if partial.str("plugin_dirs").is_some_and(|p| !p.is_empty()) {
-        let _ = writeln!(err, "WARNING  rsvol: plugin directories (-p) are not supported, ignoring");
+        let _ = writeln!(err, "WARNING  fastvol: plugin directories (-p) are not supported, ignoring");
     }
     // python lists the automagics next (before the banner, and before --help): SymbolCacheMagic
     // opens CACHE_PATH/identifier.cache, so with a --cache-path directory that does not exist
@@ -662,7 +662,7 @@ fn run_inner(
             return Ok(traceback(err, "TypeError: Invalid type stored in configuration: <class 'dict'>"));
         }
         // a saved configuration (`--save-config`) holds the layer trees the automagics built:
-        // rsvol rebuilds them from the image they name (the first file layer below a
+        // fastvol rebuilds them from the image they name (the first file layer below a
         // `memory_layer`, e.g. `kernel.layer_name.memory_layer.base_layer.location`) and its
         // swap files (`...swap_layers.swap_layers<N>.location`)
         let mut swaps: Vec<(u64, String)> = Vec::new();
@@ -784,7 +784,7 @@ fn run_inner(
             }
         }
     }
-    // what python's saved configuration records as configured (before rsvol's defaults)
+    // what python's saved configuration records as configured (before fastvol's defaults)
     let user_cfg = cfg.clone();
     // plugin defaults for everything not configured
     for r in &reqs {
@@ -853,7 +853,7 @@ fn run_inner(
 struct SaveConfig {
     target: String,
     exists: Exit,
-    /// the plugin options as configured (command line, `-c`, `-e`), without rsvol's defaults
+    /// the plugin options as configured (command line, `-c`, `-e`), without fastvol's defaults
     user: Config,
     /// the file name as given (python's `open()` error messages)
     name: String,

@@ -1,4 +1,4 @@
-"""Test fixture generator (rsvol): `python3 mksynth.py synth.pdb [variant]`; the golden file
+"""Test fixture generator (fastvol): `python3 mksynth.py synth.pdb [variant]`; the golden file
 is `pdbconv.py -f synth.pdb -o synth.py.json` from volatility3 2.28.2, and every variant
 (zero_elem ptrmix unhandled quad_enum strip_idx omap_high -> err_<variant>.pdb) makes python
 raise.

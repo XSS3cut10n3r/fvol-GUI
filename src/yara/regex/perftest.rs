@@ -1,6 +1,6 @@
 //! Developer throughput check over the real memory image (ignored test):
-//!   RSVOL_PERF_LEN=1073741824 cargo test --profile fast yara_regex_perf -- --ignored --nocapture
-//! Optional RSVOL_PERF_PAT=<pattern> (python bytes-pattern syntax) to time one pattern.
+//!   FASTVOL_PERF_LEN=1073741824 cargo test --profile fast yara_regex_perf -- --ignored --nocapture
+//! Optional FASTVOL_PERF_PAT=<pattern> (python bytes-pattern syntax) to time one pattern.
 
 use super::Regex;
 use crate::util::mmap::Mmap;
@@ -9,10 +9,10 @@ use std::time::Instant;
 #[test]
 #[ignore]
 fn yara_regex_perf() {
-    let path = std::env::var("RSVOL_IMAGE").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let path = crate::util::env::var("IMAGE").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
     let Ok(f) = std::fs::File::open(&path) else { return };
     let Ok(m) = Mmap::map(&f) else { return };
-    let len: usize = std::env::var("RSVOL_PERF_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(256 << 20);
+    let len: usize = crate::util::env::var("PERF_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(256 << 20);
     let off = (1usize << 30).min(m.len().saturating_sub(len));
     let hay = &m.as_slice()[off..off + len.min(m.len())];
     // warm the page cache
@@ -31,7 +31,7 @@ fn yara_regex_perf() {
         (r"https?://[a-zA-Z0-9./?=_%:-]+", 0),
         (r"\x0f\x05[^\xc3]{,24}\xc3", 16),
     ];
-    let pats: Vec<(String, u32)> = match std::env::var("RSVOL_PERF_PAT") {
+    let pats: Vec<(String, u32)> = match crate::util::env::var("PERF_PAT") {
         Ok(p) => vec![(p, 16)],
         Err(_) => default.into_iter().map(|(p, f)| (p.to_string(), f)).collect(),
     };
@@ -64,7 +64,7 @@ fn yara_regex_perf() {
 }
 
 /// Interleaved A/B timing of several patterns (developer probe, ignored test):
-///   RSVOL_AB_PATS='p1<TAB>p2...' RSVOL_AB_ROUNDS=15 RSVOL_AB_LEN=1073741824 \
+///   FASTVOL_AB_PATS='p1<TAB>p2...' FASTVOL_AB_ROUNDS=15 FASTVOL_AB_LEN=1073741824 \
 ///   cargo test --profile release yara_regex_ab -- --ignored --nocapture
 /// A pattern prefixed with `mm:` times `memchr::Memmem::find_iter` of the raw bytes instead.
 /// Prints best / median / lower-quartile MB/s per pattern (window: 1 GiB at 1 GiB, like
@@ -72,12 +72,12 @@ fn yara_regex_perf() {
 #[test]
 #[ignore]
 fn yara_regex_ab() {
-    let Ok(pats) = std::env::var("RSVOL_AB_PATS") else { return };
-    let path = std::env::var("RSVOL_IMAGE").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let Ok(pats) = crate::util::env::var("AB_PATS") else { return };
+    let path = crate::util::env::var("IMAGE").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
     let Ok(f) = std::fs::File::open(&path) else { return };
     let Ok(m) = Mmap::map(&f) else { return };
-    let len: usize = std::env::var("RSVOL_AB_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(1 << 30);
-    let rounds: usize = std::env::var("RSVOL_AB_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+    let len: usize = crate::util::env::var("AB_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(1 << 30);
+    let rounds: usize = crate::util::env::var("AB_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
     let off = (1usize << 30).min(m.len().saturating_sub(len));
     let hay = &m.as_slice()[off..off + len.min(m.len() - off)];
     let mut x = 0u64;
@@ -124,11 +124,11 @@ fn yara_regex_ab() {
 
 /// Compile-time breakdown per pipeline stage (developer probe, ignored test):
 ///   cargo test --profile release yara_regex_compile_stages -- --ignored --nocapture
-/// Patterns: bench/refbench/regex_cases.tsv (or RSVOL_AB_PATS, tab separated).
+/// Patterns: bench/refbench/regex_cases.tsv (or FASTVOL_AB_PATS, tab separated).
 #[test]
 #[ignore]
 fn yara_regex_compile_stages() {
-    let pats: Vec<Vec<u8>> = match std::env::var("RSVOL_AB_PATS") {
+    let pats: Vec<Vec<u8>> = match crate::util::env::var("AB_PATS") {
         Ok(p) => p.split('\t').filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec()).collect(),
         Err(_) => {
             let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/refbench/regex_cases.tsv")).unwrap_or_default();

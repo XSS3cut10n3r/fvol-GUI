@@ -1,6 +1,6 @@
 //! Minimal strict JSON parser with python `json.loads` acceptance rules (NaN/Infinity allowed,
 //! no trailing data, no control characters in strings, last duplicate key wins), used for the
-//! QEMU savevm configuration. Part of rsvol (Volatility Software License 1.0).
+//! QEMU savevm configuration. Part of fastvol (Volatility Software License 1.0).
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Value {

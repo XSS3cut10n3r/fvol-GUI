@@ -5,7 +5,7 @@
 //!
 //! # API (all allocation free; everything is computed on demand from a decoded [`Insn`])
 //!
-//! | capstone (python)                     | rsvol                                               |
+//! | capstone (python)                     | fastvol                                               |
 //! |---------------------------------------|-----------------------------------------------------|
 //! | `inst.regs_access()` -> (read, write) | `insn.regs_access()` -> `(RegList, RegList)`        |
 //! | `inst.regs_read` / `inst.regs_write`  | `insn.implicit_regs()` -> `(RegList, RegList)`      |

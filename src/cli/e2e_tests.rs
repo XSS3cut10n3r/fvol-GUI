@@ -175,7 +175,7 @@ fn python_exception_panic_keeps_its_line() {
 fn missing_cache_path_fails_like_python() {
     let plugins: Vec<&'static dyn Plugin> = Vec::new();
     for extra in [&["windows.pslist.PsList"][..], &["-h"][..]] {
-        let mut argv: Vec<String> = ["vol.py", "-q", "--cache-path", "/nonexistent/rsvol-cache"].iter().map(|s| s.to_string()).collect();
+        let mut argv: Vec<String> = ["vol.py", "-q", "--cache-path", "/nonexistent/fastvol-cache"].iter().map(|s| s.to_string()).collect();
         argv.extend(extra.iter().map(|s| s.to_string()));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let s = Settings { no_system_defaults: true, ..Default::default() };
@@ -184,7 +184,7 @@ fn missing_cache_path_fails_like_python() {
         let err = String::from_utf8(err).unwrap();
         assert_eq!(
             err.lines().last(),
-            Some("FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent/rsvol-cache/identifier.cache'")
+            Some("FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent/fastvol-cache/identifier.cache'")
         );
     }
 }
@@ -207,16 +207,16 @@ fn python_exception_classification() {
 fn missing_config_file_fails_like_python() {
     let plugins: Vec<&'static dyn Plugin> = vec![&crate::plugins::generic::frameworkinfo::FrameworkInfo];
     let argv: Vec<String> =
-        ["vol.py", "-q", "-c", "/nonexistent/rsvol.json", "frameworkinfo.FrameworkInfo"].iter().map(|s| s.to_string()).collect();
+        ["vol.py", "-q", "-c", "/nonexistent/fastvol.json", "frameworkinfo.FrameworkInfo"].iter().map(|s| s.to_string()).collect();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let s = Settings { no_system_defaults: true, ..Default::default() };
     assert_eq!(run(&argv, &plugins, &mut out, &mut err, &s), 1);
     let err = String::from_utf8(err).unwrap();
-    assert_eq!(err.lines().last(), Some("FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent/rsvol.json'"));
+    assert_eq!(err.lines().last(), Some("FileNotFoundError: [Errno 2] No such file or directory: '/nonexistent/fastvol.json'"));
 }
 
 /// `-c` with python's `--save-config` output for an ELF core: the image is the Elf64Layer's
-/// `base_layer.location` (rsvol only looked for `memory_layer.location`, and the round trip
+/// `base_layer.location` (fastvol only looked for `memory_layer.location`, and the round trip
 /// found no image), never a swap layer's location.
 #[test]
 fn config_file_finds_the_image_below_a_container_layer() {
@@ -235,7 +235,7 @@ fn config_file_finds_the_image_below_a_container_layer() {
     }
     static L: Loc = Loc;
     let plugins: Vec<&'static dyn Plugin> = vec![&L];
-    let dir = std::env::temp_dir().join(format!("rsvol-e2e-config-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("fastvol-e2e-config-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("saved.json");
     std::fs::write(
@@ -256,7 +256,7 @@ fn config_file_finds_the_image_below_a_container_layer() {
 
 #[test]
 fn output_files_follow_python_naming() {
-    let dir = std::env::temp_dir().join(format!("rsvol-e2e-files-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("fastvol-e2e-files-{}", std::process::id()));
     let d = dir.to_str().unwrap().to_string();
     std::fs::create_dir_all(&dir).unwrap();
     let ctx = Context::new(GlobalOptions { output_dir: d.clone(), ..Default::default() }).unwrap();

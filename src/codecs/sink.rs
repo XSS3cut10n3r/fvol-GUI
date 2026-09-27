@@ -82,7 +82,7 @@ impl FileSink {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(DEPTH);
         let (back_tx, back) = std::sync::mpsc::channel::<Vec<u8>>();
         let handle = std::thread::Builder::new()
-            .name("rsvol-write".into())
+            .name("fastvol-write".into())
             .spawn(move || -> std::io::Result<File> {
                 let mut file = file;
                 let mut err: Option<std::io::Error> = None;
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn file_sink_writes_in_order_and_truncates() {
-        let dir = std::env::temp_dir().join(format!("rsvol-sink-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-sink-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("out");
         let mut s = FileSink::new(File::create(&p).unwrap()).unwrap();
@@ -227,7 +227,7 @@ mod tests {
     /// shared file position does.
     #[test]
     fn file_sink_at_offsets() {
-        let dir = std::env::temp_dir().join(format!("rsvol-sink-at-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-sink-at-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("out");
         let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&p).unwrap();

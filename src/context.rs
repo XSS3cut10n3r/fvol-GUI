@@ -119,7 +119,7 @@ impl Context {
         if opts.clear_cache {
             // python --clear-cache deletes every *.cache in its cache directory (downloads too)
             // and its identifier cache; the same for ours (python's is only treated as empty)
-            crate::util::paths::clear_cache_dir(&crate::util::paths::rsvol_cache_dir());
+            crate::util::paths::clear_cache();
         }
         symbols::set_symbol_path(SymbolPath::new(&opts.symbol_dirs));
         symbols::set_remote_isf_url(opts.remote_isf_url.clone(), opts.offline);
@@ -151,9 +151,9 @@ impl Context {
 
     /// Path of the file holding the input image's data (`-f` or `--single-location`), opened
     /// like python's `ResourceAccessor`: a `http://`, `https://` or `ftp://` location is
-    /// downloaded once into the rsvol cache (`data_<sha512>.cache`, reused until
+    /// downloaded once into the fastvol cache (`data_<sha512>.cache`, reused until
     /// `--clear-cache`), and a location ending in `.gz`, `.bz2` or `.xz` is decompressed once
-    /// into the rsvol cache (see [`crate::util::resource`]).
+    /// into the fastvol cache (see [`crate::util::resource`]).
     pub fn image_path(&self) -> Result<PathBuf> {
         let Some(url) = self.image_url() else {
             return Err(Error::Unsatisfied("Unable to run LayerStacker, single_location parameter not provided".into()));
@@ -452,7 +452,7 @@ thread_local! {
 }
 
 /// Run `f` with [`Context::create_output_file`] writing into `dir` (instead of
-/// `opts.output_dir`) for calls made on this thread. `vol serve` uses it to give every plugin
+/// `opts.output_dir`) for calls made on this thread. `fvol serve` uses it to give every plugin
 /// run its own output directory while all runs share one `Context`.
 pub fn with_output_dir<R>(dir: &str, f: impl FnOnce() -> R) -> R {
     struct Restore(Option<String>);
@@ -519,7 +519,7 @@ mod bench {
     #[ignore]
     fn smear_robustness() {
         use crate::symbols::windows::prelude::*;
-        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let (phys, _) = ctx.physical_arc().unwrap();
@@ -934,8 +934,8 @@ mod bench {
         use crate::renderers::{ColType, Column, Value};
         use crate::symbols::windows::WinExt;
         use crate::util::time::wintime_to_datetime;
-        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
-        let refp = std::env::var("RSVOL_BENCH_REF").unwrap_or_else(|_| "/home/user/rs-vol/bench/ref/py/windows.dlllist.DllList.txt".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let refp = crate::util::env::var("BENCH_REF").unwrap_or_else(|_| "/home/user/rs-vol/bench/ref/py/windows.dlllist.DllList.txt".into());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let mut out: Vec<u8> = b"Volatility 3 Framework 2.28.2\n".to_vec();
@@ -1013,7 +1013,7 @@ mod bench {
     #[ignore]
     fn module_pdb_lookup() {
         use crate::symbols::windows::WinExt;
-        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let m = crate::plugins::windows::modules::list_modules(k)
@@ -1030,12 +1030,12 @@ mod bench {
         assert!(md.table().symbol_count() > 0);
     }
 
-    /// `RSVOL_BENCH_IMG=... cargo test --release translation_bench -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMG=... cargo test --release translation_bench -- --ignored --nocapture`
     /// (run through bench/scripts/limit.sh): page-walk / mapping / virtual-scan throughput.
     #[test]
     #[ignore]
     fn translation_bench() {
-        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let t = std::time::Instant::now();

@@ -312,8 +312,8 @@ fn prepare_walk(k: &LinuxKernel, follow_symlinks: bool) -> Result<Prepared> {
         let starts: Vec<Obj> = roots.iter().filter_map(|r| r.as_ref().ok().and_then(|o| o.as_ref())).map(|r| r.root_dentry).collect();
         DentryForest::build(&w, &starts, follow_symlinks)
     };
-    // RSVOL_PAGECACHE_SEQ=1 forces the sequential walk (cross-checks the parallel one)
-    let forest = forest.filter(|_| std::env::var_os("RSVOL_PAGECACHE_SEQ").is_none());
+    // FASTVOL_PAGECACHE_SEQ=1 forces the sequential walk (cross-checks the parallel one)
+    let forest = forest.filter(|_| crate::util::env::var_os("PAGECACHE_SEQ").is_none());
     let Some(forest) = forest else { return Ok(Prepared::Seq(w, roots)) };
     // an `Err` can only be the last entry: python raised after the trees before it
     let mut tail = None;
@@ -1231,7 +1231,7 @@ fn recover_fs(ctx: &Context, k: &LinuxKernel, ps: u64, format: &str, tmpfs_only:
         let dir = ctx.opts.output_dir.as_str();
         let dir = if dir.is_empty() { "." } else { dir };
         std::fs::create_dir_all(dir)?;
-        format!("{dir}/tmp_rsvol_recoverfs_{}.vol3", std::process::id())
+        format!("{dir}/tmp_fastvol_recoverfs_{}.vol3", std::process::id())
     };
     // python's file handler writes a mkstemp file (mode 0o600) that it renames into place
     let tmp_file = {

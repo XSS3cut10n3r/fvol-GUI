@@ -4,10 +4,10 @@
 //! bench/scripts/limit.sh -m 4G cargo test --profile fast yara_scan_bench -- --ignored --nocapture
 //! ```
 //!
-//! Env: `RSVOL_YARA_IMG` (default the Windows 10 image), `RSVOL_YARA_OFF` / `RSVOL_YARA_LEN`
-//! (default 1 GiB at 1 GiB), `RSVOL_YARA_RULE` (`text` | `xor` | `many`), `RSVOL_YARA_CHUNK`
+//! Env: `FASTVOL_YARA_IMG` (default the Windows 10 image), `FASTVOL_YARA_OFF` / `FASTVOL_YARA_LEN`
+//! (default 1 GiB at 1 GiB), `FASTVOL_YARA_RULE` (`text` | `xor` | `many`), `FASTVOL_YARA_CHUNK`
 //! (default 16 MiB + 4 KiB overlap, like volatility's scanner; 0 = one call),
-//! `RSVOL_YARA_PRINT=1` prints the equivalent yara rule source.
+//! `FASTVOL_YARA_PRINT=1` prints the equivalent yara rule source.
 
 use super::*;
 use crate::util::mmap::Mmap;
@@ -235,14 +235,14 @@ pub(crate) fn rule_source(strings: &[(Vec<u8>, Modifiers)]) -> String {
 #[test]
 #[ignore]
 fn yara_scan_bench() {
-    let img = std::env::var("RSVOL_YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
-    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-    let off = env("RSVOL_YARA_OFF", 1 << 30);
-    let len = env("RSVOL_YARA_LEN", 1 << 30);
-    let chunk = env("RSVOL_YARA_CHUNK", 16 << 20);
-    let rule = std::env::var("RSVOL_YARA_RULE").unwrap_or_else(|_| "text".into());
+    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let env = |k: &str, d: usize| crate::util::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let off = env("YARA_OFF", 1 << 30);
+    let len = env("YARA_LEN", 1 << 30);
+    let chunk = env("YARA_CHUNK", 16 << 20);
+    let rule = crate::util::env::var("YARA_RULE").unwrap_or_else(|_| "text".into());
     let strings = bench_rule(&rule);
-    if std::env::var("RSVOL_YARA_PRINT").is_ok() {
+    if crate::util::env::var("YARA_PRINT").is_ok() {
         println!("{}", rule_source(&strings));
     }
     let defs: Vec<StringDef> = strings
@@ -263,10 +263,10 @@ fn yara_scan_bench() {
     let all = map.as_slice();
     let end = (off + len).min(all.len());
     let data = &all[off.min(end)..end];
-    if std::env::var("RSVOL_YARA_STATS").is_ok() {
+    if crate::util::env::var("YARA_STATS").is_ok() {
         eprintln!("{}", mt.candidate_stats(data));
     }
-    if std::env::var("RSVOL_YARA_FLOOR").is_ok() {
+    if crate::util::env::var("YARA_FLOOR").is_ok() {
         // Bandwidth floor: one pass of SIMD memchr for an absent byte pattern.
         for _ in 0..3 {
             let t = std::time::Instant::now();
@@ -291,11 +291,11 @@ fn yara_scan_bench() {
     let mut out = Vec::new();
     let mut best = f64::MAX;
     let mut counts = vec![0usize; defs.len()];
-    let ab = std::env::var("RSVOL_YARA_AB").is_ok();
-    if std::env::var("RSVOL_YARA_SKIP_VERIFY").is_ok() {
+    let ab = crate::util::env::var("YARA_AB").is_ok();
+    if crate::util::env::var("YARA_SKIP_VERIFY").is_ok() {
         super::matcher::SKIP_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    if std::env::var("RSVOL_YARA_TIME_VERIFY").is_ok() {
+    if crate::util::env::var("YARA_TIME_VERIFY").is_ok() {
         super::matcher::TIME_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let mut best_ab = [f64::MAX; 2];
@@ -351,7 +351,7 @@ fn yara_scan_bench() {
 #[test]
 #[ignore]
 fn yara_scan_window_model() {
-    let img = std::env::var("RSVOL_YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
     let f = std::fs::File::open(&img).expect("open image");
     let map = Mmap::map(&f).expect("mmap");
     let data = &map.as_slice()[1 << 30..(1 << 30) + (256 << 20)];
@@ -402,12 +402,12 @@ fn yara_scan_window_model() {
 /// round(-8 * log2(P(b0 b1))), capped at 255; `<out>.wide`: the same for the 4-grams
 /// `b0 00 b1 00`).
 ///
-/// `RSVOL_YARA_BIGRAM_OUT=path cargo test --profile fast yara_scan_measure_bigrams -- --ignored`
+/// `FASTVOL_YARA_BIGRAM_OUT=path cargo test --profile fast yara_scan_measure_bigrams -- --ignored`
 #[test]
 #[ignore]
 fn yara_scan_measure_bigrams() {
-    let Ok(outp) = std::env::var("RSVOL_YARA_BIGRAM_OUT") else { return };
-    let img = std::env::var("RSVOL_YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let Ok(outp) = crate::util::env::var("YARA_BIGRAM_OUT") else { return };
+    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
     let f = std::fs::File::open(&img).expect("open image");
     let map = Mmap::map(&f).expect("mmap");
     let data = map.as_slice();

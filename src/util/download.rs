@@ -1,5 +1,5 @@
 //! Remote files (python `ResourceAccessor`, framework/layers/resources.py): a `http://`,
-//! `https://` or `ftp://` location is downloaded once with `curl` into rsvol's cache directory
+//! `https://` or `ftp://` location is downloaded once with `curl` into fastvol's cache directory
 //! as `data_<sha512(url)>.cache` (python's name, in python's `CACHE_PATH` layout) and read from
 //! there; like python, a cached file is never re-validated, and `--clear-cache` deletes it.
 //!
@@ -10,7 +10,7 @@ use crate::util::paths;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Whether `url` names a location rsvol downloads (python opens these through urllib).
+/// Whether `url` names a location fastvol downloads (python opens these through urllib).
 pub fn is_remote(url: &str) -> bool {
     let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
     ["http://", "https://", "ftp://"].iter().any(|s| lower.starts_with(s))
@@ -33,10 +33,10 @@ pub fn raw_unicode_escape(s: &str) -> Vec<u8> {
     out
 }
 
-/// The cache file of `url`: `<rsvol cache>/data_<sha512 hex>.cache`.
+/// The cache file of `url`: `<fastvol cache>/data_<sha512 hex>.cache`.
 pub fn cache_path(url: &str) -> PathBuf {
     let d = crate::crypto::sha512::digest(&raw_unicode_escape(url));
-    paths::rsvol_cache_dir().join(format!("data_{}.cache", paths::hex(&d)))
+    paths::cache_dir().join(format!("data_{}.cache", paths::hex(&d)))
 }
 
 /// The local copy of remote `url`, downloading it on first use. Fails in offline mode (python
@@ -46,7 +46,7 @@ pub fn fetch(url: &str, offline: bool) -> Result<PathBuf> {
         return Err(Error::Msg(format!("Volatility 3 is offline: unable to access {url}")));
     }
     let path = cache_path(url);
-    if path.is_file() {
+    if path.is_file() || (paths::migrate_legacy_cache() && path.is_file()) {
         return Ok(path);
     }
     download_to(url, &path)?;
@@ -127,12 +127,12 @@ pub struct RangePlan {
 /// total size and whose `ETag` matches the probe's; the assembled file must pass `verify`.
 /// Anything else (a server without range support, a resource that changed, a failed or short
 /// part, a certificate problem) falls back to [`download_to`]: one request, python's way. The
-/// bytes are the same either way. `RSVOL_RANGED_DOWNLOAD=0` always makes one request.
+/// bytes are the same either way. `FASTVOL_RANGED_DOWNLOAD=0` always makes one request.
 pub fn download_ranged_to(url: &str, dest: &Path, plan: RangePlan, verify: &dyn Fn(&Path) -> bool) -> Result<()> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let on = std::env::var_os("RSVOL_RANGED_DOWNLOAD").is_none_or(|v| v != "0");
+    let on = crate::util::env::var_os("RANGED_DOWNLOAD").is_none_or(|v| v != "0");
     if on && plan.part > 0 && plan.max_parts > 1 {
         let _t = crate::util::trace::span("download: ranged");
         match ranged(url, dest, plan, verify) {
@@ -252,7 +252,7 @@ impl Ranged {
         let out = out.clone();
         let at = range.0;
         let reader = std::thread::Builder::new()
-            .name("rsvol-dl".into())
+            .name("fastvol-dl".into())
             .spawn(move || {
                 let mut buf = vec![0u8; 256 << 10];
                 let mut n = 0u64;
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn ranged_download_same_bytes() {
         use std::sync::atomic::Ordering;
-        let dir = std::env::temp_dir().join(format!("rsvol-rng-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-rng-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let plan = RangePlan { first_wave: 3, part: 100_000, max_parts: 8 };

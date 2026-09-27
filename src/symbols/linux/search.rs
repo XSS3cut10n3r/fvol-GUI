@@ -309,7 +309,7 @@ mod tests {
         }
     }
 
-    /// Throughput on 64 MiB of memory-like data (`RSVOL_NO_SIMD=1` for the scalar path):
+    /// Throughput on 64 MiB of memory-like data (`FASTVOL_NO_SIMD=1` for the scalar path):
     /// `cargo test --profile fast linux_search_bench -- --ignored --nocapture`
     #[test]
     #[ignore]

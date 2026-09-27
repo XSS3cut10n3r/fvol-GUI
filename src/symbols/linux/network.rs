@@ -942,11 +942,11 @@ mod image_tests {
 
     /// Prints `linux.ip.Link` + `linux.ip.Addr`-like rows for a quick check of the network
     /// helpers against python's references:
-    /// `RSVOL_BENCH_IMAGE=<image> cargo test --profile fast net_like_ip -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMAGE=<image> cargo test --profile fast net_like_ip -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn net_like_ip() {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
         let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
         let ctx = Context::new(opts).unwrap();
         let k = ctx.linux_kernel().unwrap();

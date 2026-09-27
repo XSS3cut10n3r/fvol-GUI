@@ -1,4 +1,4 @@
-//! Tiny timing tracer: set `RSVOL_TRACE=1` to print `[trace] name: 1.234ms` to stderr when a
+//! Tiny timing tracer: set `FASTVOL_TRACE=1` to print `[trace] name: 1.234ms` to stderr when a
 //! span ends. Zero cost when disabled (one cached env check).
 //!
 //! ```ignore
@@ -8,10 +8,10 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
-/// Whether tracing is enabled (`RSVOL_TRACE` set and non-empty).
+/// Whether tracing is enabled (`FASTVOL_TRACE` set and non-empty).
 pub fn enabled() -> bool {
     static E: OnceLock<bool> = OnceLock::new();
-    *E.get_or_init(|| std::env::var_os("RSVOL_TRACE").is_some_and(|v| !v.is_empty()))
+    *E.get_or_init(|| crate::util::env::var_os("TRACE").is_some_and(|v| !v.is_empty()))
 }
 
 /// A timing span; prints on drop.

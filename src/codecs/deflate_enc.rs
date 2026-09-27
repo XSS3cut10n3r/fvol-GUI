@@ -79,7 +79,7 @@ fn params(level: u32) -> Params {
         _ => (256, 258, 2, 96, 258),
     };
     #[cfg(test)]
-    if let Ok(s) = std::env::var("RSVOL_DEFLATE_PARAMS") {
+    if let Ok(s) = crate::util::env::var("DEFLATE_PARAMS") {
         // Benchmark-only override: "depth,nice,lazy,good,max_insert".
         let v: Vec<usize> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         if v.len() == 5 {

@@ -679,7 +679,7 @@ pub fn init(ctx: &Context) -> Result<LinuxKernel> {
                 // first stacker's input)
                 let (tx, rx) = std::sync::mpsc::channel();
                 let h = std::thread::Builder::new()
-                    .name("rsvol-hint".into())
+                    .name("fastvol-hint".into())
                     .spawn(move || {
                         hint_and_notes(phys, want_notes, |hint| {
                             crate::symbols::store::set_banner_hint(hint.clone());
@@ -785,7 +785,7 @@ mod tests {
     }
 
 
-    /// `RSVOL_BENCH_IMAGE=<image> cargo test --profile fast bench_scans -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMAGE=<image> cargo test --profile fast bench_scans -- --ignored --nocapture`
     /// (run through bench/scripts/limit.sh): core `BytesScanner` (glibc memmem) vs
     /// [`FastBytesScanner`] full-image scans, hot single-thread search speed, and the time to the
     /// first valid VMCOREINFO note.
@@ -794,7 +794,7 @@ mod tests {
     fn bench_scans() {
         use crate::layers::scan::{BytesScanner, find};
         use crate::symbols::linux::vmcoreinfo::VMCOREINFO_MAGIC_ALIGNED;
-        let path = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let path = crate::util::env::var("BENCH_IMAGE").unwrap();
         let phys = crate::automagic::stack_physical(std::path::Path::new(&path), None, false, None).unwrap().layer;
         let total = phys.max_address() as f64;
         for round in 0..2 {

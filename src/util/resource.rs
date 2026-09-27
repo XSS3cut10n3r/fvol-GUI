@@ -2,11 +2,11 @@
 //! the image (`-f` / `--single-location`) and swap files. (VMware metadata files never end in
 //! a compression extension: the stacker downloads them directly.)
 //!
-//! A remote location is downloaded once into the rsvol cache (see [`super::download`]). A
+//! A remote location is downloaded once into the fastvol cache (see [`super::download`]). A
 //! compressed one is decompressed: python wraps the file in `lzma.LZMAFile`, `bz2.BZ2File` or
 //! `gzip.GzipFile` and decompresses on every read (a backwards seek starts over from the
-//! beginning of the file); rsvol decompresses once, in parallel where the format allows,
-//! into `<rsvol cache>/decompressed/` and memory-maps the result, so repeated runs pay
+//! beginning of the file); fastvol decompresses once, in parallel where the format allows,
+//! into `<fastvol cache>/decompressed/` and memory-maps the result, so repeated runs pay
 //! nothing. What python prints (layer names, the location in configurations) is unchanged:
 //! the location stays the compressed file's.
 //!
@@ -92,10 +92,10 @@ pub fn compression_chain(url: &str) -> Vec<Codec> {
 /// `file:` URL, if the caller has it) or the download of a remote URL, decompressed into the
 /// cache when the URL names a compressed file.
 pub fn open(url: &str, local: Option<&Path>, offline: bool) -> Result<PathBuf> {
-    open_in(&paths::rsvol_cache_dir(), url, local, offline)
+    open_in(&paths::cache_dir(), url, local, offline)
 }
 
-/// [`open`] with the rsvol cache directory `cache`.
+/// [`open`] with the fastvol cache directory `cache`.
 fn open_in(cache: &Path, url: &str, local: Option<&Path>, offline: bool) -> Result<PathBuf> {
     let file = match local {
         Some(p) => p.to_path_buf(),
@@ -143,7 +143,8 @@ fn decompressed(dir: &Path, src: &Path, url: &str, chain: &[Codec]) -> Result<Pa
     {
         return Ok(data);
     }
-    let where_ = |e: Error| Error::Msg(format!("{e} (decompressing into {}; RSVOL_CACHE selects another directory)", dir.display()));
+    let where_ = |e: Error| Error::Msg(format!("{e} (decompressing into {}; FASTVOL_CACHE selects another directory)", dir.display()));
+    paths::migrate_legacy_cache();
     std::fs::create_dir_all(dir).map_err(|e| where_(Error::Msg(format!("cannot create the directory: {e}"))))?;
     remove_stale(dir, &prefix);
     let pid = std::process::id();
@@ -259,7 +260,7 @@ fn decompress_file_with(codec: Codec, src: &Path, dst: &Path, xz_buf_max: usize)
 mod tests {
     use super::*;
 
-    /// Decoder throughput without the file system: `RSVOL_DECOMP_BENCH=<file.gz|.bz2>`
+    /// Decoder throughput without the file system: `FASTVOL_DECOMP_BENCH=<file.gz|.bz2>`
     /// `cargo test --profile fast decomp_throughput -- --ignored --nocapture` (into a sink
     /// that drops the data).
     #[test]
@@ -282,7 +283,7 @@ mod tests {
                 Ok(())
             }
         }
-        let p = PathBuf::from(std::env::var("RSVOL_DECOMP_BENCH").expect("RSVOL_DECOMP_BENCH"));
+        let p = PathBuf::from(crate::util::env::var("DECOMP_BENCH").expect("FASTVOL_DECOMP_BENCH"));
         let f = std::fs::File::open(&p).unwrap();
         let map = crate::util::mmap::Mmap::map(&f).unwrap();
         let data = map.as_slice();
@@ -318,7 +319,7 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rsvol-res-{tag}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("fastvol-res-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

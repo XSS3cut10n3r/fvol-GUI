@@ -670,7 +670,7 @@ impl LazyCore {
             let r = std::thread::scope(|sc| {
                 for _ in 0..workers {
                     let (rx, otx, table, irx) = (&rx, otx.clone(), &table, &irx);
-                    let _ = std::thread::Builder::new().name("rsvol-lazyidx".into()).spawn_scoped(sc, move || {
+                    let _ = std::thread::Builder::new().name("fastvol-lazyidx".into()).spawn_scoped(sc, move || {
                         let mut pos = Vec::new();
                         loop {
                             // symbol names first (the checks they come from are done)
@@ -1419,16 +1419,16 @@ mod tests {
     use crate::symbols::isf::build_blob;
     use crate::symbols::{Symbol, SymbolTable};
 
-    /// `RSVOL_BENCH_JSON=path cargo test --profile fast lazy_index_bench -- --ignored --nocapture`:
+    /// `FASTVOL_BENCH_JSON=path cargo test --profile fast lazy_index_bench -- --ignored --nocapture`:
     /// the lazy index's phases against the full build (best of N, in process).
     #[test]
     #[ignore]
     fn lazy_index_bench() {
-        let path = std::env::var("RSVOL_BENCH_JSON").expect("RSVOL_BENCH_JSON");
+        let path = crate::util::env::var("BENCH_JSON").expect("FASTVOL_BENCH_JSON");
         let raw = std::fs::read(&path).unwrap();
         let data = if path.ends_with(".xz") { crate::codecs::xz::decompress(&raw).unwrap() } else { raw };
         let data: &'static [u8] = Box::leak(data.into_boxed_slice());
-        let n: usize = std::env::var("RSVOL_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(15);
+        let n: usize = crate::util::env::var("BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(15);
         let best = |f: &mut dyn FnMut()| -> f64 {
             let mut b = f64::MAX;
             for _ in 0..n {
@@ -1739,7 +1739,7 @@ mod tests {
             }
         }
         files.sort();
-        if let Ok(only) = std::env::var("RSVOL_TEST_ISF_FILTER") {
+        if let Ok(only) = crate::util::env::var("TEST_ISF_FILTER") {
             files.retain(|f| f.to_string_lossy().contains(&only));
         }
         let (mut n, mut refused, mut skipped) = (0, 0, 0);
@@ -1816,7 +1816,7 @@ mod tests {
             }
         }
         files.sort();
-        if let Ok(only) = std::env::var("RSVOL_TEST_ISF_FILTER") {
+        if let Ok(only) = crate::util::env::var("TEST_ISF_FILTER") {
             files.retain(|f| f.to_string_lossy().contains(&only));
         }
         let rss = || std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split(' ').nth(1).and_then(|x| x.parse::<u64>().ok())).unwrap_or(0) * 4096 >> 20;

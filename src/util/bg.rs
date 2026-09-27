@@ -12,7 +12,7 @@ static PENDING: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
 pub fn spawn(f: impl FnOnce() + Send + 'static) {
     let f = std::sync::Arc::new(Mutex::new(Some(f)));
     let g = f.clone();
-    let h = std::thread::Builder::new().name("rsvol-bg".into()).spawn(move || {
+    let h = std::thread::Builder::new().name("fastvol-bg".into()).spawn(move || {
         if let Some(f) = g.lock().ok().and_then(|mut o| o.take()) {
             f();
         }

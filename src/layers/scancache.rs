@@ -41,7 +41,7 @@
 //! process, a scan that a sweep running on another thread will record waits for it and replays
 //! (timeliner runs its plugins concurrently).
 //!
-//! Storage: `~/.cache/rsvol/scan/<image key>/<atom key>.hits` (image key = image file identity
+//! Storage: `~/.cache/fastvol/scan/<image key>/<atom key>.hits` (image key = image file identity
 //! and this executable's identity: a rebuilt binary never trusts an older binary's scans), written
 //! atomically (unique temp file + rename, so concurrent processes are safe); a missing, stale or
 //! corrupt file (bad magic / version / key / length / checksum / encoding) is a miss and is
@@ -51,7 +51,7 @@
 //! chunk (u32, u64 if any is larger), their tags (u32, tagged atoms), and for record atoms the
 //! records of all matches, in match order. The cache
 //! directory is capped ([`MAX_TOTAL_BYTES`], oldest image directories are pruned first),
-//! `--clear-cache` wipes it and `RSVOL_NO_SCAN_CACHE=1` disables it.
+//! `--clear-cache` wipes it and `FASTVOL_NO_SCAN_CACHE=1` disables it.
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
@@ -97,19 +97,19 @@ pub enum CacheQuery<'a> {
     Opaque { key: Vec<u8> },
 }
 
-/// Whether the scan cache is enabled (`RSVOL_NO_SCAN_CACHE=1` disables it; unit tests never
+/// Whether the scan cache is enabled (`FASTVOL_NO_SCAN_CACHE=1` disables it; unit tests never
 /// touch the user's cache: they use [`Session::with_root`]).
 pub fn enabled() -> bool {
     if cfg!(test) {
         return false;
     }
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var_os("RSVOL_NO_SCAN_CACHE").is_none_or(|v| v.is_empty() || v == "0"))
+    *E.get_or_init(|| crate::util::env::var_os("NO_SCAN_CACHE").is_none_or(|v| v.is_empty() || v == "0"))
 }
 
-/// The scan cache directory (`~/.cache/rsvol/scan`).
+/// The scan cache directory (`~/.cache/fastvol/scan`).
 pub fn cache_root() -> PathBuf {
-    paths::rsvol_cache_dir().join("scan")
+    paths::cache_dir().join("scan")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -389,7 +389,8 @@ impl Session {
     fn load(&self, atom: &Atom) -> Option<Groups> {
         let key = self.atom_key(atom);
         let path = self.atom_path(&key);
-        let Ok(buf) = std::fs::read(&path) else {
+        let read = || std::fs::read(&path).ok();
+        let Some(buf) = read().or_else(|| paths::migrate_legacy_cache().then(read).flatten()) else {
             crate::util::trace::note(|| format!("scan cache: no {atom:?} ({})", path.display()));
             return None;
         };
@@ -410,7 +411,8 @@ impl Session {
     fn load_view(&self, atom: &Atom, tag_ok: impl Fn(u32) -> bool) -> Option<AtomView> {
         let key = self.atom_key(atom);
         let path = self.atom_path(&key);
-        let Some(map) = std::fs::File::open(&path).ok().and_then(|f| crate::util::mmap::Mmap::map(&f).ok()) else {
+        let open = || std::fs::File::open(&path).ok();
+        let Some(map) = open().or_else(|| paths::migrate_legacy_cache().then(open).flatten()).and_then(|f| crate::util::mmap::Mmap::map(&f).ok()) else {
             crate::util::trace::note(|| format!("scan cache: no {atom:?} ({})", path.display()));
             return None;
         };
@@ -446,6 +448,7 @@ impl Session {
     /// writers only contend on the directory (measured: 30 atoms 0.9 ms sequential, 1.2 ms on
     /// all cores).
     fn store_all(&self, atoms: &[(Atom, &Groups)]) {
+        paths::migrate_legacy_cache();
         if std::fs::create_dir_all(&self.dir).is_err() {
             return;
         }
@@ -1673,7 +1676,7 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!("rsvol-scancache-{}-{}-{tag}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
+        std::env::temp_dir().join(format!("fastvol-scancache-{}-{}-{tag}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
     }
 
     fn file_with(data: &[u8]) -> (PathBuf, Arc<FileLayer>) {
@@ -2413,12 +2416,12 @@ mod tests {
     }
 
     /// Sweep cost vs a plain scan on a real image (no files written):
-    /// `RSVOL_BENCH_IMG=img cargo test --release sweep_bench -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMG=img cargo test --release sweep_bench -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn sweep_bench() {
-        let Ok(path) = std::env::var("RSVOL_BENCH_IMG") else { return };
-        let reps: usize = std::env::var("RSVOL_BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        let Ok(path) = crate::util::env::var("BENCH_IMG") else { return };
+        let reps: usize = crate::util::env::var("BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
         let ctx = crate::context::Context::new(crate::context::GlobalOptions { file: Some(path), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let best = |f: &dyn Fn() -> usize| {
@@ -2489,11 +2492,11 @@ mod tests {
         eprintln!("phys sweep mft+all+pg    {:?}", run_sweep(k.phys, &mft, &all, true));
     }
 
-    /// Decode a cache file with the key stored in it: `RSVOL_HITS_FILE=f cargo test decode_file -- --ignored --nocapture`
+    /// Decode a cache file with the key stored in it: `FASTVOL_HITS_FILE=f cargo test decode_file -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn decode_file() {
-        let Ok(p) = std::env::var("RSVOL_HITS_FILE") else { return };
+        let Ok(p) = crate::util::env::var("HITS_FILE") else { return };
         let buf = std::fs::read(p).unwrap();
         let klen = u64::from_le_bytes(buf[16..24].try_into().unwrap()) as usize;
         let kind = u32::from_le_bytes(buf[12..16].try_into().unwrap());
@@ -2503,11 +2506,11 @@ mod tests {
     }
 
     /// Occurrence counts of candidate batch patterns:
-    /// `RSVOL_BENCH_IMG=img cargo test --profile fast scancache_counts -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMG=img cargo test --profile fast scancache_counts -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn scancache_counts() {
-        let Ok(path) = std::env::var("RSVOL_BENCH_IMG") else { return };
+        let Ok(path) = crate::util::env::var("BENCH_IMG") else { return };
         let ctx = crate::context::Context::new(crate::context::GlobalOptions { file: Some(path), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let mut pats: Vec<&[u8]> = POOL_TAGS.to_vec();

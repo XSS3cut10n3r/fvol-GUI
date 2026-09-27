@@ -706,7 +706,7 @@ mod tests {
     /// mappings (every variant, including multi-block, multi-stream and trailing garbage).
     #[test]
     fn codecs_xz_to_file() {
-        let dir = std::env::temp_dir().join(format!("rsvol-xz-file-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-xz-file-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut g = include_bytes!("testdata/text.xz").to_vec();
         g.extend_from_slice(b"garbage!");
@@ -741,12 +741,12 @@ mod tests {
     }
 
     /// Throughput of [`decompress_to_file`] against decoding alone:
-    /// `RSVOL_XZ_BENCH=<file.xz> RSVOL_XZ_BENCH_OUT=<scratch file on disk>`
+    /// `FASTVOL_XZ_BENCH=<file.xz> FASTVOL_XZ_BENCH_OUT=<scratch file on disk>`
     /// `cargo test --profile fast codecs_xz_file_throughput -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn codecs_xz_file_throughput() {
-        let p = std::env::var("RSVOL_XZ_BENCH").expect("RSVOL_XZ_BENCH");
+        let p = crate::util::env::var("XZ_BENCH").expect("FASTVOL_XZ_BENCH");
         let f = std::fs::File::open(&p).unwrap();
         let map = crate::util::mmap::Mmap::map(&f).unwrap();
         let data = map.as_slice();
@@ -768,7 +768,7 @@ mod tests {
         });
         let d = t.elapsed().as_secs_f64();
         eprintln!("{} blocks, {total} bytes: decode only {d:.3}s = {:.0} MB/s", blocks.len(), total as f64 / d / 1e6);
-        let out = std::env::var("RSVOL_XZ_BENCH_OUT").expect("RSVOL_XZ_BENCH_OUT");
+        let out = crate::util::env::var("XZ_BENCH_OUT").expect("FASTVOL_XZ_BENCH_OUT");
         let o = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&out).unwrap();
         let t = std::time::Instant::now();
         decompress_to_file(data, &o).unwrap();

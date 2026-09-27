@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn dedup() {
-        let dir = std::env::temp_dir().join(format!("rsvol-files-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-files-test-{}", std::process::id()));
         let d = dir.to_str().unwrap();
         let (_, a) = create(d, "x.dmp").unwrap();
         let (_, b) = create(d, "x.dmp").unwrap();
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn sparse_write_same_bytes() {
-        let dir = std::env::temp_dir().join(format!("rsvol-files-sparse-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-files-sparse-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut data = vec![0u8; 5 * 0x1000 + 123];
         data[0x1000] = 1; // page 1
@@ -371,7 +371,7 @@ mod tests {
     /// "directory" that is a file fails like create_dir_all.
     #[test]
     fn taken_names_and_dirs() {
-        let dir = std::env::temp_dir().join(format!("rsvol-files-test2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-files-test2-{}", std::process::id()));
         let nested = dir.join("a/b");
         let d = nested.to_str().unwrap();
         let (_, a) = create(d, "y.dmp").unwrap();

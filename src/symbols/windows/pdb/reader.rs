@@ -1206,7 +1206,7 @@ struct Meta<'m> {
 /// thread while this one parses and processes the types; everything is then written once,
 /// straight into a single pre-sized output buffer.
 pub(crate) fn convert(pdb: &[u8], database: DbName, datetime: &str, version: &str) -> PResult<Vec<u8>> {
-    let timing = cfg!(test) && std::env::var_os("RSVOL_PDB_TIMING").is_some();
+    let timing = cfg!(test) && crate::util::env::var_os("PDB_TIMING").is_some();
     let t0 = std::time::Instant::now();
     let phase = |name: &str| {
         if timing {
@@ -1258,7 +1258,7 @@ pub(crate) fn convert(pdb: &[u8], database: DbName, datetime: &str, version: &st
     // thread while the real work runs, so writing the document never page-faults.
     let symrec_size = dbi.stream.u16(dbi.stream.m(20)).ok().and_then(|n| msf.stream_size(n as i64)).unwrap_or(0);
     let est = ((1u64 << 16) + symrec_size * 3 / 2 + tpi.size * 6).min(1 << 30) as usize;
-    let sequential = cfg!(test) && std::env::var_os("RSVOL_PDB_SEQ").is_some();
+    let sequential = cfg!(test) && crate::util::env::var_os("PDB_SEQ").is_some();
     if sequential {
         return types_and_output(&tpi, &meta, sym_work, || prefaulted(est), &phase);
     }
@@ -1720,11 +1720,11 @@ mod tests {
         Paged::test_new()
     }
 
-    /// `RSVOL_PDB=<file.pdb> cargo test --release bench_symbol_stages -- --ignored --nocapture`
+    /// `FASTVOL_PDB=<file.pdb> cargo test --release bench_symbol_stages -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn bench_symbol_stages() {
-        let pdb = std::fs::read(std::env::var("RSVOL_PDB").expect("RSVOL_PDB")).unwrap();
+        let pdb = std::fs::read(crate::util::env::var("PDB").expect("FASTVOL_PDB")).unwrap();
         let msf = Msf::open(&pdb).unwrap();
         let dbi = Dbi::read(&msf).unwrap();
         let n = dbi.stream.u16(dbi.stream.m(20)).unwrap() as i64;

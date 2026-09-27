@@ -391,7 +391,7 @@ pub(crate) fn decode_following<R>(data: &[u8], plan: &Plan, follow: impl FnOnce(
     let dec = Decoding::new(plan)?;
     let t0 = std::time::Instant::now();
     let (res, r) = std::thread::scope(|s| {
-        let h = std::thread::Builder::new().name("rsvol-xz".into()).spawn_scoped(s, || {
+        let h = std::thread::Builder::new().name("fastvol-xz".into()).spawn_scoped(s, || {
             // (a panic must not leave the reader waiting)
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.run(data, plan))).unwrap_or_else(|_| {
                 dec.fail();

@@ -293,7 +293,7 @@ pub fn float_to_timeval(t: f64) -> std::result::Result<(i64, u32), String> {
 ///
 /// `Err` is the text of the python exception (`ValueError` for years outside 1..9999, ...),
 /// which is NOT a volatility exception: python plugins crash with a traceback there (the
-/// rsvol CLI's equivalent is a plugin panic, see `plugins::mac::pslist`).
+/// fastvol CLI's equivalent is a plugin panic, see `plugins::mac::pslist`).
 pub fn fromtimestamp_local(t: f64) -> std::result::Result<DateTime, String> {
     static TZ: std::sync::Once = std::sync::Once::new();
     TZ.call_once(|| unsafe { tzset() });

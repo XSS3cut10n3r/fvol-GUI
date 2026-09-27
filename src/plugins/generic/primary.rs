@@ -7,7 +7,7 @@
 //! then tries the OS stackers in `stack_order` (`LinuxIntelVMCOREINFOStacker`,
 //! `LinuxIntelStacker`, `MacIntelStacker`, `WindowsIntelStacker`); the first that succeeds puts
 //! an Intel translation layer (named after the requirement, `"primary"`) on top. When none
-//! succeeds the top container layer is the primary layer. rsvol's `Context` already runs each
+//! succeeds the top container layer is the primary layer. fastvol's `Context` already runs each
 //! OS discovery lazily and caches it per image, so this just asks them in python's order.
 
 use crate::context::Context;

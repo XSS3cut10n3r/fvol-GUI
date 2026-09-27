@@ -2,12 +2,12 @@
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 //!
-//! python lists `framework.class_subclasses(<interface>)` for seven interfaces. rsvol has no
+//! python lists `framework.class_subclasses(<interface>)` for seven interfaces. fastvol has no
 //! python class hierarchy, so the Automagic / Requirement / Layer / LayerStacker / Object /
 //! Renderer categories are python's lists verbatim (class `__name__`s in python's order,
 //! duplicates included: `class_subclasses` yields a class once per path through the
-//! hierarchy). The Plugin category reflects the plugins rsvol registers: python's order for
-//! the ones python has, then any other rsvol plugin sorted by name.
+//! hierarchy). The Plugin category reflects the plugins fastvol registers: python's order for
+//! the ones python has, then any other fastvol plugin sorted by name.
 
 use crate::context::Context;
 use crate::error::Result;

@@ -180,7 +180,7 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
         let hint = std::sync::Mutex::new(None);
         let idx = symbols::store::identifier_index_with(symbols::symbol_path(), &|| {
             let phys = phys.clone();
-            let h = std::thread::Builder::new().name("rsvol-hint".into()).spawn(move || {
+            let h = std::thread::Builder::new().name("fastvol-hint".into()).spawn(move || {
                 symbols::store::set_banner_hint(crate::automagic::banner_hint(phys.as_ref(), b"Darwin Kernel Version ", b":"));
             });
             *hint.lock().unwrap_or_else(|e| e.into_inner()) = h.ok();
@@ -215,9 +215,9 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
         // the same bytes per batch as python's chunking in batches of 2, 4... chunks (32 MB,
         // 64 MB...: more would read past the banner, ~70 MB into the 10.9 image, and a wide
         // batch of page-faulting threads contends), in chunks of FIRST_HIT_CHUNK spread over
-        // the cores (`RSVOL_MAC_FIRST_HIT=0`: python's chunking)
+        // the cores (`FASTVOL_MAC_FIRST_HIT=0`: python's chunking)
         let threads = crate::util::par::threads();
-        let fine = std::env::var_os("RSVOL_MAC_FIRST_HIT").is_none_or(|v| v != "0");
+        let fine = crate::util::env::var_os("MAC_FIRST_HIT").is_none_or(|v| v != "0");
         let per = if fine { (scanner.chunk_size() / FIRST_HIT_CHUNK).max(1) as usize } else { 1 };
         let fh = FirstHit { inner: &scanner, cs: if fine { FIRST_HIT_CHUNK } else { scanner.chunk_size() } };
         let (fb, mb) = (2 * per, threads * 4 * per);
@@ -633,11 +633,11 @@ mod tests {
     use super::*;
 
     /// Full-image scan throughput of the banner scanners (heavy: run through limit.sh with
-    /// `RSVOL_MAC_IMAGE=<image> cargo test --profile fast mac_scan_bench -- --ignored --nocapture`).
+    /// `FASTVOL_MAC_IMAGE=<image> cargo test --profile fast mac_scan_bench -- --ignored --nocapture`).
     #[test]
     #[ignore]
     fn mac_scan_bench() {
-        let Some(img) = std::env::var_os("RSVOL_MAC_IMAGE") else { return };
+        let Some(img) = crate::util::env::var_os("MAC_IMAGE") else { return };
         let phys: Arc<dyn Layer> = crate::automagic::stack_physical(std::path::Path::new(&img), None, false, None).unwrap().layer;
         let sp = symbols::SymbolPath::new(&["/home/user/rs-vol/testdata/symbols".to_string()]);
         let banners = symbols::store::identifier_index(&sp).dictionary("mac");
@@ -688,7 +688,7 @@ mod tests {
     #[test]
     #[ignore]
     fn mac_chunk_bench() {
-        let Some(img) = std::env::var_os("RSVOL_MAC_IMAGE") else { return };
+        let Some(img) = crate::util::env::var_os("MAC_IMAGE") else { return };
         let fl = crate::layers::FileLayer::open(std::path::Path::new(&img)).unwrap();
         let file = std::fs::File::open(&img).unwrap();
         let prefix = b"Darwin Kernel Version 1";

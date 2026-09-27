@@ -158,13 +158,13 @@ mod tests {
     use super::*;
 
     /// Exercise `elf::elf_dump` like python's `linux.elfs --pid 1 2912 --dump` (every VMA
-    /// starting with an ELF header): `RSVOL_BENCH_IMAGE=<image> RSVOL_TEST_OUT=<dir> cargo test
+    /// starting with an ELF header): `FASTVOL_BENCH_IMAGE=<image> FASTVOL_TEST_OUT=<dir> cargo test
     /// --profile fast elfs_like_dump -- --ignored`, then `diff -r` against python's files.
     #[test]
     #[ignore]
     fn elfs_like_dump() {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
-        let out = std::env::var("RSVOL_TEST_OUT").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
+        let out = crate::util::env::var("TEST_OUT").unwrap();
         let opts = crate::context::GlobalOptions {
             file: Some(image),
             symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
