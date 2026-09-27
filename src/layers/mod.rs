@@ -144,6 +144,38 @@ pub trait Layer: Send + Sync {
         None
     }
 
+    /// [`Layer::slice`] for the translation layers stacked on this one (their page-table walks
+    /// and the structure reads made through them): the same bytes, but file-backed data comes
+    /// through the file's random-access mapping, so on a cold page cache a read costs the page,
+    /// not the 4 MiB read-around of the default mapping (see [`FileLayer::data_random`]). A
+    /// physical layer's own `slice` / `read` keep to the default mapping (scans, sweeps, and
+    /// structure reads mixed with them); a translation layer's `slice` / `read` ARE structure
+    /// reads and use this.
+    #[inline]
+    fn slice_random(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        self.slice(addr, len)
+    }
+
+    /// [`Layer::read`] through the random-access path (see [`Layer::slice_random`]).
+    #[inline]
+    fn read_random(&self, addr: u64, buf: &mut [u8]) -> Result<()> {
+        self.read(addr, buf)
+    }
+
+    /// [`Layer::read_padded`] through the random-access path (see [`Layer::slice_random`]).
+    #[inline]
+    fn read_padded_random(&self, addr: u64, buf: &mut [u8]) {
+        self.read_padded(addr, buf)
+    }
+
+    /// [`Layer::slice`] for bulk readers that stream a whole (translation) layer, like memory
+    /// dumps: served from the default mapping, whose read-around is what a cold sequential
+    /// read wants, where a translation layer's `slice` is a structure read.
+    #[inline]
+    fn slice_bulk(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        self.slice(addr, len)
+    }
+
     /// Translation layers: the page table root (DTB/CR3). None for physical layers.
     fn dtb(&self) -> Option<u64> {
         None
