@@ -378,6 +378,8 @@ def main():
         for cid, argv in cs:
             if not a.rs_only:
                 ensure_py(im, cid, argv)
+            elif not os.path.exists(py_dir(im, cid) + "/meta.json"):
+                seed(im, cid, argv)  # existing references need no python run
             if a.py_only:
                 continue
             if not os.path.exists(py_dir(im, cid) + "/meta.json"):

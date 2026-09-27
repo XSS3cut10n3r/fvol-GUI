@@ -60,6 +60,10 @@ struct Params {
     good: usize,
     /// Matches longer than this only insert their first and last few positions.
     max_insert: usize,
+    /// Level 1: one probe of a 4-byte hash table (no chains, no 3-byte table), greedy
+    /// parsing (libdeflate's "fastest" scheme). About 1.3x the speed of a depth-4 chain
+    /// search at a slightly lower ratio.
+    fast: bool,
 }
 
 fn params(level: u32) -> Params {
@@ -79,10 +83,10 @@ fn params(level: u32) -> Params {
         // Benchmark-only override: "depth,nice,lazy,good,max_insert".
         let v: Vec<usize> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         if v.len() == 5 {
-            return Params { depth: v[0] as u32, nice: v[1], lazy: v[2] as u8, good: v[3], max_insert: v[4] };
+            return Params { depth: v[0] as u32, nice: v[1], lazy: v[2] as u8, good: v[3], max_insert: v[4], fast: false };
         }
     }
-    Params { depth, nice, lazy, good, max_insert }
+    Params { depth, nice, lazy, good, max_insert, fast: level == 1 }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -386,6 +390,43 @@ impl Mf {
         }
     }
 
+    /// [`Mf::insert_range`] of the fast finder: the 4-byte hash table only.
+    ///
+    /// # Safety
+    /// As [`Mf::insert_range`].
+    #[inline(always)]
+    unsafe fn insert_range_fast(self, buf: &[u8], mut p: usize, to: usize) {
+        let to = to.min(buf.len().saturating_sub(MIN_LOOKAHEAD - 1));
+        while p < to {
+            // SAFETY: p + 4 <= buf.len(); the hash is < the table length.
+            unsafe { *self.h4.add(self.hash4(ld32(buf, p))) = p as u32 };
+            p += 1;
+        }
+    }
+
+    /// The fast finder: inserts `pos` and checks the one candidate of its 4-byte hash bucket.
+    /// Returns (len, dist), len 0 when it does not match.
+    ///
+    /// # Safety
+    /// As [`Mf::find`].
+    #[inline(always)]
+    unsafe fn find_fast(self, buf: &[u8], pos: usize, max_len: usize) -> (usize, usize) {
+        debug_assert!(max_len >= MIN_LOOKAHEAD && pos + max_len <= buf.len());
+        // SAFETY: pos + 4 <= buf.len(); the hash is < the table length; a candidate that is
+        // not the sentinel is < pos, so cand + 4 <= buf.len() (checked by the distance test).
+        unsafe {
+            let cur = ld32(buf, pos);
+            let h = self.hash4(cur);
+            let cand = *self.h4.add(h);
+            *self.h4.add(h) = pos as u32;
+            let dist = (pos as u32).wrapping_sub(cand);
+            if dist.wrapping_sub(1) < WSIZE as u32 && ld32(buf, cand as usize) == cur {
+                return (extend(buf, cand as usize, pos, 4, max_len), dist as usize);
+            }
+        }
+        (0, 0)
+    }
+
     /// Inserts `pos` and searches for the longest match longer than `best_len` (the hash-3
     /// candidate first when `best_len < 3`). Returns (len, dist); len <= best_len: none.
     ///
@@ -626,7 +667,9 @@ impl Compressor {
             self.head3.resize(1 << b3, SENTINEL);
         }
         self.head4[..1 << b4].fill(SENTINEL);
-        self.head3[..1 << b3].fill(SENTINEL);
+        if !self.p.fast {
+            self.head3[..1 << b3].fill(SENTINEL);
+        }
         if self.prev.len() < WSIZE {
             self.prev.resize(WSIZE, SENTINEL);
         }
@@ -648,6 +691,15 @@ impl Compressor {
             write_stored(bw, &buf[start..], last);
             return;
         }
+        if self.p.fast {
+            self.segment::<true>(buf, start, last, bw);
+        } else {
+            self.segment::<false>(buf, start, last, bw);
+        }
+    }
+
+    /// The parse loop, specialized for the fast finder (`FAST`, level 1) or the chain search.
+    fn segment<const FAST: bool>(&mut self, buf: &[u8], start: usize, last: bool, bw: &mut BitWriter) {
         let end = buf.len();
         let mf = self.reset(end - start);
         let p = self.p;
@@ -657,7 +709,13 @@ impl Compressor {
         let seqs: &mut [u64] = &mut seqbuf;
         // SAFETY (all mf calls below): the tables stay allocated and unresized until the end
         // of this function, and `reset` sized them for mf's shifts.
-        unsafe { mf.insert_range(buf, 0, start) };
+        unsafe {
+            if FAST {
+                mf.insert_range_fast(buf, 0, start)
+            } else {
+                mf.insert_range(buf, 0, start)
+            }
+        };
         let mut pos = start;
         let mut block_start = start;
         let mut ns = 0usize;
@@ -680,8 +738,13 @@ impl Compressor {
             }
             let max_len = rem.min(MAX_MATCH);
             // SAFETY: pos + max_len <= end, max_len >= 4.
-            let (mut len, mut dist) =
-                unsafe { mf.find(buf, pos, max_len, p.nice.min(max_len), p.depth, MIN_MATCH - 1) };
+            let (mut len, mut dist) = unsafe {
+                if FAST {
+                    mf.find_fast(buf, pos, max_len)
+                } else {
+                    mf.find(buf, pos, max_len, p.nice.min(max_len), p.depth, MIN_MATCH - 1)
+                }
+            };
             if len < MIN_MATCH {
                 lit_run += 1;
                 pos += 1;
@@ -689,7 +752,7 @@ impl Compressor {
             }
             let mut cur = pos;
             pos += 1;
-            if p.lazy > 0 {
+            if !FAST && p.lazy > 0 {
                 loop {
                     if len >= p.nice || end - pos < MIN_LOOKAHEAD {
                         break;
@@ -742,7 +805,9 @@ impl Compressor {
                     let mend = cur + n * MAX_MATCH;
                     // SAFETY: see above.
                     unsafe {
-                        if dist < 16 || p.max_insert < MAX_MATCH {
+                        if FAST {
+                            mf.insert_range_fast(buf, mend - MIN_LOOKAHEAD, mend);
+                        } else if dist < 16 || p.max_insert < MAX_MATCH {
                             // A run (short period): its interior hashes to a few chains.
                             mf.insert_range(buf, pos, (pos + 4).min(mend));
                             mf.insert_range(buf, mend - MIN_LOOKAHEAD, mend);
@@ -764,7 +829,14 @@ impl Compressor {
             let mend = cur + len;
             // SAFETY: see above.
             unsafe {
-                if len <= p.max_insert {
+                if FAST {
+                    if len <= p.max_insert {
+                        mf.insert_range_fast(buf, pos, mend);
+                    } else {
+                        mf.insert_range_fast(buf, pos, (pos + 4).min(mend));
+                        mf.insert_range_fast(buf, (pos + 4).max(mend - 4), mend);
+                    }
+                } else if len <= p.max_insert {
                     mf.insert_range(buf, pos, mend);
                 } else {
                     // Long match: only the first and last few positions.
