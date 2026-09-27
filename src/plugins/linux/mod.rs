@@ -2,7 +2,6 @@
 
 use crate::error::{Error, Result};
 use crate::plugins::Plugin;
-use crate::renderers::{RowBlock, RowSink};
 
 pub mod bash;
 pub mod boottime;
@@ -102,49 +101,7 @@ pub fn register(v: &mut Vec<&'static dyn Plugin>) {
     v.push(&tracing::tracepoints::CheckTracepoints);
 }
 
-/// python `for item in items: yield from rows(item)` over `n` items, the rows built and
-/// formatted on all cores (see [`RowBlock`]) and handed to `out` in order: `f(range, block)`
-/// pushes the rows of the items in `range` (chunks of `chunk` items) and returns python's
-/// exception after them, if any; nothing after it is emitted. At most a few chunks per core
-/// are computed ahead of the output, so memory stays bounded whatever the output size.
-pub fn stream_chunks(out: &mut dyn RowSink, n: usize, chunk: usize, f: impl Fn(std::ops::Range<usize>, &mut RowBlock) -> Option<Error> + Sync) -> Result<()> {
-    let chunk = chunk.max(1);
-    let enc = out.encoder();
-    let enc = enc.as_ref();
-    let mut res = Ok(());
-    let mut panicked = None;
-    crate::util::par::par_map_stream(
-        n.div_ceil(chunk),
-        4 * crate::util::par::threads(),
-        // a panic (python's uncaught exceptions are panics) is caught on the worker and
-        // resumed here, in order, like the serial loop would have raised it (an uncaught
-        // worker panic would leave the stream waiting forever)
-        |c| {
-            let mut b = RowBlock::new(enc);
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(c * chunk..((c + 1) * chunk).min(n), &mut b)));
-            (b, r)
-        },
-        |_, (b, r)| {
-            // the rows before the error / panic first
-            res = b.emit(out);
-            match r {
-                _ if res.is_err() => false,
-                Ok(err) => {
-                    res = err.map_or(Ok(()), Err);
-                    res.is_ok()
-                }
-                Err(p) => {
-                    panicked = Some(p);
-                    false
-                }
-            }
-        },
-    );
-    if let Some(p) = panicked {
-        std::panic::resume_unwind(p);
-    }
-    res
-}
+pub use crate::plugins::stream_chunks;
 
 /// [`pslist::collect_tasks`]'s result as items for [`crate::plugins::emit_par_blocks`]: the
 /// tasks, then the generator's error (python raised after all of them) as an `Err` item.
@@ -171,7 +128,7 @@ pub fn clone_err(e: &Error) -> Error {
 mod tests {
     use super::*;
     use crate::renderers::text::{RenderOptions, create};
-    use crate::renderers::{CollectSink, Value};
+    use crate::renderers::{CollectSink, RowSink, Value};
 
     fn cols() -> Vec<crate::renderers::Column> {
         crate::cols![("I", Int), ("Hex", Hex), ("S", Str)]

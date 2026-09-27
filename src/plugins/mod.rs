@@ -409,26 +409,84 @@ fn stream_window() -> usize {
 /// [`par_blocks`] with bounded memory: the items are computed in windows of a few per core and
 /// `consume(i, block, x)` gets each on the calling thread in index order before the next
 /// window starts. `consume` returning `Ok(false)` or an error stops (later windows are not
-/// computed).
+/// computed); `consume` may panic (python crashes raised on the output thread).
+///
+/// A panicking `f` (python's uncaught exceptions are panics) is caught on its worker: `consume`
+/// gets that item's rows with `None` (it emits them like any block, python printed the rows
+/// before the crash), then the panic is resumed with its own payload. Without this the
+/// worker's join would replace the payload ("worker panicked").
 pub fn stream_blocks<'e, X: Send>(
     enc: Option<&'e crate::renderers::text::RowEncoder>,
     n: usize,
     f: impl Fn(usize, &mut RowBlock<'e>) -> X + Sync,
-    mut consume: impl FnMut(usize, RowBlock<'e>, X) -> Result<bool>,
+    mut consume: impl FnMut(usize, RowBlock<'e>, Option<X>) -> Result<bool>,
 ) -> Result<()> {
     let w = stream_window();
     let mut start = 0;
     while start < n {
         let end = (start + w).min(n);
-        let blocks = par_blocks(enc, end - start, |j, b| f(start + j, b));
+        let blocks = par_blocks(enc, end - start, |j, b| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(start + j, b))));
         for (j, (b, x)) in blocks.into_iter().enumerate() {
-            if !consume(start + j, b, x)? {
-                return Ok(());
+            match x {
+                Ok(x) => {
+                    if !consume(start + j, b, Some(x))? {
+                        return Ok(());
+                    }
+                }
+                Err(panic) => {
+                    consume(start + j, b, None)?;
+                    std::panic::resume_unwind(panic);
+                }
             }
         }
         start = end;
     }
     Ok(())
+}
+
+/// python `for item in items: yield from rows(item)` over `n` items, the rows built and
+/// formatted on all cores (see [`RowBlock`]) and handed to `out` in order: `f(range, block)`
+/// pushes the rows of the items in `range` (chunks of `chunk` items) and returns python's
+/// exception after them, if any; nothing after it is emitted. At most a few chunks per core
+/// are computed ahead of the output, so memory stays bounded whatever the output size; a
+/// panicking `f` is resumed here after the rows before it (see [`stream_blocks`]).
+pub fn stream_chunks(out: &mut dyn RowSink, n: usize, chunk: usize, f: impl Fn(std::ops::Range<usize>, &mut RowBlock) -> Option<crate::error::Error> + Sync) -> Result<()> {
+    let chunk = chunk.max(1);
+    let enc = out.encoder();
+    let enc = enc.as_ref();
+    let mut res = Ok(());
+    let mut panicked = None;
+    crate::util::par::par_map_stream(
+        n.div_ceil(chunk),
+        4 * crate::util::par::threads(),
+        // a panic is caught on the worker and resumed here, in order, like the serial loop
+        // would have raised it (an uncaught worker panic would leave the stream waiting
+        // forever); the consumer itself never panics (it would, too)
+        |c| {
+            let mut b = RowBlock::new(enc);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(c * chunk..((c + 1) * chunk).min(n), &mut b)));
+            (b, r)
+        },
+        |_, (b, r)| {
+            // the rows before the error / panic first
+            res = b.emit(out);
+            match r {
+                _ if res.is_err() => false,
+                Ok(err) => {
+                    res = err.map_or(Ok(()), Err);
+                    res.is_ok()
+                }
+                Err(p) => {
+                    panicked = Some(p);
+                    false
+                }
+            }
+        },
+    );
+    if let Some(p) = panicked {
+        std::panic::resume_unwind(p);
+    }
+    res
 }
 
 /// python `for item in items: yield from rows(item)` with the items' rows computed (and
@@ -456,7 +514,7 @@ pub fn emit_par_blocks<T: Sync>(out: &mut dyn RowSink, items: Vec<Result<T>>, f:
                 return Err(e);
             }
             b.emit(out)?;
-            match err {
+            match err.flatten() {
                 Some(e) => Err(e),
                 None => Ok(true),
             }
@@ -473,4 +531,105 @@ pub fn emit_par_rows<T: Sync>(out: &mut dyn RowSink, items: Vec<Result<T>>, f: i
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::renderers::CollectSink;
+    use crate::renderers::text::{RenderOptions, create};
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Fail {
+        None,
+        ErrItem(usize),
+        ErrAfterRow(usize),
+        Panic(usize),
+    }
+
+    fn row(i: usize) -> Vec<Value> {
+        vec![Value::Int(i as i128), Value::Str(format!("item {i}"))]
+    }
+
+    /// Item `i`'s rows: two, with `fail` striking after the first.
+    fn body(fail: Fail, i: usize, push: &mut dyn FnMut(Vec<Value>)) -> Result<()> {
+        push(row(i));
+        if fail == Fail::ErrAfterRow(i) {
+            return Err(Error::msg("after"));
+        }
+        if fail == Fail::Panic(i) {
+            std::panic::panic_any(format!("python crash at {i}"));
+        }
+        push(row(i + 1000));
+        Ok(())
+    }
+
+    fn items(fail: Fail, n: usize) -> Vec<Result<usize>> {
+        (0..n).map(|i| if fail == Fail::ErrItem(i) { Err(Error::msg("item")) } else { Ok(i) }).collect()
+    }
+
+    /// What python prints / raises: the serial loop.
+    fn serial(r: &mut dyn RowSink, fail: Fail, n: usize) -> Result<()> {
+        for item in items(fail, n) {
+            let i = item?;
+            let mut rows = Vec::new();
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(fail, i, &mut |v| rows.push(v))));
+            for v in rows {
+                r.row(0, v)?;
+            }
+            match res {
+                Ok(r) => r?,
+                Err(p) => std::panic::resume_unwind(p),
+            }
+        }
+        Ok(())
+    }
+
+    fn outcome(res: std::thread::Result<Result<()>>) -> String {
+        match res {
+            Ok(Ok(())) => "ok".to_string(),
+            Ok(Err(e)) => format!("err {e}"),
+            Err(p) => format!("panic {}", p.downcast_ref::<String>().cloned().unwrap_or_default()),
+        }
+    }
+
+    /// emit_par_blocks gives every renderer the serial output: the rows in item order, an `Err`
+    /// item or a failing item ends the output right where python raised, and a panicking item's
+    /// rows before the panic are emitted before the panic is resumed with its own payload.
+    #[test]
+    fn emit_par_blocks_like_serial() {
+        let n = 500usize;
+        for name in ["quick", "csv", "json", "jsonl", "pretty", "none"] {
+            for fail in [Fail::None, Fail::ErrItem(0), Fail::ErrItem(333), Fail::ErrAfterRow(5), Fail::Panic(0), Fail::Panic(417)] {
+                let run = |parallel: bool| -> (Vec<u8>, String) {
+                    let mut buf = Vec::new();
+                    let o;
+                    {
+                        let mut r = create(name, &mut buf, RenderOptions::default()).unwrap();
+                        r.begin(crate::cols![("I", Int), ("S", Str)]).unwrap();
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if parallel { emit_par_blocks(&mut *r, items(fail, n), |&i, b| body(fail, i, &mut |v| b.push(v))) } else { serial(&mut *r, fail, n) }
+                        }));
+                        o = outcome(res);
+                        if o == "ok" { r.finish().unwrap() } else { r.abort(false).unwrap() }
+                    }
+                    (buf, o)
+                };
+                let (want, wo) = run(false);
+                let (got, go) = run(true);
+                assert_eq!(wo, go, "{name} {fail:?}");
+                assert!(want == got, "{name} {fail:?}: output differs");
+            }
+        }
+        // no encoder (collectors, --filters): the values themselves, in order
+        for fail in [Fail::None, Fail::ErrAfterRow(77), Fail::Panic(10)] {
+            let mut a = CollectSink::default();
+            let mut b = CollectSink::default();
+            let ra = outcome(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serial(&mut a, fail, 200))));
+            let rb = outcome(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| emit_par_blocks(&mut b, items(fail, 200), |&i, blk| body(fail, i, &mut |v| blk.push(v))))));
+            assert_eq!(ra, rb);
+            assert_eq!(format!("{:?}", a.rows), format!("{:?}", b.rows));
+        }
+    }
 }

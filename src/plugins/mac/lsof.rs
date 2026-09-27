@@ -66,7 +66,7 @@ impl Plugin for Lsof {
                     return Err(e);
                 }
                 b.emit(out)?;
-                match err {
+                match err.flatten() {
                     Some((e, true)) => Err(raise_python(e)),
                     Some((e, false)) => Err(e),
                     None => Ok(true),

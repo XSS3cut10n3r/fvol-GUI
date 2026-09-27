@@ -725,9 +725,10 @@ impl Plugin for Handles {
                 started = Some(pi);
                 block.emit(&mut *out)?;
                 match end {
-                    UnitEnd::Done => Ok(true),
-                    UnitEnd::Err(e) => Err(e),
-                    UnitEnd::Pid => {
+                    // (None: the unit panicked after these rows; stream_blocks resumes it)
+                    None | Some(UnitEnd::Done) => Ok(true),
+                    Some(UnitEnd::Err(e)) => Err(e),
+                    Some(UnitEnd::Pid) => {
                         phs[pi].as_ref().map(|ph| ph.proc).ok_or_else(|| Error::msg("handles: no process"))?.m("UniqueProcessId")?.int()?;
                         Err(Error::msg("UniqueProcessId became readable"))
                     }
