@@ -9,7 +9,7 @@ use crate::plugins::linux::pslist::list_tasks;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
 use crate::symbols::linux::LinuxExt;
-use crate::symbols::linux::modules::{ALL_GATHERERS, module_lookup_by_address, run_modules_scanners};
+use crate::symbols::linux::modules::{ALL_GATHERERS, module_lookup_by_addresses, run_modules_scanners};
 
 pub struct Kthreads;
 
@@ -36,7 +36,12 @@ impl Plugin for Kthreads {
         }
         let known_modules = run_modules_scanners(k, &ALL_GATHERERS)?;
         let no_filter = |_: &crate::objects::Obj| Ok(false);
-        list_tasks(k, &no_filter, true, &mut |task| {
+        // python looks each handler up as it goes; the lookups only read the symbol tables, so
+        // the rows are gathered first and all kernel symbols are resolved in one pass over the
+        // table (module_lookup_by_addresses: same results, same error points) instead of one
+        // lookup each (which builds the whole address index)
+        let mut rows: Vec<(i128, String, u64)> = Vec::new();
+        let walked = list_tasks(k, &no_filter, true, &mut |task| {
             if !task.is_kernel_thread()? {
                 return Ok(true);
             }
@@ -58,14 +63,20 @@ impl Plugin for Kthreads {
                     Err(e) => return Err(e),
                 }
             }
-            let (info, symbol) = module_lookup_by_address(k, &known_modules, fnv)?;
+            rows.push((task.m("pid")?.int()?, thread_name, fnv));
+            Ok(true)
+        });
+        let addrs: Vec<u64> = rows.iter().map(|r| r.2).collect();
+        let lookups = module_lookup_by_addresses(k, &known_modules, &addrs);
+        for ((pid, thread_name, fnv), lookup) in rows.into_iter().zip(lookups) {
+            let (info, symbol) = lookup?;
             let module = info.map_or(Value::NotAvailable, |i| Value::Str(i.name));
             let symbol = match symbol {
                 Some(s) if !s.is_empty() => Value::Str(s),
                 _ => Value::NotAvailable,
             };
-            out.row(0, vec![Value::Int(task.m("pid")?.int()?), Value::Str(thread_name), Value::Int(fnv as i128), module, symbol])?;
-            Ok(true)
-        })
+            out.row(0, vec![Value::Int(pid), Value::Str(thread_name), Value::Int(fnv as i128), module, symbol])?;
+        }
+        walked
     }
 }
