@@ -8,7 +8,7 @@ import { captureTime } from './result.js';
 
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
-  try { localStorage.setItem('rsvol.theme', t); } catch (e) { /* ignore */ }
+  try { localStorage.setItem('fastvol.theme', t); } catch (e) { /* ignore */ }
 }
 
 function renderTopbar() {
@@ -27,7 +27,7 @@ function renderTopbar() {
   if (s.state === 'warming') parts.push((s.phase || 'preparing') + '…');
   if (s.state === 'failed') parts.push('⚠ not recognised');
   meta.textContent = parts.join('  ·  ');
-  document.title = `${s.name} — rsvol`;
+  document.title = `${s.name} — fastvol`;
 }
 
 function railResize() {
@@ -92,16 +92,17 @@ function shortcuts() {
   });
 }
 
-/** No (valid) token: ask for it. The token is printed by `vol serve` (in the URL it prints). */
+/** No (valid) token: ask for it. The token is printed by `fvol serve` (in the URL it prints). */
 function lockScreen(wrong) {
   const inp = el('input.input', { type: 'password', autocomplete: 'off', spellcheck: false, placeholder: 'access token', 'aria-label': 'Access token' });
   const go = () => { if (inp.value.trim()) { setToken(inp.value.trim()); location.reload(); } };
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
   const box = el('div.dialog.login-box', { 'aria-label': 'Access token needed' },
-    el('div.card-h', {}, el('h3', { text: 'rsvol · locked' })),
+    el('div.card-h', {}, el('h3', { text: 'fastvol · locked' })),
     el('div.card-b.openbox', {},
-      el('p.prose.flush', { text: 'This server gives access to a memory image. Open the URL printed by vol serve (it carries the token), or paste the token here.' }),
-      wrong ? el('p.bad', { role: 'alert', text: 'The saved token is not valid for this server (it changes every time vol serve starts).' }) : null,
+      el('img.mascot', { src: '/assets/mascot.svg', alt: '' }),
+      el('p.prose.flush', { text: 'This server gives access to a memory image. Open the URL printed by fvol serve (it carries the token), or paste the token here.' }),
+      wrong ? el('p.bad', { role: 'alert', text: 'The saved token is not valid for this server (it changes every time fvol serve starts).' }) : null,
       el('div.row', {}, inp, el('button.btn.primary', { type: 'button', text: 'Unlock', on: { click: go } }))));
   document.body.append(el('div.scrim'), box);
   inp.focus();
@@ -147,7 +148,7 @@ async function main() {
     for (const r of runs) store.runs.set(r.id, r);
   } catch (e) {
     if (e.status === 401) { lockScreen(true); return; }
-    document.getElementById('panes').append(el('div.empty-state', {}, el('h2', { text: 'Can\'t reach the rsvol server' }), e.message));
+    document.getElementById('panes').append(el('div.empty-state', {}, el('h2', { text: 'Can\'t reach the fastvol server' }), e.message));
     return;
   }
   renderTopbar();

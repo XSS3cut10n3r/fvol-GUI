@@ -30,6 +30,7 @@ pub static ASSETS: &[Asset] = &[
     asset!("catalog.js", "text/javascript; charset=utf-8"),
     asset!("result.js", "text/javascript; charset=utf-8"),
     asset!("favicon.svg", "image/svg+xml"),
+    asset!("mascot.svg", "image/svg+xml"),
     asset!("mono-400.woff2", "font/woff2"),
     asset!("mono-700.woff2", "font/woff2"),
     asset!("OFL.txt", "text/plain; charset=utf-8"),

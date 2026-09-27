@@ -355,7 +355,7 @@ pub fn explain(e: &Error, run: &Run) -> ErrInfo {
                     Some("windows") => {
                         let pdb = session.ctx.windows_kernel().ok().map(|k| format!("{} {}-{}", k.pdb_name, k.guid, k.age));
                         hints.push(format!(
-                            "rsvol needs the kernel's symbol table{}. It is downloaded from Microsoft's symbol server on first use{}.",
+                            "fastvol needs the kernel's symbol table{}. It is downloaded from Microsoft's symbol server on first use{}.",
                             pdb.map(|p| format!(" ({p})")).unwrap_or_default(),
                             if session.offline { ", but this session was started with --offline" } else { "" }
                         ));
@@ -366,14 +366,14 @@ pub fn explain(e: &Error, run: &Run) -> ErrInfo {
                             hints.push(format!("Kernel banner found in the image: {b}"));
                         }
                         hints.push("Linux symbol tables must match that exact kernel build: generate one with dwarf2json from the matching vmlinux with debug info (e.g. the linux-image-…-dbgsym package).".into());
-                        hints.push("Put the .json(.xz) under a directory and open the image again with that symbols directory (or restart `vol serve` with -s DIR).".into());
+                        hints.push("Put the .json(.xz) under a directory and open the image again with that symbols directory (or restart `fvol serve` with -s DIR).".into());
                     }
                     Some("mac") => {
                         if let Some(b) = banners.first() {
                             hints.push(format!("Kernel banner found in the image: {b}"));
                         }
                         hints.push("macOS symbol tables must match that exact kernel build; generate one with dwarf2json from the matching Kernel Debug Kit.".into());
-                        hints.push("Put the .json(.xz) under a directory and open the image again with that symbols directory (or restart `vol serve` with -s DIR).".into());
+                        hints.push("Put the .json(.xz) under a directory and open the image again with that symbols directory (or restart `fvol serve` with -s DIR).".into());
                     }
                     _ => {}
                 }
@@ -692,7 +692,7 @@ impl Runs {
                     d.error = Some(ErrInfo {
                         kind: "crash",
                         title: "The plugin crashed".into(),
-                        message: "This is a bug in rsvol, not a problem with your image. Rows produced before the crash are shown.".into(),
+                        message: "This is a bug in fastvol, not a problem with your image. Rows produced before the crash are shown.".into(),
                         hints: vec!["Please report it with the plugin name, its options and the details below.".into()],
                         detail: format!("RuntimeError: {msg}"),
                     });

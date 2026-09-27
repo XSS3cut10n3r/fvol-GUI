@@ -279,7 +279,7 @@ impl Session {
             }
             Ok(Ok(())) => Warm::Failed("No supported operating system kernel was found in this image.".into()),
             Ok(Err(m)) => Warm::Failed(m),
-            Err(_) => Warm::Failed("Internal error while analysing the image (rsvol bug).".into()),
+            Err(_) => Warm::Failed("Internal error while analysing the image (fastvol bug).".into()),
         };
         *self.warm.lock().unwrap_or_else(|e| e.into_inner()) = (state, sum);
         hub.bump();

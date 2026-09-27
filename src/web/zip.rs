@@ -186,7 +186,7 @@ pub fn download(run: &Arc<Run>) -> Response {
 mod tests {
     #[test]
     fn zip_roundtrip_with_unzip() {
-        let dir = std::env::temp_dir().join(format!("rsvol-zip-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-zip-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("a.txt"), b"hello\n").unwrap();
         std::fs::write(dir.join("b.bin"), vec![7u8; 100_000]).unwrap();

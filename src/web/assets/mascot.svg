@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="fastvol mascot: a masked ferret with a headlamp, dashing">
+  <!--
+    The fastvol ferret. Hand-written source: edit this file, then run docs/assets/build.py.
+    Palette: copper #e0662b, cream #f4e4cc, charcoal #22262e, gunmetal #3a404b, teal #3fd0c9.
+    The body's italic cuts share the 10 degree slant of the wordmark.
+  -->
+  <defs>
+    <linearGradient id="fv-beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3fd0c9" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#3fd0c9" stop-opacity="0"/>
+    </linearGradient>
+    <path id="fv-head" d="M62 62C65 54 71 47 83 45C95 43 106 47 115 53C120 56 126 58 126 63C126 67 122 69 117 69C109 70 101 73 95 77C89 81 85 86 83 92C82 97 79 101 72 101H58Z"/>
+    <clipPath id="fv-head-clip"><use href="#fv-head"/></clipPath>
+  </defs>
+  <!-- headlamp beam -->
+  <path fill="url(#fv-beam)" d="M103 35L128 21V53L103 42Z"/>
+  <!-- body, streaking -->
+  <g fill="#e0662b">
+    <path d="M36 62H72V73H34Z"/>
+    <path d="M12 76H72V87H10Z"/>
+    <path d="M28 90H72V101H26Z"/>
+  </g>
+  <!-- ear, laid back -->
+  <g transform="rotate(-14 78 50)">
+    <path fill="#e0662b" d="M71 52C68 43 72 36 79 36C86 37 88 44 85 49Z"/>
+    <path fill="#f4e4cc" d="M75 49C73 43 76 40 79 40C83 41 84 44 82 47Z"/>
+  </g>
+  <!-- head -->
+  <use href="#fv-head" fill="#e0662b"/>
+  <g clip-path="url(#fv-head-clip)">
+    <!-- pale face -->
+    <path fill="#f4e4cc" d="M87 41C98 42 110 48 130 56V100H96C90 94 84 84 81 74C79 66 80 58 81 53C82 48 84 44 87 41Z"/>
+    <!-- bandit mask -->
+    <path fill="#22262e" d="M74 54C87 48 105 48 119 56.5C110 61 97 62 87 61C81 60 77 58 74 54Z"/>
+  </g>
+  <!-- eye: flat lid, looking ahead -->
+  <path fill="#f4e4cc" d="M94.5 54.2H106C106 58 103.4 60 100.3 60C97.2 60 94.5 58 94.5 54.2Z"/>
+  <circle cx="102.2" cy="56.4" r="2.3" fill="#22262e"/>
+  <circle cx="103.1" cy="55.6" r=".75" fill="#fff"/>
+  <!-- smirk and nose -->
+  <path fill="none" stroke="#22262e" stroke-width="1.6" stroke-linecap="round" d="M119.5 67.2Q114 69.6 109 68.6"/>
+  <ellipse cx="124" cy="62.6" rx="4" ry="3.3" fill="#22262e"/>
+  <!-- headlamp -->
+  <g transform="rotate(-12 96 40)">
+    <rect x="88" y="36.5" width="15" height="8" rx="2.5" fill="#3a404b"/>
+    <rect x="100" y="37.5" width="3.5" height="6" rx="1" fill="#3fd0c9"/>
+  </g>
+</svg>

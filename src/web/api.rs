@@ -106,7 +106,7 @@ pub fn handle(app: &Arc<App>, req: &Request) -> Response {
                 if n > 20 {
                     std::thread::sleep(Duration::from_millis(250));
                 }
-                return err(401, "missing or wrong access token (open the URL printed by `vol serve`)");
+                return err(401, "missing or wrong access token (open the URL printed by `fvol serve`)");
             }
             api(app, req, &p["/api/".len()..])
         }
@@ -356,7 +356,7 @@ fn py_repr_str(s: &str) -> String {
 }
 
 /// Validate browser-supplied options against the plugin's requirements (python `int(x, 0)`
-/// for ints, choices, required options) and build the `Config` + the equivalent `vol` args.
+/// for ints, choices, required options) and build the `Config` + the equivalent `fvol` args.
 pub fn parse_config(plugin: &dyn Plugin, args: Option<&Json>) -> Result<(Config, Vec<String>), String> {
     let reqs = plugin.requirements();
     let mut cfg = Config::default();
@@ -431,7 +431,7 @@ pub fn parse_config(plugin: &dyn Plugin, args: Option<&Json>) -> Result<(Config,
                 let s = v.as_str().ok_or_else(|| format!("argument {flag}: expected a path or URL"))?;
                 let has_scheme = s.find(':').is_some_and(|i| i > 1 && s[..i].bytes().all(|c| c.is_ascii_alphanumeric() || b"+-.".contains(&c)));
                 if has_scheme && !s.to_ascii_lowercase().starts_with("file:") {
-                    return Err(format!("argument {flag}: remote URLs are disabled in vol serve (the server would fetch them); download the file and give its local path"));
+                    return Err(format!("argument {flag}: remote URLs are disabled in fvol serve (the server would fetch them); download the file and give its local path"));
                 } else if has_scheme {
                     ConfigValue::Str(s.to_string())
                 } else {
@@ -995,7 +995,7 @@ fn md_cell(out: &mut Vec<u8>, s: &[u8]) {
     }
 }
 
-/// Re-run the plugin with a CLI renderer: byte-identical to `vol -r <renderer> <plugin> ...`.
+/// Re-run the plugin with a CLI renderer: byte-identical to `fvol -r <renderer> <plugin> ...`.
 fn vol_export(app: &Arc<App>, run: Arc<Run>, req: &Request) -> Response {
     let renderer = req.param("renderer").unwrap_or("jsonl").to_string();
     if !crate::renderers::text::RENDERER_NAMES.contains(&renderer.as_str()) {

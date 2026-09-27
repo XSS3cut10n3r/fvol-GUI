@@ -88,7 +88,7 @@ impl Plugin for Crash {
 static CRASH: Crash = Crash;
 
 fn test_app() -> Arc<App> {
-    let out = std::env::temp_dir().join(format!("rsvol-web-test-{}-{}", std::process::id(), runs::now_ms()));
+    let out = std::env::temp_dir().join(format!("fastvol-web-test-{}-{}", std::process::id(), runs::now_ms()));
     // a small file stands in for the image: fake plugins never read it
     let img = out.with_extension("img");
     std::fs::write(&img, vec![0u8; 4096]).unwrap();
@@ -287,7 +287,7 @@ fn api_requires_token_host_and_same_origin() {
     assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, AUTH, ("origin", "http://evil.example")], "").0, 403);
     assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, AUTH, ("origin", "http://127.0.0.1:8765"), ("sec-fetch-site", "same-origin")], "").0, 200);
     // cookies are never credentials (they are not port-isolated)
-    let cookie = format!("rsvol_8765={TOK}");
+    let cookie = format!("fastvol_8765={TOK}");
     assert_eq!(call(&app, "GET", "/api/plugins", &[HOST, ("cookie", &cookie)], "").0, 401);
     let body = r#"{"plugin":"test.fake.Fake"}"#;
     assert_eq!(call(&app, "POST", "/api/runs", &[HOST, ("cookie", &cookie)], body).0, 401);

@@ -1,4 +1,4 @@
-//! Access control for `vol serve`: the random access token, constant-time comparison, Host
+//! Access control for `fvol serve`: the random access token, constant-time comparison, Host
 //! header validation (DNS-rebinding defence) and request-origin checks.
 
 use super::http::Request;

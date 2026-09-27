@@ -7,19 +7,19 @@ function initToken() {
   const m = /(?:^#|&)token=([^&]+)/.exec(location.hash);
   if (m) {
     const t = decodeURIComponent(m[1]);
-    try { localStorage.setItem('rsvol.token', t); } catch (e) { /* storage blocked: keep it for this page only */ }
+    try { localStorage.setItem('fastvol.token', t); } catch (e) { /* storage blocked: keep it for this page only */ }
     const rest = location.hash.replace(/(^#|&)token=[^&]+/, '').replace(/^#&/, '#');
     history.replaceState(null, '', location.pathname + location.search + (rest.length > 1 ? rest : ''));
     return t;
   }
-  try { return localStorage.getItem('rsvol.token') || ''; } catch (e) { return ''; }
+  try { return localStorage.getItem('fastvol.token') || ''; } catch (e) { return ''; }
 }
 export let TOKEN = initToken();
 export function setToken(t) {
   TOKEN = t;
-  try { localStorage.setItem('rsvol.token', t); } catch (e) { /* ignore */ }
+  try { localStorage.setItem('fastvol.token', t); } catch (e) { /* ignore */ }
 }
-export const VERSION = document.querySelector('meta[name="rsvol-version"]').content;
+export const VERSION = document.querySelector('meta[name="fastvol-version"]').content;
 
 export class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -312,8 +312,8 @@ export async function copy(text, what = 'Copied') {
 
 // ------------------------------------------------------------------ persistence (per image)
 export const prefs = {
-  get(k, d) { try { const v = localStorage.getItem('rsvol.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
-  set(k, v) { try { localStorage.setItem('rsvol.' + k, JSON.stringify(v)); } catch (e) { /* quota / blocked */ } },
+  get(k, d) { try { const v = localStorage.getItem('fastvol.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('fastvol.' + k, JSON.stringify(v)); } catch (e) { /* quota / blocked */ } },
 };
 
 /** Remember plugin durations to show an ETA next time. */
