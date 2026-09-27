@@ -842,17 +842,8 @@ fn deferred_mode() -> &'static str {
 pub fn finish_deferred() {
     super::windows::pdb::finish_ahead();
     // converted PDB tables first: their files are what python and the next run look for
-    let writes = std::mem::take(&mut *PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner()));
-    for p in writes {
-        if deferred_mode() != "thread" && spawn_helper_spec(&format!("X{}", p.job.encode())) {
-            crate::util::trace::note(|| format!("pdb isf: helper started for {}", p.job.path.display()));
-            continue;
-        }
-        crate::util::bg::spawn(move || {
-            let _t = crate::util::trace::span("pdb isf write (deferred, in-process)");
-            p.job.run_with(&p.json);
-        });
-    }
+    // (their `.json.xz` files are being written by background threads joined before exit)
+    drop(std::mem::take(&mut *PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner())));
     let jobs = std::mem::take(&mut *DEFERRED.lock().unwrap_or_else(|e| e.into_inner()));
     let mode = deferred_mode();
     for j in jobs {
@@ -2493,7 +2484,15 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
         // the load that follows builds the table from this JSON (the file does not exist yet)
         Some(job) => {
             let key = (pdb_name.to_string(), guid.to_uppercase(), age);
-            PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner()).push(PendingIsf { key, job, json: std::sync::Arc::new(json), table: None });
+            let json = std::sync::Arc::new(json);
+            // compressed and written beside the rest of the run, and done before it exits (a
+            // command started after this one finds the file, as after python)
+            let (w, j) = (job.clone(), json.clone());
+            crate::util::bg::spawn(move || {
+                let _t = crate::util::trace::span("pdb isf xz write (background)");
+                w.run_with(&j);
+            });
+            PENDING_ISF.lock().unwrap_or_else(|e| e.into_inner()).push(PendingIsf { key, job, json, table: None });
         }
         // the load that follows builds the table from this JSON instead of decompressing the file
         None => keep_decoded(&loc, json),
