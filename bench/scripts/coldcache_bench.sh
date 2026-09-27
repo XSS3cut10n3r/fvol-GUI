@@ -48,6 +48,8 @@ CASES = [
     ("win-vmscan", WIN, [], ["vmscan.Vmscan"]),
     ("win-banners", WIN, [], ["banners.Banners"]),
     ("win-mftscan", WIN, [], ["windows.mftscan.MFTScan"]),
+    ("win-mftscan-ads", WIN, [], ["windows.mftscan.ADS"]),
+    ("win-mbrscan", WIN, [], ["windows.mbrscan"]),
     ("win-memmap-dump", WIN, [], ["windows.memmap", "--pid", "2872", "--dump"]),
     ("win-vadinfo-dump", WIN, [], ["windows.vadinfo", "--pid", "2872", "--dump"]),
     ("win-pslist-dump", WIN, [], ["windows.pslist", "--dump"]),

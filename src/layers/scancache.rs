@@ -45,9 +45,11 @@
 //! and this executable's identity: a rebuilt binary never trusts an older binary's scans), written
 //! atomically (unique temp file + rename, so concurrent processes are safe); a missing, stale or
 //! corrupt file (bad magic / version / key / length / checksum / encoding) is a miss and is
-//! rewritten. Format: 64-byte header, the key material, then per chunk with hits
-//! `varint(chunk start delta) varint(count) count * varint(rel delta) [varint(tag)]` (record
-//! atoms: followed by the records of all matches, in match order). The cache
+//! rewritten. Format: 64-byte header, the key material, then fixed-width little-endian arrays
+//! that are copied out as they are (no decoding: a warm mftscan loads 480k matches): the start
+//! of every chunk with hits (u64), the end of its matches (u32), the matches' offsets in their
+//! chunk (u32, u64 if any is larger), their tags (u32, tagged atoms), and for record atoms the
+//! records of all matches, in match order. The cache
 //! directory is capped ([`MAX_TOTAL_BYTES`], oldest image directories are pruned first),
 //! `--clear-cache` wipes it and `RSVOL_NO_SCAN_CACHE=1` disables it.
 //!
@@ -62,7 +64,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Bump whenever the meaning of an atom changes (search semantics, chunking rules, encoding).
 pub const CACHE_VERSION: u32 = 1;
 /// On-disk format version (header layout).
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"RSVSCAN\x01";
 const HEADER: usize = 64;
 /// Cap of the whole scan cache; older image directories are removed first.
@@ -414,16 +416,16 @@ impl Session {
         let rec_len = atom.rec_len();
         let m = (|| {
             let buf = map.as_slice();
-            let (payload, ngroups, nrecs) = verified_payload(buf, KIND_RECS, &key)?;
-            let records = walk_groups(payload, ngroups, nrecs, true, |_, _, tag| (tag as usize) < ntags)?;
-            if (payload.len() - records) as u64 != nrecs.checked_mul(rec_len as u64)? {
+            let (payload, lay) = verified_payload(buf, KIND_RECS, true, &key)?;
+            let records = check_groups(payload, &lay, |tag| (tag as usize) < ntags)?;
+            if (payload.len() - records) as u64 != (lay.nrecs as u64).checked_mul(rec_len as u64)? {
                 return None;
             }
             let at = buf.len() - payload.len();
-            Some((at..buf.len(), records, ngroups, nrecs))
+            Some((at..buf.len(), lay))
         })();
         match m {
-            Some((payload, records, ngroups, nrecs)) => Some(MappedRecs { map, payload, records, ngroups, nrecs, rec_len }),
+            Some((payload, lay)) => Some(MappedRecs { map, payload, lay, rec_len }),
             None => {
                 crate::util::trace::note(|| format!("scan cache: damaged {atom:?} ({})", path.display()));
                 None
@@ -517,181 +519,177 @@ impl Groups {
     }
 }
 
-#[inline]
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
+/// Header flag: match offsets are stored as u64 (else u32).
+const WIDE_RELS: u64 = 1;
+
+fn checksum(key: &[u8], flags: u64, payload: &[u8]) -> u64 {
+    key_hash(key) ^ payload_hash(payload).rotate_left(17) ^ fmix(flags ^ 0x243f_6a88_85a3_08d3)
+}
+
+/// Where the fixed-width arrays of an atom's payload are: chunk starts (u64), group ends
+/// (u32, exclusive, into the match arrays), match offsets (u32, or u64 when wide), tags (u32,
+/// tagged atoms), then (record atoms) the records.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    ngroups: usize,
+    nrecs: usize,
+    wide: bool,
+    tagged: bool,
+}
+
+impl Layout {
+    fn new(ngroups: u64, nrecs: u64, wide: bool, tagged: bool) -> Option<Layout> {
+        Some(Layout { ngroups: usize::try_from(ngroups).ok()?, nrecs: usize::try_from(nrecs).ok()?, wide, tagged })
     }
-    out.push(v as u8);
-}
-
-#[inline]
-fn get_varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
-    let mut v = 0u64;
-    let mut shift = 0u32;
-    loop {
-        let b = *buf.get(*pos)?;
-        *pos += 1;
-        if shift == 63 && b > 1 {
-            return None;
-        }
-        v |= ((b & 0x7f) as u64) << shift;
-        if b & 0x80 == 0 {
-            return Some(v);
-        }
-        shift += 7;
-        if shift > 63 {
-            return None;
-        }
+    fn ends_at(&self) -> usize {
+        self.ngroups * 8
+    }
+    fn rels_at(&self) -> usize {
+        self.ends_at() + self.ngroups * 4
+    }
+    fn tags_at(&self) -> usize {
+        self.rels_at() + self.nrecs * if self.wide { 8 } else { 4 }
+    }
+    /// Bytes of the hit lists (where the records start); None on overflow.
+    fn len(&self) -> Option<usize> {
+        let per_group = 12usize;
+        let per_rec = (if self.wide { 8usize } else { 4 }) + if self.tagged { 4 } else { 0 };
+        self.ngroups.checked_mul(per_group)?.checked_add(self.nrecs.checked_mul(per_rec)?)
     }
 }
 
-#[inline]
-fn zigzag(d: i64) -> u64 {
-    ((d << 1) ^ (d >> 63)) as u64
+#[inline(always)]
+fn u32_le(b: &[u8], i: usize) -> u32 {
+    u32::from_le_bytes(b[i..i + 4].try_into().unwrap())
 }
 
-#[inline]
-fn unzigzag(v: u64) -> i64 {
-    ((v >> 1) as i64) ^ -((v & 1) as i64)
-}
-
-fn checksum(key: &[u8], payload: &[u8]) -> u64 {
-    key_hash(key) ^ payload_hash(payload).rotate_left(17)
+#[inline(always)]
+fn u64_le(b: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
 }
 
 /// Serialize `g` (None when too big or malformed).
 fn encode(kind: u32, tagged: bool, key: &[u8], g: &Groups) -> Option<Vec<u8>> {
-    let mut payload = Vec::with_capacity(g.rels.len() * 2 + g.starts.len() * 4);
-    let mut prev_start = 0u64;
-    for i in 0..g.starts.len() {
-        let s = g.starts[i];
-        if i > 0 && s <= prev_start {
+    let (ng, nr) = (g.starts.len(), g.rels.len());
+    if g.ends.len() != ng || (tagged && g.tags.len() != nr) || nr > u32::MAX as usize {
+        return None;
+    }
+    // chunk starts strictly ascending, no empty group, the groups cover the matches exactly
+    for i in 0..ng {
+        if (i > 0 && g.starts[i] <= g.starts[i - 1]) || g.range(i).is_empty() {
             return None;
         }
-        put_varint(&mut payload, if i == 0 { s } else { s - prev_start });
-        prev_start = s;
-        let r = g.range(i);
-        if r.is_empty() {
-            return None;
-        }
-        put_varint(&mut payload, r.len() as u64);
-        let mut prev = 0u64;
-        for j in r {
-            let rel = g.rels[j];
-            if tagged {
-                put_varint(&mut payload, zigzag(rel.wrapping_sub(prev) as i64));
-                put_varint(&mut payload, g.tags[j] as u64);
-            } else {
-                put_varint(&mut payload, rel.checked_sub(prev)?);
-            }
-            prev = rel;
-        }
-        if payload.len() > MAX_ATOM_BYTES {
-            return None;
-        }
+    }
+    if g.ends.last().map_or(0, |&e| e as usize) != nr {
+        return None;
+    }
+    let wide = g.rels.iter().any(|&r| r > u32::MAX as u64);
+    let lay = Layout::new(ng as u64, nr as u64, wide, tagged)?;
+    let len = lay.len()?.checked_add(g.data.len())?;
+    if len > MAX_ATOM_BYTES || (!g.data.is_empty() && kind != KIND_RECS) {
+        return None;
+    }
+    let mut payload = Vec::with_capacity(len);
+    g.starts.iter().for_each(|s| payload.extend_from_slice(&s.to_le_bytes()));
+    g.ends.iter().for_each(|e| payload.extend_from_slice(&e.to_le_bytes()));
+    if wide {
+        g.rels.iter().for_each(|r| payload.extend_from_slice(&r.to_le_bytes()));
+    } else {
+        g.rels.iter().for_each(|&r| payload.extend_from_slice(&(r as u32).to_le_bytes()));
+    }
+    if tagged {
+        g.tags.iter().for_each(|t| payload.extend_from_slice(&t.to_le_bytes()));
     }
     // record atoms: the records of all matches (in match order) follow the hit lists
-    if !g.data.is_empty() {
-        if kind != KIND_RECS || payload.len() + g.data.len() > MAX_ATOM_BYTES {
-            return None;
-        }
-        payload.extend_from_slice(&g.data);
-    }
+    payload.extend_from_slice(&g.data);
+    let flags = if wide { WIDE_RELS } else { 0 };
     let mut out = Vec::with_capacity(HEADER + key.len() + payload.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&kind.to_le_bytes());
     out.extend_from_slice(&(key.len() as u64).to_le_bytes());
     out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(g.starts.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(g.rels.len() as u64).to_le_bytes());
-    out.extend_from_slice(&checksum(key, &payload).to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(&(ng as u64).to_le_bytes());
+    out.extend_from_slice(&(nr as u64).to_le_bytes());
+    out.extend_from_slice(&checksum(key, flags, &payload).to_le_bytes());
+    out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(key);
     out.extend_from_slice(&payload);
     Some(out)
 }
 
-/// The verified payload of a file written by [`encode`] for `key` (header, key and checksum
-/// checked) with its group and match counts; None on any mismatch or damage.
-fn verified_payload<'b>(buf: &'b [u8], kind: u32, key: &[u8]) -> Option<(&'b [u8], u64, u64)> {
-    let u32_at = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
-    let u64_at = |o: usize| u64::from_le_bytes(buf[o..o + 8].try_into().unwrap());
-    if buf.len() < HEADER || &buf[..8] != MAGIC || u32_at(8) != FORMAT_VERSION || u32_at(12) != kind {
+/// The verified payload of a file written by [`encode`] for `key` (header, key, sizes and
+/// checksum checked) with its layout; None on any mismatch or damage.
+fn verified_payload<'b>(buf: &'b [u8], kind: u32, tagged: bool, key: &[u8]) -> Option<(&'b [u8], Layout)> {
+    if buf.len() < HEADER || &buf[..8] != MAGIC || u32_le(buf, 8) != FORMAT_VERSION || u32_le(buf, 12) != kind {
         return None;
     }
-    let (klen, plen, ngroups, nrecs, sum) = (u64_at(16), u64_at(24), u64_at(32), u64_at(40), u64_at(48));
-    if u64_at(56) != 0 || klen != key.len() as u64 || (buf.len() - HEADER) as u64 != klen.checked_add(plen)? {
+    let (klen, plen, ngroups, nrecs, sum, flags) = (u64_le(buf, 16), u64_le(buf, 24), u64_le(buf, 32), u64_le(buf, 40), u64_le(buf, 48), u64_le(buf, 56));
+    if flags & !WIDE_RELS != 0 || klen != key.len() as u64 || (buf.len() - HEADER) as u64 != klen.checked_add(plen)? || nrecs > u32::MAX as u64 {
+        return None;
+    }
+    let lay = Layout::new(ngroups, nrecs, flags & WIDE_RELS != 0, tagged)?;
+    if lay.len()? as u64 > plen {
         return None;
     }
     let (k, payload) = buf[HEADER..].split_at(key.len());
-    if k != key || checksum(key, payload) != sum {
+    if k != key || checksum(key, flags, payload) != sum {
         return None;
     }
-    // every group takes >= 3 bytes, every record >= 1 (2 when tagged)
-    if ngroups > plen / 3 || nrecs > plen || nrecs > u32::MAX as u64 {
-        return None;
-    }
-    Some((payload, ngroups, nrecs))
+    Some((payload, lay))
 }
 
-/// Walk the hit lists of a verified payload: `f(chunk start, offset in chunk, tag)` for every
-/// match in file order (chunk starts strictly ascending; `f` returns false to reject the file).
-/// Returns where the hit lists end; None when malformed.
-fn walk_groups(payload: &[u8], ngroups: u64, nrecs: u64, tagged: bool, mut f: impl FnMut(u64, u64, u32) -> bool) -> Option<usize> {
-    let mut pos = 0usize;
-    let mut start = 0u64;
-    let mut seen = 0u64;
-    for i in 0..ngroups {
-        let d = get_varint(payload, &mut pos)?;
-        if i > 0 && d == 0 {
+/// Check the hit lists of a verified payload: chunk starts strictly ascending, groups non-empty
+/// and covering the matches exactly, offsets ascending in each group of an untagged atom, and
+/// `tag_ok` for every tag. Returns where the hit lists end.
+fn check_groups(payload: &[u8], lay: &Layout, tag_ok: impl Fn(u32) -> bool) -> Option<usize> {
+    let mut prev_end = 0u32;
+    for i in 0..lay.ngroups {
+        let s = u64_le(payload, i * 8);
+        if i > 0 && s <= u64_le(payload, (i - 1) * 8) {
             return None;
         }
-        start = start.checked_add(d)?;
-        let n = get_varint(payload, &mut pos)?;
-        if n == 0 || n > nrecs - seen {
+        let e = u32_le(payload, lay.ends_at() + i * 4);
+        if e <= prev_end {
             return None;
         }
-        seen += n;
-        let mut rel = 0u64;
-        for _ in 0..n {
-            let v = get_varint(payload, &mut pos)?;
-            let tag = if tagged {
-                rel = rel.wrapping_add(unzigzag(v) as u64);
-                u32::try_from(get_varint(payload, &mut pos)?).ok()?
-            } else {
-                rel = rel.checked_add(v)?;
-                0
-            };
-            if !f(start, rel, tag) {
+        if !lay.tagged {
+            // literal / page atoms: every occurrence of the chunk, in order
+            let rel = |j: usize| if lay.wide { u64_le(payload, lay.rels_at() + j * 8) } else { u32_le(payload, lay.rels_at() + j * 4) as u64 };
+            if (prev_end as usize + 1..e as usize).any(|j| rel(j) < rel(j - 1)) {
                 return None;
             }
         }
+        prev_end = e;
     }
-    (seen == nrecs).then_some(pos)
+    if prev_end as usize != lay.nrecs {
+        return None;
+    }
+    if lay.tagged && !(0..lay.nrecs).all(|j| tag_ok(u32_le(payload, lay.tags_at() + j * 4))) {
+        return None;
+    }
+    lay.len()
 }
 
 /// Parse and verify a file written by [`encode`] for `key`; None on any mismatch or damage.
+/// The arrays are copied out as they are (no decoding).
 fn decode(buf: &[u8], kind: u32, tagged: bool, key: &[u8]) -> Option<Groups> {
-    let (payload, ngroups, nrecs) = verified_payload(buf, kind, key)?;
-    let mut g = Groups {
-        starts: Vec::with_capacity(ngroups as usize),
-        ends: Vec::with_capacity(ngroups as usize),
-        rels: Vec::with_capacity(nrecs as usize),
-        tags: Vec::with_capacity(if tagged { nrecs as usize } else { 0 }),
-        data: Vec::new(),
-    };
-    let pos = walk_groups(payload, ngroups, nrecs, tagged, |start, rel, tag| g.push(start, rel, tagged.then_some(tag)))?;
-    if pos != payload.len() {
+    let (payload, lay) = verified_payload(buf, kind, tagged, key)?;
+    let pos = check_groups(payload, &lay, |_| true)?;
+    if pos != payload.len() && kind != KIND_RECS {
         // only record atoms carry bytes after the hit lists (the caller checks their size)
-        if kind != KIND_RECS {
-            return None;
-        }
-        g.data = payload[pos..].to_vec();
+        return None;
     }
-    Some(g)
+    let (ng, nr) = (lay.ngroups, lay.nrecs);
+    let starts = payload[..ng * 8].chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).collect();
+    let ends = payload[lay.ends_at()..lay.rels_at()].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+    let rels = if lay.wide {
+        payload[lay.rels_at()..lay.tags_at()].chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).collect()
+    } else {
+        payload[lay.rels_at()..lay.tags_at()].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as u64).collect()
+    };
+    let tags = if tagged { payload[lay.tags_at()..lay.tags_at() + nr * 4].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect() } else { Vec::new() };
+    Some(Groups { starts, ends, rels, tags, data: payload[pos..].to_vec() })
 }
 
 /// A record atom verified in its mapped file and read in place: a warm vmscan allocates no
@@ -700,24 +698,26 @@ struct MappedRecs {
     map: crate::util::mmap::Mmap,
     /// the payload's range in the file
     payload: std::ops::Range<usize>,
-    /// where the records start in the payload (after the hit lists)
-    records: usize,
-    ngroups: u64,
-    nrecs: u64,
+    lay: Layout,
     rec_len: usize,
 }
 
 impl MappedRecs {
     /// `f(chunk start, offset in chunk, tag, record)` for every match, in chunk order.
     fn for_each(&self, mut f: impl FnMut(u64, u64, u32, &[u8])) {
-        let payload = &self.map.as_slice()[self.payload.clone()];
-        let data = &payload[self.records..];
-        let mut i = 0usize;
-        walk_groups(payload, self.ngroups, self.nrecs, true, |start, rel, tag| {
-            f(start, rel, tag, &data[i * self.rec_len..(i + 1) * self.rec_len]);
-            i += 1;
-            true
-        });
+        let p = &self.map.as_slice()[self.payload.clone()];
+        let lay = &self.lay;
+        let data = &p[lay.len().unwrap_or(p.len())..];
+        let mut j = 0usize;
+        for i in 0..lay.ngroups {
+            let start = u64_le(p, i * 8);
+            let end = u32_le(p, lay.ends_at() + i * 4) as usize;
+            while j < end {
+                let rel = if lay.wide { u64_le(p, lay.rels_at() + j * 8) } else { u32_le(p, lay.rels_at() + j * 4) as u64 };
+                f(start, rel, u32_le(p, lay.tags_at() + j * 4), &data[j * self.rec_len..(j + 1) * self.rec_len]);
+                j += 1;
+            }
+        }
     }
 }
 
@@ -818,7 +818,9 @@ impl Derive {
 /// after it; only starts before `limit`, at most `cap` matches.
 fn greedy(cand: &mut [(u64, u32, u32)], limit: u64, cap: usize, out: &mut Vec<(u64, u32)>) {
     if !cand.is_sorted_by_key(|c| c.0) {
-        cand.sort_unstable_by_key(|c| c.0);
+        // the candidates are the literals' ascending lists one after the other: the stable sort
+        // merges those runs in O(n log k) (an unstable sort took O(n log n) of 480k MFT hits)
+        cand.sort_by_key(|c| c.0);
     }
     let mut next = 0u64;
     let mut n = 0usize;
@@ -1723,23 +1725,6 @@ mod tests {
         let (k, _) = time(&|b| key_hash(b));
         let (p, _) = time(&|b| payload_hash(b));
         println!("110 KB: key_hash {k:.1} us, payload_hash {p:.1} us");
-    }
-
-    #[test]
-    fn varint_roundtrip() {
-        for v in [0u64, 1, 127, 128, 300, 1 << 35, u64::MAX - 1, u64::MAX] {
-            let mut b = Vec::new();
-            put_varint(&mut b, v);
-            let mut p = 0;
-            assert_eq!(get_varint(&b, &mut p), Some(v));
-            assert_eq!(p, b.len());
-        }
-        for d in [0i64, -1, 1, i64::MIN, i64::MAX, -12345] {
-            assert_eq!(unzigzag(zigzag(d)), d);
-        }
-        // overlong / truncated
-        assert_eq!(get_varint(&[0x80], &mut 0), None);
-        assert_eq!(get_varint(&[0xff; 11], &mut 0), None);
     }
 
     #[test]
