@@ -1,5 +1,5 @@
 [package]
-name = "rsvol"
+name = "fastvol"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
@@ -7,7 +7,7 @@ description = "A zero-dependency Rust rewrite of the Volatility 3 memory forensi
 license-file = "LICENSE.txt"
 
 [[bin]]
-name = "vol"
+name = "fvol"
 path = "src/main.rs"
 
 # NO DEPENDENCIES. std only. Do not add any crates here, ever.
@@ -22,7 +22,7 @@ strip = true
 incremental = false
 
 # Fast-to-build optimized profile for day-to-day development and output diffing:
-#   cargo build --profile fast   ->  target/fast/vol
+#   cargo build --profile fast   ->  target/fast/fvol
 [profile.fast]
 inherits = "release"
 lto = false

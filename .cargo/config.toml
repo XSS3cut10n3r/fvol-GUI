@@ -1,6 +1,6 @@
 [build]
 # crt-static: a static-pie binary skips the dynamic loader (library search, ~500k instructions of
-# symbol binding, ~25 syscalls), about 0.4 ms of every run's fixed cost. rsvol only needs libc
+# symbol binding, ~25 syscalls), about 0.4 ms of every run's fixed cost. fastvol only needs libc
 # functions that work statically (no NSS / dlopen / iconv).
 #
 # 2 MB-aligned segments, code starting on a 2 MB boundary (separate-code): the kernel can then map
@@ -18,7 +18,7 @@ rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+crt-static",
 jobs = 6
 
 [target.x86_64-unknown-linux-gnu]
-# cc (rust-lld) + hot-text ordering from .cargo/symbol-order.txt for the release `vol` binary;
+# cc (rust-lld) + hot-text ordering from .cargo/symbol-order.txt for the release `fvol` binary;
 # every other link is passed through unchanged. See .cargo/linker.sh (its name must not look like
 # a known linker: rustc infers the linker flavour and its arguments from the name).
 linker = ".cargo/linker.sh"
