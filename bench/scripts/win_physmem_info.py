@@ -1,4 +1,4 @@
-# volshell script (-w --script ... --script-only): prints RSVOLJSON{...} with the kernel DTB, PsLoadedModuleList,
+# volshell script (-w --script ... --script-only): prints FASTVOLJSON{...} with the kernel DTB, PsLoadedModuleList,
 # PsActiveProcessHead, MmPfnDatabase value, KdDebuggerDataBlock and MmPhysicalMemoryBlock runs of a Windows
 # image - the header values mk_crashdump_from_raw.py needs.
 import json
@@ -23,4 +23,4 @@ out['NumberOfPages'] = int(desc.NumberOfPages)
 if out['MmPfnDatabase']:
     out['PfnDataBase'] = int(kernel.object(object_type='pointer', offset=out['MmPfnDatabase'] - kernel.offset))
 out['dtb'] = layer.config['page_map_offset']
-print('RSVOLJSON' + json.dumps(out))
+print('FASTVOLJSON' + json.dumps(out))

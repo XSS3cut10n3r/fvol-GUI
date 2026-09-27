@@ -1,6 +1,6 @@
 // Derived from Volatility 3 (Volatility Software License 1.0); see LICENSE.txt.
 //! SHA-512 (FIPS 180-4). volatility3's `ResourceAccessor` names its download cache files
-//! `data_<sha512(url).hexdigest()>.cache` (`framework/layers/resources.py`); rsvol names its
+//! `data_<sha512(url).hexdigest()>.cache` (`framework/layers/resources.py`); fastvol names its
 //! downloads the same way. Hashes a URL per download, so this is the plain portable form.
 
 const H0: [u64; 8] = [

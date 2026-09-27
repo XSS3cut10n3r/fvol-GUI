@@ -1,10 +1,10 @@
-# Developing rsvol
+# Developing fastvol
 
 How-to guides for contributors: porting a plugin, proving it matches python, measuring it, and
 working without exhausting the machine. The rules behind these steps are in
 [DESIGN.md](../DESIGN.md), which is the contract every change must follow.
 
-Applies to rsvol 0.1.0 and volatility3 2.28.2.
+Applies to fastvol 0.1.0 and volatility3 2.28.2.
 
 ## Read first
 
@@ -52,15 +52,15 @@ session, not only the process that used the memory. These rules are mandatory:
 ## Build and test
 
 ```bash
-bench/scripts/cargo.sh build --profile fast       # target/fast/vol, for iterating
-bench/scripts/cargo.sh build --release            # target/release/vol, for timing
+bench/scripts/cargo.sh build --profile fast       # target/fast/fvol, for iterating
+bench/scripts/cargo.sh build --release            # target/release/fvol, for timing
 bench/scripts/cargo.sh test --profile fast        # all unit tests
 bench/scripts/cargo.sh test --profile fast pslist # tests whose name contains "pslist"
 ```
 
 Unit tests must stay fast. Tests that need a large image or a reference library are marked
 `#[ignore]` and read their inputs from environment variables named in their doc comments, such
-as `RSVOL_BENCH_IMG`. Run one with
+as `FASTVOL_BENCH_IMG`. Run one with
 `bench/scripts/cargo.sh test --profile fast <NAME> -- --ignored`.
 
 ## Port a plugin
@@ -147,7 +147,7 @@ plugin, with doc comments, and add them to `src/objects/README-API.md`.
 Compare one plugin on the main Windows image with its reference:
 
 ```bash
-bench/scripts/compare.sh -b $PWD/target/fast/vol windows.pslist.PsList
+bench/scripts/compare.sh -b $PWD/target/fast/fvol windows.pslist.PsList
 ```
 
 ```text
@@ -158,7 +158,7 @@ On a difference it prints `DIFF`, the paths of both outputs and the first lines 
 Arguments after the plugin name are passed through:
 
 ```bash
-bench/scripts/compare.sh -b $PWD/target/fast/vol windows.pslist.PsList --pid 4
+bench/scripts/compare.sh -b $PWD/target/fast/fvol windows.pslist.PsList --pid 4
 ```
 
 The stored references were made without arguments, so for options, run python yourself and diff
@@ -167,7 +167,7 @@ the outputs:
 ```bash
 bench/scripts/limit.sh -m 8G bench/venv/bin/python volatility3/vol.py \
   -q -f <IMAGE> -o <DIR> windows.pslist.PsList --pid 4 --dump > py.txt
-target/fast/vol -q -f <IMAGE> -o <DIR2> windows.pslist.PsList --pid 4 --dump > rs.txt
+target/fast/fvol -q -f <IMAGE> -o <DIR2> windows.pslist.PsList --pid 4 --dump > rs.txt
 cmp py.txt rs.txt && diff -r <DIR> <DIR2>
 ```
 
@@ -177,7 +177,7 @@ To compare on another image, set `IMG` and `REF`, and pass symbol directories in
 IMG=/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf \
 REF=/home/user/rs-vol/bench/ref/linux/rsvol-noble-6.8.0-139-elf/linux.pslist.PsList.txt \
 GLOBAL_ARGS="-s /home/user/rs-vol/testdata/symbols" \
-bench/scripts/compare.sh -b $PWD/target/fast/vol linux.pslist.PsList
+bench/scripts/compare.sh -b $PWD/target/fast/fvol linux.pslist.PsList
 ```
 
 Plugins whose python output order is random from run to run are listed in
@@ -190,14 +190,14 @@ live python run (`NO_LIVE_SYMBOLS=1` turns that off).
 To check `--save-config` for many plugins at once, `bench/scripts/py_save_configs.py` runs
 python's command line for each case of a list (one plugin and its options per line) and stops
 each plugin right after python wrote the configuration, so only kernel discovery is paid for.
-Compare its `<case>.json` files with rsvol's `--save-config` output for the same cases.
+Compare its `<case>.json` files with fastvol's `--save-config` output for the same cases.
 
 ## Run the parity gates
 
 Before a merge, run every reference with a private cache, first cold and then warm:
 
 ```bash
-bench/scripts/gates.sh $PWD/target/release/vol
+bench/scripts/gates.sh $PWD/target/release/fvol
 ```
 
 ```text
@@ -213,8 +213,8 @@ the cache go to `testdata/scratch/gates/` unless you pass another directory as t
 argument. Each script also runs on its own:
 
 ```bash
-bench/scripts/check_all.sh -b $PWD/target/release/vol
-bench/scripts/check_nix.sh -b $PWD/target/release/vol linux
+bench/scripts/check_all.sh -b $PWD/target/release/fvol
+bench/scripts/check_nix.sh -b $PWD/target/release/fvol linux
 ```
 
 The Windows 10 1809 image is not part of `gates.sh`. Check it with a loop over the same plugin
@@ -225,7 +225,7 @@ while read -r p; do
   IMG=/home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw \
   REF=/home/user/rs-vol/bench/ref/win1809/$p.txt \
   OUTDIR=/home/user/rs-vol/testdata/scratch/out1809 \
-  bench/scripts/compare.sh -b $PWD/target/release/vol "$p"
+  bench/scripts/compare.sh -b $PWD/target/release/fvol "$p"
 done < bench/win_noarg.txt
 ```
 
@@ -266,14 +266,14 @@ per-run timeout of `max(--min-timeout, --mult × the clean run time)`, and class
 | --------- | ------------------------------------------------------------- | ---- |
 | `OK`      | exit 0                                                        | no   |
 | `ERROR`   | other clean exit (a python-style error/traceback)            | no   |
-| `PYRAISE` | a `panic!` whose message names a python exception — rsvol's intended emulation of python's uncaught `raise`; the CLI catches it and exits 1 exactly as python does (stderr text does not affect parity) | no   |
+| `PYRAISE` | a `panic!` whose message names a python exception — fastvol's intended emulation of python's uncaught `raise`; the CLI catches it and exits 1 exactly as python does (stderr text does not affect parity) | no   |
 | `PANIC`   | a Rust-internal panic (index/unwrap/overflow/slice/unreachable/stack overflow) | **yes** |
 | `HANG`    | killed by the per-run timeout                                 | **yes** |
 | `OOM`     | killed by the memory cgroup cap                               | **yes** |
 | `SIGNAL`  | died by another signal                                        | **yes** |
 | `RUNAWAY` | stdout exceeded the output cap                                | **yes** |
 
-Distinguishing `PYRAISE` from `PANIC` matters: rsvol deliberately emulates python's uncaught
+Distinguishing `PYRAISE` from `PANIC` matters: fastvol deliberately emulates python's uncaught
 exceptions by panicking with the exception's message, so `panicked at` in stderr is not by itself a
 bug. Only a Rust-internal fault (which means the plugin diverged from python instead of skipping the
 object) or a hang/OOM/signal/runaway is a bug.
@@ -284,7 +284,7 @@ reproduces them):
 
 ```bash
 # 0. a release binary the driver will use (default: testdata/scratch/fuzz/bin/vol-base)
-cp target/release/vol testdata/scratch/fuzz/bin/vol-base
+cp target/release/fvol testdata/scratch/fuzz/bin/vol-base
 
 # 1. find structures to corrupt in a clean image (runs a few clean plugins, walks page tables)
 bench/scripts/fuzz_images.py targets win1809      # -> testdata/scratch/fuzz/targets/win1809.json
@@ -310,7 +310,7 @@ Base image names for `targets`/`baseline`/`campaign`: `win10` (the 5 GiB main Wi
 `win1809`, `noble-elf`, `noble-lime`, `jammy-elf`, `jammy-lime`, `mac`. Bugs found by a campaign are
 reduced to small crafted-input unit tests next to the code they fix, so they never regress. Two the
 driver has found so far, both cases where python's own lazy enumeration would run forever on the
-corrupted count, so rsvol bounds it and stops instead of hanging/OOMing:
+corrupted count, so fastvol bounds it and stops instead of hanging/OOMing:
 
 - a corrupted `kallsyms_num_syms` made `linux.kallsyms.Kallsyms` loop up to ~1.8 billion times
   (python does the same unbounded `range(num_syms)`); guarded in `src/symbols/linux/kallsyms.rs`
@@ -334,9 +334,9 @@ For quick measurements during development:
 | Cold and warm start                           | `bench/scripts/coldbench.py`                              |
 | Fixed cost of a CLI invocation                | `bench/scripts/cli_startup.sh <BIN> [<N>]`                |
 | Library throughput vs the C references        | `bench/scripts/refbench.sh`                               |
-| Where the time goes in one run                | `RSVOL_TRACE=1 target/release/vol ...`                    |
+| Where the time goes in one run                | `FASTVOL_TRACE=1 target/release/fvol ...`                 |
 
-Use `RSVOL_CACHE=<EMPTY_DIR>` to measure a cold run without touching your own cache. Always
+Use `FASTVOL_CACHE=<EMPTY_DIR>` to measure a cold run without touching your own cache. Always
 time release builds, through `limit.sh`, and keep the numbers before and after each
 optimization. A cold run replays python's identifier cache, so its time depends on whether that
 cache already covers the `-s` directories (milliseconds) or not (every ISF is read, like python's
@@ -364,5 +364,5 @@ cd bench/vm && python3 scripts/report.py raw .
   git fetch /home/user/rs-vol main && git merge FETCH_HEAD
   bench/scripts/cargo.sh build --release
   bench/scripts/cargo.sh test --profile fast
-  bench/scripts/gates.sh $PWD/target/release/vol
+  bench/scripts/gates.sh $PWD/target/release/fvol
   ```

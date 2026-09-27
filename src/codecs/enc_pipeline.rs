@@ -97,7 +97,7 @@ impl<S: 'static, J: Send + 'static, R: Send + 'static> Pipeline<S, J, R> {
         if spawn {
             let (shared, init, work) = (self.shared.clone(), self.init.clone(), self.work.clone());
             let h = std::thread::Builder::new()
-                .name("rsvol-enc".into())
+                .name("fastvol-enc".into())
                 .spawn(move || worker(&shared, &*init, &*work));
             match h {
                 Ok(h) => self.handles.push(h),

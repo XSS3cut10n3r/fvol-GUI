@@ -42,9 +42,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// tiny by comparison (the busiest, the Windows kernel virtual layer, is ~330k chunks); a raw
 /// image's physical layer is a few hundred. A count far above that is corruption: a garbage page
 /// interpreted as a page table makes the translation walk enumerate a practically unbounded
-/// mapped space, and since rsvol builds the whole chunk list before scanning (python streams it
+/// mapped space, and since fastvol builds the whole chunk list before scanning (python streams it
 /// lazily, so python instead scans forever -- confirmed: python `windows.driverscan` on such a
-/// mutant runs past a 120 s timeout emitting nothing), that list would exhaust memory. rsvol
+/// mutant runs past a 120 s timeout emitting nothing), that list would exhaust memory. fastvol
 /// stops enumerating at this bound and scans what it has, turning an OOM into a bounded, partial
 /// result (DESIGN "never OOM on malformed memory"; where python would hang forever, stop). At
 /// ~24 bytes per chunk the cap is ~380 MiB, ~48x above any real image, so no reference scan is
@@ -1487,7 +1487,7 @@ where
     }
 }
 
-/// Trace counters of one [`run_pipeline`] (ns; `RSVOL_TRACE=1`).
+/// Trace counters of one [`run_pipeline`] (ns; `FASTVOL_TRACE=1`).
 #[derive(Default)]
 struct PipeStats {
     walk: std::sync::atomic::AtomicU64,
@@ -1706,14 +1706,14 @@ impl Scanner for BytesScanner {
     }
 }
 
-/// Whether the AVX2 search kernels may be used (runtime detection; `RSVOL_NO_SIMD=1` forces the
+/// Whether the AVX2 search kernels may be used (runtime detection; `FASTVOL_NO_SIMD=1` forces the
 /// scalar paths, for differential testing).
 #[inline]
 pub fn simd_enabled() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         static A: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *A.get_or_init(|| std::arch::is_x86_feature_detected!("avx2") && std::env::var_os("RSVOL_NO_SIMD").is_none_or(|v| v.is_empty() || v == "0"))
+        *A.get_or_init(|| std::arch::is_x86_feature_detected!("avx2") && crate::util::env::var_os("NO_SIMD").is_none_or(|v| v.is_empty() || v == "0"))
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -2410,7 +2410,7 @@ mod tests {
         let alpha: [u8; 5] = [b'a', b'b', b'c', 0, b'P'];
         let n = 20000usize;
         let data: Vec<u8> = (0..n).map(|_| alpha[rng.below(alpha.len() as u64) as usize]).collect();
-        let path = std::env::temp_dir().join(format!("rsvol-scan-pieces-{}.bin", std::process::id()));
+        let path = std::env::temp_dir().join(format!("fastvol-scan-pieces-{}.bin", std::process::id()));
         std::fs::write(&path, &data).unwrap();
         let file = FileLayer::open(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -2485,18 +2485,18 @@ mod tests {
     }
 
     /// Scan throughput on a real image:
-    /// `RSVOL_BENCH_IMG=/path/img.raw cargo test --profile fast scan_bench -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMG=/path/img.raw cargo test --profile fast scan_bench -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn scan_bench() {
         use std::hint::black_box;
         use std::time::Instant;
-        let Ok(path) = std::env::var("RSVOL_BENCH_IMG") else {
-            eprintln!("set RSVOL_BENCH_IMG");
+        let Ok(path) = crate::util::env::var("BENCH_IMG") else {
+            eprintln!("set FASTVOL_BENCH_IMG");
             return;
         };
-        let reps: usize = std::env::var("RSVOL_BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
-        let only = std::env::var("RSVOL_BENCH_ONLY").unwrap_or_default();
+        let reps: usize = crate::util::env::var("BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let only = crate::util::env::var("BENCH_ONLY").unwrap_or_default();
         let file = crate::layers::FileLayer::open(std::path::Path::new(&path)).unwrap();
         let mb = file.len() as f64 / 1e6;
         let run = |name: &str, f: &dyn Fn() -> usize| {
@@ -2610,18 +2610,18 @@ mod tests {
 
     /// The parallel executor returns exactly what python's sequential chunk-by-chunk scan
     /// returns, on real images (raw, LiME, ELF core, kernel virtual layer):
-    /// `RSVOL_BENCH_IMG=img cargo test --profile fast scan_exact -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMG=img cargo test --profile fast scan_exact -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn scan_exact() {
-        let Ok(path) = std::env::var("RSVOL_BENCH_IMG") else {
-            eprintln!("set RSVOL_BENCH_IMG");
+        let Ok(path) = crate::util::env::var("BENCH_IMG") else {
+            eprintln!("set FASTVOL_BENCH_IMG");
             return;
         };
         let phys = crate::automagic::stack_physical(std::path::Path::new(&path), None, false, None).unwrap().layer;
         let mut layers: Vec<(&str, &dyn Layer)> = vec![("physical", phys.as_ref())];
         let ctx;
-        if std::env::var_os("RSVOL_BENCH_WIN").is_some() {
+        if crate::util::env::var_os("BENCH_WIN").is_some() {
             ctx = crate::context::Context::new(crate::context::GlobalOptions { file: Some(path.clone()), ..Default::default() }).unwrap();
             layers.push(("kernel virtual", ctx.windows_kernel().unwrap().vlayer));
         }
@@ -2649,19 +2649,19 @@ mod tests {
     }
 
     /// Hits in the format of the python oracle plugin (`scancheck.ScanCheck`, see the sub-scan
-    /// report): `RSVOL_BENCH_IMG=img RSVOL_HITS_OUT=file [RSVOL_HITS_PHYS=1] cargo test
+    /// report): `FASTVOL_BENCH_IMG=img FASTVOL_HITS_OUT=file [FASTVOL_HITS_PHYS=1] cargo test
     /// --profile fast hits_dump -- --ignored`
     #[test]
     #[ignore]
     fn hits_dump() {
         use std::io::Write;
-        let (Ok(path), Ok(outp)) = (std::env::var("RSVOL_BENCH_IMG"), std::env::var("RSVOL_HITS_OUT")) else {
-            eprintln!("set RSVOL_BENCH_IMG and RSVOL_HITS_OUT");
+        let (Ok(path), Ok(outp)) = (crate::util::env::var("BENCH_IMG"), crate::util::env::var("HITS_OUT")) else {
+            eprintln!("set FASTVOL_BENCH_IMG and FASTVOL_HITS_OUT");
             return;
         };
         let ctx = crate::context::Context::new(crate::context::GlobalOptions { file: Some(path), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
-        let l = if std::env::var_os("RSVOL_HITS_PHYS").is_some() { k.phys } else { k.vlayer };
+        let l = if crate::util::env::var_os("HITS_PHYS").is_some() { k.phys } else { k.vlayer };
         let tags: [&[u8]; 15] = [
             b"AtmT", b"Pro\xe3", b"Proc", b"Thr\xe5", b"Thre", b"Fil\xe5", b"File", b"Mut\xe1", b"Muta", b"Dri\xf6", b"Driv", b"MmLd", b"Sym\xe2",
             b"Symb", b"CM10",
@@ -2727,16 +2727,16 @@ mod tests {
     }
 
     /// Kernel virtual layer scan (what windows pool scanners do on Windows 10):
-    /// `RSVOL_BENCH_IMG=... cargo test --profile fast vscan_bench -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMG=... cargo test --profile fast vscan_bench -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn vscan_bench() {
         use std::time::Instant;
-        let Ok(path) = std::env::var("RSVOL_BENCH_IMG") else {
-            eprintln!("set RSVOL_BENCH_IMG");
+        let Ok(path) = crate::util::env::var("BENCH_IMG") else {
+            eprintln!("set FASTVOL_BENCH_IMG");
             return;
         };
-        let reps: usize = std::env::var("RSVOL_BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let reps: usize = crate::util::env::var("BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
         let ctx = crate::context::Context::new(crate::context::GlobalOptions { file: Some(path), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let l = k.vlayer;
@@ -2946,7 +2946,7 @@ mod tests {
     fn pipeline_matches_sequential_scan() {
         use crate::layers::intel::{IntelLayer, PagingMode, PteFlavor};
         let (mem, dtb) = paged_memory();
-        let path = std::env::temp_dir().join(format!("rsvol-scan-pipeline-{}.bin", std::process::id()));
+        let path = std::env::temp_dir().join(format!("fastvol-scan-pipeline-{}.bin", std::process::id()));
         std::fs::write(&path, &mem).unwrap();
         let file: Arc<dyn Layer> = Arc::new(crate::layers::FileLayer::open(&path).unwrap());
         let _ = std::fs::remove_file(&path);

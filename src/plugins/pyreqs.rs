@@ -151,7 +151,7 @@ mod tests {
                     ReqKind::ListStr => q.kind == PyKind::List && q.extra == "str",
                     ReqKind::Choice(_) => q.kind == PyKind::Choice,
                 };
-                assert!(ok, "{}: {} is {:?} in rsvol, {:?} in python", p.name(), r.name, r.kind, q.kind);
+                assert!(ok, "{}: {} is {:?} in fastvol, {:?} in python", p.name(), r.name, r.kind, q.kind);
             }
         }
     }
@@ -168,7 +168,7 @@ mod tests {
                 let q = py.iter().find(|q| q.name == r.name).unwrap();
                 let ours = r.default.as_ref().map_or(Json::Null, crate::cli::cv_to_json);
                 if ours != q.default || r.optional != q.optional {
-                    bad.push(format!("{} {}: rsvol {:?} optional={}, python {:?} optional={}", p.name(), r.name, ours, r.optional, q.default, q.optional));
+                    bad.push(format!("{} {}: fastvol {:?} optional={}, python {:?} optional={}", p.name(), r.name, ours, r.optional, q.default, q.optional));
                 }
             }
         }

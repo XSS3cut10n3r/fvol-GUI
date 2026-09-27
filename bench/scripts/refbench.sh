@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regex / YARA throughput: rsvol vs the reference libraries, same bytes, same machine.
+# Regex / YARA throughput: fastvol vs the reference libraries, same bytes, same machine.
 #
 # Builds the C/C++ harnesses of bench/refbench/ (gcc/g++ -O3 -march=native, outside the cargo
 # build) and the rust drivers (src/yara/benchdrv.rs, ignored tests), runs every engine through
@@ -10,7 +10,7 @@
 #
 # Engines: python re (bench/scripts/regex_bench.py, finditer over an mmap object), PCRE2-JIT
 # (bench/refbench/regex_pcre2.c), RE2 (bench/refbench/regex_re2.cc), libyara
-# (bench/refbench/yara_bench.c), rsvol (yara_regex_bench_driver / yara_rules_bench_driver).
+# (bench/refbench/yara_bench.c), fastvol (yara_regex_bench_driver / yara_rules_bench_driver).
 # Regex cases: bench/refbench/regex_cases.tsv. YARA cases: bench/refbench/yara_cases/*.yar.
 #
 # usage: bench/scripts/refbench.sh [--fast|--release] [--reps N] [--yara-reps N] [--py-reps N]
@@ -72,7 +72,7 @@ g++ -O3 -march=native -Wall -o "$OUT/regex_re2" "$ROOT/bench/refbench/regex_re2.
 gcc -O3 -march=native -Wall -o "$OUT/yara_bench" "$ROOT/bench/refbench/yara_bench.c" -lyara || exit 1
 
 echo "== building rust drivers (cargo test --profile $PROFILE, through limit.sh)" >&2
-(cd "$ROOT" && "$LIMIT" -m 8G cargo test --profile "$PROFILE" --bin vol --no-run -q) >&2 || exit 1
+(cd "$ROOT" && "$LIMIT" -m 8G cargo test --profile "$PROFILE" --bin fvol --no-run -q) >&2 || exit 1
 
 run() { # engine-label cmd... : run through limit.sh, keep BENCH lines
   echo "== $1" >&2
@@ -82,8 +82,8 @@ run() { # engine-label cmd... : run through limit.sh, keep BENCH lines
 }
 rust() { # driver-name extra-env...
   local drv=$1; shift
-  (cd "$ROOT" && run "rust $drv" env RSVOL_BENCH_IMG="$IMG" RSVOL_BENCH_OFF="$OFF" RSVOL_BENCH_LEN="$LEN" \
-    RSVOL_BENCH_ONLY="$ONLY" "$@" cargo test --profile "$PROFILE" --bin vol -q "$drv" -- --ignored --nocapture --test-threads=1)
+  (cd "$ROOT" && run "rust $drv" env FASTVOL_BENCH_IMG="$IMG" FASTVOL_BENCH_OFF="$OFF" FASTVOL_BENCH_LEN="$LEN" \
+    FASTVOL_BENCH_ONLY="$ONLY" "$@" cargo test --profile "$PROFILE" --bin fvol -q "$drv" -- --ignored --nocapture --test-threads=1)
 }
 
 for ROUND in $(seq 1 "$ROUNDS"); do
@@ -91,7 +91,7 @@ for ROUND in $(seq 1 "$ROUNDS"); do
 if [ $DO_REGEX = 1 ]; then
   run "PCRE2-JIT" "$OUT/regex_pcre2" "$IMG" "$OFF" "$LEN" "$REPS" "$CASES" "$ONLY"
   run "RE2" "$OUT/regex_re2" "$IMG" "$OFF" "$LEN" "$REPS" "$CASES" "$ONLY"
-  rust yara_regex_bench_driver RSVOL_BENCH_REPS="$REPS" RSVOL_BENCH_REGEX_CASES="$CASES"
+  rust yara_regex_bench_driver FASTVOL_BENCH_REPS="$REPS" FASTVOL_BENCH_REGEX_CASES="$CASES"
   if [ $DO_PY = 1 ] && [ "$ROUND" = 1 ]; then
     run "python re (window $PYLEN, best of $PYREPS)" "$PY" "$ROOT/bench/scripts/regex_bench.py" --img "$IMG" \
       --off "$OFF" --len "$PYLEN" --reps "$PYREPS" --cases "$CASES" --only "$ONLY"
@@ -106,7 +106,7 @@ if [ $DO_YARA = 1 ]; then
   if [ -n "$YSEL" ]; then
     # shellcheck disable=SC2086
     run "libyara" "$OUT/yara_bench" "$IMG" "$OFF" "$LEN" "$YREPS" $YSEL
-    rust yara_rules_bench_driver RSVOL_BENCH_REPS="$YREPS" RSVOL_BENCH_YARA_CASES="$(echo $YSEL | tr ' ' ',')"
+    rust yara_rules_bench_driver FASTVOL_BENCH_REPS="$YREPS" FASTVOL_BENCH_YARA_CASES="$(echo $YSEL | tr ' ' ',')"
   fi
 fi
 
@@ -114,7 +114,7 @@ done
 
 # ---- report -------------------------------------------------------------------------
 echo
-echo "### rsvol regex / YARA throughput vs reference libraries"
+echo "### fastvol regex / YARA throughput vs reference libraries"
 echo
 echo "machine: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) threads, kernel $(uname -r); gcc $(gcc -dumpfullversion);" \
   "pcre2 $(pkg-config --modversion libpcre2-8), re2 $(pkg-config --modversion re2), libyara $(pkg-config --modversion yara)," \
@@ -137,15 +137,15 @@ awk -F'\t' -v pylen="$PYLEN" -v len="$LEN" '
     return sprintf("%.0f", mbps[c, e])
   }
   END {
-    split("python-re pcre2-jit re2 libyara rsvol", E, " ")
+    split("python-re pcre2-jit re2 libyara fastvol", E, " ")
     print "| case | python re | PCRE2-JIT | RE2 | libyara | rust | rust/best-ref | matches (cross-check) |"
     print "|---|---:|---:|---:|---:|---:|---:|---|"
     for (i = 1; i <= n; i++) {
       c = order[i]; best = 0; bestname = ""
       for (j = 1; j <= 4; j++) if ((c, E[j]) in mbps && mbps[c, E[j]] != "-" && mbps[c, E[j]] + 0 > best) { best = mbps[c, E[j]] + 0; bestname = E[j] }
       ratio = "-"
-      if ((c, "rsvol") in mbps && mbps[c, "rsvol"] != "-" && best > 0) ratio = sprintf("%.2fx (vs %s)", mbps[c, "rsvol"] / best, bestname)
-      else if ((c, "rsvol") in note && note[c, "rsvol"] ~ /pending/) ratio = "pending"
+      if ((c, "fastvol") in mbps && mbps[c, "fastvol"] != "-" && best > 0) ratio = sprintf("%.2fx (vs %s)", mbps[c, "fastvol"] / best, bestname)
+      else if ((c, "fastvol") in note && note[c, "fastvol"] ~ /pending/) ratio = "pending"
       # match count cross-check (python only when it scanned the same window)
       ref = ""; ok = 1; detail = ""
       for (j = 1; j <= 5; j++) {
@@ -157,7 +157,7 @@ awk -F'\t' -v pylen="$PYLEN" -v len="$LEN" '
       }
       chk = (ref == "" ? "-" : (ok ? "ok " ref : "MISMATCH" detail))
       if (ok && detail ~ / py\(/) chk = chk " (python on smaller window:" substr(detail, index(detail, " py(")) ")"
-      printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n", c, cell(c, "python-re"), cell(c, "pcre2-jit"), cell(c, "re2"), cell(c, "libyara"), cell(c, "rsvol"), ratio, chk
+      printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n", c, cell(c, "python-re"), cell(c, "pcre2-jit"), cell(c, "re2"), cell(c, "libyara"), cell(c, "fastvol"), ratio, chk
     }
     print ""
     print "compile time (microseconds, best of 20 / 10 for yara):"
@@ -167,7 +167,7 @@ awk -F'\t' -v pylen="$PYLEN" -v len="$LEN" '
     for (i = 1; i <= n; i++) {
       c = order[i]; row = "| " c
       for (j = 1; j <= 5; j++) row = row " | " ((c, E[j]) in cus ? cus[c, E[j]] : "-")
-      eng = ((c, "rsvol") in note ? note[c, "rsvol"] : "-"); sub(/.*engine=/, "", eng); if (eng ~ /window=/) eng = "-"
+      eng = ((c, "fastvol") in note ? note[c, "fastvol"] : "-"); sub(/.*engine=/, "", eng); if (eng ~ /window=/) eng = "-"
       print row " | " eng " |"
     }
   }' "$RES"
@@ -175,11 +175,11 @@ if grep -q '^PRIM' "$RES"; then
   echo
   echo "substring-search floor for the plain-literal cases (MB/s, same window; diagnostic, not a reference library):"
   echo
-  echo "| case | glibc memmem | rsvol Memmem | rsvol regex |"
+  echo "| case | glibc memmem | fastvol Memmem | fastvol regex |"
   echo "|---|---:|---:|---:|"
   awk -F'\t' '$1 == "PRIM" { if ($5 + 0 > p[$3, $2] + 0) p[$3, $2] = $5; if (!($3 in s)) { s[$3] = 1; o[++n] = $3 } }
-    $1 == "BENCH" && $2 == "rsvol" { if ($6 + 0 > r[$3] + 0) r[$3] = $6 }
-    END { for (i = 1; i <= n; i++) { c = o[i]; printf "| %s | %.0f | %.0f | %.0f |\n", c, p[c, "glibc-memmem"], p[c, "rsvol-memmem"], r[c] } }' "$RES"
+    $1 == "BENCH" && $2 == "fastvol" { if ($6 + 0 > r[$3] + 0) r[$3] = $6 }
+    END { for (i = 1; i <= n; i++) { c = o[i]; printf "| %s | %.0f | %.0f | %.0f |\n", c, p[c, "glibc-memmem"], p[c, "fastvol-memmem"], r[c] } }' "$RES"
 fi
 echo
 echo "(yara matches = matching rules / string instances; raw lines: $RES)"

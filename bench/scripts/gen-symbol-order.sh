@@ -13,7 +13,7 @@
 # Run it after large code changes (a stale list only costs speed: functions it no longer names
 # are simply not moved, see .cargo/linker.sh), then rebuild the release binary. Takes a few minutes.
 # Images: WIN_IMG, LINUX_IMG, MAC_IMG, SYMBOLS (defaults: the test images of this repo); cases
-# whose image is missing are skipped. Extra cases: ORDER_CASES="args|args|..." (vol arguments).
+# whose image is missing are skipped. Extra cases: ORDER_CASES="args|args|..." (fvol arguments).
 # Needs cc, python3, nm and readelf (binutils), and ptrace (Linux).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -53,13 +53,13 @@ else
 fi
 
 echo "== building an unstripped release binary in $S/target"
-CARGO_PROFILE_RELEASE_STRIP=false RSVOL_SYMBOL_ORDER=0 \
+CARGO_PROFILE_RELEASE_STRIP=false FASTVOL_SYMBOL_ORDER=0 \
   "$CARGO" build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$S/target" 2>&1 | tail -2
-BIN=$S/target/release/vol
+BIN=$S/target/release/fvol
 [ -x "$BIN" ] || { echo "build failed"; exit 1; }
 cc -O2 -o "$S/hottrace" "$ROOT/bench/scripts/hottrace.c" || exit 1
 
-export RSVOL_CACHE=$S/cache
+export FASTVOL_CACHE=$S/cache
 rm -f "$S"/trace.*.txt
 n=0
 for c in "${CASES[@]}"; do

@@ -1,5 +1,5 @@
 #!/bin/bash
-# LZNT1: rsvol vs reference C decoders (ntfs-3g, libfwnt, Wine), in-process decode throughput,
+# LZNT1: fastvol vs reference C decoders (ntfs-3g, libfwnt, Wine), in-process decode throughput,
 # same inputs, same machine, best of N, fresh output buffer per run.
 #
 #   bench/refbench/lznt1_ref.sh [WORK_DIR] [RUNS] [SOURCE_FILE...]
@@ -13,7 +13,7 @@
 #     cut to a multiple of 4096 bytes, at most 32 MiB (so every chunk is full and all decoders,
 #     padding or not, produce the same bytes) -> WORK_DIR/NAME, compressed with ntfs-3g's
 #     compressor (lazy-matching, as NTFS) -> WORK_DIR/NAME.lznt1;
-#  4. runs every decoder and rsvol's codecs_bench_file pinned to $CPU (default 12), $ROUNDS
+#  4. runs every decoder and fastvol's codecs_bench_file pinned to $CPU (default 12), $ROUNDS
 #     interleaved rounds, best taken; both sides also report user-mode cycles.
 # Keep WORK_DIR on disk (not the tmpfs /tmp).
 set -euo pipefail
@@ -73,7 +73,7 @@ BIN="$ROOT/$BIN"
 pin=("$LIMIT" -m 2G taskset -c "$CPU")
 min() { awk -v a="$1" -v b="$2" 'BEGIN{print (b<a)?b:a}'; }
 
-printf '%-14s %7s %9s %9s %9s %9s %8s %9s %9s\n' file out_MB ntfs3g libfwnt wine rsvol vs_best C_Mcyc rs_Mcyc
+printf '%-14s %7s %9s %9s %9s %9s %8s %9s %9s\n' file out_MB ntfs3g libfwnt wine fastvol vs_best C_Mcyc rs_Mcyc
 for s in "${SOURCES[@]}"; do
     f="$WORK/$(basename "$s").lznt1"
     declare -A ms=([ntfs3g]=1e18 [libfwnt]=1e18 [wine]=1e18 [rust]=1e18) cy=([ntfs3g]=1e18 [libfwnt]=1e18 [wine]=1e18 [rust]=1e18)
@@ -97,4 +97,4 @@ for s in "${SOURCES[@]}"; do
             out / b / 1e3, out / c / 1e3, out / r / 1e3, best / r, (bc < 1e17) ? bc / 1e6 : 0, (cr < 1e17) ? cr / 1e6 : 0 }'
     unset ms cy
 done
-echo "(MB/s of output; vs_best = fastest C decoder time / rsvol time; Mcyc = user-mode cycles, best C vs rsvol)"
+echo "(MB/s of output; vs_best = fastest C decoder time / fastvol time; Mcyc = user-mode cycles, best C vs fastvol)"

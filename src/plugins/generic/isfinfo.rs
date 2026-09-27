@@ -16,7 +16,7 @@
 //!
 //! `--live` walks `symbols.__path__` like python's `os.walk` (readdir order) and parses every
 //! ISF. Per-file results (JSON validity, statistics, identifier) are cached in
-//! `~/.cache/rsvol/isfinfo.cache` keyed by URL + file size/mtime, so warm runs parse nothing.
+//! `~/.cache/fastvol/isfinfo.cache` keyed by URL + file size/mtime, so warm runs parse nothing.
 //!
 //! Known gaps: the `hash` column (sha1 of python's `json.dumps(sort_keys=True)`) is not
 //! computed for rows we insert, so they never read "True (cached)" (python only records
@@ -398,7 +398,7 @@ fn summarize_location(loc: &IsfLocation) -> Summary {
     }
 }
 
-/// `~/.cache/rsvol/isfinfo.cache`: URL -> (file stamp, summary). Read on first use only (a
+/// `~/.cache/fastvol/isfinfo.cache`: URL -> (file stamp, summary). Read on first use only (a
 /// default run with an up-to-date python database needs no summaries at all).
 struct SummaryCache {
     map: Option<FxHashMap<String, (u64, Summary)>>,
@@ -409,7 +409,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RSISFI01";
 
 impl SummaryCache {
     fn path() -> PathBuf {
-        paths::rsvol_cache_dir().join("isfinfo.cache")
+        paths::cache_dir().join("isfinfo.cache")
     }
 
     fn load() -> SummaryCache {
@@ -1364,7 +1364,7 @@ mod tests {
             map.insert(format!("u{i}"), (i as u64, e.clone()));
         }
         let c = SummaryCache { map: Some(map), dirty: true };
-        let tmp = std::env::temp_dir().join(format!("rsvol-isfinfo-test-{}.cache", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fastvol-isfinfo-test-{}.cache", std::process::id()));
         c.save_to(&tmp);
         let back = SummaryCache::load_from(&tmp).map.unwrap();
         let _ = std::fs::remove_file(&tmp);

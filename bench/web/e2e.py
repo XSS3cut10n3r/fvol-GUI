@@ -1,7 +1,7 @@
-"""End-to-end checks of `vol serve` against the real CLI (run via bench/web/e2e.sh).
+"""End-to-end checks of `fvol serve` against the real CLI (run via bench/web/e2e.sh).
 
-Every check compares what the web API returns with what `vol` prints for the same plugin and
-options: streamed rows == the quick renderer's rows, python-identical exports == `vol -r X`,
+Every check compares what the web API returns with what `fvol` prints for the same plugin and
+options: streamed rows == the quick renderer's rows, python-identical exports == `fvol -r X`,
 dumped files == the CLI's dumped files. Plus the access-control rules over real sockets."""
 
 import hashlib
@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-BIN = os.environ.get("BIN", "target/fast/vol")
+BIN = os.environ.get("BIN", "target/fast/fvol")
 SCR = "/home/user/rs-vol/testdata/scratch/webui/e2e"
 os.makedirs(SCR, exist_ok=True)
 fails = []
@@ -101,11 +101,11 @@ def same_plugin(srv, image, plugin, args=None, argv=(), syms=None):
     rid, cols, rows, end = srv.run(plugin, args)
     check(f"{plugin} {' '.join(argv)} finished", end and end["status"] == "done", end and end.get("error"))
     q = cli(image, plugin, argv, syms=syms)
-    check(f"{plugin} {' '.join(argv)}: streamed rows == vol quick rows ({len(rows)})", "\n".join(quick_lines(rows)) == cli_quick_rows(q))
+    check(f"{plugin} {' '.join(argv)}: streamed rows == fvol quick rows ({len(rows)})", "\n".join(quick_lines(rows)) == cli_quick_rows(q))
     for rend in ("jsonl", "csv", "quick"):
         st, body, _ = srv.req("GET", f"/api/runs/{rid}/vol?renderer={rend}", raw=True)
         ref = cli(image, plugin, argv, renderer=rend, syms=syms)
-        check(f"{plugin} {' '.join(argv)}: export vol -r {rend} byte-identical", st == 200 and body == ref, f"{len(body)} vs {len(ref)} bytes")
+        check(f"{plugin} {' '.join(argv)}: export fvol -r {rend} byte-identical", st == 200 and body == ref, f"{len(body)} vs {len(ref)} bytes")
     return rid, cols, rows
 
 
@@ -125,7 +125,7 @@ def main():
     check("DNS-rebinding Host -> 421", st == 421)
     st, _ = w.req("GET", "/api/plugins", headers={"Sec-Fetch-Site": "cross-site"})
     check("cross-site fetch -> 403", st == 403)
-    st, _ = w.req("GET", "/api/plugins", headers={"X-Vol-Token": None, "Cookie": f"rsvol_18765={w.token}"})
+    st, _ = w.req("GET", "/api/plugins", headers={"X-Vol-Token": None, "Cookie": f"fastvol_18765={w.token}"})
     check("a cookie is never a credential", st == 401)
     st, raw, r = w.req("GET", "/", headers={"X-Vol-Token": None}, raw=True)
     check("page holds no token and sets no cookie", st == 200 and w.token.encode() not in raw and not r.getheader("set-cookie"))

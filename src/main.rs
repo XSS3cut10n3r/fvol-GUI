@@ -1,4 +1,4 @@
-//! rsvol: a zero-dependency Rust rewrite of Volatility 3.
+//! fastvol: a zero-dependency Rust rewrite of Volatility 3.
 //!
 //! This is a port of the Volatility 3 memory forensics framework (Copyright Volatility
 //! Foundation) and is licensed under the Volatility Software License 1.0.
@@ -46,7 +46,7 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // a detached helper building a symbol table blob (see symbols::store::finish_deferred)
-    if let Some(spec) = std::env::var_os(symbols::store::HELPER_ENV) {
+    if let Some(spec) = util::env::var_os(symbols::store::HELPER_ENV_NAME) {
         std::process::exit(symbols::store::run_helper(&spec));
     }
     // std::sys::pal::unix::init: sanitize_standard_fds + reset_sigpipe

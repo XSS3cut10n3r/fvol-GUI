@@ -132,8 +132,8 @@ fn is_kernel_pdb(pdb_name: &str) -> bool {
 /// PDB is then one part).
 fn range_plan(pdb_name: &str) -> crate::util::download::RangePlan {
     use crate::util::download::RangePlan;
-    // `RSVOL_PDB_RANGES=<first wave>,<part KiB>,<max parts>` (measurements)
-    if let Some(v) = std::env::var("RSVOL_PDB_RANGES").ok().map(|v| v.split(',').filter_map(|x| x.parse::<u64>().ok()).collect::<Vec<_>>())
+    // `FASTVOL_PDB_RANGES=<first wave>,<part KiB>,<max parts>` (measurements)
+    if let Some(v) = crate::util::env::var("PDB_RANGES").ok().map(|v| v.split(',').filter_map(|x| x.parse::<u64>().ok()).collect::<Vec<_>>())
         && let [w, kib, m] = v[..]
     {
         return RangePlan { first_wave: w as usize, part: kib << 10, max_parts: m as usize };
@@ -320,7 +320,7 @@ pub fn convert_ahead(pdb_name: &str, guid: &str, age: u32, download: bool) {
         };
         convert(&pdb, &name).ok()
     };
-    if let Ok(h) = std::thread::Builder::new().name("rsvol-pdbconv".into()).spawn(job) {
+    if let Ok(h) = std::thread::Builder::new().name("fastvol-pdbconv".into()).spawn(job) {
         g.push((key, h));
     }
 }
@@ -444,7 +444,7 @@ mod tests {
             name.to_str().unwrap(),
             "/c/data_4b0f7e7467e414c27795057e12998e845eea045d8863f194908ce99896253624284202aade8d0f24f4b61f1e1e5c2058bcc9bbc4fb9c9f0efb86176c5e305f11.cache"
         );
-        let dir = std::env::temp_dir().join(format!("rsvol-pdbcache-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-pdbcache-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // an unreachable symbol server would fail every download: the cached file is used
         let p = pdb_cache_path(&dir, &symbol_server_urls("k.pdb", "AB", 2)[0]);
@@ -463,15 +463,15 @@ mod tests {
         assert!(download_pdb("x.pdb", "00", 1, true).is_err());
         assert!(download_and_convert("../x.pdb", "00", 1, &[PathBuf::from("/nonexistent")], true).is_err());
         // no writable directory: fails before any download
-        let e = download_and_convert("x.pdb", "00", 1, &[PathBuf::from("/proc/rsvol-no")], false).unwrap_err();
+        let e = download_and_convert("x.pdb", "00", 1, &[PathBuf::from("/proc/fastvol-no")], false).unwrap_err();
         assert!(e.to_string().contains("Cannot write downloaded symbols"), "{e}");
     }
 
     /// python's choice of output directory: the first where the file can be created.
     #[test]
     fn first_writable_dir() {
-        let base = std::env::temp_dir().join(format!("rsvol-pdbdl-{}", std::process::id()));
-        let dirs = [PathBuf::from("/proc/rsvol-no"), base.join("a"), base.join("b")];
+        let base = std::env::temp_dir().join(format!("fastvol-pdbdl-{}", std::process::id()));
+        let dirs = [PathBuf::from("/proc/fastvol-no"), base.join("a"), base.join("b")];
         let rel = isf_relative_path("k.pdb", "ab", 2);
         let (path, tmp) = open_output(&dirs, &rel).unwrap();
         assert_eq!(path, base.join("a/windows/k.pdb/AB-2.json.xz"));

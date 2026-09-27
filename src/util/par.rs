@@ -20,11 +20,11 @@ use crate::util::pool::{self, Payload, Work};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
-/// Number of worker threads to use (all logical CPUs; override with `RSVOL_THREADS`).
+/// Number of worker threads to use (all logical CPUs; override with `FASTVOL_THREADS`).
 pub fn threads() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| {
-        if let Some(n) = std::env::var("RSVOL_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        if let Some(n) = crate::util::env::var("THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
             return n.max(1);
         }
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)

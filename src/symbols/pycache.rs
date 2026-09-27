@@ -144,7 +144,7 @@ pub fn read(path: &Path) -> Option<Vec<CacheRow>> {
 // ---------------------------------------------------------------------------------------------
 
 /// python `volatility3.symbols.__path__` (`-s` dirs, volatility3/symbols,
-/// volatility3/framework/symbols, CACHE_PATH/symbols) from rsvol's search path: the python
+/// volatility3/framework/symbols, CACHE_PATH/symbols) from fastvol's search path: the python
 /// install directories stand in for the embedded copies when python is installed.
 pub fn python_symbol_roots(sp: &SymbolPath) -> Vec<Root> {
     let have_python = super::store::python_install_cached().is_some();
@@ -529,7 +529,7 @@ where
                     .collect();
                 insert_or_replace(rows, inserted);
             }
-            Err(e) => eprintln!("rsvol: remote ISF list {url}: {e}"),
+            Err(e) => eprintln!("fastvol: remote ISF list {url}: {e}"),
         }
     }
     let mut info = finish(rows, &stale, info);

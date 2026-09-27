@@ -244,7 +244,7 @@ fn measure(pmu: &Counters, dec: Dec, data: &[u8], runs: usize) -> (usize, f64, [
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if let Some(cpu) = std::env::var("RSVOL_BENCH_CPU").ok().and_then(|v| v.parse().ok()) {
+    if let Some(cpu) = std::env::var("FASTVOL_BENCH_CPU").or_else(|_| std::env::var("RSVOL_BENCH_CPU")).ok().and_then(|v| v.parse().ok()) {
         pin(cpu);
     }
     match args.get(1).map(String::as_str) {

@@ -9,7 +9,7 @@ GATE_OUT=${GATE_OUT:-/home/user/rs-vol/testdata/scratch/gates/run-$$}; mkdir -p 
 # Each plugin of bench/{win,linux,mac}_noarg.txt that has <ref_dir>/<plugin>.txt is run via compare.sh
 # (isfinfo.IsfInfo, which compare.sh checks against a live python run, only once per distinct symbol_args).
 ROOT=/home/user/rs-vol
-BIN=$ROOT/target/fast/vol
+BIN=$ROOT/target/fast/fvol
 OSES=
 while [ $# -gt 0 ]; do
   case $1 in -b) BIN=$2; shift 2;; -o) OSES=$2; shift 2;; *) break;; esac

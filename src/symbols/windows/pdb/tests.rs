@@ -105,7 +105,7 @@ fn synthetic_mutations_never_panic() {
         rng
     };
     const INTERESTING: [u8; 10] = [0, 1, 0x7f, 0x80, 0xff, 0x10, 0x15, 0xf1, 0x03, 0x12];
-    let iters: usize = std::env::var("RSVOL_MUT_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(3000);
+    let iters: usize = crate::util::env::var("MUT_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(3000);
     for _it in 0..iters {
         let mut m = SYNTH.to_vec();
         for _ in 0..1 + next() % 8 {
@@ -115,8 +115,8 @@ fn synthetic_mutations_never_panic() {
         if next() % 16 == 0 {
             m.truncate((next() % m.len() as u64) as usize);
         }
-        // RSVOL_MUT_TRACE=<file>: keep the input being converted (to reproduce a crash / OOM)
-        if let Some(path) = std::env::var_os("RSVOL_MUT_TRACE") {
+        // FASTVOL_MUT_TRACE=<file>: keep the input being converted (to reproduce a crash / OOM)
+        if let Some(path) = crate::util::env::var_os("MUT_TRACE") {
             eprintln!("mutation {_it}");
             std::fs::write(path, &m).unwrap();
         }
@@ -139,28 +139,28 @@ fn ntkrnlmp_if_present() {
     assert_eq!(out, out2);
 }
 
-/// `RSVOL_PDB=<file.pdb> RSVOL_REF=<python json> [RSVOL_DB=<name>] cargo test ... -- --ignored`
+/// `FASTVOL_PDB=<file.pdb> FASTVOL_REF=<python json> [FASTVOL_DB=<name>] cargo test ... -- --ignored`
 #[test]
 #[ignore]
 fn compare_with_python_reference() {
-    let pdb = std::fs::read(std::env::var("RSVOL_PDB").expect("RSVOL_PDB")).unwrap();
-    let reference = std::fs::read(std::env::var("RSVOL_REF").expect("RSVOL_REF")).unwrap();
-    let db = std::env::var("RSVOL_DB").ok();
+    let pdb = std::fs::read(crate::util::env::var("PDB").expect("FASTVOL_PDB")).unwrap();
+    let reference = std::fs::read(crate::util::env::var("REF").expect("FASTVOL_REF")).unwrap();
+    let db = crate::util::env::var("DB").ok();
     let t = std::time::Instant::now();
     let ours = pdb_to_isf_bytes(&pdb, db.as_deref(), "X").unwrap();
     eprintln!("converted in {:?}", t.elapsed());
-    if let Ok(out) = std::env::var("RSVOL_OUT") {
+    if let Ok(out) = crate::util::env::var("OUT") {
         std::fs::write(out, &ours).unwrap();
     }
     assert!(normalize(&ours) == normalize(&reference), "output differs from the python reference");
 }
 
-/// `RSVOL_PDB=<file.pdb> [RSVOL_ITERS=n] cargo test --profile fast ... bench_convert -- --ignored --nocapture`
+/// `FASTVOL_PDB=<file.pdb> [FASTVOL_ITERS=n] cargo test --profile fast ... bench_convert -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn bench_convert() {
-    let pdb = std::fs::read(std::env::var("RSVOL_PDB").expect("RSVOL_PDB")).unwrap();
-    let iters: usize = std::env::var("RSVOL_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+    let pdb = std::fs::read(crate::util::env::var("PDB").expect("FASTVOL_PDB")).unwrap();
+    let iters: usize = crate::util::env::var("ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
     let mut best = std::time::Duration::MAX;
     let mut len = 0;
     for _ in 0..iters {
@@ -173,12 +173,12 @@ fn bench_convert() {
 }
 
 /// Random byte mutations of a real PDB must never panic.
-/// `RSVOL_PDB=<file.pdb> [RSVOL_ITERS=n] cargo test ... fuzz_mutations -- --ignored`
+/// `FASTVOL_PDB=<file.pdb> [FASTVOL_ITERS=n] cargo test ... fuzz_mutations -- --ignored`
 #[test]
 #[ignore]
 fn fuzz_mutations() {
-    let pdb = std::fs::read(std::env::var("RSVOL_PDB").expect("RSVOL_PDB")).unwrap();
-    let iters: usize = std::env::var("RSVOL_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
+    let pdb = std::fs::read(crate::util::env::var("PDB").expect("FASTVOL_PDB")).unwrap();
+    let iters: usize = crate::util::env::var("ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
     let mut rng = 0x9e37_79b9_7f4a_7c15u64;
     let mut next = move || {
         rng ^= rng << 13;
@@ -205,15 +205,15 @@ fn fuzz_mutations() {
     eprintln!("fuzz: {ok} ok, {err} errors");
 }
 
-/// Batch comparison: every `RSVOL_PDB_DIR/<name>/<GUIDage>/<name>.pdb` is converted
+/// Batch comparison: every `FASTVOL_PDB_DIR/<name>/<GUIDage>/<name>.pdb` is converted
 /// (`pdbconv.py -f` semantics) and compared byte for byte with
-/// `RSVOL_REF_DIR/<name>.<GUIDage>.f.json`; a missing reference means python failed, in
+/// `FASTVOL_REF_DIR/<name>.<GUIDage>.f.json`; a missing reference means python failed, in
 /// which case the conversion must fail too.
 #[test]
 #[ignore]
 fn compare_dir() {
-    let dir = std::path::PathBuf::from(std::env::var("RSVOL_PDB_DIR").expect("RSVOL_PDB_DIR"));
-    let refs = std::path::PathBuf::from(std::env::var("RSVOL_REF_DIR").expect("RSVOL_REF_DIR"));
+    let dir = std::path::PathBuf::from(crate::util::env::var("PDB_DIR").expect("FASTVOL_PDB_DIR"));
+    let refs = std::path::PathBuf::from(crate::util::env::var("REF_DIR").expect("FASTVOL_REF_DIR"));
     let mut bad = 0;
     let mut entries = Vec::new();
     for n in std::fs::read_dir(&dir).unwrap() {
@@ -249,7 +249,7 @@ fn compare_dir() {
             }
         };
         eprintln!("{name:<16} {guid:<34} {:>9} bytes {dt:>12?}  {verdict}", pdb.len());
-        if let (Ok(o), Ok(dirout)) = (&ours, std::env::var("RSVOL_OUT_DIR")) {
+        if let (Ok(o), Ok(dirout)) = (&ours, crate::util::env::var("OUT_DIR")) {
             std::fs::write(std::path::Path::new(&dirout).join(format!("{stem}.{guid}.json")), o).unwrap();
         }
     }
@@ -257,13 +257,13 @@ fn compare_dir() {
 }
 
 /// Differential test of [`pe_codeview_info`] against volatility3's
-/// `PDBUtility.get_guid_from_mz` (pefile): `RSVOL_PE_REF` is a TSV of
+/// `PDBUtility.get_guid_from_mz` (pefile): `FASTVOL_PE_REF` is a TSV of
 /// `path<TAB>None` / `path<TAB>GUID<TAB>age<TAB>name` lines produced by python over the
 /// same files (zero padded to SizeOfImage).
 #[test]
 #[ignore]
 fn pe_codeview_matches_python() {
-    let reference = std::fs::read_to_string(std::env::var("RSVOL_PE_REF").expect("RSVOL_PE_REF")).unwrap();
+    let reference = std::fs::read_to_string(crate::util::env::var("PE_REF").expect("FASTVOL_PE_REF")).unwrap();
     let (mut same, mut found, mut diff) = (0, 0, 0);
     let t_all = std::time::Instant::now();
     for line in reference.lines() {
@@ -285,20 +285,20 @@ fn pe_codeview_matches_python() {
             found += (want != "None") as usize;
         } else {
             diff += 1;
-            eprintln!("DIFF {}\n  python: {want}\n  rsvol:  {ours}", f[0]);
+            eprintln!("DIFF {}\n  python: {want}\n  fastvol:  {ours}", f[0]);
         }
     }
     eprintln!("{same} identical ({found} with CodeView info), {diff} different, in {:?}", t_all.elapsed());
     assert_eq!(diff, 0);
 }
 
-/// Downloads every `name<TAB>GUID<TAB>age` line of `RSVOL_DL_LIST` into
-/// `RSVOL_DL_DIR/<name>/<GUID><age>/<name>` with [`download_pdb`].
+/// Downloads every `name<TAB>GUID<TAB>age` line of `FASTVOL_DL_LIST` into
+/// `FASTVOL_DL_DIR/<name>/<GUID><age>/<name>` with [`download_pdb`].
 #[test]
 #[ignore]
 fn download_list() {
-    let list = std::fs::read_to_string(std::env::var("RSVOL_DL_LIST").expect("RSVOL_DL_LIST")).unwrap();
-    let dir = std::path::PathBuf::from(std::env::var("RSVOL_DL_DIR").expect("RSVOL_DL_DIR"));
+    let list = std::fs::read_to_string(crate::util::env::var("DL_LIST").expect("FASTVOL_DL_LIST")).unwrap();
+    let dir = std::path::PathBuf::from(crate::util::env::var("DL_DIR").expect("FASTVOL_DL_DIR"));
     for line in list.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         if f.len() < 3 {
@@ -321,11 +321,11 @@ fn download_list() {
     }
 }
 
-/// `download_and_convert` end to end into `RSVOL_DL_DIR`.
+/// `download_and_convert` end to end into `FASTVOL_DL_DIR`.
 #[test]
 #[ignore]
 fn download_and_convert_ntkrnlmp() {
-    let dir = std::path::PathBuf::from(std::env::var("RSVOL_DL_DIR").expect("RSVOL_DL_DIR"));
+    let dir = std::path::PathBuf::from(crate::util::env::var("DL_DIR").expect("FASTVOL_DL_DIR"));
     let t = std::time::Instant::now();
     let (p, json) = download_and_convert("ntkrnlmp.pdb", "8e3373d6124e747f0e72ef8e02e676b3", 1, std::slice::from_ref(&dir), false).unwrap();
     eprintln!("{} in {:?}", p.display(), t.elapsed());
@@ -339,7 +339,7 @@ fn download_and_convert_ntkrnlmp() {
 /// only the final file; the PDB info stream GUID is what the symbol server path names.
 #[test]
 fn deferred_isf_write_same_json() {
-    let dir = std::env::temp_dir().join(format!("rsvol-isfwrite-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("fastvol-isfwrite-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let pdb = dir.join("data_x.cache");

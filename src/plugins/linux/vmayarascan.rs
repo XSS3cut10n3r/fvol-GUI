@@ -154,7 +154,7 @@ impl Plugin for VmaYaraScan {
         ])?;
         let k = ctx.linux_kernel()?;
         // yara.SyntaxError / an unreadable rule file: not volatility exceptions, python's
-        // plugin dies with a traceback (a panic is rsvol's equivalent)
+        // plugin dies with a traceback (a panic is fastvol's equivalent)
         let rules = yara_rules_from_config(cfg).unwrap_or_else(|e| panic!("{e}"));
         let pids = cfg.get_ints("pid");
         let filter = pid_filter(&pids);

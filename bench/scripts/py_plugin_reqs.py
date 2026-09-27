@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Dump every python volatility3 plugin's requirement list (`get_requirements()`, python order)
-as the data table rsvol builds `--save-config` / `timeliner --record-config` from:
+as the data table fastvol builds `--save-config` / `timeliner --record-config` from:
 
     bench/venv/bin/python bench/scripts/py_plugin_reqs.py > src/plugins/pyreqs.tsv
 
@@ -20,7 +20,7 @@ One line per top-level requirement, TAB separated:
             (Layer: then ';' and the oses); Choice: the choices as a JSON list; else empty
   description  json.dumps(requirement.description) (python's "Unsatisfied requirement" text)
 
-Only data python itself holds; rsvol's semantics (which values land in the saved configuration)
+Only data python itself holds; fastvol's semantics (which values land in the saved configuration)
 live in src/plugins/pyreqs.rs.
 """
 import json

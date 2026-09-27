@@ -1,4 +1,4 @@
-# rsvol core API — python volatility3 → rust cheat-sheet
+# fastvol core API — python volatility3 → rust cheat-sheet
 
 For plugin porters. Everything here mirrors volatility3 2.28.2 semantics; when in doubt read the
 python source in `/home/user/rs-vol/volatility3/` and the doc comments of the rust items named
@@ -322,7 +322,7 @@ stacker, `LinuxIntel32e` from the banner stacker), `vlayer`, `phys`, `table`
 
 A trailing `Err` in a walker's `Vec` marks where python would have raised. Python exceptions
 that are not volatility exceptions (e.g. `ValueError` from `datetime`) crash python's plugin
-with a traceback; the rsvol equivalent is a plugin panic, which the CLI renders the same way.
+with a traceback; the fastvol equivalent is a plugin panic, which the CLI renders the same way.
 
 ## Layers
 
@@ -361,7 +361,7 @@ changes python's last chunk of a section (hits there can be reported twice, like
 | python | rust |
 |---|---|
 | `layer.scan(ctx, scanners.BytesScanner(needle), sections)` | `scan(layer, &BytesScanner::new(needle), Some(&secs))` → `Vec<u64>` |
-| `layer.scan(ctx, scanners.MultiStringScanner(patterns))` | `scan_each(layer, &MultiStringScanner::new(&pats), None, \|(addr, idx)\| ..)` (AVX2 prefilter; `RSVOL_NO_SIMD=1` forces scalar) |
+| `layer.scan(ctx, scanners.MultiStringScanner(patterns))` | `scan_each(layer, &MultiStringScanner::new(&pats), None, \|(addr, idx)\| ..)` (AVX2 prefilter; `FASTVOL_NO_SIMD=1` forces scalar) |
 | `layer.scan(ctx, scanners.RegExScanner(pattern))` | `FnScanner::new(\|data, off, out\| ..)` with the regex engine (apply the `chunk_size` rule yourself) |
 | `PdbSignatureScanner(names)` / `PDBUtility.pdbname_scan(...)` | `automagic::windows::{RsdsScanner, pdbname_scan}` (streaming) or `PdbSignatureScanner` (GUID/age in the hit); the matcher on raw bytes: `symbols::windows::pdb::{rsds_search, rsds_scan, find_mz_before, guid_string}` |
 | a scan that usually stops at an early hit (banners) | `scan_each_progressive(layer, &scanner, \|h\| h.0, \|h\| ..)` (growing batches; same hits/order as `scan_each`) |
@@ -374,7 +374,7 @@ pages mapped at several virtual addresses are searched once) and `stream_window`
 chunks, slower).
 
 **Scan cache** (`crate::layers::scancache`): a two-phase scanner that also implements
-`cache_query()` has its raw `prescan` matches cached per image (`~/.cache/rsvol/scan/`); repeat
+`cache_query()` has its raw `prescan` matches cached per image (`~/.cache/fastvol/scan/`); repeat
 scans of the same layer / sections / chunking replay them through `finish` in python order
 without reading the layer, so put every python-side check in `finish` (it runs on every run).
 Describe the prescan exactly: `CacheQuery::Greedy { patterns, limit, cap }` (python
@@ -385,7 +385,7 @@ answered from per-literal atoms, and a full-layer miss also records well-known l
 tags, MFT / MBR signatures, vmscan page starts) in the same sweep, so the next scanner of that
 family is warm too. Scans of < 16 MiB of sections are never cached (cheap anyway); greedy
 queries over > 64 literals are cached whole. Never implement it for scanners of user-supplied
-patterns (yara/regex). `RSVOL_NO_SCAN_CACHE=1` disables the cache, `--clear-cache` wipes it.
+patterns (yara/regex). `FASTVOL_NO_SCAN_CACHE=1` disables the cache, `--clear-cache` wipes it.
 Scanners with their own executor use the explicit API (`scancache::page_start_hits`, vmscan).
 
 ### Pool scanning (`crate::plugins::windows::poolscanner`, `crate::symbols::windows::pool`)
@@ -525,7 +525,7 @@ error after the objects before it; collected variants return `Vec<Result<..>>` w
   avoids even that. Page walks go through a per-thread TLB and a shared page-table-validity cache;
   `layer.slice()` gives zero-copy access to mmapped bytes within one page.
 * Symbol tables are flat mmapped blobs (warm load ~0.02 ms); kernel discovery is cached per image
-  (`~/.cache/rsvol/automagic`). `RSVOL_TRACE=1` prints timing spans; `RSVOL_CACHE=dir` relocates
+  (`~/.cache/fastvol/automagic`). `FASTVOL_TRACE=1` prints timing spans; `FASTVOL_CACHE=dir` relocates
   the caches (use an empty dir to measure cold runs).
 * Use `crate::util::par::{par_map, par_for, par_map_stream}` for per-process / per-item work
   that reads lots of memory; results stay in order. Pattern (see `plugins/windows/vadinfo.rs`):

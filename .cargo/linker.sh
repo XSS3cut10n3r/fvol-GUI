@@ -1,6 +1,6 @@
 #!/bin/sh
 # Linker wrapper (see .cargo/config.toml): links exactly like rustc's default `cc` invocation, plus
-# hot-text ordering for the release `vol` binary.
+# hot-text ordering for the release `fvol` binary.
 #
 # .cargo/symbol-order.txt lists the functions a warm run executes (demangled, so without the
 # crate hashes that change with every toolchain, version or profile tweak), hottest first. It is
@@ -11,10 +11,11 @@
 #
 # The ordering only moves functions around, so it can never change behaviour: a stale list,
 # a missing file, a missing `nm` or any failure here just links without it (a bit slower).
-# RSVOL_SYMBOL_ORDER=0 turns it off; RSVOL_SYMBOL_ORDER=<file> uses another list.
-CC=${RSVOL_LINK_CC:-cc}
+# FASTVOL_SYMBOL_ORDER=0 turns it off; FASTVOL_SYMBOL_ORDER=<file> uses another list. (RSVOL_SYMBOL_ORDER
+# and RSVOL_LINK_CC, from the project's former name, are still accepted; the FASTVOL_ names win.)
+CC=${FASTVOL_LINK_CC:-${RSVOL_LINK_CC:-cc}}
 
-# only for the fat-LTO `vol` executable (a single Rust object, not in a response file)
+# only for the fat-LTO `fvol` executable (a single Rust object, not in a response file)
 out= objs= nobj=0 prev=
 for a in "$@"; do
     case $a in
@@ -25,10 +26,10 @@ for a in "$@"; do
     prev=$a
 done
 case ${out##*/} in
-    vol | vol-*) ;;
+    fvol | fvol-*) ;;
     *) exec "$CC" "$@" ;;
 esac
-order=${RSVOL_SYMBOL_ORDER:-$(dirname "$0")/symbol-order.txt}
+order=${FASTVOL_SYMBOL_ORDER:-${RSVOL_SYMBOL_ORDER:-$(dirname "$0")/symbol-order.txt}}
 if [ "$order" = 0 ] || [ "$nobj" != 1 ] || [ ! -s "$order" ] || ! command -v nm > /dev/null 2>&1; then
     exec "$CC" "$@"
 fi

@@ -1,4 +1,4 @@
-"""Performance numbers for `vol serve` (run via bench/web/perf.sh).
+"""Performance numbers for `fvol serve` (run via bench/web/perf.sh).
 
 Server side: warm plugin latency vs the CLI, streaming throughput and table memory for a
 42-million-row plugin (windows.memmap without --pid), window fetch latency, view build times.
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 PORT = 18765
 TOKEN = "testtoken-win-0123456789"
-BIN = os.environ.get("BIN", "target/fast/vol")
+BIN = os.environ.get("BIN", "target/fast/fvol")
 IMG = "/home/user/cbc2/task2/memory-dirty.raw"
 conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=600)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates differential test vectors against pycryptodome/hashlib for rsvol's
+"""Generates differential test vectors against pycryptodome/hashlib for fastvol's
 crypto module, as a small embedded Rust source file (hex-encoded tuples)."""
 import hashlib
 import hmac

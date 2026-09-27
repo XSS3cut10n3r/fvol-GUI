@@ -5,7 +5,7 @@
 //!
 //! Search order (python `volatility3.symbols.__path__`):
 //!   1. `-s/--symbol-dirs` directories,
-//!   2. `<directory of the rsvol binary>/symbols` (like a frozen python executable),
+//!   2. `<directory of the fastvol binary>/symbols` (like a frozen python executable),
 //!   3. the ISFs shipped with volatility3 (python's own `volatility3/symbols` and
 //!      `volatility3/framework/symbols` directories when an installation is found, the copies
 //!      embedded in the binary otherwise),
@@ -15,7 +15,7 @@
 //! A downloaded PDB is converted to `windows/<pdb>/<GUID>-<age>.json.xz` in the first of
 //! these directories where the file can be created, like python's `download_pdb_isf`.
 //!
-//! Every loaded table is cached as a flat blob in `~/.cache/rsvol/isf/<key>.isfb`
+//! Every loaded table is cached as a flat blob in `~/.cache/fastvol/isf/<key>.isfb`
 //! (key = source URL + size + mtime + natives), so a warm load is one mmap.
 
 use super::isf::{BuildOptions, build_blob};
@@ -41,7 +41,7 @@ pub enum IsfLocation {
     Embedded { rel: &'static str, top: bool, data: &'static [u8] },
     /// A location from a remote identifier list (python `-u/--remote-isf-url`), kept verbatim:
     /// `file://...` is read in place, anything else (http/https/ftp) is downloaded once and
-    /// cached as `~/.cache/rsvol/data_<sha512>.cache` (python: `CACHE_PATH/data_<sha512>.cache`).
+    /// cached as `~/.cache/fastvol/data_<sha512>.cache` (python: `CACHE_PATH/data_<sha512>.cache`).
     Url(String),
 }
 
@@ -403,12 +403,12 @@ impl SymbolPath {
 }
 
 /// Locate a python volatility3 package directory (the one containing `framework/`):
-/// `$RSVOL_VOL3_ROOT` (the package dir or a checkout containing it), else the nearest ancestor
-/// of the rsvol binary holding `volatility3/volatility3/framework/symbols` or
+/// `$FASTVOL_VOL3_ROOT` (the package dir or a checkout containing it), else the nearest ancestor
+/// of the fastvol binary holding `volatility3/volatility3/framework/symbols` or
 /// `volatility3/framework/symbols`.
 pub fn python_install() -> Option<PathBuf> {
     let is_pkg = |p: &Path| p.join("framework").join("symbols").is_dir();
-    if let Some(r) = std::env::var_os("RSVOL_VOL3_ROOT").filter(|v| !v.is_empty()) {
+    if let Some(r) = crate::util::env::var_os("VOL3_ROOT").filter(|v| !v.is_empty()) {
         let r = PathBuf::from(r);
         for c in [r.clone(), r.join("volatility3")] {
             if is_pkg(&c) {
@@ -622,6 +622,7 @@ fn source_identity(loc: &IsfLocation, url: &str) -> Option<Vec<u8>> {
 /// (`blob | key | key_len u32 | ISFB_TRAILER`), verified on load: a hash collision is a miss,
 /// never a wrong table.
 fn cache_file(loc: &IsfLocation, url: &str, opts: &BuildOptions) -> Option<(PathBuf, Vec<u8>)> {
+    // (key material of the cache format, kept from the project's former name: renamed caches stay valid)
     let mut key = b"rsvol-isfb\0".to_vec();
     key.extend_from_slice(&super::table::BLOB_VERSION.to_le_bytes());
     key.extend_from_slice(&source_identity(loc, url)?);
@@ -638,7 +639,7 @@ fn cache_file(loc: &IsfLocation, url: &str, opts: &BuildOptions) -> Option<(Path
         }
     }
     let h = crate::layers::scancache::key_hash(&key);
-    Some((paths::rsvol_cache_dir().join("isf").join(format!("{h:016x}.isfb")), key))
+    Some((paths::cache_dir().join("isf").join(format!("{h:016x}.isfb")), key))
 }
 
 const ISFB_TRAILER: &[u8; 8] = b"RSVKEY01";
@@ -754,9 +755,9 @@ pub fn load(loc: &IsfLocation, name: &str, opts: &BuildOptions) -> Result<Symbol
 /// A big `.xz` ISF file loading as a lazy table: decoded while its lazy index reads the part
 /// already decoded (see [`super::stream`]). `None` when that does not apply (lazy tables off,
 /// natives given, another kind of file, a layout the streamed decoder leaves to the codec, a
-/// document under [`LAZY_MIN`]). `RSVOL_STREAM_ISF=0` turns it off.
+/// document under [`LAZY_MIN`]). `FASTVOL_STREAM_ISF=0` turns it off.
 fn streamed_load(loc: &IsfLocation, opts: &BuildOptions) -> Option<super::lazy::Streamed> {
-    if !lazy_tables_on() || opts.natives.is_some() || std::env::var_os("RSVOL_STREAM_ISF").is_some_and(|v| v == "0") {
+    if !lazy_tables_on() || opts.natives.is_some() || crate::util::env::var_os("STREAM_ISF").is_some_and(|v| v == "0") {
         return None;
     }
     let IsfLocation::File(p) = loc else { return None };
@@ -785,9 +786,9 @@ fn lazy_tables_on() -> bool {
 const LAZY_MIN: usize = 1 << 20;
 
 /// Let big ISFs load as lazy tables (the one-shot CLI: its blob is written after the output,
-/// see [`finish_deferred`]). `RSVOL_LAZY_ISF=0` turns them off.
+/// see [`finish_deferred`]). `FASTVOL_LAZY_ISF=0` turns them off.
 pub fn set_lazy_tables(on: bool) {
-    let on = on && std::env::var_os("RSVOL_LAZY_ISF").is_none_or(|v| v != "0");
+    let on = on && crate::util::env::var_os("LAZY_ISF").is_none_or(|v| v != "0");
     LAZY.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -823,11 +824,11 @@ fn lazy_register(loc: &IsfLocation, url: &str, cf: &Option<(PathBuf, Vec<u8>)>, 
     }
 }
 
-/// How the blobs of lazy tables are written (`RSVOL_DEFERRED_ISFB`): `helper` (default) = a
+/// How the blobs of lazy tables are written (`FASTVOL_DEFERRED_ISFB`): `helper` (default) = a
 /// detached helper process per blob, `thread` = a background thread of this process joined
 /// before exit, `off` = not at all.
 fn deferred_mode() -> &'static str {
-    match std::env::var("RSVOL_DEFERRED_ISFB").as_deref() {
+    match crate::util::env::var("DEFERRED_ISFB").as_deref() {
         Ok("thread") => "thread",
         Ok("off") => "off",
         _ => "helper",
@@ -865,7 +866,11 @@ pub fn finish_deferred() {
 }
 
 /// The helper-mode environment variable: its value names the ISF whose blob to build.
-pub const HELPER_ENV: &str = "RSVOL_ISFB_HELPER";
+/// (set for the child by this executable, so only the current name; read through
+/// [`crate::util::env`] as [`HELPER_ENV_NAME`])
+pub const HELPER_ENV: &str = "FASTVOL_ISFB_HELPER";
+/// [`HELPER_ENV`] without the `FASTVOL_` prefix.
+pub const HELPER_ENV_NAME: &str = "ISFB_HELPER";
 
 /// The [`HELPER_ENV`] value for `loc` (files, zip members and downloaded URLs; the shipped
 /// ISFs never load lazily).
@@ -904,7 +909,7 @@ fn spawn_helper_spec(spec: &str) -> bool {
     use std::os::unix::process::CommandExt;
     let Some(exe) = paths::current_exe() else { return false };
     std::process::Command::new(exe)
-        .arg0("rsvol-isfb-helper")
+        .arg0("fastvol-isfb-helper")
         .env(HELPER_ENV, spec)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -975,7 +980,7 @@ pub fn run_helper(spec: &std::ffi::OsStr) -> i32 {
     }
 }
 
-/// Symbol tables pre-built by one helper (see [`prebuild_siblings`]); `RSVOL_PREBUILD=<N>`
+/// Symbol tables pre-built by one helper (see [`prebuild_siblings`]); `FASTVOL_PREBUILD=<N>`
 /// (0: none).
 const PREBUILD_PER_RUN: usize = 3;
 /// No pre-building once the binary tables in the cache take this much.
@@ -989,7 +994,7 @@ const PREBUILD_BUDGET: u64 = 512 << 20;
 /// reach [`PREBUILD_BUDGET`]; at idle CPU priority, one at a time, each under the same lock as
 /// any helper's build.
 fn prebuild_siblings(isf: &Path) {
-    let per_run = std::env::var("RSVOL_PREBUILD").ok().and_then(|v| v.parse().ok()).unwrap_or(PREBUILD_PER_RUN);
+    let per_run = crate::util::env::var("PREBUILD").ok().and_then(|v| v.parse().ok()).unwrap_or(PREBUILD_PER_RUN);
     if per_run == 0 {
         return;
     }
@@ -1003,7 +1008,7 @@ fn prebuild_siblings(isf: &Path) {
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .collect();
     cands.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let isf_dir = paths::rsvol_cache_dir().join("isf");
+    let isf_dir = paths::cache_dir().join("isf");
     let cached = || -> u64 {
         std::fs::read_dir(&isf_dir).map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "isfb")).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()).unwrap_or(0)
     };
@@ -1040,6 +1045,7 @@ fn write_blob_locked(loc: &IsfLocation, json: Option<Vec<u8>>) -> Option<()> {
     let url = loc.url();
     let opts = BuildOptions::default();
     let (cf, key) = cache_file(loc, &url, &opts)?;
+    paths::migrate_legacy_cache();
     std::fs::create_dir_all(cf.parent()?).ok()?;
     let lock_path = cf.with_extension("lock");
     let lf = std::fs::File::options().create(true).append(true).open(&lock_path).ok()?;
@@ -1197,7 +1203,7 @@ fn lazy_identifier(loc: &IsfLocation, os: &str, json: Vec<u8>) -> std::result::R
 /// [`super::stream`]); `None` when that does not apply. `Err` = unreadable (a decode error).
 fn streamed_identifier(loc: &IsfLocation, os: &str) -> Option<std::result::Result<Option<(String, Vec<u8>)>, ()>> {
     let IsfLocation::File(p) = loc else { return None };
-    if !p.as_os_str().as_encoded_bytes().ends_with(b".xz") || std::env::var_os("RSVOL_STREAM_ISF").is_some_and(|v| v == "0") {
+    if !p.as_os_str().as_encoded_bytes().ends_with(b".xz") || crate::util::env::var_os("STREAM_ISF").is_some_and(|v| v == "0") {
         return None;
     }
     let f = std::fs::File::open(p).ok()?;
@@ -1268,7 +1274,7 @@ pub fn load_in_background(loc: IsfLocation) {
     if known {
         return;
     }
-    let _ = std::thread::Builder::new().name("rsvol-isf-spec".into()).spawn(move || {
+    let _ = std::thread::Builder::new().name("fastvol-isf-spec".into()).spawn(move || {
         let _t = crate::util::trace::span("isf speculative load (background)");
         let _ = load(&loc, "", &BuildOptions::default());
     });
@@ -1524,8 +1530,8 @@ fn static_os(os: &str) -> Option<&'static str> {
 /// depends on its database's history). Without a usable python database (none yet, or
 /// `--clear-cache`, which deletes it) the index is the database python would build from
 /// scratch: every ISF on the search path, inserted in python's set order (see
-/// [`super::pycache::update`]). Only the ISFs python would read are read, through rsvol's own
-/// per-file index (`~/.cache/rsvol/identifiers.cache`). With `RSVOL_NO_PY_IDENT_SEED=1` rsvol
+/// [`super::pycache::update`]). Only the ISFs python would read are read, through fastvol's own
+/// per-file index (`~/.cache/fastvol/identifiers.cache`). With `FASTVOL_NO_PY_IDENT_SEED=1` fastvol
 /// indexes every ISF itself, in search-path order.
 pub struct IdentifierIndex {
     pub entries: Vec<IdentEntry>,
@@ -1558,10 +1564,10 @@ pub fn set_python_identifier_cache(db: Option<PathBuf>) {
     *PY_DB.write().unwrap_or_else(|e| e.into_inner()) = Some(db.map_or(PySeed::Fresh, PySeed::Db));
 }
 
-/// Where the identifier index takes python's rows from, or `None` (`RSVOL_NO_PY_IDENT_SEED=1`:
-/// rsvol's own index in search-path order).
+/// Where the identifier index takes python's rows from, or `None` (`FASTVOL_NO_PY_IDENT_SEED=1`:
+/// fastvol's own index in search-path order).
 fn py_seed() -> Option<PySeed> {
-    if std::env::var_os("RSVOL_NO_PY_IDENT_SEED").is_some_and(|v| !v.is_empty() && v != "0") {
+    if crate::util::env::var_os("NO_PY_IDENT_SEED").is_some_and(|v| !v.is_empty() && v != "0") {
         return None;
     }
     match &*PY_DB.read().unwrap_or_else(|e| e.into_inner()) {
@@ -1719,12 +1725,12 @@ fn choice_deps_hold_at(kv: &[(String, String)], state: &str, now: i64) -> bool {
     true
 }
 
-/// python's `update()` reading the new / stale ISFs `todo` (url, location): through rsvol's
+/// python's `update()` reading the new / stale ISFs `todo` (url, location): through fastvol's
 /// per-file index (`identifiers.cache`, URL + size + mtime), extracting what it lacks (in
 /// parallel; `on_work` first when that includes files other than the shipped ones). `None` =
 /// python's read raises (the file cannot be opened / decompressed).
 fn scan_for_python(todo: &[(&str, &IsfLocation)], on_work: &dyn Fn()) -> Vec<Option<super::pycache::Scanned>> {
-    let cache_path = paths::rsvol_cache_dir().join("identifiers.cache");
+    let cache_path = paths::cache_dir().join("identifiers.cache");
     let mut all = read_ident_cache(&cache_path);
     let mut by_url: crate::util::FxHashMap<String, usize> = all.iter().enumerate().map(|(i, e)| (e.url.clone(), i)).collect();
     let locs: Vec<IsfLocation> = todo.iter().map(|(_, l)| (*l).clone()).collect();
@@ -1775,7 +1781,7 @@ fn scan_for_python(todo: &[(&str, &IsfLocation)], on_work: &dyn Fn()) -> Vec<Opt
 
 impl IdentifierIndex {
     /// Build the index for `path` (+ the `-u` identifier list `remote`): seeded from python's
-    /// identifier cache when possible (see the type's docs), else rsvol's own. `on_work` runs
+    /// identifier cache when possible (see the type's docs), else fastvol's own. `on_work` runs
     /// first when ISFs other than the shipped ones must be read.
     pub fn build(path: &SymbolPath, remote: Option<&str>, on_work: &dyn Fn()) -> IdentifierIndex {
         let state = seed_state();
@@ -1795,7 +1801,7 @@ impl IdentifierIndex {
                                 index.locations.push(IsfLocation::Url(location));
                             }
                         }
-                        Err(e) => eprintln!("rsvol: remote ISF list {url}: {e}"),
+                        Err(e) => eprintln!("fastvol: remote ISF list {url}: {e}"),
                     }
                 }
                 index
@@ -1806,11 +1812,11 @@ impl IdentifierIndex {
         index
     }
 
-    /// The index from python's identifier cache (`None`: `RSVOL_NO_PY_IDENT_SEED=1`): python's
+    /// The index from python's identifier cache (`None`: `FASTVOL_NO_PY_IDENT_SEED=1`): python's
     /// rows after an emulated `SqliteCache.update()` (`symbols::pycache`), in rowid order; an
     /// empty database where python starts from one (`--clear-cache`; a database that is
     /// missing, unreadable or of another schema, which python recreates). The ISFs that
-    /// update() would (re)scan are read through rsvol's per-file index ([`scan_for_python`]).
+    /// update() would (re)scan are read through fastvol's per-file index ([`scan_for_python`]).
     fn seeded(path: &SymbolPath, remote: Option<&str>, on_work: &dyn Fn()) -> Option<IdentifierIndex> {
         use super::pycache;
         let rows = match py_seed()? {
@@ -1876,7 +1882,7 @@ impl IdentifierIndex {
     /// Key material a remembered *failure* to find an `os` kernel depends on (checked by
     /// [`choice_deps_hold`] as well): [`IdentifierIndex::choice_deps`] with every ISF of `os`
     /// (and every unidentified one) as a candidate, since any of them could hold the image's
-    /// banner, in both index modes (rsvol's own index re-reads a modified ISF too).
+    /// banner, in both index modes (fastvol's own index re-reads a modified ISF too).
     pub fn os_deps(&self, os: &str) -> Vec<(&'static str, String)> {
         self.deps_of(|e| e.os == os || e.os.is_empty(), true)
     }
@@ -1929,7 +1935,7 @@ impl IdentifierIndex {
     /// [`IdentifierIndex::update`]; `on_work` runs first when ISFs other than the shipped ones
     /// must be (re)read.
     pub fn update_with(path: &SymbolPath, on_work: &dyn Fn()) -> IdentifierIndex {
-        let cache_path = paths::rsvol_cache_dir().join("identifiers.cache");
+        let cache_path = paths::cache_dir().join("identifiers.cache");
         // entries for every symbol path ever indexed are kept, so alternating `-s` dirs does
         // not rewrite (or re-extract) the cache on each run
         let mut all = read_ident_cache(&cache_path);
@@ -2255,10 +2261,11 @@ fn extract_all<R: Send>(locs: &[IsfLocation], todo: &[usize], make: impl Fn(usiz
         .collect()
 }
 
-/// rsvol's per-file identifier results (`identifiers.cache`): url, stamp, os, identifier per
+/// fastvol's per-file identifier results (`identifiers.cache`): url, stamp, os, identifier per
 /// entry. Format 3 marks unreadable files (os [`UNREADABLE`]); older files are ignored.
 fn read_ident_cache(path: &Path) -> Vec<IdentEntry> {
-    let Ok(b) = std::fs::read(path) else { return Vec::new() };
+    let read = || std::fs::read(path).ok();
+    let Some(b) = read().or_else(|| paths::migrate_legacy_cache().then(read).flatten()) else { return Vec::new() };
     let mut out = Vec::new();
     let mut i = 0usize;
     let rd = |i: &mut usize, n: usize| -> Option<&[u8]> {
@@ -2316,7 +2323,7 @@ pub fn identifier_index(path: &SymbolPath) -> &'static IdentifierIndex {
 /// index), e.g. to start a banner-hint scan only then.
 pub fn identifier_index_with(path: &SymbolPath, on_work: &dyn Fn()) -> &'static IdentifierIndex {
     // one index per distinct search path, `-u` list and seeding state (a process normally has
-    // exactly one; a long-running `vol serve` rebuilds it when python's database changed)
+    // exactly one; a long-running `fvol serve` rebuilds it when python's database changed)
     type Key = (SymbolPath, Option<String>, String);
     static INDEX: std::sync::Mutex<Vec<(Key, &'static IdentifierIndex)>> = std::sync::Mutex::new(Vec::new());
     let remote = super::remote_isf_url();
@@ -2383,13 +2390,13 @@ fn choice_file(path: &SymbolPath, identifier: &[u8], os: &str) -> (PathBuf, Stri
         k.extend_from_slice(part);
     }
     let h = crate::layers::scancache::key_hash(&k);
-    (paths::rsvol_cache_dir().join("isfchoice").join(format!("{h:016x}.{os}")), paths::hex(&k))
+    (paths::cache_dir().join("isfchoice").join(format!("{h:016x}.{os}")), paths::hex(&k))
 }
 
 /// python `SqliteCache(CACHE_PATH/identifier.cache).find_location(identifier, os)` right after
 /// the `SymbolCacheMagic` update: the location of the last row with the identifier in the
 /// identifier index (see [`IdentifierIndex`]), `None` without one. The answer is kept in
-/// `~/.cache/rsvol/isfchoice/` with its dependencies ([`IdentifierIndex::choice_deps`]), so a
+/// `~/.cache/fastvol/isfchoice/` with its dependencies ([`IdentifierIndex::choice_deps`]), so a
 /// later run with the same python database and search path skips building the index.
 pub fn find_location_cached(path: &SymbolPath, identifier: &[u8], os: &str) -> Option<IsfLocation> {
     choice_cached(path, identifier, os).unwrap_or_else(|| choice_from_index(path, identifier, os))
@@ -2477,7 +2484,7 @@ pub fn find_windows_isf(path: &SymbolPath, pdb_name: &str, guid: &str, age: u32,
     // download + convert into the first writable directory of the search path, like python's
     // `download_pdb_isf` over `symbols.__path__` (the embedded roots are not directories)
     let dirs: Vec<PathBuf> = path.roots.iter().filter_map(|r| if let Root::Dir(d) = r { Some(d.clone()) } else { None }).collect();
-    let defer = lazy_tables_on() && std::env::var_os("RSVOL_PDB_ISF_WRITE").is_none_or(|v| v != "sync");
+    let defer = lazy_tables_on() && crate::util::env::var_os("PDB_ISF_WRITE").is_none_or(|v| v != "sync");
     let (out, json, job) = super::windows::pdb::download_and_convert_with(pdb_name, &guid.to_uppercase(), age, &dirs, offline, defer)?;
     let loc = IsfLocation::File(out);
     match job {
@@ -2604,8 +2611,8 @@ mod tests {
         let t = std::time::Instant::now();
         let p0 = SymbolPath::new(&[]);
         let t1 = t.elapsed();
-        // RSVOL_ISF_OLD=1: the previous lookup (every match of every root, then the first)
-        let l0 = if std::env::var_os("RSVOL_ISF_OLD").is_some() {
+        // FASTVOL_ISF_OLD=1: the previous lookup (every match of every root, then the first)
+        let l0 = if crate::util::env::var_os("ISF_OLD").is_some() {
             p0.find("windows", "pe").into_iter().next().unwrap()
         } else {
             p0.find_first("windows", "pe").unwrap()
@@ -2738,12 +2745,12 @@ mod tests {
     }
 
     /// Components of the fast extractor on one document.
-    /// `RSVOL_BENCH_JSON=x.json cargo test --release fast_ident_parts -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_JSON=x.json cargo test --release fast_ident_parts -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn fast_ident_parts() {
         use crate::symbols::linux::search::Needle;
-        let data = std::fs::read(std::env::var("RSVOL_BENCH_JSON").unwrap()).unwrap();
+        let data = std::fs::read(crate::util::env::var("BENCH_JSON").unwrap()).unwrap();
         let best = |f: &mut dyn FnMut()| {
             let mut b = f64::MAX;
             for _ in 0..10 {
@@ -2775,11 +2782,11 @@ mod tests {
     }
 
     /// Identifier extraction: indexed walk vs the byte parser (same answers, speed).
-    /// `RSVOL_BENCH_JSON=a.json[:b.json...] cargo test --release ident_bench -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_JSON=a.json[:b.json...] cargo test --release ident_bench -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn ident_bench() {
-        for path in std::env::var("RSVOL_BENCH_JSON").unwrap().split(':') {
+        for path in crate::util::env::var("BENCH_JSON").unwrap().split(':') {
             let data = std::fs::read(path).unwrap();
             let best = |f: &mut dyn FnMut()| {
                 let mut b = f64::MAX;
@@ -2838,7 +2845,7 @@ mod tests {
     /// without `-s` dirs; user dirs keep rglob semantics (any depth, first root wins).
     #[test]
     fn find_first_matches_find() {
-        let tmp = std::env::temp_dir().join(format!("rsvol-isf-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fastvol-isf-{}", std::process::id()));
         let user = tmp.join("user");
         let deep = tmp.join("deep");
         for (dir, rel) in [(&user, "windows/pe.json"), (&deep, "windows/sub/dir/kdbg.json.xz"), (&deep, "linux/elf.json.gz")] {
@@ -2884,7 +2891,7 @@ mod tests {
     /// `all()` gives under `sub`.
     #[test]
     fn all_under_is_the_sub_path_trees() {
-        let tmp = std::env::temp_dir().join(format!("rsvol-allunder-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fastvol-allunder-{}", std::process::id()));
         for rel in ["generic/vmcs/b.json", "generic/vmcs/a.json.xz", "generic/vmcs/deep/c.json", "generic/vmcs/x.txt", "other/generic/vmcs/d.json", "generic/vmcsx/e.json"] {
             let f = tmp.join(rel);
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -2928,7 +2935,7 @@ mod tests {
 
     /// A symbol directory with Linux ISFs (`rel` -> banner); returns it canonicalized.
     fn seed_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rsvol-seed-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("fastvol-seed-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         for (rel, banner) in files {
             let p = d.join(rel);
@@ -2992,7 +2999,7 @@ mod tests {
         let (a, b, new) = (url_of(&d, "a/k.json"), url_of(&d, "b/k.json"), url_of(&d, "a/new.json"));
         let now = t("2026-09-26 12:00:00");
         let roots = [Root::Dir(d.clone())];
-        // rsvol's own order (a/ before b/) would pick b/k.json: python's rows say a/k.json
+        // fastvol's own order (a/ before b/) would pick b/k.json: python's rows say a/k.json
         let rows = vec![
             row(&b, "Linux version 1", "2026-09-26 10:00:00", true),
             row(&a, "Linux version 1", "2026-09-26 10:00:01", true),
@@ -3135,7 +3142,7 @@ mod tests {
     /// in memory (the file does not exist), sharing one table.
     #[test]
     fn pending_converted_table() {
-        let d = std::env::temp_dir().join(format!("rsvol-pending-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("fastvol-pending-{}", std::process::id()));
         let path = d.join("windows/p.pdb/ABC-7.json.xz");
         let job = super::super::windows::pdb::IsfWrite { pdb: d.join("x"), pdb_name: "p.pdb".into(), datetime: "t".into(), tmp: path.with_extension("tmp"), path: path.clone() };
         let json = std::sync::Arc::new(super::super::isf::tests::ISF.as_bytes().to_vec());

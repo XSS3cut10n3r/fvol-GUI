@@ -1,7 +1,7 @@
-// Reference JSON parsers on ISF files, for comparison with rsvol's ISF loader (src/symbols/isf.rs,
+// Reference JSON parsers on ISF files, for comparison with fastvol's ISF loader (src/symbols/isf.rs,
 // src/util/json.rs). In-process, best of N, single thread:
 //   * simdjson DOM (parser.parse: stage 1 + tape) and simdjson On-Demand walking every ISF field
-//     rsvol extracts (types, fields, offsets, type descriptors, symbols, enums),
+//     fastvol extracts (types, fields, offsets, type descriptors, symbols, enums),
 //   * yyjson DOM read (+ the same walk over the DOM).
 // Build (simdjson is not packaged: fetch the single-header amalgamation, see isf_json_bench.sh):
 //   g++ -O3 -march=native -std=c++17 -o isf_json_bench isf_json_bench.cc simdjson.cpp -lyyjson
@@ -18,7 +18,7 @@
 using namespace simdjson;
 static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-// ---- simdjson On-Demand ISF walk (the fields rsvol's builder reads) ----
+// ---- simdjson On-Demand ISF walk (the fields fastvol's builder reads) ----
 static uint64_t od_desc(ondemand::object o);
 static uint64_t od_desc_v(ondemand::value v) {
     ondemand::object o;

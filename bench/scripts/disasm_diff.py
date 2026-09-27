@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test harness: rsvol's x86 disassembler (src/disasm) vs capstone 5.
+"""Differential test harness: fastvol's x86 disassembler (src/disasm) vs capstone 5.
 
 Usage (run with the bench venv python, which has capstone):
   disasm_diff.py gen  [--out DIR] [--pe DIR ...] [--quick]   build corpora + capstone reference

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cold / warm page-cache benchmark of rsvol plugins, without root.
+# Cold / warm page-cache benchmark of fastvol plugins, without root.
 #
 # Cold page cache without root: every image is copied once with `cp --reflink=always` into the
 # scratch dir. The copy shares the on-disk extents (no extra disk space) but has its own page
@@ -10,16 +10,16 @@
 #
 # Usage: bench/scripts/coldcache_bench.sh [options]
 #   -b LABEL=BIN[,K=V...]  binary to measure (repeatable; runs of all binaries are interleaved so
-#                          machine load hits them alike). Default: new=target/release/vol.
+#                          machine load hits them alike). Default: new=target/release/fvol.
 #                          K=V pairs are extra environment for that binary only (A/B env switches).
 #   -n N                   runs per (case, binary, mode) (default 3); best and median are reported
 #   -m MODES               cold,warm (default both)
 #   -c CASES               comma-separated case names or name prefixes (default: all; -l lists them)
 #   -s DIR                 scratch dir (default testdata/scratch/coldcache; must be on the images'
 #                          btrfs for the reflink copies)
-#   -S                     keep the scan cache (default: RSVOL_NO_SCAN_CACHE=1, scans really run)
+#   -S                     keep the scan cache (default: FASTVOL_NO_SCAN_CACHE=1, scans really run)
 #   -l                     list the cases and exit
-# Each binary gets a private RSVOL_CACHE (warmed by one untimed run per case, so cold runs measure
+# Each binary gets a private FASTVOL_CACHE (warmed by one untimed run per case, so cold runs measure
 # the image IO, not symbol/automagic first-run work). Dump plugins write into a private output
 # dir that is emptied after every run. Heavy: run it through bench/scripts/limit.sh.
 #
@@ -79,7 +79,7 @@ for o, v in opts:
         for c in CASES: print(f"{c[0]:18} {os.path.basename(c[1]):40} {' '.join(c[3])}")
         sys.exit(0)
 if not bins:
-    bins = [("new", os.path.abspath("target/release/vol"), {})]
+    bins = [("new", os.path.abspath("target/release/fvol"), {})]
 cases = [c for c in CASES if only is None or any(c[0] == k or c[0].startswith(k) for k in only)]
 os.makedirs(f"{scratch}/img", exist_ok=True)
 
@@ -141,9 +141,10 @@ for name, src, extra, pargs in cases:
     envs = {}
     for label, binary, benv in bins:
         env = dict(os.environ)
-        env["RSVOL_CACHE"] = f"{scratch}/cache-{label}"
+        # both names: a baseline binary may predate the rename (RSVOL_* only)
+        env["FASTVOL_CACHE"] = env["RSVOL_CACHE"] = f"{scratch}/cache-{label}"
         if not keep_scan:
-            env["RSVOL_NO_SCAN_CACHE"] = "1"
+            env["FASTVOL_NO_SCAN_CACHE"] = env["RSVOL_NO_SCAN_CACHE"] = "1"
         env.update(benv)
         envs[label] = env
         # untimed warm-up: symbol / automagic caches, page cache

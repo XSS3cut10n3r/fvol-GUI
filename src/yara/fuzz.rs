@@ -1,5 +1,5 @@
 //! Robustness fuzzing: arbitrary pattern bytes / haystacks must never panic.
-//! Quick version runs in `cargo test yara`; `RSVOL_FUZZ_ITERS=1000000 cargo test
+//! Quick version runs in `cargo test yara`; `FASTVOL_FUZZ_ITERS=1000000 cargo test
 //! --profile fast yara_fuzz -- --ignored` runs a long campaign.
 
 use super::regex::Regex;
@@ -65,8 +65,8 @@ fn yara_fuzz_quick() {
 #[test]
 #[ignore]
 fn yara_fuzz_long() {
-    let iters: usize = std::env::var("RSVOL_FUZZ_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
-    let seed: u64 = std::env::var("RSVOL_FUZZ_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0x5eed);
+    let iters: usize = crate::util::env::var("FUZZ_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let seed: u64 = crate::util::env::var("FUZZ_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0x5eed);
     let mut r = Rng(seed | 1);
     for i in 0..iters {
         if i % 100_000 == 0 {

@@ -85,10 +85,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// How long an idle worker keeps looking for the next job before it sleeps: back-to-back
-/// sections then start without a futex wake-up (`RSVOL_POOL_SPIN_US`, default 20).
+/// sections then start without a futex wake-up (`FASTVOL_POOL_SPIN_US`, default 20).
 fn spin() -> std::time::Duration {
     static US: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    std::time::Duration::from_micros(*US.get_or_init(|| std::env::var("RSVOL_POOL_SPIN_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20)))
+    std::time::Duration::from_micros(*US.get_or_init(|| crate::util::env::var("POOL_SPIN_US").ok().and_then(|v| v.parse().ok()).unwrap_or(20)))
 }
 
 /// Reserve `k` more workers (up to [`crate::util::par::threads`] in all); true when the caller
@@ -143,7 +143,7 @@ pub fn shutdown() {
 const WORKER_STACK: usize = 8 << 20;
 
 fn spawn_worker() {
-    let started = std::thread::Builder::new().name("rsvol-pool".into()).stack_size(WORKER_STACK).spawn(|| {
+    let started = std::thread::Builder::new().name("fastvol-pool".into()).stack_size(WORKER_STACK).spawn(|| {
         let gone: &'static std::sync::atomic::AtomicU32 = Box::leak(Box::new(std::sync::atomic::AtomicU32::new(1)));
         {
             let mut s = lock(&POOL.state);
@@ -524,11 +524,11 @@ mod tests {
     /// sections still work, on their caller. Runs in a child process: the pool is global.
     #[test]
     fn shutdown_leaves_no_worker() {
-        if std::env::var_os("RSVOL_POOL_SHUTDOWN_CHILD").is_some() {
+        if crate::util::env::var_os("POOL_SHUTDOWN_CHILD").is_some() {
             // threads other than the harness's (libtest may run the test on a thread of its own)
             let tasks = || {
                 std::fs::read_dir("/proc/self/task")
-                    .map(|d| d.flatten().filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c.starts_with("rsvol-pool"))).count())
+                    .map(|d| d.flatten().filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c.starts_with("fastvol-pool"))).count())
                     .unwrap_or(0)
             };
             // nested sections: all workers started
@@ -553,7 +553,7 @@ mod tests {
         }
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "util::pool::tests::shutdown_leaves_no_worker", "--test-threads=1", "--nocapture"])
-            .env("RSVOL_POOL_SHUTDOWN_CHILD", "1")
+            .env("FASTVOL_POOL_SHUTDOWN_CHILD", "1")
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);

@@ -1,29 +1,29 @@
-# The web UI: `vol serve`
+# The web UI: `fvol serve`
 
-`vol serve` runs a small web server inside the `vol` binary and serves an analysis workspace for
-one memory image. It is part of rsvol only; python volatility3 has no equivalent command.
+`fvol serve` runs a small web server inside the `fvol` binary and serves an analysis workspace for
+one memory image. It is part of fastvol only; python volatility3 has no equivalent command.
 
 This page has two parts. The [tutorial](#tutorial-a-first-session) walks through a first
 session. The [reference](#reference) lists the options, keyboard shortcuts, HTTP API and the
 security model.
 
-Applies to rsvol 0.1.0.
+Applies to fastvol 0.1.0.
 
 ## Tutorial: a first session
 
 In this tutorial you open a Windows image in the browser, look at its processes, inspect one
-process, read memory at an address and export a result. You need a built `vol` binary, a Windows
+process, read memory at an address and export a result. You need a built `fvol` binary, a Windows
 memory image and a browser on the same machine. Linux and macOS images work the same way once you
 add their symbol directory with `-s`.
 
 ### 1. Start the server
 
 ```bash
-vol serve -f <IMAGE>
+fvol serve -f <IMAGE>
 ```
 
 ```text
-rsvol web UI · Volatility 3 Framework 2.28.2
+fastvol web UI · Volatility 3 Framework 2.28.2
   image   /cases/memory-dirty.raw (5.0 GiB)
   output  /cases/vol-serve-output
   open    http://127.0.0.1:8765/#token=1c5fa1176bd21e349985b1160bfc6ac6
@@ -38,7 +38,7 @@ its symbols in the background.
 Copy the `open` URL into your browser. The page stores the token and removes it from the address
 bar.
 
-The overview tab shows what rsvol found: the operating system, kernel base, DTB, the symbol file
+The overview tab shows what fastvol found: the operating system, kernel base, DTB, the symbol file
 and the layers of the image. Next to it are quick actions for the plugins most analysts run first.
 On the left is the process tree.
 
@@ -80,12 +80,12 @@ follow it, `Backspace` to go back and `D` to disassemble from the cursor.
 ### 7. Export a result
 
 Use the export menu of a result tab to download the visible columns of the current view as CSV,
-TSV, JSON, JSON Lines or Markdown. The `vol -r ...` entries download what the command line prints
+TSV, JSON, JSON Lines or Markdown. The `fvol -r ...` entries download what the command line prints
 for the same plugin and options instead. Files that a plugin wrote, such as dumped executables,
 are listed with the run and can be downloaded one by one or as a zip.
 
 Stop the server with `Ctrl+C`. The results of this session are gone, but the files plugins wrote
-stay in `vol-serve-output/`, and the rsvol caches make the next session on the same image start
+stay in `vol-serve-output/`, and the fastvol caches make the next session on the same image start
 immediately.
 
 For more, read the [reference](#reference) below, and [usage.md](usage.md) for symbol setup.
@@ -95,9 +95,9 @@ For more, read the [reference](#reference) below, and [usage.md](usage.md) for s
 ### Command line
 
 ```text
-vol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
-          [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
-          [--max-conns N] [--parallel N] [--max-memory SIZE]
+fvol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
+           [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
+           [--max-conns N] [--parallel N] [--max-memory SIZE]
 ```
 
 | Option                   | Default              | Meaning                                                                  |
@@ -105,21 +105,21 @@ vol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT
 | `-f, --file FILE`        | none                 | Image to open. Without it, open one from the UI.                         |
 | `--host HOST`            | `127.0.0.1`          | IP address to listen on. `localhost` means `127.0.0.1`.                  |
 | `--port PORT`            | 8765                 | Port. Without the option, the first free port from 8765 to 8784 is used, then any free port. `0` means any free port. |
-| `-s, --symbol-dirs DIRS` | none                 | Semicolon-separated symbol directories, as for `vol`.                    |
+| `-s, --symbol-dirs DIRS` | none                 | Semicolon-separated symbol directories, as for `fvol`.                    |
 | `-o, --output-dir DIR`   | `./vol-serve-output` | Root of the per-run output directories.                                  |
 | `--offline`              | off                  | Never download symbols.                                                  |
-| `-u, --remote-isf-url URL` | none               | Remote symbol file list, as for `vol`.                                   |
-| `--cache-path PATH`      | python's default     | python volatility3 cache path, as for `vol`.                             |
+| `-u, --remote-isf-url URL` | none               | Remote symbol file list, as for `fvol`.                                   |
+| `--cache-path PATH`      | python's default     | python volatility3 cache path, as for `fvol`.                             |
 | `--token TOKEN`          | random               | Fixed access token: at least 16 printable characters, without `;`, `,` or quotes. |
 | `--allow-host NAME`      | none                 | Also accept requests whose `Host` header is `NAME`, for example behind a reverse proxy. Repeatable. |
 | `--max-conns N`          | 512                  | Concurrent HTTP connections, between 8 and 4096.                         |
 | `--parallel N`           | 3                    | Plugins that may run at the same time, between 1 and 64.                 |
-| `--max-memory SIZE`      | `3G`                 | Memory for stored result rows across all runs, such as `2G` or `512M`. Rows past the budget are counted but not kept; exports through the `vol` renderer stay complete. |
+| `--max-memory SIZE`      | `3G`                 | Memory for stored result rows across all runs, such as `2G` or `512M`. Rows past the budget are counted but not kept; exports through the `fvol` renderer stay complete. |
 
 ### Output files
 
 Every run of a plugin that writes files gets its own directory below the output root, named
-`run-<NNNN>-<plugin>`. Exports through the `vol` renderer use `export-<NNNN>-<N>`. Downloads are
+`run-<NNNN>-<plugin>`. Exports through the `fvol` renderer use `export-<NNNN>-<N>`. Downloads are
 served only from these directories.
 
 ### Keyboard shortcuts
@@ -174,7 +174,7 @@ The API exists for the UI and for scripts. Every call under `/api/` needs the to
 | `GET /api/runs/<ID>/rows`            | A page of rows: `from`, `count` up to 5000, optional `view`        |
 | `GET /api/runs/<ID>/stream`          | Every row as NDJSON while the plugin produces it                   |
 | `GET /api/runs/<ID>/export`          | The rows as `format=csv`, `tsv`, `json`, `jsonl` or `md`           |
-| `GET /api/runs/<ID>/vol`             | The plugin's `vol` command-line output for `renderer=<NAME>`       |
+| `GET /api/runs/<ID>/vol`             | The plugin's `fvol` command-line output for `renderer=<NAME>`       |
 | `GET /api/runs/<ID>/files`           | Files the run wrote                                                |
 | `GET /api/runs/<ID>/files/<NAME>`    | Download one file                                                  |
 | `GET /api/runs/<ID>/files.zip`       | Download all files as a zip                                        |
@@ -201,7 +201,7 @@ TreeDepth,PID,PPID,ImageFileName,Offset(V),Threads,Handles,SessionId,Wow64,Creat
 ```
 
 The `vol` endpoint runs the plugin again with the command-line renderer, so its output is the
-same as `vol -r csv` would print.
+same as `fvol -r csv` would print.
 
 ### Security model
 
@@ -233,5 +233,5 @@ only by the person who started it.
 
 What the token grants: whoever holds it can read the open image and can open any other file that
 the server's user can read, list directories and read that file's bytes in the memory viewer.
-Treat the URL like a password, and run `vol serve` as a user that can read only what you intend
+Treat the URL like a password, and run `fvol serve` as a user that can read only what you intend
 to analyse.

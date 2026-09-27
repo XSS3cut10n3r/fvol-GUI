@@ -166,7 +166,7 @@ class RunTab {
     clear(this.errBox);
     if (r.error && (r.status === 'failed' || (r.status === 'cancelled' && r.error.kind !== 'cancelled'))) this.errBox.append(errCard(r.error));
     if (r.evicted) this.errBox.append(errCard({ kind: 'cancelled', title: 'This result was dropped from memory', message: 'Newer results needed the memory (--max-memory). Nothing was lost on disk: run it again to see it (it only takes as long as the plugin).', hints: [], detail: '' }));
-    if (r.truncated) this.errBox.append(errCard({ kind: 'cancelled', title: `Showing the first ${fmtCount(r.stored)} of ${fmtCount(r.rows)} rows`, message: 'This result is larger than the memory vol serve sets aside for results (--max-memory). The remaining rows were counted but not kept.', hints: ['Narrow the run with the plugin\'s options (for example --pid), or', 'export the complete output straight to disk with Export → “vol -r csv” (it re-runs the plugin and streams everything).'], detail: '' }));
+    if (r.truncated) this.errBox.append(errCard({ kind: 'cancelled', title: `Showing the first ${fmtCount(r.stored)} of ${fmtCount(r.rows)} rows`, message: 'This result is larger than the memory fvol serve sets aside for results (--max-memory). The remaining rows were counted but not kept.', hints: ['Narrow the run with the plugin\'s options (for example --pid), or', 'export the complete output straight to disk with Export → “fvol -r csv” (it re-runs the plugin and streams everything).'], detail: '' }));
     const running = r.status === 'running' || r.status === 'queued';
     this.progress.hidden = !running;
     this.filesBox.hidden = !r.files || !r.files.length;
@@ -427,13 +427,14 @@ function openImageCard(first) {
       if (syms.value.trim()) body.symbol_dirs = syms.value.split(';').map(x => x.trim()).filter(Boolean);
       await api('session', { method: 'POST', body });
       toast('Opening ' + body.file);
-      document.dispatchEvent(new CustomEvent('rsvol-close-dialog'));
+      document.dispatchEvent(new CustomEvent('fastvol-close-dialog'));
     } catch (e) { err.textContent = e.message; }
     go.disabled = false;
   }
   path.addEventListener('input', debounce(browse, 150));
   path.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   const body = el('div.card-b.openbox', {},
+    first ? el('img.mascot', { src: '/assets/mascot.svg', alt: '' }) : null,
     first ? el('p.prose', { text: 'No memory image is loaded. Enter the path of one (raw, LiME, ELF core such as a QEMU or VirtualBox core dump, Windows crash dump, VMware .vmem, QEMU savevm, AVML…). It is only read, never modified.', style: { margin: 0 } }) : el('p.prose', { text: 'Switching images keeps earlier runs in the history, but they belong to the old image.', style: { margin: 0 } }),
     el('div.row', {}, path, go), syms, list, err);
   card.append(el('div.card-h', {}, el('h3', { text: 'Open a memory image' })), body);
@@ -445,8 +446,8 @@ export function openImageDialog() {
   const box = el('div.dialog', { 'aria-label': 'Open a memory image' });
   box.append(openImageCard(false));
   const m = modal(box);
-  const close = () => { m.close(); document.removeEventListener('rsvol-close-dialog', close); };
-  document.addEventListener('rsvol-close-dialog', close);
+  const close = () => { m.close(); document.removeEventListener('fastvol-close-dialog', close); };
+  document.addEventListener('fastvol-close-dialog', close);
 }
 
 // ------------------------------------------------------------------ run history (rail)

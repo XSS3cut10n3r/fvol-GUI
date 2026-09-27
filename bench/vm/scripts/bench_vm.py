@@ -21,7 +21,7 @@ B = os.path.expanduser("~/rsvol-bench")
 IMG = os.environ.get("IMG", f"{B}/img/memory-dirty.raw")
 OUTROOT = f"{B}/out"
 TOOLS = {
-    "rs": [os.environ.get("RS_BIN", f"{B}/rsvol/target/release/vol")],
+    "rs": [os.environ.get("RS_BIN", f"{B}/rsvol/target/release/fvol")],
     "volrs": [os.environ.get("VOLRS_BIN", f"{B}/bin/vol-rs")],
     "py": [f"{B}/venv314/bin/python", f"{B}/volatility3/vol.py"],
 }

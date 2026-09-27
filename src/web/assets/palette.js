@@ -226,7 +226,7 @@ export function buildForm(p, prefill = {}) {
   const img = store.session && store.session.image ? store.session.image : 'IMAGE';
 
   function update() {
-    const parts = ['vol', '-f', quote(img)];
+    const parts = ['fvol', '-f', quote(img)];
     if (store.session && store.session.symbol_dirs.length) parts.push('-s', quote(store.session.symbol_dirs.join(';')));
     parts.push(p.name);
     for (const f of fields) parts.push(...f.argv());

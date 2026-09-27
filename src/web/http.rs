@@ -1,4 +1,4 @@
-//! A small, strict HTTP/1.1 implementation for `vol serve`: request parsing with hard limits,
+//! A small, strict HTTP/1.1 implementation for `fvol serve`: request parsing with hard limits,
 //! keep-alive with pipelining, fixed-length / chunked responses.
 //!
 //! Deliberately strict (this server reads evidence; ambiguity is how request smuggling and

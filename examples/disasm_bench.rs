@@ -191,7 +191,7 @@ fn main() {
     let only = args.get(2).cloned();
     // build the tables outside the timed region (capstone's are static data)
     let _ = x86::insn_len(&[0x90], Mode::X86_64);
-    println!("# rsvol x86  passes={passes}  corpus={dir}");
+    println!("# fastvol x86  passes={passes}  corpus={dir}");
     println!(
         "{:<6} {:<7} {:>10} {:>10} {:>10} {:>9} {:>12} {:>9} check",
         "side", "work", "mode", "insns", "bytes", "best_s", "insn/s", "MB/s"

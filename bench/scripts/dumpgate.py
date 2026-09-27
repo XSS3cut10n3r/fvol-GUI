@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Dump-parity gate: the files the dumping plugins write (names + contents), plus their stdout
-and exit code, compared between python volatility3 2.28.2 and rsvol on every image of
+and exit code, compared between python volatility3 2.28.2 and fastvol on every image of
 bench/images.tsv (and the main image through its existing bench/ref/pyargs references).
 
 The other gates compare stdout only, and the multi-image references run plugins without
@@ -25,7 +25,7 @@ Comparison: exit code, stdout byte for byte, and the dumped files: the same name
 each the same size and SHA-256. RecoverFs tarballs (recovered_fs.tar.{gz,bz2,xz}) are compared
 by member (name, type, size, mode, uid/gid, user/group names, link target, content SHA-256):
 the compressed bytes differ by design (python stamps the current time into the member mtimes
-and the gzip header, and rsvol's compression level is its own choice).
+and the gzip header, and fastvol's compression level is its own choice).
 
 Seeds (no python run needed): the main image's cases come from bench/ref/pyargs (stdout +
 dump/<case>/), and a case identical to a no-argument reference of py_refs_images.sh
@@ -341,10 +341,10 @@ def compare(im, cid, argv, binary, show):
         only_p = sorted(set(pf) - set(rf))
         only_r = sorted(set(rf) - set(pf))
         diff = sorted(k for k in set(pf) & set(rf) if pf[k] != rf[k])
-        msg = "files: python %d, rsvol %d; %d only python, %d only rsvol, %d differ" % (len(pf), len(rf), len(only_p), len(only_r), len(diff))
+        msg = "files: python %d, fastvol %d; %d only python, %d only fastvol, %d differ" % (len(pf), len(rf), len(only_p), len(only_r), len(diff))
         det =["      only python: " + k for k in only_p[:show]]
-        det += ["      only rsvol:  " + k for k in only_r[:show]]
-        det += ["      differ:      %s (python %s, rsvol %s)" % (k, pf[k][0], rf[k][0]) for k in diff[:show]]
+        det += ["      only fastvol:  " + k for k in only_r[:show]]
+        det += ["      differ:      %s (python %s, fastvol %s)" % (k, pf[k][0], rf[k][0]) for k in diff[:show]]
         probs.append(msg + ("\n" + "\n".join(det) if det else ""))
     nfiles = len(rf)
     if probs:
@@ -354,7 +354,7 @@ def compare(im, cid, argv, binary, show):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("-b", "--bin", default=ROOT + "/target/release/vol")
+    ap.add_argument("-b", "--bin", default=ROOT + "/target/release/fvol")
     ap.add_argument("-c", "--case", action="append", default=[])
     ap.add_argument("--py-only", action="store_true")
     ap.add_argument("--rs-only", action="store_true")

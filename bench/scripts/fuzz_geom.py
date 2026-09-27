@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Image geometry + x86-64 page-table walker for the rsvol robustness fuzzer.
+"""Image geometry + x86-64 page-table walker for the fastvol robustness fuzzer.
 
 Maps physical addresses to file offsets for raw / ELF-core / LiME images (so corruption can be
 placed at a known structure without copying the whole image), locates container header regions,

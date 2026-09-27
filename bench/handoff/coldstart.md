@@ -85,9 +85,9 @@ Trace-level: Windows kernel ISF lazy index after the decode ends 3.3-5 ms -> 0.9
 - PDB-cold needs `XDG_CACHE_HOME` pointing at an empty dir, or rsvol finds the ISF in
   `~/.cache/volatility3/symbols` (scen.sh does it).
 - On the VM, rsvol finds `~/rsvol-bench/volatility3` as a python install (it holds a converted
-  8E33 ISF): use `RSVOL_VOL3_ROOT=/nonexistent`. The VM is clean again (coldstart dir removed).
-- New switches: `RSVOL_RANGED_DOWNLOAD=0`, `RSVOL_PDB_RANGES=wave,partKiB,max`,
-  `RSVOL_PDB_ISF_WRITE=sync`, `RSVOL_STREAM_ISF=0`, `RSVOL_PREBUILD=N`, `RSVOL_MAC_FIRST_HIT=0`.
+  8E33 ISF): use `FASTVOL_VOL3_ROOT=/nonexistent`. The VM is clean again (coldstart dir removed).
+- New switches: `FASTVOL_RANGED_DOWNLOAD=0`, `FASTVOL_PDB_RANGES=wave,partKiB,max`,
+  `FASTVOL_PDB_ISF_WRITE=sync`, `FASTVOL_STREAM_ISF=0`, `FASTVOL_PREBUILD=N`, `FASTVOL_MAC_FIRST_HIT=0`.
 - `pdb::convert_ahead(.., download=true)` threads are joined at exit (`finish_ahead`), so an
   unused speculative download finishes instead of leaving partial files.
 - Streamed index correctness tests: `cargo.sh test --profile fast streamed` and the ignored

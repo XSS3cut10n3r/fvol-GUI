@@ -1,4 +1,4 @@
-/* RE2 reference harness for rsvol's regex engine (src/yara/regex).
+/* RE2 reference harness for fastvol's regex engine (src/yara/regex).
  *
  * For every case of regex_cases.tsv: compile time (RE2 constructor, best of 20) and a
  * find-all loop of RE2::Match(text, pos, len, UNANCHORED, &m, 1) over an mmapped window

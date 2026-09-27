@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test: rsvol's regex engine vs python `re` (bytes patterns).
+"""Differential test: fastvol's regex engine vs python `re` (bytes patterns).
 
 Generates random patterns over a small alphabet plus random haystacks, computes the
 expected `finditer` spans (and group spans for a subset) with python `re`, runs the
@@ -266,8 +266,8 @@ def main():
     with open(cpath, "w") as fh:
         for i, (p, f, h, mode) in enumerate(cases):
             fh.write("%d\t%s\t%d\t%s\t%s\n" % (i, p.hex(), f, h.hex(), mode))
-    env = dict(os.environ, RSVOL_REGEX_CASES=cpath, RSVOL_REGEX_OUT=opath)
-    cmd = ["cargo", "test", "--profile", args.profile, "--bin", "vol", "yara_regex_difftest_driver", "--", "--ignored", "--nocapture", "--test-threads=1"]
+    env = dict(os.environ, FASTVOL_REGEX_CASES=cpath, FASTVOL_REGEX_OUT=opath)
+    cmd = ["cargo", "test", "--profile", args.profile, "--bin", "fvol", "yara_regex_difftest_driver", "--", "--ignored", "--nocapture", "--test-threads=1"]
     r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-4000:], r.stderr[-4000:])
@@ -288,7 +288,7 @@ def main():
             bad += 1
             if shown < args.show:
                 shown += 1
-                print("MISMATCH #%d mode=%s flags=%d pattern=%r hay=%r\n   python=%s\n   rsvol =%s %s" % (
+                print("MISMATCH #%d mode=%s flags=%d pattern=%r hay=%r\n   python=%s\n   fastvol =%s %s" % (
                     i, mode, f, p, h, expected[i], g, btdiff.get(i, "")))
     print("cases=%d mismatches=%d (%.3f%%) python-timeouts-skipped=%d" % (len(cases), bad, 100.0 * bad / max(1, len(cases)), timeouts))
     sys.exit(1 if bad else 0)

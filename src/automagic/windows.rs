@@ -577,7 +577,7 @@ fn method_offsets_fused(vlayer: &IntelLayer, phys: &dyn Layer, candidate: &(dyn 
         }
     };
     std::thread::scope(|sc| {
-        let h = std::thread::Builder::new().name("rsvol-spot".into()).spawn_scoped(sc, || helper(())).ok();
+        let h = std::thread::Builder::new().name("fastvol-spot".into()).spawn_scoped(sc, || helper(())).ok();
         scan_each(phys, &scanner, None, |(o, pi)| match if pi == 0 { OffHit::Kdbg(o) } else { OffHit::Module(o) } {
             OffHit::Kdbg(o) => match try_hit(o, 8, &mut seen) {
                 Ok(Some(k)) => {
@@ -771,7 +771,7 @@ impl IsfSpeculation {
                 }
             }
         };
-        if let Ok(h) = std::thread::Builder::new().name("rsvol-spec".into()).spawn(job) {
+        if let Ok(h) = std::thread::Builder::new().name("fastvol-spec".into()).spawn(job) {
             *g = Some(SpecJob { key, chosen: rx, load: h });
         }
     }
@@ -859,7 +859,7 @@ impl EarlyIndex {
     pub fn start(path: &'static crate::symbols::SymbolPath) -> EarlyIndex {
         let st = std::sync::Arc::new(EarlyState { m: Default::default(), cv: Default::default() });
         let s = st.clone();
-        let spawned = std::thread::Builder::new().name("rsvol-index".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("fastvol-index".into()).spawn(move || {
             let _t = crate::util::trace::span("identifier index (early)");
             crate::symbols::store::identifier_index_with(path, &|| {
                 s.update(|p| p.reading = true);

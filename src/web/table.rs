@@ -2,7 +2,7 @@
 //! time-range) the browser pages through.
 //!
 //! A table stores every cell as the exact text the CLI's quick renderer prints (so what the
-//! analyst sees is what `vol` prints), concatenated into one byte arena with a u32 end offset
+//! analyst sees is what `fvol` prints), concatenated into one byte arena with a u32 end offset
 //! and a kind byte per cell: 5 bytes of overhead per cell, no per-cell allocation. Int and Hex
 //! cells (most of a typical table) are stored as their 8-byte value instead of text and
 //! formatted on demand, which halves memory for address-heavy output and makes numeric
@@ -896,7 +896,7 @@ pub fn csv_field(out: &mut Vec<u8>, s: &[u8], sep: u8) {
 }
 
 /// Typed JSON value of a cell for exports: numbers for numeric columns (Hex as its value,
-/// like `vol -r json`), booleans, null for absent, strings otherwise.
+/// like `fvol -r json`), booleans, null for absent, strings otherwise.
 pub fn cell_json(out: &mut Vec<u8>, t: &Table, r: usize, c: usize, ty: ColType) {
     match t.kind(r, c) {
         K_ABSENT | K_NA => out.extend_from_slice(b"null"),

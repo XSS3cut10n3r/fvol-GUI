@@ -1,6 +1,6 @@
 //! Differential-test driver against yara-python (run by `rules_diff.py` in this
-//! directory): reads cases from `$RSVOL_YARA_RULES_CASES`, writes results to
-//! `$RSVOL_YARA_RULES_OUT`.
+//! directory): reads cases from `$FASTVOL_YARA_RULES_CASES`, writes results to
+//! `$FASTVOL_YARA_RULES_OUT`.
 //!
 //! Case line: `id \t source_hex \t data_hex`. Result line: `id \t result` with
 //! result `ERR:line N: msg` or `OK:` + matches serialized exactly like
@@ -94,7 +94,7 @@ pub fn run_case(src: &[u8], data: &[u8]) -> String {
 #[test]
 #[ignore]
 fn yara_rules_difftest_driver() {
-    let (Ok(cases), Ok(out)) = (std::env::var("RSVOL_YARA_RULES_CASES"), std::env::var("RSVOL_YARA_RULES_OUT")) else {
+    let (Ok(cases), Ok(out)) = (crate::util::env::var("YARA_RULES_CASES"), crate::util::env::var("YARA_RULES_OUT")) else {
         return;
     };
     let text = std::fs::read_to_string(cases).unwrap_or_default();

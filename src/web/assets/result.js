@@ -103,7 +103,7 @@ export class ResultPanel {
     const r = this.run;
     const cli = () => {
       const s = store.session;
-      const parts = ['vol', '-f', s.image];
+      const parts = ['fvol', '-f', s.image];
       if (s.symbol_dirs.length) parts.push('-s', s.symbol_dirs.join(';'));
       parts.push(r.plugin, ...r.args);
       return parts.map(p => (/^[\w./:=,@%+-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`)).join(' ');
@@ -117,13 +117,13 @@ export class ResultPanel {
       { label: 'Markdown table', hint: '.md', act: () => dl(t.exportUrl('md')) },
       'sep',
       { header: 'Exactly as vol prints it (re-runs the plugin)' },
-      { label: 'vol -r jsonl', act: () => dl(`/api/runs/${this.runId}/vol?renderer=jsonl`) },
-      { label: 'vol -r json', act: () => dl(`/api/runs/${this.runId}/vol?renderer=json`) },
-      { label: 'vol -r csv', act: () => dl(`/api/runs/${this.runId}/vol?renderer=csv`) },
-      { label: 'vol (quick text)', act: () => dl(`/api/runs/${this.runId}/vol?renderer=quick`) },
+      { label: 'fvol -r jsonl', act: () => dl(`/api/runs/${this.runId}/vol?renderer=jsonl`) },
+      { label: 'fvol -r json', act: () => dl(`/api/runs/${this.runId}/vol?renderer=json`) },
+      { label: 'fvol -r csv', act: () => dl(`/api/runs/${this.runId}/vol?renderer=csv`) },
+      { label: 'fvol (quick text)', act: () => dl(`/api/runs/${this.runId}/vol?renderer=quick`) },
       'sep',
       { label: 'Copy visible rows as TSV', hint: '≤ 20k', act: () => this.copyRows() },
-      { label: 'Copy the vol command', act: () => copy(cli(), 'Command copied') },
+      { label: 'Copy the fvol command', act: () => copy(cli(), 'Command copied') },
     ]);
   }
 

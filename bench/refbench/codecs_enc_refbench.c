@@ -15,7 +15,7 @@
  * compared with the input.
  * Prints: "c <codec> <level> <file> <in_bytes> <out_bytes> <best_ms> <MB/s> <cycles>"
  * (MB/s = 1e6 bytes of INPUT per second; cycles = user-mode cycles of the calling thread in
- * the fastest run, 0 if unavailable; set RSVOL_PERF_PMU=cpu_atom when pinned to an E-core).
+ * the fastest run, 0 if unavailable; set FASTVOL_PERF_PMU=cpu_atom when pinned to an E-core).
  */
 #include <bzlib.h>
 #include <libdeflate.h>
@@ -32,10 +32,11 @@
 #include <time.h>
 #include <unistd.h>
 
-/* User-mode cycles of this thread (RSVOL_PERF_PMU=cpu_atom when pinned to an E-core). */
+/* User-mode cycles of this thread (FASTVOL_PERF_PMU=cpu_atom when pinned to an E-core). */
 static int perf_fd = -1;
 static void perf_open(void) {
-    const char *pmu_name = getenv("RSVOL_PERF_PMU");
+    const char *pmu_name = getenv("FASTVOL_PERF_PMU");
+    if (!pmu_name) pmu_name = getenv("RSVOL_PERF_PMU"); /* pre-rename name */
     char path[256];
     snprintf(path, sizeof path, "/sys/bus/event_source/devices/%s/type", pmu_name ? pmu_name : "cpu_core");
     unsigned long long pmu = 0;

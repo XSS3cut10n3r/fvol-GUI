@@ -1,4 +1,4 @@
-//! The real `vol` binary with and without the exit helper (`src/util/exit.rs`): the helper must
+//! The real `fvol` binary with and without the exit helper (`src/util/exit.rs`): the helper must
 //! not change the exit status, stdout or stderr, and pipes must reach EOF. Runs paths that need
 //! no memory image.
 
@@ -7,12 +7,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn vol(args: &[&str], helper: bool) -> std::process::Output {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_vol"));
+    let mut c = Command::new(env!("CARGO_BIN_EXE_fvol"));
     c.args(args);
     if helper {
-        c.env_remove("RSVOL_EXIT_HELPER");
+        c.env_remove("FASTVOL_EXIT_HELPER").env_remove("RSVOL_EXIT_HELPER");
     } else {
-        c.env("RSVOL_EXIT_HELPER", "0");
+        c.env("FASTVOL_EXIT_HELPER", "0");
     }
     c.output().expect("run vol")
 }
@@ -33,7 +33,7 @@ fn exit_helper_closes_the_pipe_with_the_process() {
     // read the (large) help text through a pipe to EOF: it must be complete, and EOF must come
     // right after the process exits, not after some helper that still holds the pipe
     for _ in 0..20 {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_vol")).arg("-h").stdout(Stdio::piped()).spawn().expect("spawn");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fvol")).arg("-h").stdout(Stdio::piped()).spawn().expect("spawn");
         let mut out = Vec::new();
         let t = Instant::now();
         child.stdout.take().unwrap().read_to_end(&mut out).unwrap();

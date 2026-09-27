@@ -1875,7 +1875,7 @@ mod tests {
         assert_eq!(decompress_to(&v, &mut sink).unwrap(), HELLO.len() as u64);
         assert_eq!(sink, HELLO);
         // the same into a file
-        let p = std::env::temp_dir().join(format!("rsvol-bz2-stream-{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("fastvol-bz2-stream-{}", std::process::id()));
         let mut fs = crate::codecs::sink::FileSink::new(std::fs::File::create(&p).unwrap()).unwrap();
         assert_eq!(decompress_to(&v, &mut fs).unwrap(), HELLO.len() as u64);
         fs.finish().unwrap();

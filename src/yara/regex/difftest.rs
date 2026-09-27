@@ -1,5 +1,5 @@
 //! Differential-test driver (run by `bench/scripts/regex_diff.py`):
-//! reads cases from `$RSVOL_REGEX_CASES`, writes results to `$RSVOL_REGEX_OUT`.
+//! reads cases from `$FASTVOL_REGEX_CASES`, writes results to `$FASTVOL_REGEX_OUT`.
 //!
 //! Case line: `id \t pattern_hex \t flags \t haystack_hex \t mode` (mode = iter|groups)
 //! Result line: `id \t result` where result is `ERR`, `NONE`, spans `s-e,s-e` (iter),
@@ -72,11 +72,11 @@ pub fn run_case(pat: &[u8], flags: u32, hay: &[u8], mode: &str) -> (String, Opti
 #[test]
 #[ignore]
 fn yara_regex_difftest_driver() {
-    let Ok(inp) = std::env::var("RSVOL_REGEX_CASES") else { return };
-    let out = std::env::var("RSVOL_REGEX_OUT").unwrap_or_else(|_| format!("{inp}.out"));
+    let Ok(inp) = crate::util::env::var("REGEX_CASES") else { return };
+    let out = crate::util::env::var("REGEX_OUT").unwrap_or_else(|_| format!("{inp}.out"));
     let data = std::fs::read_to_string(&inp).expect("read cases");
     let mut res = String::new();
-    let trace = std::env::var("RSVOL_REGEX_TRACE").is_ok();
+    let trace = crate::util::env::var("REGEX_TRACE").is_ok();
     let mut engines: std::collections::BTreeMap<&'static str, usize> = Default::default();
     for line in data.lines() {
         let f: Vec<&str> = line.split('\t').collect();

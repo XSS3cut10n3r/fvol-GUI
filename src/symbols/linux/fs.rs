@@ -1003,11 +1003,11 @@ mod image_tests {
 
     /// Prints `linux.mountinfo.MountInfo`-like rows (default options) to check the mount /
     /// dentry helpers against python's reference:
-    /// `RSVOL_BENCH_IMAGE=<image> cargo test --profile fast mountinfo_like -- --ignored --nocapture`
+    /// `FASTVOL_BENCH_IMAGE=<image> cargo test --profile fast mountinfo_like -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn mountinfo_like() {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
         let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
         let ctx = Context::new(opts).unwrap();
         let k = ctx.linux_kernel().unwrap();

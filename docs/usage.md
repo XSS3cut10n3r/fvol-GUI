@@ -1,9 +1,9 @@
-# Using rsvol
+# Using fastvol
 
-Task-oriented guides for the `vol` command line. They assume you know what a memory image and a
+Task-oriented guides for the `fvol` command line. They assume you know what a memory image and a
 volatility3 plugin are. For the browser interface, see [web-ui.md](web-ui.md).
 
-Applies to rsvol 0.1.0, which reproduces volatility3 2.28.2.
+Applies to fastvol 0.1.0, which reproduces volatility3 2.28.2.
 
 - [Run a plugin](#run-a-plugin)
 - [Complete commands with TAB](#complete-commands-with-tab)
@@ -24,19 +24,19 @@ Applies to rsvol 0.1.0, which reproduces volatility3 2.28.2.
 Global options go before the plugin name and plugin options after it:
 
 ```bash
-vol [GLOBAL OPTIONS] -f <IMAGE> <PLUGIN> [PLUGIN OPTIONS]
+fvol [GLOBAL OPTIONS] -f <IMAGE> <PLUGIN> [PLUGIN OPTIONS]
 ```
 
-List the plugins and the global options with `vol -h`, and the options of one plugin with
-`vol <PLUGIN> -h`:
+List the plugins and the global options with `fvol -h`, and the options of one plugin with
+`fvol <PLUGIN> -h`:
 
 ```bash
-vol windows.pslist.PsList -h
+fvol windows.pslist.PsList -h
 ```
 
 ```text
 Volatility 3 Framework 2.28.2
-usage: vol windows.pslist.PsList [-h] [--physical] [--pid [PID ...]] [--dump]
+usage: fvol windows.pslist.PsList [-h] [--physical] [--pid [PID ...]] [--dump]
 
 Lists the processes present in a particular windows memory image.
 
@@ -52,25 +52,25 @@ Any unique prefix of a plugin name works, so `windows.pslist` runs `windows.psli
 `-f` takes the image file, and the format is detected from its contents. For a VMware image,
 pass the `.vmem` file and keep the `.vmss` or `.vmsn` file of the same name next to it.
 
-`-f` also takes an `http://`, `https://` or `ftp://` URL, as python does. rsvol downloads the
-image once with `curl` into `~/.cache/rsvol/data_<SHA512>.cache`, named like python's download,
+`-f` also takes an `http://`, `https://` or `ftp://` URL, as python does. fastvol downloads the
+image once with `curl` into `~/.cache/fastvol/data_<SHA512>.cache`, named like python's download,
 and reads it from there on later runs without checking the server again. For a `.vmem` URL it
 downloads the `.vmss` next to it the same way, or the `.vmsn` when there is no `.vmss`.
-`--clear-cache` deletes the downloads. Like python, rsvol retries a download whose TLS
+`--clear-cache` deletes the downloads. Like python, fastvol retries a download whose TLS
 certificate fails verification without verification, with a warning.
 
 ### Compressed images
 
 An image whose name ends in `.gz`, `.bz2` or `.xz` is decompressed, as python does, whether it is
 a file or a URL. Decompression happens once: the first run writes the uncompressed image to
-`~/.cache/rsvol/decompressed/` and later runs read that copy, so they cost no more than runs on
+`~/.cache/fastvol/decompressed/` and later runs read that copy, so they cost no more than runs on
 the uncompressed image. Plan for the disk space of the uncompressed image. Output is the same
 as for the uncompressed image, and configurations written by `configwriter.ConfigWriter` or
 `--save-config` name the compressed file, as python's do.
 
 ```bash
-vol -f memory.raw.xz windows.pslist.PsList     # first run: decompresses, then runs
-vol -f memory.raw.xz windows.psscan.PsScan     # later runs: no decompression
+fvol -f memory.raw.xz windows.pslist.PsList     # first run: decompresses, then runs
+fvol -f memory.raw.xz windows.psscan.PsScan     # later runs: no decompression
 ```
 
 - The extension decides, as in python without the optional `magic` module: `x.raw.gz` is
@@ -81,23 +81,23 @@ vol -f memory.raw.xz windows.psscan.PsScan     # later runs: no decompression
   several members, such as those from `bgzip`, decompress on all cores. A single-member gzip
   file, such as the output of plain `gzip`, is one stream and decompresses on one core.
 - The copy is kept until `--clear-cache`, or until the next decompression after the compressed
-  file changed (size or modification time) or was deleted. `RSVOL_CACHE` moves the cache to a
+  file changed (size or modification time) or was deleted. `FASTVOL_CACHE` moves the cache to a
   disk with more room.
 - `.vmem` detection uses the name as given, as python does, so a compressed `x.vmem.gz` is
   read as a raw image without its `.vmss`.
 
 The exit status is 0 on success, 1 when the plugin cannot run or fails, and 2 for a usage error.
-rsvol prints no progress output, so `-q` is accepted but changes nothing.
+fastvol prints no progress output, so `-q` is accepted but changes nothing.
 
 ## Complete commands with TAB
 
-`vol completion bash` prints a bash completion script. Load it in the current shell, or install it
+`fvol completion bash` prints a bash completion script. Load it in the current shell, or install it
 for new shells (the second form needs the bash-completion package, which most distributions
 ship):
 
 ```bash
-eval "$(vol completion bash)"
-vol completion bash > ~/.local/share/bash-completion/completions/vol
+eval "$(fvol completion bash)"
+fvol completion bash > ~/.local/share/bash-completion/completions/fvol
 ```
 
 TAB then completes:
@@ -109,9 +109,9 @@ TAB then completes:
 - option values: the choices of `-r`, `--parallelism` and plugin choice options, file names for
   `-f`, `-c`, `--save-config` and plugin file options such as `--yara-file`, directories for
   `-o`, `-s`, `-p` and `--cache-path`, both as `-r json` and `--renderer=json`
-- `vol serve` and its options
+- `fvol serve` and its options
 
-The script calls `vol __complete` for each TAB (about 0.5 ms), so the candidates always match the
+The script calls `fvol __complete` for each TAB (about 0.5 ms), so the candidates always match the
 binary that runs. Only bash is supported.
 
 ## Analyze a Windows image
@@ -121,7 +121,7 @@ binary that runs. Only bash is supported.
    converts it to a symbol file:
 
    ```bash
-   vol -f <IMAGE> windows.info.Info
+   fvol -f <IMAGE> windows.info.Info
    ```
 
    The converted file, `windows/ntkrnlmp.pdb/<GUID>-<AGE>.json.xz`, goes where python
@@ -137,17 +137,17 @@ binary that runs. Only bash is supported.
 2. Run the plugins you need. A typical triage sequence:
 
    ```bash
-   vol -f <IMAGE> windows.pstree.PsTree
-   vol -f <IMAGE> windows.cmdline.CmdLine
-   vol -f <IMAGE> windows.netscan.NetScan
-   vol -f <IMAGE> windows.malware.malfind.Malfind
-   vol -f <IMAGE> windows.registry.hivelist.HiveList
+   fvol -f <IMAGE> windows.pstree.PsTree
+   fvol -f <IMAGE> windows.cmdline.CmdLine
+   fvol -f <IMAGE> windows.netscan.NetScan
+   fvol -f <IMAGE> windows.malware.malfind.Malfind
+   fvol -f <IMAGE> windows.registry.hivelist.HiveList
    ```
 
 3. If the system had a page file and you have it, add it so that paged-out memory can be read:
 
    ```bash
-   vol -f <IMAGE> --single-swap-locations <PAGEFILE> windows.pslist.PsList
+   fvol -f <IMAGE> --single-swap-locations <PAGEFILE> windows.pslist.PsList
    ```
 
 ### Use Windows symbols without network access
@@ -155,7 +155,7 @@ binary that runs. Only bash is supported.
 Run with `--offline -v` to learn which symbol file is missing:
 
 ```bash
-vol --offline -v -f <IMAGE> windows.info.Info
+fvol --offline -v -f <IMAGE> windows.info.Info
 ```
 
 ```text
@@ -173,11 +173,11 @@ symbol directory with this layout:
 Then pass the directory with `-s`:
 
 ```bash
-vol --offline -s <SYMBOL_DIR> -f <IMAGE> windows.info.Info
+fvol --offline -s <SYMBOL_DIR> -f <IMAGE> windows.info.Info
 ```
 
 The file name layout is the fast path. A Windows symbol file anywhere below a symbol directory is
-also found, because rsvol reads the PDB identity from the file's metadata.
+also found, because fastvol reads the PDB identity from the file's metadata.
 
 ## Analyze a Linux image
 
@@ -186,7 +186,7 @@ Linux plugins need a symbol file generated from the exact kernel build of the im
 1. Read the kernel version from the image:
 
    ```bash
-   vol -f <IMAGE> banners.Banners
+   fvol -f <IMAGE> banners.Banners
    ```
 
    ```text
@@ -210,12 +210,12 @@ Linux plugins need a symbol file generated from the exact kernel build of the im
 4. Run the plugins with `-s`:
 
    ```bash
-   vol -s <SYMBOL_DIR> -f <IMAGE> linux.pslist.PsList
-   vol -s <SYMBOL_DIR> -f <IMAGE> linux.bash.Bash
-   vol -s <SYMBOL_DIR> -f <IMAGE> linux.sockstat.Sockstat
+   fvol -s <SYMBOL_DIR> -f <IMAGE> linux.pslist.PsList
+   fvol -s <SYMBOL_DIR> -f <IMAGE> linux.bash.Bash
+   fvol -s <SYMBOL_DIR> -f <IMAGE> linux.sockstat.Sockstat
    ```
 
-rsvol picks the symbol file whose `linux_banner` equals the banner in memory, wherever it lies
+fastvol picks the symbol file whose `linux_banner` equals the banner in memory, wherever it lies
 below the symbol directory. The `linux/` subdirectory is a convention, not a requirement.
 
 The first run with a new symbol directory reads every symbol file in it once to index the
@@ -227,23 +227,23 @@ macOS works like Linux: the symbol file must match the kernel's `version` string
 Foundation publishes symbol packs for released macOS kernels.
 
 ```bash
-vol -s <SYMBOL_DIR> -f <IMAGE> mac.pslist.PsList
+fvol -s <SYMBOL_DIR> -f <IMAGE> mac.pslist.PsList
 ```
 
-A symbol pack can stay zipped: rsvol reads symbol files inside `.zip` archives found in a symbol
+A symbol pack can stay zipped: fastvol reads symbol files inside `.zip` archives found in a symbol
 directory.
 
 ## Control where symbol files are found
 
-rsvol searches for symbol files, called ISF files, in this order:
+fastvol searches for symbol files, called ISF files, in this order:
 
 1. The directories given with `-s`, separated by semicolons.
-2. A `symbols` directory next to the `vol` executable.
+2. A `symbols` directory next to the `fvol` executable.
 3. The symbol files that ship with volatility3. They cover generic, Windows and Linux helper
    tables, not OS kernels. A copy of them is compiled into the binary. When a python volatility3
    installation is found, its `symbols` and `framework/symbols` directories are searched as well,
-   so that file URLs printed by plugins such as `windows.info.Info` match python's. rsvol looks
-   for the installation in `RSVOL_VOL3_ROOT`, then for a `volatility3` checkout in a parent
+   so that file URLs printed by plugins such as `windows.info.Info` match python's. fastvol looks
+   for the installation in `FASTVOL_VOL3_ROOT`, then for a `volatility3` checkout in a parent
    directory of the executable.
 4. python's download directory, `~/.cache/volatility3/symbols`, or
    `$XDG_CACHE_HOME/volatility3/symbols` when that variable is set.
@@ -254,18 +254,18 @@ archives.
 Linux and macOS kernel ISFs are found by the kernel banner, Windows ones by the PDB name, GUID
 and age. When several ISFs on the search path carry the same banner or PDB, for example the same
 Windows kernel ISF in volatility3's `symbols` directory and in `~/.cache/volatility3/symbols`,
-rsvol loads the one python volatility3 would load: the one listed last in python's identifier
+fastvol loads the one python volatility3 would load: the one listed last in python's identifier
 cache, `~/.cache/volatility3/identifier.cache` or the one under `--cache-path`, after python's
-update of that cache. Without that file, or with `--clear-cache`, rsvol takes the one python
+update of that cache. Without that file, or with `--clear-cache`, fastvol takes the one python
 would list last in the cache it builds from scratch; that order depends on python's string
-hashing and matches a python run with `PYTHONHASHSEED=0`. With `RSVOL_NO_PY_IDENT_SEED=1` the
+hashing and matches a python run with `PYTHONHASHSEED=0`. With `FASTVOL_NO_PY_IDENT_SEED=1` the
 last one in search order wins.
 
-To use a remote list of symbol files, pass its URL with `-u`. rsvol downloads the list and the
-files it needs once, with `curl`, and keeps them in `~/.cache/rsvol/` as `data_<SHA512>.cache`:
+To use a remote list of symbol files, pass its URL with `-u`. fastvol downloads the list and the
+files it needs once, with `curl`, and keeps them in `~/.cache/fastvol/` as `data_<SHA512>.cache`:
 
 ```bash
-vol -u <ISF_LIST_URL> -f <IMAGE> linux.pslist.PsList
+fvol -u <ISF_LIST_URL> -f <IMAGE> linux.pslist.PsList
 ```
 
 `--offline` prevents every download, including PDB files for Windows.
@@ -277,7 +277,7 @@ which must exist. Each plugin prints the name of every file it wrote in its `Fil
 
 ```bash
 mkdir -p <OUTPUT_DIR>
-vol -f <IMAGE> -o <OUTPUT_DIR> windows.pslist.PsList --pid 828 --dump
+fvol -f <IMAGE> -o <OUTPUT_DIR> windows.pslist.PsList --pid 828 --dump
 ```
 
 ```text
@@ -322,7 +322,7 @@ With `csv`, `json`, `jsonl` and `mermaid` the version banner goes to stderr, so 
 the data:
 
 ```bash
-vol -f <IMAGE> -r json windows.pslist.PsList --pid 4 2>/dev/null
+fvol -f <IMAGE> -r json windows.pslist.PsList --pid 4 2>/dev/null
 ```
 
 ```json
@@ -360,15 +360,15 @@ excluding filter as `--filters=-...`, because a separate argument that starts wi
 an option:
 
 ```bash
-vol -f <IMAGE> --filters 'ImageFileName,^svc!' windows.pslist.PsList
-vol -f <IMAGE> --filters=-ImageFileName,svchost windows.pslist.PsList
+fvol -f <IMAGE> --filters 'ImageFileName,^svc!' windows.pslist.PsList
+fvol -f <IMAGE> --filters=-ImageFileName,svchost windows.pslist.PsList
 ```
 
 `--hide-columns` takes a list of column name prefixes. Because the list ends only at the next
 option, put another option after it, or the plugin name is taken as a column:
 
 ```bash
-vol -f <IMAGE> --hide-columns Offset Threads Handles -r quick windows.pslist.PsList
+fvol -f <IMAGE> --hide-columns Offset Threads Handles -r quick windows.pslist.PsList
 ```
 
 ## Build a timeline
@@ -378,20 +378,20 @@ order. `--create-bodyfile` also writes `volatility.body` for tools that read the
 and `--plugin-filter` limits the run to plugins whose names contain a substring:
 
 ```bash
-vol -f <IMAGE> -o <OUTPUT_DIR> timeliner.Timeliner --create-bodyfile
-vol -f <IMAGE> timeliner.Timeliner --plugin-filter windows.registry
+fvol -f <IMAGE> -o <OUTPUT_DIR> timeliner.Timeliner --create-bodyfile
+fvol -f <IMAGE> timeliner.Timeliner --plugin-filter windows.registry
 ```
 
 ## Search memory with YARA rules or regular expressions
 
 ```bash
 # a string, a rule file, or a regular expression over physical memory
-vol -f <IMAGE> yarascan.YaraScan --yara-string 'evil.example'
-vol -f <IMAGE> yarascan.YaraScan --yara-file <RULES.yar>
-vol -f <IMAGE> regexscan.RegExScan --pattern '[a-z0-9.]+\.onion'
+fvol -f <IMAGE> yarascan.YaraScan --yara-string 'evil.example'
+fvol -f <IMAGE> yarascan.YaraScan --yara-file <RULES.yar>
+fvol -f <IMAGE> regexscan.RegExScan --pattern '[a-z0-9.]+\.onion'
 
 # the same inside process memory
-vol -f <IMAGE> windows.vadyarascan.VadYaraScan --pid <PID> --yara-file <RULES.yar>
+fvol -f <IMAGE> windows.vadyarascan.VadYaraScan --pid <PID> --yara-file <RULES.yar>
 ```
 
 Rules that use `import` and precompiled rule files are not supported.
@@ -401,15 +401,15 @@ Rules that use `import` and precompiled rule files are not supported.
 `--save-config <FILE>` writes the configuration of a run as JSON, and `-c <FILE>` loads it
 again. The file is the one python volatility3 writes: the plugin's options and what kernel
 discovery found, the layer stack down to the image file (`kernel.layer_name.memory_layer...`),
-the kernel offset and the ISF of the kernel's symbol table. Files written by python and by rsvol
-are interchangeable. Like python, rsvol writes the file once the kernel is found, before the
+the kernel offset and the ISF of the kernel's symbol table. Files written by python and by fastvol
+are interchangeable. Like python, fastvol writes the file once the kernel is found, before the
 plugin runs, and writes nothing when the plugin's requirements are not met. A file loaded with
 `-c` names the image, so `-f` can be left out. Default options can also be set in
 `~/.config/volatility3/vol.json`, as with python volatility3:
 
 ```bash
-vol -f <IMAGE> --save-config pslist.json windows.pslist.PsList --pid 4
-vol -c pslist.json windows.pslist.PsList
+fvol -f <IMAGE> --save-config pslist.json windows.pslist.PsList --pid 4
+fvol -c pslist.json windows.pslist.PsList
 ```
 
 ## Troubleshoot a run that finds no kernel
@@ -418,7 +418,7 @@ When the kernel or its symbols cannot be found, the plugin stops with "Unable to
 plugin requirements". Add `-v` to see why:
 
 ```bash
-vol -v -f <IMAGE> linux.pslist.PsList
+fvol -v -f <IMAGE> linux.pslist.PsList
 ```
 
 ```text

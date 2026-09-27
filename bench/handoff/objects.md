@@ -21,7 +21,7 @@
 - `check_nix.sh all`: not finished (stopped). On `ea6836b` (my object-model work, before the
   sub-agent merges) all four gates passed: 538 unit, 98/98, 1114/1114, 763/763. The nix
   sub-agent ran all four gates green on its branch (763/763 nix) after merging my `e1181f6`.
-  **Next agent: run `check_nix.sh -b $PWD/target/release/vol all` once on this head.**
+  **Next agent: run `check_nix.sh -b $PWD/target/release/fvol all` once on this head.**
 - Renderer A/B (quick, csv, json, jsonl, pretty, none, `--filters`) against the pre-work main
   binary: identical for all 12 plugins converted here (handles, vadinfo, vadwalk, iat, privileges,
   envars, getsids, verinfo, malware ldrmodules/hollowprocesses/processghosting/suspicious_threads)
@@ -121,7 +121,7 @@ malfind 3.1 -> 2.1 ms.
 - `bench/scripts/cargo.sh test --profile fast` (new tests: objects::tests::page_cache_matches_reads,
   lookup_caches_are_exact, strings::tests::cstring_cut_matches_full_decode,
   plugins::tests::emit_par_blocks_like_serial, plugins::linux::tests::stream_chunks_*).
-- `bench/scripts/check_all.sh -b $PWD/target/release/vol`, `check_win_images.sh -b ...`,
+- `bench/scripts/check_all.sh -b $PWD/target/release/fvol`, `check_win_images.sh -b ...`,
   `check_nix.sh -b ... all`.
 - Per-plugin renderer A/B: `testdata/scratch/opt/rcmp.sh BIN_A BIN_B IMG plugin [args]`
   (FILTER="-PID,9999" adds a --filters run); subset of plugins on all manifest images:

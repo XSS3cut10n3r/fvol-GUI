@@ -1,9 +1,9 @@
 #!/bin/bash
-# End-to-end tests of `vol serve` (Windows + Linux images) against the CLI.
-#   bench/web/e2e.sh            (uses target/fast/vol; BIN=... to override)
+# End-to-end tests of `fvol serve` (Windows + Linux images) against the CLI.
+#   bench/web/e2e.sh            (uses target/fast/fvol; BIN=... to override)
 set -e
 cd "$(dirname "$0")/../.."
-export BIN=${BIN:-$PWD/target/fast/vol}
+export BIN=${BIN:-$PWD/target/fast/fvol}
 bench/web/serve.sh start win 18765 /home/user/cbc2/task2/memory-dirty.raw
 bench/web/serve.sh start lnx 18766 /home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf -s /home/user/rs-vol/testdata/symbols
 rc=0

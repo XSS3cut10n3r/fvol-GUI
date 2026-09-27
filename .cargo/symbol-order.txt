@@ -142,12 +142,12 @@ ssignal
 __bsd_signal.part.0
 sigaction
 __libc_sigaction
-<core::iter::adapters::map::Map<std::env::ArgsOs, vol::cli::main::{closure#0}> as core::iter::traits::iterator::Iterator>::next
+<core::iter::adapters::map::Map<std::env::ArgsOs, fvol::cli::main::{closure#0}> as core::iter::traits::iterator::Iterator>::next
 <alloc::string::String>::from_utf8_lossy
 <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
 __rustc::__rust_alloc
-vol::plugins::registered
-vol::cli::run_inner
+fvol::plugins::registered
+fvol::cli::run_inner
 <core::str::iter::SplitInternal<char>>::next_back
 core::slice::memchr::memrchr_aligned
 __memcmp_avx2_movbe
@@ -172,250 +172,250 @@ std::fs::read::inner
 open64
 __errno_location
 std::sys::io::error::unix::is_interrupted
-<vol::cli::argparse::Parser>::new
-<vol::cli::argparse::Action>::new
-<vol::cli::argparse::Parser>::add
-<alloc::raw_vec::RawVec<vol::cli::argparse::Action>>::grow_one
-<alloc::raw_vec::RawVec<for<'a> fn(u32, u64, &'a mut alloc::string::String) -> vol::disasm::arm64::engine::Res>>::grow_one
+<fvol::cli::argparse::Parser>::new
+<fvol::cli::argparse::Action>::new
+<fvol::cli::argparse::Parser>::add
+<alloc::raw_vec::RawVec<fvol::cli::argparse::Action>>::grow_one
+<alloc::raw_vec::RawVec<for<'a> fn(u32, u64, &'a mut alloc::string::String) -> fvol::disasm::arm64::engine::Res>>::grow_one
 unlink_chunk.isra.0
-<alloc::raw_vec::RawVec<alloc::vec::Vec<vol::renderers::Value>>>::grow_one
-core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<(alloc::string::String, vol::cli::argparse::PyVal)>>
-<vol::cli::argparse::Parser>::parse_known_args
-<vol::cli::argparse::Namespace>::set::<&str>
-<alloc::raw_vec::RawVec<core::result::Result<(alloc::string::String, vol::symbols::linux::modules::ParamValue), vol::error::Error>>>::grow_one
-<vol::cli::argparse::PyVal as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global>
-<vol::cli::argparse::Parser>::match_arguments_partial
-<vol::cli::argparse::Parser>::match_argument
+<alloc::raw_vec::RawVec<alloc::vec::Vec<fvol::renderers::Value>>>::grow_one
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<(alloc::string::String, fvol::cli::argparse::PyVal)>>
+<fvol::cli::argparse::Parser>::parse_known_args
+<fvol::cli::argparse::Namespace>::set::<&str>
+<alloc::raw_vec::RawVec<core::result::Result<(alloc::string::String, fvol::symbols::linux::modules::ParamValue), fvol::error::Error>>>::grow_one
+<fvol::cli::argparse::PyVal as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global>
+<fvol::cli::argparse::Parser>::match_arguments_partial
+<fvol::cli::argparse::Parser>::match_argument
 <alloc::raw_vec::RawVec<[u64; 4]>>::grow_one
-<vol::cli::argparse::Parser>::parse_inner::{closure#1}
-core::ptr::drop_glue::<alloc::vec::Vec<vol::cli::argparse::PyVal>>
-core::ptr::drop_glue::<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<vol::cli::argparse::OptTuple>>>>
+<fvol::cli::argparse::Parser>::parse_inner::{closure#1}
+core::ptr::drop_glue::<alloc::vec::Vec<fvol::cli::argparse::PyVal>>
+core::ptr::drop_glue::<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<fvol::cli::argparse::OptTuple>>>>
 alloc::str::join_generic_copy::<str, u8, alloc::string::String>
-vol::cli::requirement_action
-core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<vol::plugins::Requirement>>
-<alloc::raw_vec::RawVec<core::result::Result<vol::plugins::mac::proc_maps::VmaRow, vol::error::Error>>>::grow_one
-<vol::plugins::generic::banners::Banners as vol::plugins::Plugin>::name
-<vol::plugins::generic::configwriter::ConfigWriter as vol::plugins::Plugin>::name
-<vol::plugins::generic::frameworkinfo::FrameworkInfo as vol::plugins::Plugin>::name
-<vol::plugins::generic::isfinfo::IsfInfo as vol::plugins::Plugin>::name
-<vol::plugins::generic::layerwriter::LayerWriter as vol::plugins::Plugin>::name
-<vol::plugins::generic::regexscan::RegExScan as vol::plugins::Plugin>::name
-<vol::plugins::generic::timeliner::Timeliner as vol::plugins::Plugin>::name
-<vol::plugins::generic::vmscan::Vmscan as vol::plugins::Plugin>::name
-<vol::plugins::generic::yarascan::YaraScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::bigpools::BigPools as vol::plugins::Plugin>::name
-<vol::plugins::windows::callbacks::Callbacks as vol::plugins::Plugin>::name
-<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::name
-<vol::plugins::windows::cmdscan::CmdScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::consoles::Consoles as vol::plugins::Plugin>::name
-<vol::plugins::windows::crashinfo::Crashinfo as vol::plugins::Plugin>::name
-<vol::plugins::windows::debugregisters::DebugRegisters as vol::plugins::Plugin>::name
-<vol::plugins::windows::deskscan::DeskScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::desktops::Desktops as vol::plugins::Plugin>::name
-<vol::plugins::windows::devicetree::DeviceTree as vol::plugins::Plugin>::name
-<vol::plugins::windows::direct_system_calls::DirectSystemCalls as vol::plugins::Plugin>::name
-<vol::plugins::windows::dlllist::DllList as vol::plugins::Plugin>::name
-<vol::plugins::windows::driverirp::DriverIrp as vol::plugins::Plugin>::name
-<vol::plugins::windows::drivermodule::DriverModule as vol::plugins::Plugin>::name
-<vol::plugins::windows::driverscan::DriverScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::dumpfiles::DumpFiles as vol::plugins::Plugin>::name
-<vol::plugins::windows::envars::Envars as vol::plugins::Plugin>::name
-<vol::plugins::windows::etwpatch::EtwPatch as vol::plugins::Plugin>::name
-<vol::plugins::windows::filescan::FileScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::getservicesids::GetServiceSIDs as vol::plugins::Plugin>::name
-<vol::plugins::windows::getsids::GetSIDs as vol::plugins::Plugin>::name
-<vol::plugins::windows::handles::Handles as vol::plugins::Plugin>::name
-<vol::plugins::windows::hollowprocesses::HollowProcesses as vol::plugins::Plugin>::name
-<vol::plugins::windows::iat::IAT as vol::plugins::Plugin>::name
-<vol::plugins::windows::indirect_system_calls::IndirectSystemCalls as vol::plugins::Plugin>::name
-<vol::plugins::windows::info::Info as vol::plugins::Plugin>::name
-<vol::plugins::windows::joblinks::JobLinks as vol::plugins::Plugin>::name
-<vol::plugins::windows::kpcrs::KPCRs as vol::plugins::Plugin>::name
-<vol::plugins::windows::ldrmodules::LdrModules as vol::plugins::Plugin>::name
-<vol::plugins::windows::malfind::Malfind as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::drivermodule::DriverModule as vol::plugins::Plugin>::name
-<vol::plugins::windows::mbrscan::MBRScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::memmap::Memmap as vol::plugins::Plugin>::name
-<vol::plugins::windows::mftscan::MFTScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::mftscan::ADS as vol::plugins::Plugin>::name
-<vol::plugins::windows::mftscan::ResidentData as vol::plugins::Plugin>::name
-<vol::plugins::windows::modscan::ModScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::modules::Modules as vol::plugins::Plugin>::name
-<vol::plugins::windows::mutantscan::MutantScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::netscan::NetScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::netstat::NetStat as vol::plugins::Plugin>::name
-<vol::plugins::windows::orphan_kernel_threads::Threads as vol::plugins::Plugin>::name
-<vol::plugins::windows::pe_symbols::PESymbols as vol::plugins::Plugin>::name
-<vol::plugins::windows::pedump::PEDump as vol::plugins::Plugin>::name
-<vol::plugins::windows::poolscanner::PoolScanner as vol::plugins::Plugin>::name
-<vol::plugins::windows::privileges::Privs as vol::plugins::Plugin>::name
-<vol::plugins::windows::processghosting::ProcessGhosting as vol::plugins::Plugin>::name
-<vol::plugins::windows::pslist::PsList as vol::plugins::Plugin>::name
-<vol::plugins::windows::psscan::PsScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::pstree::PsTree as vol::plugins::Plugin>::name
-<vol::plugins::windows::psxview::PsXView as vol::plugins::Plugin>::name
-<vol::plugins::windows::sessions::Sessions as vol::plugins::Plugin>::name
-<vol::plugins::windows::shimcachemem::ShimcacheMem as vol::plugins::Plugin>::name
-<vol::plugins::windows::skeleton_key_check::SkeletonKeyCheck as vol::plugins::Plugin>::name
-<vol::plugins::windows::ssdt::Ssdt as vol::plugins::Plugin>::name
-<vol::plugins::windows::statistics::Statistics as vol::plugins::Plugin>::name
-<vol::plugins::windows::strings::Strings as vol::plugins::Plugin>::name
-<vol::plugins::windows::suspended_threads::SuspendedThreads as vol::plugins::Plugin>::name
-<vol::plugins::windows::suspicious_threads::SuspiciousThreads as vol::plugins::Plugin>::name
-<vol::plugins::windows::svcdiff::SvcDiff as vol::plugins::Plugin>::name
-<vol::plugins::windows::svclist::SvcList as vol::plugins::Plugin>::name
-<vol::plugins::windows::svcscan::SvcScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::symlinkscan::SymlinkScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::thrdscan::ThrdScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::threads::Threads as vol::plugins::Plugin>::name
-<vol::plugins::windows::timers::Timers as vol::plugins::Plugin>::name
-<vol::plugins::windows::truecrypt::Passphrase as vol::plugins::Plugin>::name
-<vol::plugins::windows::unhooked_system_calls::UnhookedSystemCalls as vol::plugins::Plugin>::name
-<vol::plugins::windows::unloadedmodules::UnloadedModules as vol::plugins::Plugin>::name
-<vol::plugins::windows::vadinfo::VadInfo as vol::plugins::Plugin>::name
-<vol::plugins::windows::vadregexscan::VadRegExScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::vadwalk::VadWalk as vol::plugins::Plugin>::name
-<vol::plugins::windows::vadyarascan::VadYaraScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::verinfo::VerInfo as vol::plugins::Plugin>::name
-<vol::plugins::windows::virtmap::VirtMap as vol::plugins::Plugin>::name
-<vol::plugins::windows::windows::Windows as vol::plugins::Plugin>::name
-<vol::plugins::windows::windowstations::WindowStations as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::direct_system_calls::DirectSystemCalls as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::hollowprocesses::HollowProcesses as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::indirect_system_calls::IndirectSystemCalls as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::ldrmodules::LdrModules as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::malfind::Malfind as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::pebmasquerade::PebMasquerade as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::processghosting::ProcessGhosting as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::psxview::PsXView as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::skeleton_key_check::SkeletonKeyCheck as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::suspicious_threads::SuspiciousThreads as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::svcdiff::SvcDiff as vol::plugins::Plugin>::name
-<vol::plugins::windows::malware::unhooked_system_calls::UnhookedSystemCalls as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::hivelist::HiveList as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::hivescan::HiveScan as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::printkey::PrintKey as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::hashdump::Hashdump as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::hashdump::HashdumpDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::lsadump::Lsadump as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::lsadump::LsadumpDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::cachedump::Cachedump as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::cachedump::CachedumpDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::certificates::Certificates as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::getcellroutine::GetCellRoutine as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::userassist::UserAssist as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::amcache::Amcache as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::amcache::AmcacheDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::scheduled_tasks::ScheduledTasks as vol::plugins::Plugin>::name
-<vol::plugins::windows::registry::scheduled_tasks::ScheduledTasksDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::bash::Bash as vol::plugins::Plugin>::name
-<vol::plugins::linux::capabilities::Capabilities as vol::plugins::Plugin>::name
-<vol::plugins::linux::elfs::Elfs as vol::plugins::Plugin>::name
-<vol::plugins::linux::envars::Envars as vol::plugins::Plugin>::name
-<vol::plugins::linux::graphics::fbdev::Fbdev as vol::plugins::Plugin>::name
-<vol::plugins::linux::ip::Addr as vol::plugins::Plugin>::name
-<vol::plugins::linux::ip::Link as vol::plugins::Plugin>::name
-<vol::plugins::linux::library_list::LibraryList as vol::plugins::Plugin>::name
-<vol::plugins::linux::lsof::Lsof as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::malfind::Malfind as vol::plugins::Plugin>::name
-<vol::plugins::linux::mountinfo::MountInfo as vol::plugins::Plugin>::name
-<vol::plugins::linux::pagecache::Files as vol::plugins::Plugin>::name
-<vol::plugins::linux::pagecache::InodePages as vol::plugins::Plugin>::name
-<vol::plugins::linux::pagecache::RecoverFs as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::malfind::MalfindDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::process_spoofing::ProcessSpoofing as vol::plugins::Plugin>::name
-<vol::plugins::linux::pidhashtable::PIDHashTable as vol::plugins::Plugin>::name
-<vol::plugins::linux::proc::Maps as vol::plugins::Plugin>::name
-<vol::plugins::linux::psaux::PsAux as vol::plugins::Plugin>::name
-<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::name
-<vol::plugins::linux::psscan::PsScan as vol::plugins::Plugin>::name
-<vol::plugins::linux::pstree::PsTree as vol::plugins::Plugin>::name
-<vol::plugins::linux::ptrace::Ptrace as vol::plugins::Plugin>::name
-<vol::plugins::linux::sockscan::Sockscan as vol::plugins::Plugin>::name
-<vol::plugins::linux::sockstat::Sockstat as vol::plugins::Plugin>::name
-<vol::plugins::linux::vmaregexscan::VmaRegExScan as vol::plugins::Plugin>::name
-<vol::plugins::linux::vmayarascan::VmaYaraScan as vol::plugins::Plugin>::name
-<vol::plugins::linux::pscallstack::PsCallStack as vol::plugins::Plugin>::name
-<vol::plugins::linux::kthreads::Kthreads as vol::plugins::Plugin>::name
-<vol::plugins::linux::boottime::Boottime as vol::plugins::Plugin>::name
-<vol::plugins::linux::ebpf::Ebpf as vol::plugins::Plugin>::name
-<vol::plugins::linux::iomem::IOMem as vol::plugins::Plugin>::name
-<vol::plugins::linux::kallsyms::Kallsyms as vol::plugins::Plugin>::name
-<vol::plugins::linux::kmsg::Kmsg as vol::plugins::Plugin>::name
-<vol::plugins::linux::lsmod::Lsmod as vol::plugins::Plugin>::name
-<vol::plugins::linux::module_extract::ModuleExtract as vol::plugins::Plugin>::name
-<vol::plugins::linux::vmcoreinfo::VMCoreInfo as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_afinfo::CheckAfinfo as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_afinfo::CheckAfinfoDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_creds::CheckCreds as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_creds::CheckCredsDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_idt::CheckIdt as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_idt::CheckIdtDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_modules::CheckModules as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_modules::CheckModulesDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_syscall::CheckSyscall as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::check_syscall::CheckSyscallDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::hidden_modules::HiddenModules as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::hidden_modules::HiddenModulesDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiers as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiersDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::modxview::Modxview as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::modxview::ModxviewDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::netfilter::Netfilter as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::netfilter::NetfilterDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::tty_check::TtyCheck as vol::plugins::Plugin>::name
-<vol::plugins::linux::malware::tty_check::TtyCheckDeprecated as vol::plugins::Plugin>::name
-<vol::plugins::linux::tracing::ftrace::CheckFtrace as vol::plugins::Plugin>::name
-<vol::plugins::linux::tracing::perf_events::PerfEvents as vol::plugins::Plugin>::name
-<vol::plugins::linux::tracing::tracepoints::CheckTracepoints as vol::plugins::Plugin>::name
-<vol::plugins::mac::bash::Bash as vol::plugins::Plugin>::name
-<vol::plugins::mac::check_syscall::CheckSyscall as vol::plugins::Plugin>::name
-<vol::plugins::mac::check_syscall::CheckTrapTable as vol::plugins::Plugin>::name
-<vol::plugins::mac::check_sysctl::CheckSysctl as vol::plugins::Plugin>::name
-<vol::plugins::mac::dmesg::Dmesg as vol::plugins::Plugin>::name
-<vol::plugins::mac::ifconfig::Ifconfig as vol::plugins::Plugin>::name
-<vol::plugins::mac::kauth_scopes::KauthListeners as vol::plugins::Plugin>::name
-<vol::plugins::mac::kauth_scopes::KauthScopes as vol::plugins::Plugin>::name
-<vol::plugins::mac::kevents::Kevents as vol::plugins::Plugin>::name
-<vol::plugins::mac::list_files::ListFiles as vol::plugins::Plugin>::name
-<vol::plugins::mac::lsmod::Lsmod as vol::plugins::Plugin>::name
-<vol::plugins::mac::lsof::Lsof as vol::plugins::Plugin>::name
-<vol::plugins::mac::malfind::Malfind as vol::plugins::Plugin>::name
-<vol::plugins::mac::mount::Mount as vol::plugins::Plugin>::name
-<vol::plugins::mac::netstat::Netstat as vol::plugins::Plugin>::name
-<vol::plugins::mac::proc_maps::Maps as vol::plugins::Plugin>::name
-<vol::plugins::mac::psaux::Psaux as vol::plugins::Plugin>::name
-<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::name
-<vol::plugins::mac::pstree::PsTree as vol::plugins::Plugin>::name
-<vol::plugins::mac::socket_filters::SocketFilters as vol::plugins::Plugin>::name
-<vol::plugins::mac::timers::Timers as vol::plugins::Plugin>::name
-<vol::plugins::mac::trustedbsd::Trustedbsd as vol::plugins::Plugin>::name
-<vol::plugins::mac::vfsevents::VfsEvents as vol::plugins::Plugin>::name
+fvol::cli::requirement_action
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<fvol::plugins::Requirement>>
+<alloc::raw_vec::RawVec<core::result::Result<fvol::plugins::mac::proc_maps::VmaRow, fvol::error::Error>>>::grow_one
+<fvol::plugins::generic::banners::Banners as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::configwriter::ConfigWriter as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::frameworkinfo::FrameworkInfo as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::isfinfo::IsfInfo as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::layerwriter::LayerWriter as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::regexscan::RegExScan as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::timeliner::Timeliner as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::vmscan::Vmscan as fvol::plugins::Plugin>::name
+<fvol::plugins::generic::yarascan::YaraScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::bigpools::BigPools as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::callbacks::Callbacks as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::cmdline::CmdLine as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::cmdscan::CmdScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::consoles::Consoles as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::crashinfo::Crashinfo as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::debugregisters::DebugRegisters as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::deskscan::DeskScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::desktops::Desktops as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::devicetree::DeviceTree as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::direct_system_calls::DirectSystemCalls as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::dlllist::DllList as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::driverirp::DriverIrp as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::drivermodule::DriverModule as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::driverscan::DriverScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::dumpfiles::DumpFiles as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::envars::Envars as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::etwpatch::EtwPatch as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::filescan::FileScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::getservicesids::GetServiceSIDs as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::getsids::GetSIDs as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::handles::Handles as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::hollowprocesses::HollowProcesses as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::iat::IAT as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::indirect_system_calls::IndirectSystemCalls as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::info::Info as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::joblinks::JobLinks as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::kpcrs::KPCRs as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::ldrmodules::LdrModules as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malfind::Malfind as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::drivermodule::DriverModule as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::mbrscan::MBRScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::memmap::Memmap as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::mftscan::MFTScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::mftscan::ADS as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::mftscan::ResidentData as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::modscan::ModScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::modules::Modules as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::mutantscan::MutantScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::netscan::NetScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::netstat::NetStat as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::orphan_kernel_threads::Threads as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::pe_symbols::PESymbols as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::pedump::PEDump as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::poolscanner::PoolScanner as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::privileges::Privs as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::processghosting::ProcessGhosting as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::pslist::PsList as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::psscan::PsScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::pstree::PsTree as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::psxview::PsXView as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::sessions::Sessions as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::shimcachemem::ShimcacheMem as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::skeleton_key_check::SkeletonKeyCheck as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::ssdt::Ssdt as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::statistics::Statistics as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::strings::Strings as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::suspended_threads::SuspendedThreads as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::suspicious_threads::SuspiciousThreads as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::svcdiff::SvcDiff as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::svclist::SvcList as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::svcscan::SvcScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::symlinkscan::SymlinkScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::thrdscan::ThrdScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::threads::Threads as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::timers::Timers as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::truecrypt::Passphrase as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::unhooked_system_calls::UnhookedSystemCalls as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::unloadedmodules::UnloadedModules as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::vadinfo::VadInfo as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::vadregexscan::VadRegExScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::vadwalk::VadWalk as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::vadyarascan::VadYaraScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::verinfo::VerInfo as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::virtmap::VirtMap as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::windows::Windows as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::windowstations::WindowStations as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::direct_system_calls::DirectSystemCalls as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::hollowprocesses::HollowProcesses as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::indirect_system_calls::IndirectSystemCalls as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::ldrmodules::LdrModules as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::malfind::Malfind as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::pebmasquerade::PebMasquerade as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::processghosting::ProcessGhosting as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::psxview::PsXView as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::skeleton_key_check::SkeletonKeyCheck as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::suspicious_threads::SuspiciousThreads as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::svcdiff::SvcDiff as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::malware::unhooked_system_calls::UnhookedSystemCalls as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::hivelist::HiveList as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::hivescan::HiveScan as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::printkey::PrintKey as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::hashdump::Hashdump as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::hashdump::HashdumpDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::lsadump::Lsadump as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::lsadump::LsadumpDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::cachedump::Cachedump as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::cachedump::CachedumpDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::certificates::Certificates as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::getcellroutine::GetCellRoutine as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::userassist::UserAssist as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::amcache::Amcache as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::amcache::AmcacheDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::scheduled_tasks::ScheduledTasks as fvol::plugins::Plugin>::name
+<fvol::plugins::windows::registry::scheduled_tasks::ScheduledTasksDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::bash::Bash as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::capabilities::Capabilities as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::elfs::Elfs as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::envars::Envars as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::graphics::fbdev::Fbdev as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::ip::Addr as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::ip::Link as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::library_list::LibraryList as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::lsof::Lsof as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::malfind::Malfind as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::mountinfo::MountInfo as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::pagecache::Files as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::pagecache::InodePages as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::pagecache::RecoverFs as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::malfind::MalfindDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::process_spoofing::ProcessSpoofing as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::pidhashtable::PIDHashTable as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::proc::Maps as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::psaux::PsAux as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::pslist::PsList as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::psscan::PsScan as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::pstree::PsTree as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::ptrace::Ptrace as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::sockscan::Sockscan as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::sockstat::Sockstat as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::vmaregexscan::VmaRegExScan as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::vmayarascan::VmaYaraScan as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::pscallstack::PsCallStack as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::kthreads::Kthreads as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::boottime::Boottime as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::ebpf::Ebpf as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::iomem::IOMem as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::kallsyms::Kallsyms as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::kmsg::Kmsg as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::lsmod::Lsmod as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::module_extract::ModuleExtract as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::vmcoreinfo::VMCoreInfo as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_afinfo::CheckAfinfo as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_afinfo::CheckAfinfoDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_creds::CheckCreds as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_creds::CheckCredsDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_idt::CheckIdt as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_idt::CheckIdtDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_modules::CheckModules as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_modules::CheckModulesDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_syscall::CheckSyscall as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::check_syscall::CheckSyscallDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::hidden_modules::HiddenModules as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::hidden_modules::HiddenModulesDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiers as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiersDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::modxview::Modxview as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::modxview::ModxviewDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::netfilter::Netfilter as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::netfilter::NetfilterDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::tty_check::TtyCheck as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::malware::tty_check::TtyCheckDeprecated as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::tracing::ftrace::CheckFtrace as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::tracing::perf_events::PerfEvents as fvol::plugins::Plugin>::name
+<fvol::plugins::linux::tracing::tracepoints::CheckTracepoints as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::bash::Bash as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::check_syscall::CheckSyscall as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::check_syscall::CheckTrapTable as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::check_sysctl::CheckSysctl as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::dmesg::Dmesg as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::ifconfig::Ifconfig as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::kauth_scopes::KauthListeners as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::kauth_scopes::KauthScopes as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::kevents::Kevents as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::list_files::ListFiles as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::lsmod::Lsmod as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::lsof::Lsof as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::malfind::Malfind as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::mount::Mount as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::netstat::Netstat as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::proc_maps::Maps as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::psaux::Psaux as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::pslist::PsList as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::pstree::PsTree as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::socket_filters::SocketFilters as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::timers::Timers as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::trustedbsd::Trustedbsd as fvol::plugins::Plugin>::name
+<fvol::plugins::mac::vfsevents::VfsEvents as fvol::plugins::Plugin>::name
 <alloc::rc::Rc<alloc::vec::Vec<&str>>>::drop_slow
-<vol::cli::argparse::Parser>::match_arguments_partial::m
-core::ptr::drop_glue::<vol::cli::argparse::Parser>
-core::ptr::drop_glue::<vol::cli::argparse::Action>
-core::ptr::drop_glue::<alloc::vec::Vec<(alloc::string::String, vol::cli::argparse::PyVal)>>
+<fvol::cli::argparse::Parser>::match_arguments_partial::m
+core::ptr::drop_glue::<fvol::cli::argparse::Parser>
+core::ptr::drop_glue::<fvol::cli::argparse::Action>
+core::ptr::drop_glue::<alloc::vec::Vec<(alloc::string::String, fvol::cli::argparse::PyVal)>>
 _int_free_chunk
 write
 <alloc::raw_vec::RawVec<core::option::Option<u64>>>::grow_one
 alloc::str::join_generic_copy::<str, u8, &str>
 <[u8]>::repeat
-core::ptr::drop_glue::<[vol::cli::argparse::PyVal]>
-<alloc::rc::Rc<dyn for<'a> core::ops::function::Fn<(&'a str,), Output = vol::cli::argparse::Parser>>>::drop_slow
-core::ptr::drop_glue::<<vol::plugins::generic::timeliner::Merge>::sorted_rows::{closure#12}>
-core::ptr::drop_glue::<vol::cli::add_late_arguments::{closure#3}>
+core::ptr::drop_glue::<[fvol::cli::argparse::PyVal]>
+<alloc::rc::Rc<dyn for<'a> core::ops::function::Fn<(&'a str,), Output = fvol::cli::argparse::Parser>>>::drop_slow
+core::ptr::drop_glue::<<fvol::plugins::generic::timeliner::Merge>::sorted_rows::{closure#12}>
+core::ptr::drop_glue::<fvol::cli::add_late_arguments::{closure#3}>
 isatty
 <std::sys::sync::once::futex::Once>::call
 <alloc::raw_vec::RawVec<alloc::string::String>>::grow_one
-core::ptr::drop_glue::<vol::cli::argparse::Namespace>
+core::ptr::drop_glue::<fvol::cli::argparse::Namespace>
 <std::io::stdio::Stderr as core::io::write::Write>::flush
 <std::sync::once_lock::OnceLock<std::sync::reentrant_lock::ReentrantLock<core::cell::RefCell<alloc::io::buffered::linewriter::LineWriter<std::io::stdio::StdoutRaw>>>>>::initialize::<<std::sync::once_lock::OnceLock<std::sync::reentrant_lock::ReentrantLock<core::cell::RefCell<alloc::io::buffered::linewriter::LineWriter<std::io::stdio::StdoutRaw>>>>>::get_or_init<std::io::stdio::stdout::{closure#0}>::{closure#0}, !>
 <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::sync::reentrant_lock::ReentrantLock<core::cell::RefCell<alloc::io::buffered::linewriter::LineWriter<std::io::stdio::StdoutRaw>>>>>::initialize<<std::sync::once_lock::OnceLock<std::sync::reentrant_lock::ReentrantLock<core::cell::RefCell<alloc::io::buffered::linewriter::LineWriter<std::io::stdio::StdoutRaw>>>>>::get_or_init<std::io::stdio::stdout::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
 <std::io::stdio::Stdout as core::io::write::Write>::flush
 <alloc::io::buffered::bufwriter::BufWriter<std::io::stdio::StdoutRaw>>::flush_buf
-vol::util::bg::join_all
-vol::util::exit::detach_teardown
+fvol::util::bg::join_all
+fvol::util::exit::detach_teardown
 getauxval
 core::slice::sort::shared::smallsort::insertion_sort_shift_left::<(bool, usize, usize), <(bool, usize, usize) as core::cmp::PartialOrd>::lt>
 std::process::exit
@@ -435,125 +435,125 @@ _IO_flush_all
 __libc_cleanup_push_defer
 __libc_cleanup_pop_restore
 _exit
-<vol::cli::argparse::Parser>::get_value
-<vol::cli::argparse::Parser>::check_value
+<fvol::cli::argparse::Parser>::get_value
+<fvol::cli::argparse::Parser>::check_value
 <alloc::string::String as core::clone::Clone>::clone
-<vol::cli::argparse::PyVal>::py_str
-vol::cli::split_doc
+<fvol::cli::argparse::PyVal>::py_str
+fvol::cli::split_doc
 <core::str::pattern::StrSearcher>::new
 <core::str::pattern::StrSearcher as core::str::pattern::Searcher>::next_match
 <str>::trim_matches::<<char>::is_whitespace>
-<vol::plugins::mac::list_files::ListFiles as vol::plugins::Plugin>::epilog
-<vol::cli::RawStdout as core::io::write::Write>::write_all
-vol::cli::add_late_arguments::{closure#3}
-core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<(alloc::borrow::Cow<str>, vol::cli::argparse::PyVal)>>
+<fvol::plugins::mac::list_files::ListFiles as fvol::plugins::Plugin>::epilog
+<fvol::cli::RawStdout as core::io::write::Write>::write_all
+fvol::cli::add_late_arguments::{closure#3}
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<(alloc::borrow::Cow<str>, fvol::cli::argparse::PyVal)>>
 <alloc::raw_vec::RawVecInner>::try_allocate_in
-<vol::cli::argparse::Namespace>::str
-vol::cli::location_from_file
-vol::cli::url_scheme
-vol::cli::abspath
-vol::cli::normpath
+<fvol::cli::argparse::Namespace>::str
+fvol::cli::location_from_file
+fvol::cli::url_scheme
+fvol::cli::abspath
+fvol::cli::normpath
 std::sys::fs::metadata
 std::sys::fs::unix::try_statx
 syscall
-vol::cli::quote_path
-core::ptr::drop_glue::<core::option::Option<vol::cli::Location>>
-vol::cli::path_exists
-<vol::cli::argparse::Namespace>::get
-vol::cli::run_inner::{closure#18}
+fvol::cli::quote_path
+core::ptr::drop_glue::<core::option::Option<fvol::cli::Location>>
+fvol::cli::path_exists
+<fvol::cli::argparse::Namespace>::get
+fvol::cli::run_inner::{closure#18}
 core::ptr::drop_glue::<core::option::Option<alloc::vec::Vec<alloc::string::String>>>
 core::ptr::drop_glue::<alloc::vec::Vec<alloc::string::String>>
-<vol::plugins::Config as core::clone::Clone>::clone
-vol::cli::run_inner::{closure#23}
-<vol::cli::argparse::Namespace>::bool
-core::ptr::drop_glue::<hashbrown::raw::RawTable<(alloc::string::String, vol::plugins::ConfigValue)>>
-<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::slice::iter::Iter<vol::cli::argparse::PyVal>, vol::cli::run_inner::{closure#28}>>>::from_iter
-vol::cli::execute
-<vol::context::Context>::new
-<vol::symbols::store::SymbolPath>::new
-<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<vol::util::paths::current_exe::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<vol::util::paths::current_exe::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+<fvol::plugins::Config as core::clone::Clone>::clone
+fvol::cli::run_inner::{closure#23}
+<fvol::cli::argparse::Namespace>::bool
+core::ptr::drop_glue::<hashbrown::raw::RawTable<(alloc::string::String, fvol::plugins::ConfigValue)>>
+<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::slice::iter::Iter<fvol::cli::argparse::PyVal>, fvol::cli::run_inner::{closure#28}>>>::from_iter
+fvol::cli::execute
+<fvol::context::Context>::new
+<fvol::symbols::store::SymbolPath>::new
+<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<fvol::util::paths::current_exe::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<fvol::util::paths::current_exe::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
 std::env::current_exe
 readlink
 <std::path::Components as core::iter::traits::double_ended::DoubleEndedIterator>::next_back
 <std::path::Components>::parse_next_component_back
 <std::path::Components>::as_path
 <std::path::Path>::_join
-<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<vol::symbols::store::python_install>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<vol::symbols::store::python_install>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::symbols::store::python_install::{closure#0}
-vol::util::paths::vol3_cache_dir
-<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::xdg_cache_home::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::xdg_cache_home::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::renderers::text::create
+<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<fvol::symbols::store::python_install>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<fvol::symbols::store::python_install>::{closure#0}, !>::{closure#0}>::{closure#0}
+fvol::symbols::store::python_install::{closure#0}
+fvol::util::paths::vol3_cache_dir
+<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<fvol::util::paths::xdg_cache_home::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<fvol::util::paths::xdg_cache_home::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+fvol::renderers::text::create
 sysmalloc_mmap
 mmap64
 __set_vma_name
 __is_decorate_maps_enabled
-<vol::renderers::text::Base>::set_columns
-<vol::renderers::text::Base>::compute_hidden
-<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<vol::util::trace::enabled::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<vol::util::trace::enabled::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn vol::layers::Layer>, &dyn vol::layers::Layer), alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn vol::layers::Layer>, &dyn vol::layers::Layer), alloc::string::String>>>::get_or_init<<vol::context::Context>::physical_arc::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn vol::layers::Layer>, &dyn vol::layers::Layer), alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn vol::layers::Layer>, &dyn vol::layers::Layer), alloc::string::String>>>::get_or_init<<vol::context::Context>::physical_arc::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-<vol::context::Context>::image_path
-<vol::context::Context>::image_url
-<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::get_or_init<<vol::context::Context>::image_path::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::get_or_init<<vol::context::Context>::image_path::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::util::resource::open
-<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::rsvol_cache_dir::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::rsvol_cache_dir::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::util::resource::open_in
-<vol::layers::file::FileLayer>::open
+<fvol::renderers::text::Base>::set_columns
+<fvol::renderers::text::Base>::compute_hidden
+<std::sync::once_lock::OnceLock<bool>>::initialize::<<std::sync::once_lock::OnceLock<bool>>::get_or_init<fvol::util::trace::enabled::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<bool>>::initialize<<std::sync::once_lock::OnceLock<bool>>::get_or_init<fvol::util::trace::enabled::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn fvol::layers::Layer>, &dyn fvol::layers::Layer), alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn fvol::layers::Layer>, &dyn fvol::layers::Layer), alloc::string::String>>>::get_or_init<<fvol::context::Context>::physical_arc::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn fvol::layers::Layer>, &dyn fvol::layers::Layer), alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<(alloc::sync::Arc<dyn fvol::layers::Layer>, &dyn fvol::layers::Layer), alloc::string::String>>>::get_or_init<<fvol::context::Context>::physical_arc::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+<fvol::context::Context>::image_path
+<fvol::context::Context>::image_url
+<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::get_or_init<<fvol::context::Context>::image_path::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::get_or_init<<fvol::context::Context>::image_path::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+fvol::util::resource::open
+<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<fvol::util::paths::cache_dir::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<fvol::util::paths::cache_dir::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+fvol::util::resource::open_in
+<fvol::layers::file::FileLayer>::open
 <std::fs::OpenOptions>::_open
-vol::util::paths::canonicalize
+fvol::util::paths::canonicalize
 std::sys::fs::canonicalize
 std::sys::fs::unix::canonicalize
 realpath
 <alloc::raw_vec::RawVec<(std::path::PathBuf, std::path::PathBuf)>>::grow_one
-vol::layers::containers::stack_with
-core::ptr::drop_glue::<vol::error::Error>
-vol::layers::containers::elf::check_header
-<vol::layers::containers::Base>::bytes
-vol::layers::containers::lime::check_header
+fvol::layers::containers::stack_with
+core::ptr::drop_glue::<fvol::error::Error>
+fvol::layers::containers::elf::check_header
+<fvol::layers::containers::Base>::bytes
+fvol::layers::containers::lime::check_header
 <u32 as core::fmt::LowerHex>::fmt
 <core::fmt::Formatter>::pad_integral
 <core::fmt::Formatter>::pad_integral::write_prefix
 <usize as core::fmt::LowerHex>::fmt
-vol::layers::containers::crash::check_header
+fvol::layers::containers::crash::check_header
 <core::option::Option<alloc::string::String> as alloc::vec::spec_from_elem::SpecFromElem>::from_elem::<alloc::alloc::Global>
-vol::layers::containers::describe::construct
-vol::layers::containers::describe::list
+fvol::layers::containers::describe::construct
+fvol::layers::containers::describe::list
 <std::sync::once_lock::OnceLock<alloc::string::String>>::initialize::<<std::sync::once_lock::OnceLock<alloc::string::String>>::get_or_init<<std::sync::once_lock::OnceLock<alloc::string::String>>::try_insert::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<vol::layers::containers::StackEntry>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<vol::layers::containers::StackEntry>>>::get_or_init<<std::sync::once_lock::OnceLock<alloc::vec::Vec<vol::layers::containers::StackEntry>>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-core::ptr::drop_glue::<alloc::vec::Vec<vol::layers::containers::Node>>
-vol::automagic::cache::load
-vol::automagic::cache::key_for
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fvol::layers::containers::StackEntry>>>::initialize<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fvol::layers::containers::StackEntry>>>::get_or_init<<std::sync::once_lock::OnceLock<alloc::vec::Vec<fvol::layers::containers::StackEntry>>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+core::ptr::drop_glue::<alloc::vec::Vec<fvol::layers::containers::Node>>
+fvol::automagic::cache::load
+fvol::automagic::cache::key_for
 <std::path::Components as core::cmp::PartialEq>::eq
-vol::util::paths::hex
+fvol::util::paths::hex
 std::fs::read_to_string::inner
 alloc::io::read::default_read_to_end::<std::fs::File>
 read
 alloc::io::read::default_read_to_end::small_probe_read::<std::fs::File>
 close
-<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<core::str::iter::Lines, vol::symbols::store::find_location_cached::{closure#1}>, vol::symbols::store::find_location_cached::{closure#2}> as core::iter::traits::iterator::Iterator>::next
+<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<core::str::iter::Lines, fvol::symbols::store::find_location_cached::{closure#1}>, fvol::symbols::store::find_location_cached::{closure#2}> as core::iter::traits::iterator::Iterator>::next
 <core::str::iter::Lines as core::iter::traits::iterator::Iterator>::next
 <core::str::pattern::StrSearcher as core::str::pattern::Searcher>::next
-vol::automagic::cache::get
+fvol::automagic::cache::get
 core::ptr::drop_glue::<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>
-<vol::layers::intel::IntelLayer>::new
-<vol::layers::intel::IntelLayer>::with_table_cache
-vol::symbols::symbol_path
-vol::symbols::remote_isf_url
-<&vol::symbols::store::Root as core::fmt::Debug>::fmt
+<fvol::layers::intel::IntelLayer>::new
+<fvol::layers::intel::IntelLayer>::with_table_cache
+fvol::symbols::symbol_path
+fvol::symbols::remote_isf_url
+<&fvol::symbols::store::Root as core::fmt::Debug>::fmt
 <core::str::lossy::Debug as core::fmt::Debug>::fmt
 <alloc::string::String as core::fmt::Write>::write_char
 <char>::escape_debug_ext
 <core::fmt::builders::DebugStruct>::field
 <&bool as core::fmt::Debug>::fmt
-vol::symbols::store::choice_deps_hold
-vol::symbols::store::seed_state
-vol::symbols::store::py_seed
+fvol::symbols::store::choice_deps_hold
+fvol::symbols::store::seed_state
+fvol::symbols::store::py_seed
 <std::path::Display as core::fmt::Display>::fmt
 <core::bstr::ByteStr as core::fmt::Display>::fmt
 <u64 as core::fmt::Display>::fmt
@@ -562,187 +562,187 @@ vol::symbols::store::py_seed
 <std::sys::pal::unix::time::Timespec>::now
 clock_gettime
 <std::sys::pal::unix::time::Timespec>::sub_timespec
-vol::symbols::store::stamp_bytes
-vol::util::paths::path_to_file_uri
-vol::symbols::load_location
-<vol::symbols::store::IsfLocation>::url
-vol::symbols::store::load
-vol::symbols::store::cache_file
-vol::symbols::store::source_identity
+fvol::symbols::store::stamp_bytes
+fvol::util::paths::path_to_file_uri
+fvol::symbols::load_location
+<fvol::symbols::store::IsfLocation>::url
+fvol::symbols::store::load
+fvol::symbols::store::cache_file
+fvol::symbols::store::source_identity
 <alloc::raw_vec::RawVec<u8>>::grow_one
-vol::symbols::store::key_lock
+fvol::symbols::store::key_lock
 <alloc::raw_vec::RawVec<(alloc::vec::Vec<u8>, alloc::sync::Arc<std::sync::poison::mutex::Mutex<()>>)>>::grow_one
-vol::symbols::store::load_known
-<vol::symbols::table::SymbolTable>::from_blob
-<alloc::boxed::Box<[core::sync::atomic::Atomic<u8>]> as core::iter::traits::collect::FromIterator<core::sync::atomic::Atomic<u8>>>::from_iter::<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <vol::symbols::table::SymbolTable>::from_blob::{closure#1}>>
-vol::symbols::register
+fvol::symbols::store::load_known
+<fvol::symbols::table::SymbolTable>::from_blob
+<alloc::boxed::Box<[core::sync::atomic::Atomic<u8>]> as core::iter::traits::collect::FromIterator<core::sync::atomic::Atomic<u8>>>::from_iter::<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <fvol::symbols::table::SymbolTable>::from_blob::{closure#1}>>
+fvol::symbols::register
 <i32 as core::fmt::Display>::fmt
-<hashbrown::map::HashMap<alloc::string::String, &vol::symbols::table::SymbolTable, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
-<hashbrown::raw::RawTable<(alloc::string::String, &vol::symbols::table::SymbolTable)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, &vol::symbols::table::SymbolTable, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<vol::objects::Space>::get
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::address_mask
+<hashbrown::map::HashMap<alloc::string::String, &fvol::symbols::table::SymbolTable, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::insert
+<hashbrown::raw::RawTable<(alloc::string::String, &fvol::symbols::table::SymbolTable)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, &fvol::symbols::table::SymbolTable, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+<fvol::objects::Space>::get
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::address_mask
 __log2_fma
-<hashbrown::raw::RawTable<((usize, usize, usize), &vol::objects::Space)>>::reserve_rehash::<hashbrown::map::make_hasher<(usize, usize, usize), &vol::objects::Space, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<vol::symbols::table::SymbolTable>::get_symbol
-<vol::symbols::table::SymbolTable>::lookup
-<vol::symbols::table::SymbolTable>::get_type
-<vol::symbols::table::SymbolTable>::member
-<vol::symbols::table::SymbolTable>::validate_type
-<vol::objects::Obj>::m
-<vol::layers::intel::IntelLayer>::translate_raw
-<vol::layers::intel::IntelLayer>::translate_entry_ex
-<vol::layers::intel::IntelLayer>::table_valid
-<vol::objects::Obj>::int
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::read
-<vol::layers::intel::IntelLayer>::read_impl
-vol::objects::strings::decode
-core::ptr::drop_glue::<vol::renderers::Value>
-<vol::cli::RawStdout as core::io::write::Write>::flush
-core::ptr::drop_glue::<vol::renderers::text::Base>
+<hashbrown::raw::RawTable<((usize, usize, usize), &fvol::objects::Space)>>::reserve_rehash::<hashbrown::map::make_hasher<(usize, usize, usize), &fvol::objects::Space, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+<fvol::symbols::table::SymbolTable>::get_symbol
+<fvol::symbols::table::SymbolTable>::lookup
+<fvol::symbols::table::SymbolTable>::get_type
+<fvol::symbols::table::SymbolTable>::member
+<fvol::symbols::table::SymbolTable>::validate_type
+<fvol::objects::Obj>::m
+<fvol::layers::intel::IntelLayer>::translate_raw
+<fvol::layers::intel::IntelLayer>::translate_entry_ex
+<fvol::layers::intel::IntelLayer>::table_valid
+<fvol::objects::Obj>::int
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::read
+<fvol::layers::intel::IntelLayer>::read_impl
+fvol::objects::strings::decode
+core::ptr::drop_glue::<fvol::renderers::Value>
+<fvol::cli::RawStdout as core::io::write::Write>::flush
+core::ptr::drop_glue::<fvol::renderers::text::Base>
 munmap_chunk
 munmap
-core::ptr::drop_glue::<vol::renderers::text::RenderOptions>
-core::ptr::drop_glue::<vol::context::Context>
-core::ptr::drop_glue::<vol::context::GlobalOptions>
-core::ptr::drop_glue::<std::sync::once_lock::OnceLock<alloc::vec::Vec<vol::layers::containers::StackEntry>>>
-core::ptr::drop_glue::<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>
-core::ptr::drop_glue::<alloc::vec::Vec<vol::plugins::Requirement>>
-<vol::plugins::Config>::get
-<vol::renderers::text::Quick as vol::renderers::RowSink>::begin
+core::ptr::drop_glue::<fvol::renderers::text::RenderOptions>
+core::ptr::drop_glue::<fvol::context::Context>
+core::ptr::drop_glue::<fvol::context::GlobalOptions>
+core::ptr::drop_glue::<std::sync::once_lock::OnceLock<alloc::vec::Vec<fvol::layers::containers::StackEntry>>>
+core::ptr::drop_glue::<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::mac::MacKernel, alloc::string::String>>>
+core::ptr::drop_glue::<alloc::vec::Vec<fvol::plugins::Requirement>>
+<fvol::plugins::Config>::get
+<fvol::renderers::text::Quick as fvol::renderers::RowSink>::begin
 <str>::to_uppercase
-vol::symbols::store::unhex
-vol::objects::resolve_named
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::is_valid
-<vol::symbols::table::SymbolTable>::node
-<vol::symbols::table::SymbolTable>::size_of
-<vol::objects::Obj>::deref
-<std::sync::once_lock::OnceLock<&vol::objects::Space>>::initialize::<<std::sync::once_lock::OnceLock<&vol::objects::Space>>::get_or_init<<vol::objects::Space>::native_space::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<&vol::objects::Space>>::initialize<<std::sync::once_lock::OnceLock<&vol::objects::Space>>::get_or_init<<vol::objects::Space>::native_space::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-<hashbrown::map::HashMap<u64, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
-<hashbrown::raw::RawTable<(u64, ())>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-vol::objects::strings::decode_utf8
-<vol::renderers::text::Quick as vol::renderers::RowSink>::row
-<vol::renderers::text::Quick as vol::renderers::RowSink>::row_ref
-vol::renderers::text::render_cell
-<vol::renderers::text::Quick as vol::renderers::text::TextRenderer>::finish
-core::ptr::drop_glue::<vol::renderers::text::Csv>
-vol::cli::cv_to_pyval
-core::ptr::drop_glue::<vol::plugins::ConfigValue>
-<vol::cli::argparse::PyVal as core::clone::Clone>::clone
-vol::cli::pyval_to_cv
-<vol::plugins::Config>::set
-<hashbrown::raw::RawTable<(alloc::string::String, vol::plugins::ConfigValue)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, vol::plugins::ConfigValue, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-core::ptr::drop_glue::<vol::cli::argparse::PyVal>
-<vol::plugins::ConfigValue as core::clone::Clone>::clone
-vol::automagic::stackers_key
-<vol::layers::registry::RegistryHive as vol::layers::Layer>::as_registry_hive
+fvol::symbols::store::unhex
+fvol::objects::resolve_named
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::is_valid
+<fvol::symbols::table::SymbolTable>::node
+<fvol::symbols::table::SymbolTable>::size_of
+<fvol::objects::Obj>::deref
+<std::sync::once_lock::OnceLock<&fvol::objects::Space>>::initialize::<<std::sync::once_lock::OnceLock<&fvol::objects::Space>>::get_or_init<<fvol::objects::Space>::native_space::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<&fvol::objects::Space>>::initialize<<std::sync::once_lock::OnceLock<&fvol::objects::Space>>::get_or_init<<fvol::objects::Space>::native_space::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+<hashbrown::map::HashMap<u64, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::insert
+<hashbrown::raw::RawTable<(u64, ())>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+fvol::objects::strings::decode_utf8
+<fvol::renderers::text::Quick as fvol::renderers::RowSink>::row
+<fvol::renderers::text::Quick as fvol::renderers::RowSink>::row_ref
+fvol::renderers::text::render_cell
+<fvol::renderers::text::Quick as fvol::renderers::text::TextRenderer>::finish
+core::ptr::drop_glue::<fvol::renderers::text::Csv>
+fvol::cli::cv_to_pyval
+core::ptr::drop_glue::<fvol::plugins::ConfigValue>
+<fvol::cli::argparse::PyVal as core::clone::Clone>::clone
+fvol::cli::pyval_to_cv
+<fvol::plugins::Config>::set
+<hashbrown::raw::RawTable<(alloc::string::String, fvol::plugins::ConfigValue)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, fvol::plugins::ConfigValue, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+core::ptr::drop_glue::<fvol::cli::argparse::PyVal>
+<fvol::plugins::ConfigValue as core::clone::Clone>::clone
+fvol::automagic::stackers_key
+<fvol::layers::registry::RegistryHive as fvol::layers::Layer>::as_registry_hive
 <str>::trim_matches::<char>
-<vol::plugins::Config>::get_ints
-vol::symbols::resolve_ref
-<vol::objects::Obj>::is_readable
-<alloc::raw_vec::RawVec<core::result::Result<core::option::Option<vol::objects::Obj>, vol::error::Error>>>::grow_one
-vol::renderers::pyfmt::push_u64
-core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<core::result::Result<core::option::Option<vol::objects::Obj>, vol::error::Error>>>
-vol::objects::strings::parse_encoding
-<vol::plugins::Config>::get_bool
-<std::sync::once_lock::OnceLock<core::result::Result<vol::context::WinKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<vol::context::WinKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::windows_kernel::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<vol::context::WinKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<vol::context::WinKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::windows_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-<vol::context::Context>::windows_kernel::{closure#0}
-<vol::context::Context>::init_windows::{closure#1}::{closure#0}
+<fvol::plugins::Config>::get_ints
+fvol::symbols::resolve_ref
+<fvol::objects::Obj>::is_readable
+<alloc::raw_vec::RawVec<core::result::Result<core::option::Option<fvol::objects::Obj>, fvol::error::Error>>>::grow_one
+fvol::renderers::pyfmt::push_u64
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<core::result::Result<core::option::Option<fvol::objects::Obj>, fvol::error::Error>>>
+fvol::objects::strings::parse_encoding
+<fvol::plugins::Config>::get_bool
+<std::sync::once_lock::OnceLock<core::result::Result<fvol::context::WinKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<fvol::context::WinKernel, alloc::string::String>>>::get_or_init<<fvol::context::Context>::windows_kernel::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<fvol::context::WinKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<fvol::context::WinKernel, alloc::string::String>>>::get_or_init<<fvol::context::Context>::windows_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+<fvol::context::Context>::windows_kernel::{closure#0}
+<fvol::context::Context>::init_windows::{closure#1}::{closure#0}
 <u32>::from_ascii_bytes_radix_impl
-<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<alloc::string::String>>, <vol::context::Context>::init_windows::{closure#7}> as core::iter::traits::iterator::Iterator>::next
-core::ptr::drop_glue::<alloc::vec::Vec<alloc::sync::Arc<dyn vol::layers::Layer>>>
-vol::symbols::store::find_windows_isf
+<core::iter::adapters::filter_map::FilterMap<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<alloc::string::String>>, <fvol::context::Context>::init_windows::{closure#7}> as core::iter::traits::iterator::Iterator>::next
+core::ptr::drop_glue::<alloc::vec::Vec<alloc::sync::Arc<dyn fvol::layers::Layer>>>
+fvol::symbols::store::find_windows_isf
 <u32 as core::fmt::Display>::fmt
-<alloc::vec::Vec<vol::symbols::store::Root> as core::fmt::Debug>::fmt
-vol::util::paths::unquote
-core::ptr::drop_glue::<core::option::Option<vol::util::trace::Span>>
-core::ptr::drop_glue::<std::collections::hash::map::HashMap<usize, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>
-<vol::objects::Obj>::string
-<dyn vol::layers::Layer as vol::layers::LayerExt>::read_vec
-vol::objects::strings::decode_cstring
-<vol::objects::Obj>::has_member
-<vol::symbols::table::SymbolTable>::user_type_name
-<vol::objects::Obj>::path
+<alloc::vec::Vec<fvol::symbols::store::Root> as core::fmt::Debug>::fmt
+fvol::util::paths::unquote
+core::ptr::drop_glue::<core::option::Option<fvol::util::trace::Span>>
+core::ptr::drop_glue::<std::collections::hash::map::HashMap<usize, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>
+<fvol::objects::Obj>::string
+<dyn fvol::layers::Layer as fvol::layers::LayerExt>::read_vec
+fvol::objects::strings::decode_cstring
+<fvol::objects::Obj>::has_member
+<fvol::symbols::table::SymbolTable>::user_type_name
+<fvol::objects::Obj>::path
 __divti3
-vol::renderers::pyfmt::date_bytes
-vol::objects::util::address_to_string
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::lower
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::mapping
-<vol::layers::intel::IntelLayer>::mapping_with_targets
-<vol::layers::intel::RangeWalk<<vol::layers::intel::IntelLayer>::mapping_with_targets::{closure#0}>>::table
-<vol::layers::intel::IntelLayer>::translate_cursor
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::mapping::{closure#0}
-vol::objects::util::gather_contiguous_bytes::{closure#0}
-vol::objects::strings::bytes_to_decoded_string
-<vol::plugins::windows::pslist::PsList as vol::plugins::Plugin>::description
-vol::symbols::store::find_location_cached::{closure#5}
-vol::symbols::pycache::location_of
-vol::plugins::windows::pslist::list_processes
-<vol::symbols::table::SymbolTable>::offset_of
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::to_list
-<vol::symbols::windows::ext::ListIter as core::iter::traits::iterator::Iterator>::next
-vol::symbols::windows::ext::next_link
-vol::plugins::windows::pslist::pid_filter::{closure#0}
-core::ptr::drop_glue::<vol::symbols::windows::ext::ListState>
-core::ptr::drop_glue::<vol::symbols::windows::ext::ListIter>
-<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::run::{closure#0}
-vol::renderers::pyfmt::push_datetime_cli
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::as_intel
-<vol::objects::Module>::object_abs
-<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::str::iter::Split<char>, vol::cli::run_inner::{closure#21}>>>::from_iter
-<core::iter::adapters::map::Map<core::str::iter::Split<char>, vol::cli::run_inner::{closure#21}> as core::iter::traits::iterator::Iterator>::next
-<alloc::raw_vec::RawVec<core::option::Option<vol::automagic::windows::PdbSig>>>::grow_one
-<alloc::raw_vec::RawVec<vol::util::resource::Codec>>::grow_one
-<vol::symbols::store::SymbolPath>::os_fingerprint
-vol::automagic::mac::cache_load::{closure#0}
-<vol::objects::Module>::object_from_symbol
+fvol::renderers::pyfmt::date_bytes
+fvol::objects::util::address_to_string
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::lower
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::mapping
+<fvol::layers::intel::IntelLayer>::mapping_with_targets
+<fvol::layers::intel::RangeWalk<<fvol::layers::intel::IntelLayer>::mapping_with_targets::{closure#0}>>::table
+<fvol::layers::intel::IntelLayer>::translate_cursor
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::mapping::{closure#0}
+fvol::objects::util::gather_contiguous_bytes::{closure#0}
+fvol::objects::strings::bytes_to_decoded_string
+<fvol::plugins::windows::pslist::PsList as fvol::plugins::Plugin>::description
+fvol::symbols::store::find_location_cached::{closure#5}
+fvol::symbols::pycache::location_of
+fvol::plugins::windows::pslist::list_processes
+<fvol::symbols::table::SymbolTable>::offset_of
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::to_list
+<fvol::symbols::windows::ext::ListIter as core::iter::traits::iterator::Iterator>::next
+fvol::symbols::windows::ext::next_link
+fvol::plugins::windows::pslist::pid_filter::{closure#0}
+core::ptr::drop_glue::<fvol::symbols::windows::ext::ListState>
+core::ptr::drop_glue::<fvol::symbols::windows::ext::ListIter>
+<fvol::plugins::linux::pslist::PsList as fvol::plugins::Plugin>::run::{closure#0}
+fvol::renderers::pyfmt::push_datetime_cli
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::as_intel
+<fvol::objects::Module>::object_abs
+<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::str::iter::Split<char>, fvol::cli::run_inner::{closure#21}>>>::from_iter
+<core::iter::adapters::map::Map<core::str::iter::Split<char>, fvol::cli::run_inner::{closure#21}> as core::iter::traits::iterator::Iterator>::next
+<alloc::raw_vec::RawVec<core::option::Option<fvol::automagic::windows::PdbSig>>>::grow_one
+<alloc::raw_vec::RawVec<fvol::util::resource::Codec>>::grow_one
+<fvol::symbols::store::SymbolPath>::os_fingerprint
+fvol::automagic::mac::cache_load::{closure#0}
+<fvol::objects::Module>::object_from_symbol
 __open_nocancel
 __read_nocancel
 lseek64
-<vol::plugins::windows::pslist::PsList as vol::plugins::Plugin>::requirements
-<vol::plugins::windows::pslist::PsList as vol::plugins::Plugin>::run
-vol::plugins::windows::pslist::rows
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_handle_count
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_session_id
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_is_wow64
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_wow_64_process
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_create_time
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_exit_time
-<vol::renderers::Value as core::clone::Clone>::clone
-<vol::plugins::windows::info::Info as vol::plugins::Plugin>::description
-<vol::symbols::table::SymbolTable>::base_type_ty
-<alloc::raw_vec::RawVec<core::result::Result<vol::plugins::windows::handles::HandleItem, vol::error::Error>>>::grow_one
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::name
-<vol::objects::Module>::object
+<fvol::plugins::windows::pslist::PsList as fvol::plugins::Plugin>::requirements
+<fvol::plugins::windows::pslist::PsList as fvol::plugins::Plugin>::run
+fvol::plugins::windows::pslist::rows
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_handle_count
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_session_id
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_is_wow64
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_wow_64_process
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_create_time
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_exit_time
+<fvol::renderers::Value as core::clone::Clone>::clone
+<fvol::plugins::windows::info::Info as fvol::plugins::Plugin>::description
+<fvol::symbols::table::SymbolTable>::base_type_ty
+<alloc::raw_vec::RawVec<core::result::Result<fvol::plugins::windows::handles::HandleItem, fvol::error::Error>>>::grow_one
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::name
+<fvol::objects::Module>::object
 <i64 as core::fmt::Display>::fmt
-vol::objects::strings::decode_utf16
-<vol::symbols::table::SymbolTable>::enum_constants
-<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::description
-<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::linux::LinuxKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::linux::LinuxKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::linux_kernel::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::linux::LinuxKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::linux::LinuxKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::linux_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::automagic::linux::init
-<vol::layers::containers::segmented::SegmentedLayer>::with_blocks
-<vol::layers::containers::segmented::SegmentedLayer>::build
-core::slice::sort::shared::smallsort::insertion_sort_shift_left::<vol::layers::containers::segmented::Seg, <[vol::layers::containers::segmented::Seg]>::sort_by_key<u64, <vol::layers::containers::segmented::SegmentedLayer>::build::{closure#3}>::{closure#0}>
-<vol::layers::containers::segmented::SegmentedLayer as vol::layers::Layer>::read
-vol::automagic::linux::unhex
-vol::automagic::linux::isf_from_key
-vol::automagic::linux::isf_key
-<vol::layers::file::FileLayer as vol::layers::Layer>::as_registry_hive
-<alloc::raw_vec::RawVec<vol::objects::Module>>::grow_one
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::to_list
-<vol::layers::containers::segmented::SegmentedLayer as vol::layers::Layer>::slice
-<vol::layers::containers::segmented::SegmentedLayer as vol::layers::Layer>::is_valid
-vol::symbols::table
-<vol::objects::Field>::new
-vol::symbols::linux::ext::follow
-<vol::symbols::linux::ext::ListIter as core::iter::traits::iterator::Iterator>::next
-core::ptr::drop_glue::<vol::symbols::linux::ext::ListState>
+fvol::objects::strings::decode_utf16
+<fvol::symbols::table::SymbolTable>::enum_constants
+<fvol::plugins::linux::pslist::PsList as fvol::plugins::Plugin>::description
+<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::linux::LinuxKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::linux::LinuxKernel, alloc::string::String>>>::get_or_init<<fvol::context::Context>::linux_kernel::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::linux::LinuxKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::linux::LinuxKernel, alloc::string::String>>>::get_or_init<<fvol::context::Context>::linux_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+fvol::automagic::linux::init
+<fvol::layers::containers::segmented::SegmentedLayer>::with_blocks
+<fvol::layers::containers::segmented::SegmentedLayer>::build
+core::slice::sort::shared::smallsort::insertion_sort_shift_left::<fvol::layers::containers::segmented::Seg, <[fvol::layers::containers::segmented::Seg]>::sort_by_key<u64, <fvol::layers::containers::segmented::SegmentedLayer>::build::{closure#3}>::{closure#0}>
+<fvol::layers::containers::segmented::SegmentedLayer as fvol::layers::Layer>::read
+fvol::automagic::linux::unhex
+fvol::automagic::linux::isf_from_key
+fvol::automagic::linux::isf_key
+<fvol::layers::file::FileLayer as fvol::layers::Layer>::as_registry_hive
+<alloc::raw_vec::RawVec<fvol::objects::Module>>::grow_one
+<fvol::objects::Obj as fvol::symbols::linux::ext::LinuxExt>::to_list
+<fvol::layers::containers::segmented::SegmentedLayer as fvol::layers::Layer>::slice
+<fvol::layers::containers::segmented::SegmentedLayer as fvol::layers::Layer>::is_valid
+fvol::symbols::table
+<fvol::objects::Field>::new
+fvol::symbols::linux::ext::follow
+<fvol::symbols::linux::ext::ListIter as core::iter::traits::iterator::Iterator>::next
+core::ptr::drop_glue::<fvol::symbols::linux::ext::ListState>
 __floattidf
-<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::description
-vol::util::time::fromtimestamp_local
-<std::sync::once::Once>::call_once::<vol::util::time::fromtimestamp_local::{closure#0}>::{closure#0}
+<fvol::plugins::mac::pslist::PsList as fvol::plugins::Plugin>::description
+fvol::util::time::fromtimestamp_local
+<std::sync::once::Once>::call_once::<fvol::util::time::fromtimestamp_local::{closure#0}>::{closure#0}
 tzset
 tzset_internal
 __tzfile_read
@@ -844,7 +844,7 @@ gettid
 arena_get2
 new_heap
 alloc_new_heap
-std::sys::backtrace::__rust_begin_short_backtrace::<std::thread::lifecycle::spawn_unchecked<vol::util::bg::spawn<<vol::symbols::store::IdentifierIndex>::update_with::{closure#5}>::{closure#0}, ()>::{closure#1}::{closure#0}::{closure#0}, ()>
+std::sys::backtrace::__rust_begin_short_backtrace::<std::thread::lifecycle::spawn_unchecked<fvol::util::bg::spawn<<fvol::symbols::store::IdentifierIndex>::update_with::{closure#5}>::{closure#0}, ()>::{closure#1}::{closure#0}::{closure#0}, ()>
 <std::thread::spawnhook::ChildSpawnHooks>::inherit_and_run
 core::ptr::drop_glue::<[alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send>]>
 __syscall_cancel_arch
@@ -868,98 +868,98 @@ pthread_testcancel
 __nptl_free_tcb
 __nptl_deallocate_stack
 <alloc::sync::Arc<std::thread::thread::Inner, std::alloc::System>>::drop_slow
-<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::description
-<vol::plugins::mac::lsmod::Lsmod as vol::plugins::Plugin>::description
-<vol::cli::argparse::Parser>::formatter
+<fvol::plugins::windows::cmdline::CmdLine as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::lsmod::Lsmod as fvol::plugins::Plugin>::description
+<fvol::cli::argparse::Parser>::formatter
 ioctl
 <&alloc::borrow::Cow<str> as core::fmt::Display>::fmt
-<vol::cli::help::Formatter>::format_args
-<vol::cli::help::Formatter>::metavar
-<vol::cli::help::Formatter>::format_usage
+<fvol::cli::help::Formatter>::format_args
+<fvol::cli::help::Formatter>::metavar
+<fvol::cli::help::Formatter>::format_usage
 core::ptr::drop_glue::<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::chain::Chain<alloc::vec::into_iter::IntoIter<alloc::vec::Vec<usize>>, alloc::vec::into_iter::IntoIter<alloc::vec::Vec<usize>>>>>
-<vol::cli::help::Formatter>::format_usage::{closure#2}
+<fvol::cli::help::Formatter>::format_usage::{closure#2}
 <alloc::string::String as core::iter::traits::collect::FromIterator<char>>::from_iter::<core::iter::adapters::skip::Skip<core::str::iter::Chars>>
-vol::renderers::text::push_default
-<vol::plugins::mac::list_files::ListFiles as vol::plugins::Plugin>::requirements
-<vol::plugins::windows::info::Info as vol::plugins::Plugin>::run
-vol::symbols::load_isf
-<&vol::symbols::store::SymbolPath as core::fmt::Pointer>::fmt
-<vol::symbols::table::SymbolTable>::base_type_name
-<vol::symbols::store::SymbolPath>::find_first
-<vol::symbols::store::SymbolPath>::find_first::{closure#0}
-vol::symbols::store::embedded_matches
-vol::symbols::store::embedded_named
+fvol::renderers::text::push_default
+<fvol::plugins::mac::list_files::ListFiles as fvol::plugins::Plugin>::requirements
+<fvol::plugins::windows::info::Info as fvol::plugins::Plugin>::run
+fvol::symbols::load_isf
+<&fvol::symbols::store::SymbolPath as core::fmt::Pointer>::fmt
+<fvol::symbols::table::SymbolTable>::base_type_name
+<fvol::symbols::store::SymbolPath>::find_first
+<fvol::symbols::store::SymbolPath>::find_first::{closure#0}
+fvol::symbols::store::embedded_matches
+fvol::symbols::store::embedded_named
 std::sys::fs::symlink_metadata
-vol::symbols::table::ty_encode
-<vol::plugins::windows::info::Info as vol::plugins::Plugin>::run::{closure#0}
-<vol::symbols::table::SymbolTable>::is_64bit
-vol::layers::metadata
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::own_metadata
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::dependencies
-<vol::layers::file::FileLayer as vol::layers::Layer>::own_metadata
-<vol::layers::file::FileLayer as vol::layers::Layer>::dependencies
-core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<alloc::sync::Arc<dyn vol::layers::Layer>>>
-core::ptr::drop_glue::<vol::cli::Settings>
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::class_name
-<vol::context::Context>::physical_listing
-vol::plugins::windows::info::get_version_structure
+fvol::symbols::table::ty_encode
+<fvol::plugins::windows::info::Info as fvol::plugins::Plugin>::run::{closure#0}
+<fvol::symbols::table::SymbolTable>::is_64bit
+fvol::layers::metadata
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::own_metadata
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::dependencies
+<fvol::layers::file::FileLayer as fvol::layers::Layer>::own_metadata
+<fvol::layers::file::FileLayer as fvol::layers::Layer>::dependencies
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<alloc::sync::Arc<dyn fvol::layers::Layer>>>
+core::ptr::drop_glue::<fvol::cli::Settings>
+<fvol::layers::intel::IntelLayer as fvol::layers::Layer>::class_name
+<fvol::context::Context>::physical_listing
+fvol::plugins::windows::info::get_version_structure
 <i128 as alloc::string::SpecToString>::spec_to_string
-vol::plugins::windows::info::get_kuser_structure
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_time
-vol::util::time::py_str
+fvol::plugins::windows::info::get_kuser_structure
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_time
+fvol::util::time::py_str
 <char as core::fmt::Display>::fmt
-<vol::objects::Obj>::read_string
-<vol::objects::Obj>::description
-<vol::symbols::table::SymbolTable>::enum_base
-<vol::symbols::table::SymbolTable>::enum_lookup
-vol::plugins::windows::info::get_ntheader_structure
-vol::symbols::windows::pe::get_nt_header
-<vol::objects::Obj>::named
-<vol::objects::Obj>::cast
-vol::util::time::asctime
-<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::requirements
-<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::run
-vol::plugins::linux::pslist::list_tasks
-<vol::symbols::table::SymbolTable>::type_name
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::is_valid
-vol::symbols::linux::ext::task_is_valid
-vol::plugins::linux::pslist::pid_filter::{closure#0}
-vol::plugins::linux::pslist::run_rows::{closure#0}
-vol::plugins::linux::pslist::get_task_fields
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::get_boottime
-vol::symbols::linux::vmlinux_of
-<vol::symbols::linux::timespec::Timespec>::from_nsec
+<fvol::objects::Obj>::read_string
+<fvol::objects::Obj>::description
+<fvol::symbols::table::SymbolTable>::enum_base
+<fvol::symbols::table::SymbolTable>::enum_lookup
+fvol::plugins::windows::info::get_ntheader_structure
+fvol::symbols::windows::pe::get_nt_header
+<fvol::objects::Obj>::named
+<fvol::objects::Obj>::cast
+fvol::util::time::asctime
+<fvol::plugins::linux::pslist::PsList as fvol::plugins::Plugin>::requirements
+<fvol::plugins::linux::pslist::PsList as fvol::plugins::Plugin>::run
+fvol::plugins::linux::pslist::list_tasks
+<fvol::symbols::table::SymbolTable>::type_name
+<fvol::objects::Obj as fvol::symbols::linux::ext::LinuxExt>::is_valid
+fvol::symbols::linux::ext::task_is_valid
+fvol::plugins::linux::pslist::pid_filter::{closure#0}
+fvol::plugins::linux::pslist::run_rows::{closure#0}
+fvol::plugins::linux::pslist::get_task_fields
+<fvol::objects::Obj as fvol::symbols::linux::ext::LinuxExt>::get_boottime
+fvol::symbols::linux::vmlinux_of
+<fvol::symbols::linux::timespec::Timespec>::from_nsec
 fmodf64
 __fixdfti
 __fixunsdfti
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::get_parent_pid
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::cred_value
-<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::requirements
-<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::run
-<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::automagic::mac::init
+<fvol::objects::Obj as fvol::symbols::linux::ext::LinuxExt>::get_parent_pid
+<fvol::objects::Obj as fvol::symbols::linux::ext::LinuxExt>::cred_value
+<fvol::plugins::mac::pslist::PsList as fvol::plugins::Plugin>::requirements
+<fvol::plugins::mac::pslist::PsList as fvol::plugins::Plugin>::run
+<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::mac::MacKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<fvol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::mac::MacKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<fvol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<fvol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+fvol::automagic::mac::init
 <std::path::PathBuf as core::fmt::Debug>::fmt
-vol::automagic::mac::loc_decode
-<vol::plugins::Config>::get_str
-vol::plugins::mac::pslist::list_tasks
-<vol::objects::Obj as vol::symbols::mac::MacExt>::walk_list
-vol::plugins::mac::pslist::pid_filter::{closure#0}
+fvol::automagic::mac::loc_decode
+<fvol::plugins::Config>::get_str
+fvol::plugins::mac::pslist::list_tasks
+<fvol::objects::Obj as fvol::symbols::mac::MacExt>::walk_list
+fvol::plugins::mac::pslist::pid_filter::{closure#0}
 alloc::boxed::box_new_uninit
-<vol::renderers::text::Json as vol::renderers::RowSink>::begin
-core::slice::sort::shared::smallsort::insertion_sort_shift_left::<(alloc::string::String, usize), <[(alloc::string::String, usize)]>::sort_by<<vol::renderers::text::Json as vol::renderers::RowSink>::begin::{closure#0}>::{closure#0}>
-vol::renderers::pyfmt::push_json_str
-vol::symbols::store::set_banner_hint
-vol::symbols::store::identifier_index_with
-vol::symbols::pycache::python_symbol_roots
-<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<vol::symbols::store::Root>, vol::symbols::pycache::python_symbol_roots::{closure#0}>, vol::symbols::pycache::python_symbol_roots::{closure#1}> as core::iter::traits::iterator::Iterator>::next
+<fvol::renderers::text::Json as fvol::renderers::RowSink>::begin
+core::slice::sort::shared::smallsort::insertion_sort_shift_left::<(alloc::string::String, usize), <[(alloc::string::String, usize)]>::sort_by<<fvol::renderers::text::Json as fvol::renderers::RowSink>::begin::{closure#0}>::{closure#0}>
+fvol::renderers::pyfmt::push_json_str
+fvol::symbols::store::set_banner_hint
+fvol::symbols::store::identifier_index_with
+fvol::symbols::pycache::python_symbol_roots
+<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<fvol::symbols::store::Root>, fvol::symbols::pycache::python_symbol_roots::{closure#0}>, fvol::symbols::pycache::python_symbol_roots::{closure#1}> as core::iter::traits::iterator::Iterator>::next
 <std::path::PathBuf>::_push
-vol::symbols::pycache::rglob_dirs
-vol::symbols::pycache::rglob_dirs::{closure#0}
+fvol::symbols::pycache::rglob_dirs
+fvol::symbols::pycache::rglob_dirs::{closure#0}
 std::sys::fs::read_dir
 opendir
 opendir_tail
-<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<std::fs::ReadDir, vol::symbols::pycache::rglob_dirs::{closure#0}::{closure#0}>, vol::symbols::pycache::rglob_dirs::{closure#0}::{closure#1}> as core::iter::traits::iterator::Iterator>::next
+<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<std::fs::ReadDir, fvol::symbols::pycache::rglob_dirs::{closure#0}::{closure#0}>, fvol::symbols::pycache::rglob_dirs::{closure#0}::{closure#1}> as core::iter::traits::iterator::Iterator>::next
 <std::sys::fs::unix::ReadDir as core::iter::traits::iterator::Iterator>::next
 readdir64
 getdents64
@@ -968,65 +968,65 @@ getdents64
 dirfd
 closedir
 core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<(std::path::PathBuf, alloc::vec::Vec<(std::ffi::os_str::OsString, bool)>)>>
-vol::symbols::pycache::read
-<vol::util::sqlite::Database>::table
-<vol::util::sqlite::Database>::leaf_cell
-vol::util::sqlite::varint
-vol::util::sqlite::decode_record
-<alloc::raw_vec::RawVec<vol::layers::scancache::Rec<vol::plugins::windows::mftscan::DataBatch>>>::grow_one
-core::ptr::drop_glue::<[vol::util::sqlite::SchemaEntry]>
-<core::ops::range::Range<usize> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::any::check<usize, vol::util::sqlite::parse_create_table::{closure#8}>::{closure#0}, core::ops::control_flow::ControlFlow<()>>
-core::ptr::drop_glue::<alloc::vec::Vec<vol::util::sqlite::Tok>>
-<alloc::vec::Vec<vol::util::sqlite::Value>>::resize
-<vol::util::sqlite::Value as core::clone::Clone>::clone
-<vol::util::sqlite::Value>::into_owned
+fvol::symbols::pycache::read
+<fvol::util::sqlite::Database>::table
+<fvol::util::sqlite::Database>::leaf_cell
+fvol::util::sqlite::varint
+fvol::util::sqlite::decode_record
+<alloc::raw_vec::RawVec<fvol::layers::scancache::Rec<fvol::plugins::windows::mftscan::DataBatch>>>::grow_one
+core::ptr::drop_glue::<[fvol::util::sqlite::SchemaEntry]>
+<core::ops::range::Range<usize> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::any::check<usize, fvol::util::sqlite::parse_create_table::{closure#8}>::{closure#0}, core::ops::control_flow::ControlFlow<()>>
+core::ptr::drop_glue::<alloc::vec::Vec<fvol::util::sqlite::Tok>>
+<alloc::vec::Vec<fvol::util::sqlite::Value>>::resize
+<fvol::util::sqlite::Value as core::clone::Clone>::clone
+<fvol::util::sqlite::Value>::into_owned
 <[u8]>::eq_ignore_ascii_case_chunks::<16>
-<alloc::raw_vec::RawVec<vol::symbols::pycache::CacheRow>>::grow_one
-<vol::symbols::store::IdentifierIndex>::from_python_rows::<<vol::symbols::store::IdentifierIndex>::seeded::{closure#0}>
-vol::symbols::pycache::file_symbol_urls
-vol::symbols::pycache::file_symbol_urls::{closure#0}
-<hashbrown::map::HashMap<alloc::string::String, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
-<hashbrown::raw::RawTable<(alloc::string::String, ())>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<hashbrown::map::HashMap<&str, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
-vol::util::pyset::py_hash_str_seed0
-<vol::util::pyset::PySet<alloc::string::String>>::add
-<vol::util::pyset::PySet<alloc::string::String>>::resize
-vol::util::pyset::insert_clean::<alloc::string::String>
-<hashbrown::map::HashMap<alloc::string::String, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::contains_key::<alloc::string::String>
-<hashbrown::map::HashMap<&str, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::contains_key::<str>
-core::ptr::drop_glue::<vol::symbols::pycache::CacheRow>
-core::ptr::drop_glue::<[vol::util::sqlite::Value; 4]>
-<hashbrown::raw::RawTable<(&str, &vol::symbols::store::IsfLocation)>>::reserve_rehash::<hashbrown::map::make_hasher<&str, &vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<hashbrown::map::HashMap<&str, &vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
-<vol::util::pyset::PySet<alloc::string::String>>::difference
-<vol::util::pyset::PySet<alloc::string::String>>::union
-<vol::util::pyset::PySet<alloc::string::String>>::update
-vol::symbols::pycache::sql_datetime
-vol::symbols::pycache::insert_or_replace
-vol::symbols::pycache::update::<<vol::symbols::store::IdentifierIndex>::seeded::{closure#0}>::{closure#7}
-<hashbrown::raw::RawTable<(alloc::string::String, vol::symbols::store::IsfLocation)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<vol::symbols::store::IsfLocation as core::clone::Clone>::clone
-<hashbrown::map::HashMap<alloc::string::String, vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
-core::ptr::drop_glue::<std::collections::hash::map::HashMap<alloc::string::String, vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>
-core::ptr::drop_glue::<alloc::vec::Vec<(alloc::string::String, vol::symbols::store::IsfLocation)>>
-vol::symbols::pycache::fromisoformat
-vol::util::time::days_from_civil
-<alloc::vec::Vec<&[u8]> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&[u8], core::slice::iter::Split<u8, vol::symbols::pycache::fromisoformat::{closure#2}>>>::from_iter
-vol::symbols::pycache::fromisoformat::{closure#0}
-core::ptr::drop_glue::<vol::symbols::pycache::Updated>
-<alloc::raw_vec::RawVec<((vol::symbols::store::SymbolPath, core::option::Option<alloc::string::String>, alloc::string::String), &vol::symbols::store::IdentifierIndex)>>::grow_one
-<vol::symbols::store::IdentifierIndex>::choice_deps
-vol::symbols::pycache::update_pathname
-vol::symbols::pycache::update_pathname::url_path
-vol::symbols::pycache::mtime_local
+<alloc::raw_vec::RawVec<fvol::symbols::pycache::CacheRow>>::grow_one
+<fvol::symbols::store::IdentifierIndex>::from_python_rows::<<fvol::symbols::store::IdentifierIndex>::seeded::{closure#0}>
+fvol::symbols::pycache::file_symbol_urls
+fvol::symbols::pycache::file_symbol_urls::{closure#0}
+<hashbrown::map::HashMap<alloc::string::String, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::insert
+<hashbrown::raw::RawTable<(alloc::string::String, ())>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+<hashbrown::map::HashMap<&str, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::insert
+fvol::util::pyset::py_hash_str_seed0
+<fvol::util::pyset::PySet<alloc::string::String>>::add
+<fvol::util::pyset::PySet<alloc::string::String>>::resize
+fvol::util::pyset::insert_clean::<alloc::string::String>
+<hashbrown::map::HashMap<alloc::string::String, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::contains_key::<alloc::string::String>
+<hashbrown::map::HashMap<&str, (), core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::contains_key::<str>
+core::ptr::drop_glue::<fvol::symbols::pycache::CacheRow>
+core::ptr::drop_glue::<[fvol::util::sqlite::Value; 4]>
+<hashbrown::raw::RawTable<(&str, &fvol::symbols::store::IsfLocation)>>::reserve_rehash::<hashbrown::map::make_hasher<&str, &fvol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+<hashbrown::map::HashMap<&str, &fvol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::insert
+<fvol::util::pyset::PySet<alloc::string::String>>::difference
+<fvol::util::pyset::PySet<alloc::string::String>>::union
+<fvol::util::pyset::PySet<alloc::string::String>>::update
+fvol::symbols::pycache::sql_datetime
+fvol::symbols::pycache::insert_or_replace
+fvol::symbols::pycache::update::<<fvol::symbols::store::IdentifierIndex>::seeded::{closure#0}>::{closure#7}
+<hashbrown::raw::RawTable<(alloc::string::String, fvol::symbols::store::IsfLocation)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, fvol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+<fvol::symbols::store::IsfLocation as core::clone::Clone>::clone
+<hashbrown::map::HashMap<alloc::string::String, fvol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::insert
+core::ptr::drop_glue::<std::collections::hash::map::HashMap<alloc::string::String, fvol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>
+core::ptr::drop_glue::<alloc::vec::Vec<(alloc::string::String, fvol::symbols::store::IsfLocation)>>
+fvol::symbols::pycache::fromisoformat
+fvol::util::time::days_from_civil
+<alloc::vec::Vec<&[u8]> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&[u8], core::slice::iter::Split<u8, fvol::symbols::pycache::fromisoformat::{closure#2}>>>::from_iter
+fvol::symbols::pycache::fromisoformat::{closure#0}
+core::ptr::drop_glue::<fvol::symbols::pycache::Updated>
+<alloc::raw_vec::RawVec<((fvol::symbols::store::SymbolPath, core::option::Option<alloc::string::String>, alloc::string::String), &fvol::symbols::store::IdentifierIndex)>>::grow_one
+<fvol::symbols::store::IdentifierIndex>::choice_deps
+fvol::symbols::pycache::update_pathname
+fvol::symbols::pycache::update_pathname::url_path
+fvol::symbols::pycache::mtime_local
 <alloc::ffi::c_str::CString>::_from_vec_unchecked
 pthread_self
 pthread_setname_np
 prctl
-<std::thread::lifecycle::spawn_unchecked<vol::util::bg::spawn<vol::symbols::store::find_location_cached::{closure#8}>::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
-std::sys::backtrace::__rust_begin_short_backtrace::<vol::util::bg::spawn<vol::symbols::store::find_location_cached::{closure#8}>::{closure#0}, ()>
-vol::util::paths::write_atomic_parts
+<std::thread::lifecycle::spawn_unchecked<fvol::util::bg::spawn<fvol::symbols::store::find_location_cached::{closure#8}>::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+std::sys::backtrace::__rust_begin_short_backtrace::<fvol::util::bg::spawn<fvol::symbols::store::find_location_cached::{closure#8}>::{closure#0}, ()>
+fvol::util::paths::write_atomic_parts
 <std::fs::DirBuilder>::_create
 <std::sys::fs::unix::DirBuilder>::mkdir
 mkdir
@@ -1037,28 +1037,28 @@ getpid
 <std::fs::File as core::io::write::Write>::write_all
 std::sys::fs::rename
 rename
-<alloc::sync::Arc<std::sync::poison::mutex::Mutex<core::option::Option<vol::symbols::store::find_location_cached::{closure#8}>>>>::drop_slow
-<vol::renderers::text::Json as vol::renderers::RowSink>::row
-<vol::renderers::text::Json as vol::renderers::RowSink>::row_ref
-<vol::renderers::text::Json>::close_to
-<vol::renderers::text::Json>::emit_ready
-vol::renderers::text::push_json_node
-vol::renderers::text::write_json_cell
-vol::renderers::pyfmt::push_datetime_iso
-vol::renderers::pyfmt::push_date_time
-vol::renderers::text::write_json_default
-<vol::renderers::text::Json as vol::renderers::text::TextRenderer>::finish
+<alloc::sync::Arc<std::sync::poison::mutex::Mutex<core::option::Option<fvol::symbols::store::find_location_cached::{closure#8}>>>>::drop_slow
+<fvol::renderers::text::Json as fvol::renderers::RowSink>::row
+<fvol::renderers::text::Json as fvol::renderers::RowSink>::row_ref
+<fvol::renderers::text::Json>::close_to
+<fvol::renderers::text::Json>::emit_ready
+fvol::renderers::text::push_json_node
+fvol::renderers::text::write_json_cell
+fvol::renderers::pyfmt::push_datetime_iso
+fvol::renderers::pyfmt::push_date_time
+fvol::renderers::text::write_json_default
+<fvol::renderers::text::Json as fvol::renderers::text::TextRenderer>::finish
 <alloc::raw_vec::RawVec<alloc::vec::Vec<u8>>>::grow_one
 <alloc::vec::Vec<u8>>::append_elements
-core::ptr::drop_glue::<vol::renderers::text::Json>
-core::ptr::drop_glue::<alloc::collections::vec_deque::VecDeque<core::option::Option<vol::renderers::text::JNode>>>
+core::ptr::drop_glue::<fvol::renderers::text::Json>
+core::ptr::drop_glue::<alloc::collections::vec_deque::VecDeque<core::option::Option<fvol::renderers::text::JNode>>>
 <alloc::sync::Arc<std::thread::lifecycle::Packet<()>>>::drop_slow
 core::ptr::drop_glue::<std::thread::lifecycle::Packet<()>>
 core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<std::thread::join_handle::JoinHandle<()>>>
-<vol::plugins::linux::bash::Bash as vol::plugins::Plugin>::requirements
-<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run
-<std::sync::once_lock::OnceLock<usize>>::initialize::<<std::sync::once_lock::OnceLock<usize>>::get_or_init<vol::util::par::threads::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<usize>>::initialize<<std::sync::once_lock::OnceLock<usize>>::get_or_init<vol::util::par::threads::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+<fvol::plugins::linux::bash::Bash as fvol::plugins::Plugin>::requirements
+<fvol::plugins::windows::cmdline::CmdLine as fvol::plugins::Plugin>::run
+<std::sync::once_lock::OnceLock<usize>>::initialize::<<std::sync::once_lock::OnceLock<usize>>::get_or_init<fvol::util::par::threads::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<usize>>::initialize<<std::sync::once_lock::OnceLock<usize>>::get_or_init<fvol::util::par::threads::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
 std::thread::functions::available_parallelism
 std::fs::buffer_capacity_required
 alloc::io::read::default_read_to_end::<&std::fs::File>
@@ -1071,10 +1071,10 @@ alloc::io::read::default_read_to_end::small_probe_read::<&std::fs::File>
 sched_getaffinity
 std::thread::current::init_current
 <std::thread::thread::Thread>::new_current
-<std::thread::lifecycle::spawn_unchecked<vol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>, <vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
-std::sys::backtrace::__rust_begin_short_backtrace::<vol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>, <vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>
-<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::add_process_layer
+<std::thread::lifecycle::spawn_unchecked<fvol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>, <fvol::plugins::windows::cmdline::CmdLine as fvol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+std::sys::backtrace::__rust_begin_short_backtrace::<fvol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>, <fvol::plugins::windows::cmdline::CmdLine as fvol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)>>
+<fvol::plugins::windows::cmdline::CmdLine as fvol::plugins::Plugin>::run::{closure#1}
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::add_process_layer
 get_nprocs
 read_sysfs_file
 next_line
@@ -1082,247 +1082,247 @@ __memchr_avx2
 __isoc23_strtoumax
 ____strtoull_l_internal
 __close_nocancel_nostatus
-<std::thread::lifecycle::JoinInner<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>::join
+<std::thread::lifecycle::JoinInner<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)>>>::join
 __futex_abstimed_wait_cancelable64
-vol::symbols::windows::ext::process_layer
+fvol::symbols::windows::ext::process_layer
 <std::sys::sync::mutex::futex::Mutex>::lock_contended
-<hashbrown::raw::RawTable<((usize, u64), &dyn vol::layers::Layer)>>::reserve_rehash::<hashbrown::map::make_hasher<(usize, u64), &dyn vol::layers::Layer, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_string
-<vol::layers::intel::IntelLayer>::translate_swap
-<vol::layers::intel::IntelLayer>::read_impl::{closure#1}
-core::ptr::drop_glue::<core::option::Option<core::result::Result<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>, alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>>
-<alloc::sync::Arc<std::thread::lifecycle::Packet<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>>::drop_slow
-core::ptr::drop_glue::<std::thread::lifecycle::Packet<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>
+<hashbrown::raw::RawTable<((usize, u64), &dyn fvol::layers::Layer)>>::reserve_rehash::<hashbrown::map::make_hasher<(usize, u64), &dyn fvol::layers::Layer, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+<fvol::objects::Obj as fvol::symbols::windows::ext::WinExt>::get_string
+<fvol::layers::intel::IntelLayer>::translate_swap
+<fvol::layers::intel::IntelLayer>::read_impl::{closure#1}
+core::ptr::drop_glue::<core::option::Option<core::result::Result<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)>, alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>>
+<alloc::sync::Arc<std::thread::lifecycle::Packet<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)>>>>::drop_slow
+core::ptr::drop_glue::<std::thread::lifecycle::Packet<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)>>>
 __nptl_free_stacks
 _dl_deallocate_tls
-core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>>
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<std::thread::scoped::ScopedJoinHandle<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)>>>>
 <alloc::sync::Arc<std::thread::scoped::ScopeData>>::drop_slow
-core::ptr::drop_glue::<[core::option::Option<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>>]>
-core::ptr::drop_glue::<[(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)]>
-core::ptr::drop_glue::<core::iter::adapters::zip::Zip<alloc::vec::into_iter::IntoIter<core::result::Result<vol::objects::Obj, vol::error::Error>>, alloc::vec::into_iter::IntoIter<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>>>>
-core::ptr::drop_glue::<[core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>]>
-<vol::plugins::linux::lsmod::Lsmod as vol::plugins::Plugin>::requirements
-<vol::plugins::linux::lsmod::Lsmod as vol::plugins::Plugin>::run
-vol::symbols::linux::modules::list_modules
-vol::plugins::linux::lsmod::columns
-<vol::objects::Obj as vol::symbols::linux::module::ModuleExt>::get_init_size
-<vol::objects::Obj as vol::symbols::linux::module::ModuleExt>::get_mem_type
-<vol::objects::Obj>::at
-<vol::objects::Obj as vol::symbols::linux::module::ModuleExt>::get_core_size
-<vol::symbols::linux::tainting::Tainting>::new
-<vol::symbols::linux::tainting::Tainting>::get_taints_parsed
-<vol::symbols::linux::tainting::Tainting>::get_taints_as_plain_string
-vol::symbols::linux::tainting::copy_err::<i128>
-vol::symbols::linux::modules::get_load_parameters
-<vol::symbols::table::RuntimeNodes>::intern
-<vol::symbols::table::RuntimeNodes>::push
-<hashbrown::map::HashMap<vol::symbols::table::Ty, u32, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
-<core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher> as core::hash::BuildHasher>::hash_one::<&vol::symbols::table::Ty>
-<hashbrown::raw::RawTable<(vol::symbols::table::Ty, u32)>>::reserve_rehash::<hashbrown::map::make_hasher<vol::symbols::table::Ty, u32, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-core::ptr::drop_glue::<vol::layers::scan::ItemOut<vol::automagic::windows::DtbHit>>
-core::ptr::drop_glue::<[core::result::Result<(alloc::string::String, vol::symbols::linux::modules::ParamValue), vol::error::Error>]>
-<vol::symbols::table::Ty as core::cmp::PartialEq>::eq
-vol::symbols::linux::modules::get_load_parameters::{closure#0}::{closure#0}
-vol::symbols::linux::modules::get_param_val
-<vol::symbols::linux::modules::ParamValue as core::fmt::Display>::fmt
-vol::objects::strings::handle_err
-vol::objects::util::pointer_to_string_ex
-<alloc::vec::Vec<vol::symbols::linux::modules::ParamValue>>::push_mut
+core::ptr::drop_glue::<[core::option::Option<core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>>]>
+core::ptr::drop_glue::<[(usize, core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>)]>
+core::ptr::drop_glue::<core::iter::adapters::zip::Zip<alloc::vec::into_iter::IntoIter<core::result::Result<fvol::objects::Obj, fvol::error::Error>>, alloc::vec::into_iter::IntoIter<core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>>>>
+core::ptr::drop_glue::<[core::option::Option<core::result::Result<alloc::vec::Vec<fvol::renderers::Value>, fvol::error::Error>>]>
+<fvol::plugins::linux::lsmod::Lsmod as fvol::plugins::Plugin>::requirements
+<fvol::plugins::linux::lsmod::Lsmod as fvol::plugins::Plugin>::run
+fvol::symbols::linux::modules::list_modules
+fvol::plugins::linux::lsmod::columns
+<fvol::objects::Obj as fvol::symbols::linux::module::ModuleExt>::get_init_size
+<fvol::objects::Obj as fvol::symbols::linux::module::ModuleExt>::get_mem_type
+<fvol::objects::Obj>::at
+<fvol::objects::Obj as fvol::symbols::linux::module::ModuleExt>::get_core_size
+<fvol::symbols::linux::tainting::Tainting>::new
+<fvol::symbols::linux::tainting::Tainting>::get_taints_parsed
+<fvol::symbols::linux::tainting::Tainting>::get_taints_as_plain_string
+fvol::symbols::linux::tainting::copy_err::<i128>
+fvol::symbols::linux::modules::get_load_parameters
+<fvol::symbols::table::RuntimeNodes>::intern
+<fvol::symbols::table::RuntimeNodes>::push
+<hashbrown::map::HashMap<fvol::symbols::table::Ty, u32, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>>::insert
+<core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher> as core::hash::BuildHasher>::hash_one::<&fvol::symbols::table::Ty>
+<hashbrown::raw::RawTable<(fvol::symbols::table::Ty, u32)>>::reserve_rehash::<hashbrown::map::make_hasher<fvol::symbols::table::Ty, u32, core::hash::BuildHasherDefault<fvol::util::fxhash::FxHasher>>::{closure#0}>
+core::ptr::drop_glue::<fvol::layers::scan::ItemOut<fvol::automagic::windows::DtbHit>>
+core::ptr::drop_glue::<[core::result::Result<(alloc::string::String, fvol::symbols::linux::modules::ParamValue), fvol::error::Error>]>
+<fvol::symbols::table::Ty as core::cmp::PartialEq>::eq
+fvol::symbols::linux::modules::get_load_parameters::{closure#0}::{closure#0}
+fvol::symbols::linux::modules::get_param_val
+<fvol::symbols::linux::modules::ParamValue as core::fmt::Display>::fmt
+fvol::objects::strings::handle_err
+fvol::objects::util::pointer_to_string_ex
+<alloc::vec::Vec<fvol::symbols::linux::modules::ParamValue>>::push_mut
 <alloc::raw_vec::RawVec<core::option::Option<i128>>>::grow_one
-<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::slice::iter::Iter<vol::symbols::linux::modules::ParamValue>, vol::symbols::linux::modules::get_param_val::{closure#1}>>>::from_iter
-core::ptr::drop_glue::<alloc::vec::Vec<vol::symbols::linux::modules::ParamValue>>
-core::ptr::drop_glue::<vol::symbols::linux::tainting::KernelFlag>
-vol::cli::add_late_arguments::{closure#2}
-<vol::plugins::generic::banners::Banners as vol::plugins::Plugin>::description
-<vol::plugins::generic::configwriter::ConfigWriter as vol::plugins::Plugin>::description
-<vol::plugins::generic::frameworkinfo::FrameworkInfo as vol::plugins::Plugin>::description
-<vol::plugins::generic::isfinfo::IsfInfo as vol::plugins::Plugin>::description
-<vol::plugins::generic::layerwriter::LayerWriter as vol::plugins::Plugin>::description
-<vol::plugins::generic::regexscan::RegExScan as vol::plugins::Plugin>::description
-<vol::plugins::generic::timeliner::Timeliner as vol::plugins::Plugin>::description
-<vol::plugins::generic::vmscan::Vmscan as vol::plugins::Plugin>::description
-<vol::plugins::generic::yarascan::YaraScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::bigpools::BigPools as vol::plugins::Plugin>::description
-<vol::plugins::windows::callbacks::Callbacks as vol::plugins::Plugin>::description
-<vol::plugins::windows::cmdscan::CmdScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::consoles::Consoles as vol::plugins::Plugin>::description
-<vol::plugins::windows::crashinfo::Crashinfo as vol::plugins::Plugin>::description
-<vol::plugins::windows::debugregisters::DebugRegisters as vol::plugins::Plugin>::description
-<vol::plugins::windows::deskscan::DeskScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::desktops::Desktops as vol::plugins::Plugin>::description
-<vol::plugins::windows::devicetree::DeviceTree as vol::plugins::Plugin>::description
-<vol::plugins::windows::direct_system_calls::DirectSystemCalls as vol::plugins::Plugin>::description
-<vol::plugins::windows::dlllist::DllList as vol::plugins::Plugin>::description
-<vol::plugins::windows::driverirp::DriverIrp as vol::plugins::Plugin>::description
-<vol::plugins::windows::drivermodule::DriverModule as vol::plugins::Plugin>::description
-<vol::plugins::windows::driverscan::DriverScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::dumpfiles::DumpFiles as vol::plugins::Plugin>::description
-<vol::plugins::windows::envars::Envars as vol::plugins::Plugin>::description
-<vol::plugins::windows::etwpatch::EtwPatch as vol::plugins::Plugin>::description
-<vol::plugins::windows::etwpatch::EtwPatch as vol::plugins::Plugin>::epilog
-<vol::plugins::windows::filescan::FileScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::getservicesids::GetServiceSIDs as vol::plugins::Plugin>::description
-<vol::plugins::windows::getsids::GetSIDs as vol::plugins::Plugin>::description
-<vol::plugins::windows::handles::Handles as vol::plugins::Plugin>::description
-<vol::plugins::windows::hollowprocesses::HollowProcesses as vol::plugins::Plugin>::description
-<vol::plugins::windows::iat::IAT as vol::plugins::Plugin>::description
-<vol::plugins::windows::indirect_system_calls::IndirectSystemCalls as vol::plugins::Plugin>::description
-<vol::plugins::windows::joblinks::JobLinks as vol::plugins::Plugin>::description
-<vol::plugins::windows::kpcrs::KPCRs as vol::plugins::Plugin>::description
-<vol::plugins::windows::ldrmodules::LdrModules as vol::plugins::Plugin>::description
-<vol::plugins::windows::malfind::Malfind as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::drivermodule::DriverModule as vol::plugins::Plugin>::description
-<vol::plugins::windows::mbrscan::MBRScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::memmap::Memmap as vol::plugins::Plugin>::description
-<vol::plugins::windows::mftscan::MFTScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::mftscan::ADS as vol::plugins::Plugin>::description
-<vol::plugins::windows::mftscan::ResidentData as vol::plugins::Plugin>::description
-<vol::plugins::windows::modscan::ModScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::modules::Modules as vol::plugins::Plugin>::description
-<vol::plugins::windows::mutantscan::MutantScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::netscan::NetScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::netstat::NetStat as vol::plugins::Plugin>::description
-<vol::plugins::windows::orphan_kernel_threads::Threads as vol::plugins::Plugin>::description
-<vol::plugins::windows::pe_symbols::PESymbols as vol::plugins::Plugin>::description
-<vol::plugins::windows::pedump::PEDump as vol::plugins::Plugin>::description
-<vol::plugins::windows::poolscanner::PoolScanner as vol::plugins::Plugin>::description
-<vol::plugins::windows::privileges::Privs as vol::plugins::Plugin>::description
-<vol::plugins::windows::processghosting::ProcessGhosting as vol::plugins::Plugin>::description
-<vol::plugins::windows::psscan::PsScan as vol::plugins::Plugin>::description
-<vol::plugins::mac::pstree::PsTree as vol::plugins::Plugin>::description
-<vol::plugins::windows::psxview::PsXView as vol::plugins::Plugin>::description
-<vol::plugins::windows::sessions::Sessions as vol::plugins::Plugin>::description
-<vol::plugins::windows::shimcachemem::ShimcacheMem as vol::plugins::Plugin>::description
-<vol::plugins::windows::skeleton_key_check::SkeletonKeyCheck as vol::plugins::Plugin>::description
-<vol::plugins::windows::ssdt::Ssdt as vol::plugins::Plugin>::description
-<vol::plugins::windows::statistics::Statistics as vol::plugins::Plugin>::description
-<vol::plugins::windows::strings::Strings as vol::plugins::Plugin>::description
-<vol::plugins::windows::suspended_threads::SuspendedThreads as vol::plugins::Plugin>::description
-<vol::plugins::windows::suspicious_threads::SuspiciousThreads as vol::plugins::Plugin>::description
-<vol::plugins::windows::svcdiff::SvcDiff as vol::plugins::Plugin>::description
-<vol::plugins::windows::svclist::SvcList as vol::plugins::Plugin>::description
-<vol::plugins::windows::svcscan::SvcScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::symlinkscan::SymlinkScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::thrdscan::ThrdScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::timers::Timers as vol::plugins::Plugin>::description
-<vol::plugins::windows::truecrypt::Passphrase as vol::plugins::Plugin>::description
-<vol::plugins::windows::unhooked_system_calls::UnhookedSystemCalls as vol::plugins::Plugin>::description
-<vol::plugins::windows::unloadedmodules::UnloadedModules as vol::plugins::Plugin>::description
-<vol::plugins::windows::vadinfo::VadInfo as vol::plugins::Plugin>::description
-<vol::plugins::linux::vmaregexscan::VmaRegExScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::vadwalk::VadWalk as vol::plugins::Plugin>::description
-<vol::plugins::windows::vadyarascan::VadYaraScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::verinfo::VerInfo as vol::plugins::Plugin>::description
-<vol::plugins::windows::virtmap::VirtMap as vol::plugins::Plugin>::description
-<vol::plugins::windows::windows::Windows as vol::plugins::Plugin>::description
-<vol::plugins::windows::windowstations::WindowStations as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::direct_system_calls::DirectSystemCalls as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::hollowprocesses::HollowProcesses as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::indirect_system_calls::IndirectSystemCalls as vol::plugins::Plugin>::description
-<vol::plugins::mac::malfind::Malfind as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::pebmasquerade::PebMasquerade as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::processghosting::ProcessGhosting as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::psxview::PsXView as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::suspicious_threads::SuspiciousThreads as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::svcdiff::SvcDiff as vol::plugins::Plugin>::description
-<vol::plugins::windows::malware::unhooked_system_calls::UnhookedSystemCalls as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::hivelist::HiveList as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::hivescan::HiveScan as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::printkey::PrintKey as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::hashdump::Hashdump as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::hashdump::HashdumpDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::lsadump::Lsadump as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::lsadump::LsadumpDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::certificates::Certificates as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::getcellroutine::GetCellRoutine as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::userassist::UserAssist as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::amcache::Amcache as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::amcache::AmcacheDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::scheduled_tasks::ScheduledTasks as vol::plugins::Plugin>::description
-<vol::plugins::windows::registry::scheduled_tasks::ScheduledTasksDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::mac::bash::Bash as vol::plugins::Plugin>::description
-<vol::plugins::linux::capabilities::Capabilities as vol::plugins::Plugin>::description
-<vol::plugins::linux::elfs::Elfs as vol::plugins::Plugin>::description
-<vol::plugins::linux::envars::Envars as vol::plugins::Plugin>::description
-<vol::plugins::linux::graphics::fbdev::Fbdev as vol::plugins::Plugin>::description
-<vol::plugins::mac::ifconfig::Ifconfig as vol::plugins::Plugin>::description
-<vol::plugins::linux::ip::Link as vol::plugins::Plugin>::description
-<vol::plugins::linux::library_list::LibraryList as vol::plugins::Plugin>::description
-<vol::plugins::linux::lsof::Lsof as vol::plugins::Plugin>::description
-<vol::plugins::linux::mountinfo::MountInfo as vol::plugins::Plugin>::description
-<vol::plugins::linux::pagecache::Files as vol::plugins::Plugin>::description
-<vol::plugins::linux::pagecache::InodePages as vol::plugins::Plugin>::description
-<vol::plugins::linux::pagecache::RecoverFs as vol::plugins::Plugin>::description
-<vol::plugins::linux::pagecache::RecoverFs as vol::plugins::Plugin>::epilog
-<vol::plugins::linux::malware::process_spoofing::ProcessSpoofing as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::process_spoofing::ProcessSpoofing as vol::plugins::Plugin>::epilog
-<vol::plugins::linux::pidhashtable::PIDHashTable as vol::plugins::Plugin>::description
-<vol::plugins::linux::proc::Maps as vol::plugins::Plugin>::description
-<vol::plugins::linux::psaux::PsAux as vol::plugins::Plugin>::description
-<vol::plugins::linux::psscan::PsScan as vol::plugins::Plugin>::description
-<vol::plugins::linux::ptrace::Ptrace as vol::plugins::Plugin>::description
-<vol::plugins::linux::sockscan::Sockscan as vol::plugins::Plugin>::description
-<vol::plugins::mac::netstat::Netstat as vol::plugins::Plugin>::description
-<vol::plugins::linux::vmayarascan::VmaYaraScan as vol::plugins::Plugin>::description
-<vol::plugins::linux::pscallstack::PsCallStack as vol::plugins::Plugin>::description
-<vol::plugins::linux::kthreads::Kthreads as vol::plugins::Plugin>::description
-<vol::plugins::linux::boottime::Boottime as vol::plugins::Plugin>::description
-<vol::plugins::linux::ebpf::Ebpf as vol::plugins::Plugin>::description
-<vol::plugins::linux::iomem::IOMem as vol::plugins::Plugin>::description
-<vol::plugins::linux::kallsyms::Kallsyms as vol::plugins::Plugin>::description
-<vol::plugins::linux::kallsyms::Kallsyms as vol::plugins::Plugin>::epilog
-<vol::plugins::linux::kmsg::Kmsg as vol::plugins::Plugin>::description
-<vol::plugins::linux::module_extract::ModuleExtract as vol::plugins::Plugin>::description
-<vol::plugins::linux::vmcoreinfo::VMCoreInfo as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_afinfo::CheckAfinfo as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_afinfo::CheckAfinfoDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_creds::CheckCreds as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_creds::CheckCredsDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_idt::CheckIdt as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_idt::CheckIdtDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_modules::CheckModules as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_modules::CheckModulesDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::mac::check_syscall::CheckSyscall as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::check_syscall::CheckSyscallDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::hidden_modules::HiddenModules as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::hidden_modules::HiddenModulesDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiers as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiersDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::modxview::Modxview as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::modxview::ModxviewDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::netfilter::Netfilter as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::netfilter::NetfilterDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::tty_check::TtyCheck as vol::plugins::Plugin>::description
-<vol::plugins::linux::malware::tty_check::TtyCheckDeprecated as vol::plugins::Plugin>::description
-<vol::plugins::linux::tracing::ftrace::CheckFtrace as vol::plugins::Plugin>::description
-<vol::plugins::linux::tracing::ftrace::CheckFtrace as vol::plugins::Plugin>::epilog
-<vol::plugins::linux::tracing::perf_events::PerfEvents as vol::plugins::Plugin>::description
-<vol::plugins::linux::tracing::tracepoints::CheckTracepoints as vol::plugins::Plugin>::description
-<vol::plugins::linux::tracing::tracepoints::CheckTracepoints as vol::plugins::Plugin>::epilog
-<vol::plugins::mac::check_syscall::CheckTrapTable as vol::plugins::Plugin>::description
-<vol::plugins::mac::check_sysctl::CheckSysctl as vol::plugins::Plugin>::description
-<vol::plugins::mac::dmesg::Dmesg as vol::plugins::Plugin>::description
-<vol::plugins::mac::kauth_scopes::KauthListeners as vol::plugins::Plugin>::description
-<vol::plugins::mac::kauth_scopes::KauthScopes as vol::plugins::Plugin>::description
-<vol::plugins::mac::kevents::Kevents as vol::plugins::Plugin>::description
-<vol::plugins::mac::lsof::Lsof as vol::plugins::Plugin>::description
-<vol::plugins::mac::mount::Mount as vol::plugins::Plugin>::description
-<vol::plugins::mac::psaux::Psaux as vol::plugins::Plugin>::description
-<vol::plugins::mac::socket_filters::SocketFilters as vol::plugins::Plugin>::description
-<vol::plugins::mac::timers::Timers as vol::plugins::Plugin>::description
-<vol::plugins::mac::trustedbsd::Trustedbsd as vol::plugins::Plugin>::description
-<vol::plugins::mac::vfsevents::VfsEvents as vol::plugins::Plugin>::description
-core::slice::sort::stable::driftsort_main::<(alloc::string::String, core::option::Option<alloc::string::String>), <[(alloc::string::String, core::option::Option<alloc::string::String>)]>::sort_by<vol::cli::add_late_arguments::{closure#2}::{closure#1}>::{closure#0}, alloc::vec::Vec<(alloc::string::String, core::option::Option<alloc::string::String>)>>
-core::slice::sort::stable::drift::sort::<(alloc::string::String, core::option::Option<alloc::string::String>), <[(alloc::string::String, core::option::Option<alloc::string::String>)]>::sort_by<vol::cli::add_late_arguments::{closure#2}::{closure#1}>::{closure#0}>
-core::slice::sort::stable::quicksort::quicksort::<(alloc::string::String, core::option::Option<alloc::string::String>), <[(alloc::string::String, core::option::Option<alloc::string::String>)]>::sort_by<vol::cli::add_late_arguments::{closure#2}::{closure#1}>::{closure#0}>
-core::slice::sort::shared::pivot::median3_rec::<(alloc::string::String, alloc::vec::Vec<(i128, i128)>), <[(alloc::string::String, alloc::vec::Vec<(i128, i128)>)]>::sort_by<<vol::plugins::windows::virtmap::VirtMap as vol::plugins::Plugin>::run::{closure#0}>::{closure#0}>
-core::slice::sort::shared::smallsort::sort4_stable::<(alloc::string::String, alloc::vec::Vec<(i128, i128)>), <[(alloc::string::String, alloc::vec::Vec<(i128, i128)>)]>::sort_by<<vol::plugins::windows::virtmap::VirtMap as vol::plugins::Plugin>::run::{closure#0}>::{closure#0}>
-<vol::cli::help::Formatter>::format_invocation
-<vol::cli::help::Formatter>::format_text
+<alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::slice::iter::Iter<fvol::symbols::linux::modules::ParamValue>, fvol::symbols::linux::modules::get_param_val::{closure#1}>>>::from_iter
+core::ptr::drop_glue::<alloc::vec::Vec<fvol::symbols::linux::modules::ParamValue>>
+core::ptr::drop_glue::<fvol::symbols::linux::tainting::KernelFlag>
+fvol::cli::add_late_arguments::{closure#2}
+<fvol::plugins::generic::banners::Banners as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::configwriter::ConfigWriter as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::frameworkinfo::FrameworkInfo as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::isfinfo::IsfInfo as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::layerwriter::LayerWriter as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::regexscan::RegExScan as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::timeliner::Timeliner as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::vmscan::Vmscan as fvol::plugins::Plugin>::description
+<fvol::plugins::generic::yarascan::YaraScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::bigpools::BigPools as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::callbacks::Callbacks as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::cmdscan::CmdScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::consoles::Consoles as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::crashinfo::Crashinfo as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::debugregisters::DebugRegisters as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::deskscan::DeskScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::desktops::Desktops as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::devicetree::DeviceTree as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::direct_system_calls::DirectSystemCalls as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::dlllist::DllList as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::driverirp::DriverIrp as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::drivermodule::DriverModule as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::driverscan::DriverScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::dumpfiles::DumpFiles as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::envars::Envars as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::etwpatch::EtwPatch as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::etwpatch::EtwPatch as fvol::plugins::Plugin>::epilog
+<fvol::plugins::windows::filescan::FileScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::getservicesids::GetServiceSIDs as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::getsids::GetSIDs as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::handles::Handles as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::hollowprocesses::HollowProcesses as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::iat::IAT as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::indirect_system_calls::IndirectSystemCalls as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::joblinks::JobLinks as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::kpcrs::KPCRs as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::ldrmodules::LdrModules as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malfind::Malfind as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::drivermodule::DriverModule as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::mbrscan::MBRScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::memmap::Memmap as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::mftscan::MFTScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::mftscan::ADS as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::mftscan::ResidentData as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::modscan::ModScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::modules::Modules as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::mutantscan::MutantScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::netscan::NetScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::netstat::NetStat as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::orphan_kernel_threads::Threads as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::pe_symbols::PESymbols as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::pedump::PEDump as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::poolscanner::PoolScanner as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::privileges::Privs as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::processghosting::ProcessGhosting as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::psscan::PsScan as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::pstree::PsTree as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::psxview::PsXView as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::sessions::Sessions as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::shimcachemem::ShimcacheMem as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::skeleton_key_check::SkeletonKeyCheck as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::ssdt::Ssdt as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::statistics::Statistics as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::strings::Strings as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::suspended_threads::SuspendedThreads as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::suspicious_threads::SuspiciousThreads as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::svcdiff::SvcDiff as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::svclist::SvcList as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::svcscan::SvcScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::symlinkscan::SymlinkScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::thrdscan::ThrdScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::timers::Timers as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::truecrypt::Passphrase as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::unhooked_system_calls::UnhookedSystemCalls as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::unloadedmodules::UnloadedModules as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::vadinfo::VadInfo as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::vmaregexscan::VmaRegExScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::vadwalk::VadWalk as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::vadyarascan::VadYaraScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::verinfo::VerInfo as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::virtmap::VirtMap as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::windows::Windows as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::windowstations::WindowStations as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::direct_system_calls::DirectSystemCalls as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::hollowprocesses::HollowProcesses as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::indirect_system_calls::IndirectSystemCalls as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::malfind::Malfind as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::pebmasquerade::PebMasquerade as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::processghosting::ProcessGhosting as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::psxview::PsXView as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::suspicious_threads::SuspiciousThreads as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::svcdiff::SvcDiff as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::malware::unhooked_system_calls::UnhookedSystemCalls as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::hivelist::HiveList as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::hivescan::HiveScan as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::printkey::PrintKey as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::hashdump::Hashdump as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::hashdump::HashdumpDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::lsadump::Lsadump as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::lsadump::LsadumpDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::certificates::Certificates as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::getcellroutine::GetCellRoutine as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::userassist::UserAssist as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::amcache::Amcache as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::amcache::AmcacheDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::scheduled_tasks::ScheduledTasks as fvol::plugins::Plugin>::description
+<fvol::plugins::windows::registry::scheduled_tasks::ScheduledTasksDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::bash::Bash as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::capabilities::Capabilities as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::elfs::Elfs as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::envars::Envars as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::graphics::fbdev::Fbdev as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::ifconfig::Ifconfig as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::ip::Link as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::library_list::LibraryList as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::lsof::Lsof as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::mountinfo::MountInfo as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::pagecache::Files as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::pagecache::InodePages as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::pagecache::RecoverFs as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::pagecache::RecoverFs as fvol::plugins::Plugin>::epilog
+<fvol::plugins::linux::malware::process_spoofing::ProcessSpoofing as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::process_spoofing::ProcessSpoofing as fvol::plugins::Plugin>::epilog
+<fvol::plugins::linux::pidhashtable::PIDHashTable as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::proc::Maps as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::psaux::PsAux as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::psscan::PsScan as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::ptrace::Ptrace as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::sockscan::Sockscan as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::netstat::Netstat as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::vmayarascan::VmaYaraScan as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::pscallstack::PsCallStack as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::kthreads::Kthreads as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::boottime::Boottime as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::ebpf::Ebpf as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::iomem::IOMem as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::kallsyms::Kallsyms as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::kallsyms::Kallsyms as fvol::plugins::Plugin>::epilog
+<fvol::plugins::linux::kmsg::Kmsg as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::module_extract::ModuleExtract as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::vmcoreinfo::VMCoreInfo as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_afinfo::CheckAfinfo as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_afinfo::CheckAfinfoDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_creds::CheckCreds as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_creds::CheckCredsDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_idt::CheckIdt as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_idt::CheckIdtDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_modules::CheckModules as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_modules::CheckModulesDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::check_syscall::CheckSyscall as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::check_syscall::CheckSyscallDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::hidden_modules::HiddenModules as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::hidden_modules::HiddenModulesDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiers as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::keyboard_notifiers::KeyboardNotifiersDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::modxview::Modxview as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::modxview::ModxviewDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::netfilter::Netfilter as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::netfilter::NetfilterDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::tty_check::TtyCheck as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::malware::tty_check::TtyCheckDeprecated as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::tracing::ftrace::CheckFtrace as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::tracing::ftrace::CheckFtrace as fvol::plugins::Plugin>::epilog
+<fvol::plugins::linux::tracing::perf_events::PerfEvents as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::tracing::tracepoints::CheckTracepoints as fvol::plugins::Plugin>::description
+<fvol::plugins::linux::tracing::tracepoints::CheckTracepoints as fvol::plugins::Plugin>::epilog
+<fvol::plugins::mac::check_syscall::CheckTrapTable as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::check_sysctl::CheckSysctl as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::dmesg::Dmesg as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::kauth_scopes::KauthListeners as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::kauth_scopes::KauthScopes as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::kevents::Kevents as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::lsof::Lsof as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::mount::Mount as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::psaux::Psaux as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::socket_filters::SocketFilters as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::timers::Timers as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::trustedbsd::Trustedbsd as fvol::plugins::Plugin>::description
+<fvol::plugins::mac::vfsevents::VfsEvents as fvol::plugins::Plugin>::description
+core::slice::sort::stable::driftsort_main::<(alloc::string::String, core::option::Option<alloc::string::String>), <[(alloc::string::String, core::option::Option<alloc::string::String>)]>::sort_by<fvol::cli::add_late_arguments::{closure#2}::{closure#1}>::{closure#0}, alloc::vec::Vec<(alloc::string::String, core::option::Option<alloc::string::String>)>>
+core::slice::sort::stable::drift::sort::<(alloc::string::String, core::option::Option<alloc::string::String>), <[(alloc::string::String, core::option::Option<alloc::string::String>)]>::sort_by<fvol::cli::add_late_arguments::{closure#2}::{closure#1}>::{closure#0}>
+core::slice::sort::stable::quicksort::quicksort::<(alloc::string::String, core::option::Option<alloc::string::String>), <[(alloc::string::String, core::option::Option<alloc::string::String>)]>::sort_by<fvol::cli::add_late_arguments::{closure#2}::{closure#1}>::{closure#0}>
+core::slice::sort::shared::pivot::median3_rec::<(alloc::string::String, alloc::vec::Vec<(i128, i128)>), <[(alloc::string::String, alloc::vec::Vec<(i128, i128)>)]>::sort_by<<fvol::plugins::windows::virtmap::VirtMap as fvol::plugins::Plugin>::run::{closure#0}>::{closure#0}>
+core::slice::sort::shared::smallsort::sort4_stable::<(alloc::string::String, alloc::vec::Vec<(i128, i128)>), <[(alloc::string::String, alloc::vec::Vec<(i128, i128)>)]>::sort_by<<fvol::plugins::windows::virtmap::VirtMap as fvol::plugins::Plugin>::run::{closure#0}>::{closure#0}>
+<fvol::cli::help::Formatter>::format_invocation
+<fvol::cli::help::Formatter>::format_text
 <&str as core::str::pattern::Pattern>::is_contained_in
-vol::cli::help::collapse_ws
-vol::cli::help::wrap
-<vol::cli::help::Formatter>::format_action
+fvol::cli::help::collapse_ws
+fvol::cli::help::wrap
+<fvol::cli::help::Formatter>::format_action
 core::str::count::do_count_chars
 core::ptr::drop_glue::<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<(alloc::string::String, core::option::Option<alloc::string::String>)>>>>
 core::slice::sort::unstable::ipnsort::<&str, <&str as core::cmp::PartialOrd>::lt>
@@ -1330,5 +1330,5 @@ core::slice::sort::unstable::quicksort::quicksort::<&str, <&str as core::cmp::Pa
 core::slice::sort::shared::pivot::median3_rec::<&str, <&str as core::cmp::PartialOrd>::lt>
 core::slice::sort::shared::smallsort::sort4_stable::<&str, <&str as core::cmp::PartialOrd>::lt>
 core::slice::sort::shared::smallsort::bidirectional_merge::<&str, <&str as core::cmp::PartialOrd>::lt>
-<vol::cli::argparse::Action>::name
-<vol::cli::argparse::Parser>::error
+<fvol::cli::argparse::Action>::name
+<fvol::cli::argparse::Parser>::error

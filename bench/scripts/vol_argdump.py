@@ -3,7 +3,7 @@
 prints `json.dumps(vars(args), sort_keys=True)` and exits 0. Everything before that point
 (argument parsing, --help, errors, the banner, -f / -c / -o checks) is the real code.
 
-rsvol's `cli::Settings { dump_args: true, .. }` stops at the same point, so both can be diffed.
+fastvol's `cli::Settings { dump_args: true, .. }` stops at the same point, so both can be diffed.
 
 Special mode: `vol_argdump.py --rsvol-plugin-helps` prints a JSON map plugin -> `<plugin> -h`
 output (captured in-process, one parser build for all plugins).

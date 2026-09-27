@@ -10,7 +10,7 @@
 #   gzip:L -> zlib L, bz2:L -> libbz2 L, xz:L -> liblzma L (+ xz-mt with -t N > 1).
 #
 # Single-thread runs (-t 1, default) are pinned to one P-core ($CPU, default 8) on both sides.
-# With -t N > 1 the Rust side runs with RSVOL_THREADS=N (unpinned); the reference libraries are
+# With -t N > 1 the Rust side runs with FASTVOL_THREADS=N (unpinned); the reference libraries are
 # single-threaded (except xz-mt). Inputs must be on disk (never tmpfs /tmp).
 # Output columns: file codec level in_MB | C out ratio MB/s | rust out ratio MB/s | size% speedup
 set -euo pipefail
@@ -53,7 +53,7 @@ for f in "$@"; do
             bz2) refs=(bz2) ;;
             xz) refs=(xz); [[ $THREADS -gt 1 ]] && refs+=(xz-mt) ;;
         esac
-        read -r _ _ _ _ n rout rms _ _ < <(RSVOL_THREADS=$THREADS CODECS_ENC_FILE="$f" CODECS_ENC_CODEC="$codec" \
+        read -r _ _ _ _ n rout rms _ _ < <(FASTVOL_THREADS=$THREADS CODECS_ENC_FILE="$f" CODECS_ENC_CODEC="$codec" \
             CODECS_ENC_LEVEL="$level" CODECS_RUNS="$RUNS" "${pin[@]}" "$BIN" codecs_enc_bench_file --ignored \
             --nocapture --test-threads=1 | grep -oE 'rust [a-z0-9-]+ .*')
         for ref in "${refs[@]}"; do

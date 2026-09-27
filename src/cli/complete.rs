@@ -1,7 +1,7 @@
 //! Shell tab completion (not part of volatility3; dispatched before the CLI, like `serve`).
 //!
-//! `vol completion bash` prints a bash script. Its completion function calls
-//! `vol __complete bash LINE`, where LINE is the command line up to the cursor, and gets back a
+//! `fvol completion bash` prints a bash script. Its completion function calls
+//! `fvol __complete bash LINE`, where LINE is the command line up to the cursor, and gets back a
 //! directive line (`words`, `files`, `dirs` or `none`) followed by the candidate words.
 //!
 //! The candidates come from the parsers the CLI itself runs (`base_parser`, `add_late_arguments`
@@ -30,9 +30,9 @@ const DIR_DESTS: &[&str] = &["plugin_dirs", "symbol_dirs", "output_dir", "cache_
 const COMMANDS: &[&str] = &["serve", "completion"];
 const SHELLS: &[&str] = &["bash"];
 
-/// `vol completion [bash]`: print the completion script for the shell.
+/// `fvol completion [bash]`: print the completion script for the shell.
 pub fn script(argv: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let prog = argv.first().map(|a| a.rsplit('/').next().unwrap_or(a)).filter(|p| !p.is_empty()).unwrap_or("vol");
+    let prog = argv.first().map(|a| a.rsplit('/').next().unwrap_or(a)).filter(|p| !p.is_empty()).unwrap_or("fvol");
     match argv.get(2).map(String::as_str) {
         None | Some("bash") if argv.len() <= 3 => {
             let _ = out.write_all(bash_script(prog).as_bytes());
@@ -58,7 +58,7 @@ fn usage(prog: &str) -> String {
     )
 }
 
-/// `vol __complete SHELL LINE`: print the directive and the candidates for LINE's last word.
+/// `fvol __complete SHELL LINE`: print the directive and the candidates for LINE's last word.
 pub fn complete(args: &[String], plugins: &[&'static dyn Plugin], out: &mut dyn Write) -> i32 {
     let line = args.get(1).map(String::as_str).unwrap_or("");
     let mut words = split_line(line);
@@ -138,8 +138,8 @@ struct Level {
 }
 
 fn global_level(plugins: &[&'static dyn Plugin]) -> Level {
-    let mut p = super::base_parser("vol", "", "");
-    super::add_late_arguments(&mut p, "vol", plugins);
+    let mut p = super::base_parser("fvol", "", "");
+    super::add_late_arguments(&mut p, "fvol", plugins);
     Level { parser: p, files: FILE_DESTS.to_vec(), dirs: DIR_DESTS.to_vec() }
 }
 
@@ -151,7 +151,7 @@ fn plugin_level(global: &Parser, plugin: &dyn Plugin) -> Option<Level> {
 
 /// `serve`'s options, read from its help text: `-f, --file FILE` -> (["-f", "--file"], "FILE").
 fn serve_level() -> Level {
-    let mut p = Parser::new("vol serve", None, None, false);
+    let mut p = Parser::new("fvol serve", None, None, false);
     for line in crate::web::USAGE.lines() {
         let Some(spec) = line.strip_prefix("  -") else { continue };
         let spec = format!("-{}", spec.split("  ").next().unwrap_or(""));
@@ -370,7 +370,7 @@ fn option_words(p: &Parser, used: &[&str], cur: &str) -> Reply {
 
 fn bash_script(prog: &str) -> String {
     let func: String = prog.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    let name = if prog.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b)) { prog.to_string() } else { "vol".into() };
+    let name = if prog.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b)) { prog.to_string() } else { "fvol".into() };
     BASH.replace("__FUNC__", &func).replace("__PROG__", &name)
 }
 
@@ -431,10 +431,10 @@ mod tests {
 
     #[test]
     fn split_line_like_the_shell() {
-        assert_eq!(split_line("vol -f a.raw "), w("vol -f a.raw").into_iter().chain([String::new()]).collect::<Vec<_>>());
-        assert_eq!(split_line("vol -f 'a b.raw' x"), vec!["vol", "-f", "a b.raw", "x"]);
-        assert_eq!(split_line(r#"vol -f "a \"b\"" c\ d"#), vec!["vol", "-f", "a \"b\"", "c d"]);
-        assert_eq!(split_line("vol -f '/tmp/unterminated"), vec!["vol", "-f", "/tmp/unterminated"]);
+        assert_eq!(split_line("fvol -f a.raw "), w("fvol -f a.raw").into_iter().chain([String::new()]).collect::<Vec<_>>());
+        assert_eq!(split_line("fvol -f 'a b.raw' x"), vec!["fvol", "-f", "a b.raw", "x"]);
+        assert_eq!(split_line(r#"fvol -f "a \"b\"" c\ d"#), vec!["fvol", "-f", "a \"b\"", "c d"]);
+        assert_eq!(split_line("fvol -f '/tmp/unterminated"), vec!["fvol", "-f", "/tmp/unterminated"]);
         assert_eq!(split_line(""), vec![""]);
     }
 
@@ -516,15 +516,15 @@ mod tests {
     fn protocol_and_script() {
         let plugins = crate::plugins::registered();
         let mut out = Vec::new();
-        complete(&["bash".into(), "vol -r jso".into()], &plugins, &mut out);
+        complete(&["bash".into(), "fvol -r jso".into()], &plugins, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "words\njson\njsonl\n");
         let mut out = Vec::new();
-        complete(&["bash".into(), "vol -f ".into()], &plugins, &mut out);
+        complete(&["bash".into(), "fvol -f ".into()], &plugins, &mut out);
         assert_eq!(out, b"files\n");
         let (mut out, mut err) = (Vec::new(), Vec::new());
         assert_eq!(script(&["/usr/local/bin/fvol".into(), "completion".into(), "bash".into()], &mut out, &mut err), 0);
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("complete -F _fvol_complete fvol\n") && s.contains("\n_fvol_complete() {"), "{s}");
-        assert_eq!(script(&["vol".into(), "completion".into(), "tcsh".into()], &mut Vec::new(), &mut err), 2);
+        assert_eq!(script(&["fvol".into(), "completion".into(), "tcsh".into()], &mut Vec::new(), &mut err), 2);
     }
 }

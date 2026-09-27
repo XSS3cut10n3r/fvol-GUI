@@ -1,4 +1,4 @@
-//! `vol serve`: a built-in web UI for rsvol.
+//! `fvol serve`: a built-in web UI for fastvol.
 //!
 //! The binary serves a single-page app (embedded assets, no external requests) and a JSON API
 //! over a small HTTP/1.1 server on `std::net`. One analysis `Context` stays alive for the
@@ -97,11 +97,11 @@ impl App {
     }
 }
 
-pub(crate) const USAGE: &str = "usage: vol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
-                 [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
-                 [--max-conns N] [--parallel N] [--max-memory SIZE]
+pub(crate) const USAGE: &str = "usage: fvol serve [-h] [-f FILE] [--host HOST] [--port PORT] [-s SYMBOL_DIRS] [-o OUTPUT_DIR]
+                  [--offline] [-u URL] [--cache-path PATH] [--token TOKEN] [--allow-host NAME]
+                  [--max-conns N] [--parallel N] [--max-memory SIZE]
 
-Serve the rsvol web UI (a local, token-protected web app for analysing a memory image).
+Serve the fastvol web UI (a local, token-protected web app for analysing a memory image).
 
 options:
   -h, --help            show this help message and exit
@@ -123,7 +123,7 @@ options:
   --max-conns N         concurrent HTTP connections (default 512)
   --parallel N          plugins that may run at the same time (default 3)
   --max-memory SIZE     memory for stored results, all runs together (default 3G); rows past
-                        it are counted but not kept (exports via `vol -r` stay complete)
+                        it are counted but not kept (exports via `fvol -r` stay complete)
 ";
 
 /// "4G", "512M", "1.5g", "100000000" -> bytes
@@ -154,7 +154,7 @@ fn human_size(n: u64) -> String {
     if u == 0 { format!("{n} B") } else { format!("{v:.1} {}", units[u]) }
 }
 
-/// `vol serve ...`; `args` excludes "vol" and "serve". Returns the exit status.
+/// `fvol serve ...`; `args` excludes "fvol" and "serve". Returns the exit status.
 pub fn main(args: &[String]) -> i32 {
     let mut file: Option<String> = None;
     let mut host = "127.0.0.1".to_string();
@@ -172,7 +172,7 @@ pub fn main(args: &[String]) -> i32 {
     let mut i = 0;
     let fail = |m: &str| -> i32 {
         eprint!("{USAGE}");
-        eprintln!("vol serve: error: {m}");
+        eprintln!("fvol serve: error: {m}");
         2
     };
     while i < args.len() {
@@ -246,7 +246,7 @@ pub fn main(args: &[String]) -> i32 {
         None => match security::random_token() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("vol serve: cannot read /dev/urandom for the access token: {e}");
+                eprintln!("fvol serve: cannot read /dev/urandom for the access token: {e}");
                 return 1;
             }
         },
@@ -262,7 +262,7 @@ pub fn main(args: &[String]) -> i32 {
             Some(p) => match try_bind(p) {
                 Some(x) => x,
                 None => {
-                    eprintln!("vol serve: cannot listen on {host}:{p} (in use or not permitted)");
+                    eprintln!("fvol serve: cannot listen on {host}:{p} (in use or not permitted)");
                     return 1;
                 }
             },
@@ -271,7 +271,7 @@ pub fn main(args: &[String]) -> i32 {
                 None => match try_bind(0) {
                     Some(x) => x,
                     None => {
-                        eprintln!("vol serve: cannot listen on {host}");
+                        eprintln!("fvol serve: cannot listen on {host}");
                         return 1;
                     }
                 },
@@ -288,7 +288,7 @@ pub fn main(args: &[String]) -> i32 {
     let app = match App::new(token.clone(), port, hosts, opts, parallel, budget) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("vol serve: {e}");
+            eprintln!("fvol serve: {e}");
             return 1;
         }
     };
@@ -299,7 +299,7 @@ pub fn main(args: &[String]) -> i32 {
     } else {
         ip.to_string()
     };
-    println!("rsvol web UI · {}", crate::VERSION_BANNER);
+    println!("fastvol web UI · {}", crate::VERSION_BANNER);
     match &image {
         Some(p) => println!("  image   {} ({})", p.display(), human_size(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))),
         None => println!("  image   (none yet: open one from the UI)"),

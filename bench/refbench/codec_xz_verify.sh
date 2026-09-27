@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Byte-identity gate for the xz decoder: every .xz under the given files/directories (default:
-# the codec corpus, testdata/symbols and the volatility3 symbol cache) is decoded by rsvol's
+# the codec corpus, testdata/symbols and the volatility3 symbol cache) is decoded by fastvol's
 # decoder (codec_xz_micro, built with rustc) and compared with `xz -dc`.
 #   bench/refbench/codec_xz_verify.sh [FILE|DIR]...
 set -uo pipefail

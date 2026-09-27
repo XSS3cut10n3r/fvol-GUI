@@ -6,7 +6,7 @@
 //!   padded reads each. Every answer must match exactly.
 //! * `python_differential_large` (ignored): same against a bigger generated set, e.g.
 //!   `gen_containers.py RAW /tmp/fx --scale 64 --queries 2000` then
-//!   `RSVOL_CONTAINER_FIXTURES=/tmp/fx cargo test --release python_differential_large -- --ignored`.
+//!   `FASTVOL_CONTAINER_FIXTURES=/tmp/fx cargo test --release python_differential_large -- --ignored`.
 //! * model tests of the segment semantics, malformed-input fuzzing (no panics).
 
 use super::segmented::{Seg, SegmentedLayer, Src};
@@ -30,7 +30,7 @@ fn fixtures_dir() -> PathBuf {
 fn temp_file(tag: &str, data: &[u8]) -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
-    let p = std::env::temp_dir().join(format!("rsvol-ctest-{}-{}-{tag}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let p = std::env::temp_dir().join(format!("fastvol-ctest-{}-{}-{tag}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     std::fs::write(&p, data).unwrap();
     p
 }
@@ -67,7 +67,7 @@ fn check_expect(expect: &Path) -> usize {
     let st = stack_with(file.clone(), &StackOptions { location: Some(&main), ..Default::default() }).unwrap();
     let open_time = t.elapsed();
     let layer = st.layer;
-    if std::env::var_os("RSVOL_CONTAINER_VERBOSE").is_some() {
+    if crate::util::env::var_os("CONTAINER_VERBOSE").is_some() {
         let base = Base::from_file(&file);
         let direct = match layer.class_name() {
             "LimeLayer" => lime::stack(&base).ok(),
@@ -156,7 +156,7 @@ fn python_differential_fixtures() {
 #[test]
 #[ignore]
 fn python_differential_large() {
-    let Ok(dir) = std::env::var("RSVOL_CONTAINER_FIXTURES") else { return };
+    let Ok(dir) = crate::util::env::var("CONTAINER_FIXTURES") else { return };
     let (files, queries) = check_dir(Path::new(&dir));
     println!("{files} containers, {queries} queries match python");
 }
@@ -610,17 +610,17 @@ fn malformed_containers_never_panic() {
 
 /// Read throughput on the large containers of bench/refbench/containers.py (`make`), same
 /// random page addresses as the python run (`pybench`):
-///   RSVOL_LAYER_BENCH=DIR [RSVOL_BENCH_CPU=2] cargo test --release container_bench -- --ignored --nocapture
+///   FASTVOL_LAYER_BENCH=DIR [FASTVOL_BENCH_CPU=2] cargo test --release container_bench -- --ignored --nocapture
 /// Per layer: open time; random 8-byte `read` and `slice` (page-table-walk style accesses:
 /// the per-read overhead); random 4 KiB reads; the same 8-byte reads from all threads;
 /// sequential 1 MiB padded reads over every run; one full `mapping()` iteration.
 #[test]
 #[ignore]
 fn container_bench() {
-    // RSVOL_LAYER_BENCH=DIR (containers.py make) and/or RSVOL_LAYER_IMAGES=img1,img2 (real
+    // FASTVOL_LAYER_BENCH=DIR (containers.py make) and/or FASTVOL_LAYER_IMAGES=img1,img2 (real
     // images: random pages drawn from their mapping())
-    let dir = std::env::var("RSVOL_LAYER_BENCH").ok();
-    let images = std::env::var("RSVOL_LAYER_IMAGES").ok();
+    let dir = crate::util::env::var("LAYER_BENCH").ok();
+    let images = crate::util::env::var("LAYER_IMAGES").ok();
     if dir.is_none() && images.is_none() {
         return;
     }
@@ -633,7 +633,7 @@ fn container_bench() {
     };
     let all_cpus = [u64::MAX; 16];
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
-    if let Some(cpu) = std::env::var("RSVOL_BENCH_CPU").ok().and_then(|v| v.parse::<usize>().ok()) {
+    if let Some(cpu) = crate::util::env::var("BENCH_CPU").ok().and_then(|v| v.parse::<usize>().ok()) {
         let mut mask = [0u64; 16];
         mask[cpu % 1024 / 64] = 1 << (cpu % 64);
         set_affinity(&mask);
@@ -797,13 +797,13 @@ fn container_bench() {
 /// Two containers of the same memory (e.g. a LiME image and its AVML conversion) must expose
 /// the same address space: identical mapping() coverage and identical bytes everywhere,
 /// read in 1 MiB pieces from all cores.
-///   RSVOL_LAYER_COMPARE=a.lime,b.avml cargo test --release container_compare -- --ignored --nocapture
+///   FASTVOL_LAYER_COMPARE=a.lime,b.avml cargo test --release container_compare -- --ignored --nocapture
 #[test]
 #[ignore]
 fn container_compare() {
-    let Ok(pair) = std::env::var("RSVOL_LAYER_COMPARE") else { return };
+    let Ok(pair) = crate::util::env::var("LAYER_COMPARE") else { return };
     let paths: Vec<PathBuf> = pair.split(',').map(PathBuf::from).collect();
-    assert_eq!(paths.len(), 2, "RSVOL_LAYER_COMPARE=a,b");
+    assert_eq!(paths.len(), 2, "FASTVOL_LAYER_COMPARE=a,b");
     let layers: Vec<Arc<dyn Layer>> =
         paths.iter().map(|p| stack_with(open(p), &StackOptions { location: Some(p), ..Default::default() }).unwrap().layer).collect();
     let coverage = |l: &Arc<dyn Layer>| {

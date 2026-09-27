@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential test of the rsvol YARA rule front-end against yara-python.
+"""Differential test of the fastvol YARA rule front-end against yara-python.
 
 Generates random rule sets (random conditions over plain text strings, loops,
 of-expressions, rule references, arithmetic edge cases ...) and random data,
@@ -20,7 +20,7 @@ import yara
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRATE = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-WORK = os.environ.get("RSVOL_YARA_RULES_WORK", "/home/user/rs-vol/testdata/scratch/yara")
+WORK = os.environ.get("FASTVOL_YARA_RULES_WORK", "/home/user/rs-vol/testdata/scratch/yara")
 
 ALPH = b"abAB x\x00"
 TEXTS = ["a", "b", "ab", "ba", "A", "aa", "x", "bA", "a b"]
@@ -419,7 +419,7 @@ def main():
         for i, (src, data) in enumerate(cases):
             f.write("%d\t%s\t%s\n" % (i, src.encode().hex(), data.hex()))
     expected = [oracle(src, data) for src, data in cases]
-    env = dict(os.environ, RSVOL_YARA_RULES_CASES=cases_path, RSVOL_YARA_RULES_OUT=out_path)
+    env = dict(os.environ, FASTVOL_YARA_RULES_CASES=cases_path, FASTVOL_YARA_RULES_OUT=out_path)
     subprocess.run(["cargo", "test", "--profile", "fast", "yara_rules_difftest_driver", "--", "--ignored", "--quiet"],
                    cwd=CRATE, env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     got = {}

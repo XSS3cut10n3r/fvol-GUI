@@ -223,7 +223,7 @@ impl MatchFinder {
         #[allow(unused_mut)]
         let mut window = CHAIN_WINDOW;
         #[cfg(test)]
-        if let Some(w) = std::env::var("RSVOL_LZMA_WINDOW").ok().and_then(|v| v.parse::<usize>().ok()) {
+        if let Some(w) = crate::util::env::var("LZMA_WINDOW").ok().and_then(|v| v.parse::<usize>().ok()) {
             window = w.next_power_of_two();
         }
         let size = n.max(1).next_power_of_two().min(window);
@@ -349,7 +349,7 @@ impl LzmaParams {
             _ => (256, 273),
         };
         #[cfg(test)]
-        if let Ok(s) = std::env::var("RSVOL_LZMA_PARAMS") {
+        if let Ok(s) = crate::util::env::var("LZMA_PARAMS") {
             // Benchmark-only override: "depth,nice".
             let v: Vec<usize> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             if v.len() == 2 {

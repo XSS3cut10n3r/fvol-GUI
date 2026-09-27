@@ -1,4 +1,4 @@
-/* Reference benchmark for rsvol's x86 disassembler (src/disasm/x86), measured in-process
+/* Reference benchmark for fastvol's x86 disassembler (src/disasm/x86), measured in-process
  * against libcapstone 5 (the "beat the reference library" bar). Rust side: examples/disasm_bench.rs
  * (identical corpus, methodology and output format).
  *

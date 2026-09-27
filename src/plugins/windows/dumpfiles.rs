@@ -23,7 +23,7 @@
 //! 7. rows are emitted in order, then python's fatal error (if any) is raised.
 //!
 //! The run is bound by the kernel's buffered-write throughput (see the trace spans,
-//! `RSVOL_TRACE=1`); everything else takes a few tens of milliseconds.
+//! `FASTVOL_TRACE=1`); everything else takes a few tens of milliseconds.
 
 use crate::cli::regex::Regex;
 use crate::plugins::windows::handles::HandleWalker;
@@ -986,7 +986,7 @@ mod tests {
             // a 256 KiB VACB-style page straddling the fallback boundary
             vec![(30 * 0x1000 + 0x10, 0x100, 0x40000)],
         ];
-        let dir = std::env::temp_dir().join(format!("rsvol-dumpfiles-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fastvol-dumpfiles-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for (i, pages) in cases.iter().enumerate() {
             let path = dir.join(format!("case{i}"));

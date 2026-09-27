@@ -2,7 +2,7 @@
 # Usage: bench/scripts/cli_startup.sh [BIN] [N]
 # Average wall time of N invocations of the CLI paths that do no plugin work
 # (help, an argument error, a bad -f), against /bin/true as the process-spawn floor.
-BIN=${1:-/home/user/rs-vol/target/fast/vol}
+BIN=${1:-/home/user/rs-vol/target/fast/fvol}
 N=${2:-1000}
 t() {
   local s e

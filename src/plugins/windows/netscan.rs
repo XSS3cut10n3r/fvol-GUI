@@ -370,13 +370,13 @@ mod tests {
     use super::*;
     use crate::context::GlobalOptions;
 
-    /// `RSVOL_BENCH_IMG=... cargo test --profile fast net_timelines -- --ignored --nocapture`:
+    /// `FASTVOL_BENCH_IMG=... cargo test --profile fast net_timelines -- --ignored --nocapture`:
     /// print netscan's and netstat's timeline events (python `generate_timeline`), to diff
     /// against python's timeliner descriptions.
     #[test]
     #[ignore]
     fn net_timelines() {
-        let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
         let ctx = Context::new(GlobalOptions { file: Some(img), output_dir: ".".into(), ..Default::default() }).unwrap();
         let cfg = Config::default();
         for (name, p) in [("NetScan", &NetScan as &dyn Plugin), ("NetStat", &crate::plugins::windows::netstat::NetStat)] {

@@ -1,6 +1,6 @@
 /* Minimal stand-in for samba's replace.h so lib/compression/lzxpress.c builds standalone. */
-#ifndef RSVOL_REFBENCH_REPLACE_H
-#define RSVOL_REFBENCH_REPLACE_H
+#ifndef FASTVOL_REFBENCH_REPLACE_H
+#define FASTVOL_REFBENCH_REPLACE_H
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

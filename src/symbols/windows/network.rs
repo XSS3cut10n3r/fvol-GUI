@@ -435,13 +435,13 @@ mod tests {
         assert!(inet_ntop(Family::V6, &[0; 4]).is_err());
     }
 
-    /// `RSVOL_NTOP_VECTORS=file cargo test --profile fast ntop6_vectors -- --ignored`: compare
+    /// `FASTVOL_NTOP_VECTORS=file cargo test --profile fast ntop6_vectors -- --ignored`: compare
     /// against `hex<TAB>python inet_ntop` lines (e.g. generated with random zero-heavy
     /// addresses).
     #[test]
     #[ignore]
     fn ntop6_vectors() {
-        let path = std::env::var("RSVOL_NTOP_VECTORS").expect("RSVOL_NTOP_VECTORS");
+        let path = crate::util::env::var("NTOP_VECTORS").expect("FASTVOL_NTOP_VECTORS");
         let text = std::fs::read_to_string(path).unwrap();
         let mut n = 0;
         for line in text.lines() {

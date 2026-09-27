@@ -4,8 +4,8 @@
  * engine scans the mapping in place (exactly what the rust drivers in
  * src/yara/benchdrv.rs do), so all engines see the same bytes at the same addresses.
  */
-#ifndef RSVOL_BENCHUTIL_H
-#define RSVOL_BENCHUTIL_H
+#ifndef FASTVOL_BENCHUTIL_H
+#define FASTVOL_BENCHUTIL_H
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* memmem */

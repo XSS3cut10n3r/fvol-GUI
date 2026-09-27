@@ -1,4 +1,4 @@
-/* rsvol web UI — "evidence bench": an instrument for reading memory.
+/* fastvol web UI — "evidence bench": an instrument for reading memory.
    Mono-first (embedded JetBrains Mono subset, OFL), graphite + signal amber in the dark,
    manila case-file + stamp red in the light. No external resources. */
 
@@ -182,8 +182,11 @@ select.input { padding-right: 20px; }
   content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
   background: linear-gradient(90deg, var(--accent) 0, var(--accent) 64px, transparent 64px);
 }
-.brand { display: flex; align-items: center; gap: 7px; font-weight: 700; letter-spacing: .04em; color: var(--accent); font-size: 13px; padding-right: 4px; }
-.brand span { color: var(--text); }
+.brand { display: flex; align-items: center; gap: 6px; color: var(--text); padding-right: 4px; }
+.brand .brand-mark { display: block; }
+.brand .wordmark { display: block; }
+.mascot { display: block; width: 96px; height: 96px; margin: 0 auto; }
+.login-box .mascot { margin: 4px auto 0; }
 .evidence {
   display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 auto;
   height: 28px; padding: 0 10px 0 0; border: 1px solid transparent; border-radius: var(--r);

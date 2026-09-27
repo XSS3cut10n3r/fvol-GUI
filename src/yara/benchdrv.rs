@@ -9,11 +9,11 @@
 //! * `yara_rules_difftest_driver` — YARA differential test vs yara-python
 //!   (bench/scripts/yara_diff.py).
 //!
-//! Benchmark environment: `RSVOL_BENCH_IMG` (image path), `RSVOL_BENCH_OFF` / `RSVOL_BENCH_LEN`
-//! (window, default 1 GiB at 1 GiB; K/M/G suffixes ok), `RSVOL_BENCH_REPS` (best of N,
-//! default 5), `RSVOL_BENCH_REGEX_CASES` (bench/refbench/regex_cases.tsv),
-//! `RSVOL_BENCH_YARA_CASES` (comma separated .yar files), `RSVOL_BENCH_ONLY` (case name).
-//! Output lines: `BENCH \t rsvol \t case \t compile_us \t best_s \t MB/s \t matches \t note`.
+//! Benchmark environment: `FASTVOL_BENCH_IMG` (image path), `FASTVOL_BENCH_OFF` / `FASTVOL_BENCH_LEN`
+//! (window, default 1 GiB at 1 GiB; K/M/G suffixes ok), `FASTVOL_BENCH_REPS` (best of N,
+//! default 5), `FASTVOL_BENCH_REGEX_CASES` (bench/refbench/regex_cases.tsv),
+//! `FASTVOL_BENCH_YARA_CASES` (comma separated .yar files), `FASTVOL_BENCH_ONLY` (case name).
+//! Output lines: `BENCH \t fastvol \t case \t compile_us \t best_s \t MB/s \t matches \t note`.
 
 use super::regex::Regex;
 use super::rules::{MetaValue, RuleMatch, Rules};
@@ -98,12 +98,12 @@ fn parse_size(s: &str) -> Option<usize> {
 }
 
 fn env_size(name: &str, default: usize) -> usize {
-    std::env::var(name).ok().and_then(|v| parse_size(&v)).unwrap_or(default)
+    crate::util::env::var(name).ok().and_then(|v| parse_size(&v)).unwrap_or(default)
 }
 
 fn bench_window() -> Window {
-    let img = std::env::var("RSVOL_BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
-    let w = Window::map(&img, env_size("RSVOL_BENCH_OFF", 1 << 30), env_size("RSVOL_BENCH_LEN", 1 << 30));
+    let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let w = Window::map(&img, env_size("BENCH_OFF", 1 << 30), env_size("BENCH_LEN", 1 << 30));
     w.warm();
     w
 }
@@ -156,9 +156,9 @@ fn pattern_literal(p: &[u8]) -> Option<Vec<u8>> {
 #[test]
 #[ignore]
 fn yara_regex_bench_driver() {
-    let Ok(cases) = std::env::var("RSVOL_BENCH_REGEX_CASES") else { return };
-    let reps = env_size("RSVOL_BENCH_REPS", 5);
-    let only = std::env::var("RSVOL_BENCH_ONLY").unwrap_or_default();
+    let Ok(cases) = crate::util::env::var("BENCH_REGEX_CASES") else { return };
+    let reps = env_size("BENCH_REPS", 5);
+    let only = crate::util::env::var("BENCH_ONLY").unwrap_or_default();
     let data = std::fs::read(&cases).expect("read regex cases");
     let w = bench_window();
     let hay = w.bytes();
@@ -177,13 +177,13 @@ fn yara_regex_bench_driver() {
         let re = match re {
             Ok(r) => r,
             Err(e) => {
-                println!("BENCH\trsvol\t{name}\t-\t-\t-\t-\tcompile error: {e}");
+                println!("BENCH\tfastvol\t{name}\t-\t-\t-\t-\tcompile error: {e}");
                 continue;
             }
         };
         let (best, n) = secs_best(reps, || re.find_iter(black_box(hay)).count());
         println!(
-            "BENCH\trsvol\t{name}\t{:.1}\t{best:.4}\t{:.1}\t{n}\twindow={}MiB engine={}",
+            "BENCH\tfastvol\t{name}\t{:.1}\t{best:.4}\t{:.1}\t{n}\twindow={}MiB engine={}",
             ctime * 1e6,
             hay.len() as f64 / 1e6 / best,
             hay.len() >> 20,
@@ -192,7 +192,7 @@ fn yara_regex_bench_driver() {
         if let Some(lit) = pattern_literal(pat).filter(|l| l.len() > 1) {
             let mm = super::memchr::Memmem::new(&lit);
             let (best, n) = secs_best(reps, || mm.find_iter(black_box(hay)).count());
-            println!("PRIM\trsvol-memmem\t{name}\t{best:.4}\t{:.1}\t{n}", hay.len() as f64 / 1e6 / best);
+            println!("PRIM\tfastvol-memmem\t{name}\t{best:.4}\t{:.1}\t{n}", hay.len() as f64 / 1e6 / best);
         }
     }
 }
@@ -201,9 +201,9 @@ fn yara_regex_bench_driver() {
 #[test]
 #[ignore]
 fn yara_rules_bench_driver() {
-    let Ok(files) = std::env::var("RSVOL_BENCH_YARA_CASES") else { return };
-    let reps = env_size("RSVOL_BENCH_REPS", 5);
-    let only = std::env::var("RSVOL_BENCH_ONLY").unwrap_or_default();
+    let Ok(files) = crate::util::env::var("BENCH_YARA_CASES") else { return };
+    let reps = env_size("BENCH_REPS", 5);
+    let only = crate::util::env::var("BENCH_ONLY").unwrap_or_default();
     let w = bench_window();
     let hay = w.bytes();
     for path in files.split(',').filter(|p| !p.is_empty()) {
@@ -216,7 +216,7 @@ fn yara_rules_bench_driver() {
         let rules = match rules {
             Ok(r) => r,
             Err(e) => {
-                println!("BENCH\trsvol\t{name}\t-\t-\t-\t-\tpending ({e})");
+                println!("BENCH\tfastvol\t{name}\t-\t-\t-\t-\tpending ({e})");
                 continue;
             }
         };
@@ -225,7 +225,7 @@ fn yara_rules_bench_driver() {
             (m.len(), m.iter().flat_map(|r| r.strings.iter()).map(|s| s.instances.len()).sum::<usize>())
         });
         println!(
-            "BENCH\trsvol\t{name}\t{:.1}\t{best:.4}\t{:.1}\t{nr}/{ni}\twindow={}MiB",
+            "BENCH\tfastvol\t{name}\t{:.1}\t{best:.4}\t{:.1}\t{nr}/{ni}\twindow={}MiB",
             ctime * 1e6,
             hay.len() as f64 / 1e6 / best,
             hay.len() >> 20
@@ -234,7 +234,7 @@ fn yara_rules_bench_driver() {
 }
 
 /// Scan-API overheads and multi-thread scaling (developer probe, ignored test):
-///   RSVOL_BENCH_YARA_CASES=a.yar,b.yar [RSVOL_BENCH_REGEX_CASES=cases.tsv] \
+///   FASTVOL_BENCH_YARA_CASES=a.yar,b.yar [FASTVOL_BENCH_REGEX_CASES=cases.tsv] \
 ///   cargo test --profile release yara_scaling_probe -- --ignored --nocapture
 /// * per-call cost of `Rules::scan` / `Regex::find_iter` on small buffers (vadyarascan
 ///   calls once per VAD): ns per call for 4 KiB and 64 KiB pieces of the window;
@@ -247,7 +247,7 @@ fn yara_scaling_probe() {
     let hay = w.bytes();
     type Job = Box<dyn Fn(&[u8]) -> usize + Sync>;
     let mut jobs: Vec<(String, Job)> = Vec::new();
-    if let Ok(files) = std::env::var("RSVOL_BENCH_YARA_CASES") {
+    if let Ok(files) = crate::util::env::var("BENCH_YARA_CASES") {
         for path in files.split(',').filter(|p| !p.is_empty()) {
             let src = std::fs::read_to_string(path).expect("read rule file");
             let rules = Rules::compile(&src).expect("compile");
@@ -255,7 +255,7 @@ fn yara_scaling_probe() {
             jobs.push((format!("yara {name}"), Box::new(move |d: &[u8]| rules.scan(d).len())));
         }
     }
-    if let Ok(cases) = std::env::var("RSVOL_BENCH_REGEX_CASES") {
+    if let Ok(cases) = crate::util::env::var("BENCH_REGEX_CASES") {
         let data = std::fs::read(&cases).expect("read regex cases");
         for line in data.split(|&b| b == b'\n').filter(|l| !l.is_empty() && l[0] != b'#') {
             let Some(tab) = line.iter().position(|&b| b == b'\t') else { continue };
@@ -298,7 +298,7 @@ fn yara_scaling_probe() {
     }
     // Shared-Regex contention: T threads calling `search` on 64-byte strings (scratch
     // space comes from the regex's pool on every call).
-    if std::env::var("RSVOL_BENCH_REGEX_CASES").is_ok() {
+    if crate::util::env::var("BENCH_REGEX_CASES").is_ok() {
         let re = Regex::new(br"https?://[a-zA-Z0-9./?=_%:-]+", 0).expect("regex");
         let calls = 200_000usize;
         let mut row = Vec::new();
@@ -325,7 +325,7 @@ fn yara_scaling_probe() {
 }
 
 /// Where YARA scan time goes (developer probe, ignored test):
-///   RSVOL_BENCH_YARA_CASES=a.yar,... cargo test --profile release yara_verify_probe -- --ignored --nocapture
+///   FASTVOL_BENCH_YARA_CASES=a.yar,... cargo test --profile release yara_verify_probe -- --ignored --nocapture
 /// Per rule file: full scan, scan with hex/regex verification skipped, time inside
 /// `ReString::verify`, and the candidate statistics of the matcher.
 #[test]
@@ -333,7 +333,7 @@ fn yara_scaling_probe() {
 fn yara_verify_probe() {
     use super::scan::Matcher;
     use super::scan::matcher::{SKIP_VERIFY, TIME_VERIFY, VERIFY_CALLS, VERIFY_NS};
-    let Ok(files) = std::env::var("RSVOL_BENCH_YARA_CASES") else { return };
+    let Ok(files) = crate::util::env::var("BENCH_YARA_CASES") else { return };
     let w = bench_window();
     let hay = w.bytes();
     for path in files.split(',').filter(|p| !p.is_empty()) {
@@ -367,15 +367,15 @@ fn yara_verify_probe() {
 // YARA differential driver (bench/scripts/yara_diff.py)
 // ---------------------------------------------------------------------------------------
 //
-// Input (`$RSVOL_YARA_CASES`), tab separated, one record per line:
+// Input (`$FASTVOL_YARA_CASES`), tab separated, one record per line:
 //   D  data_id  hex                        inline data buffer
 //   F  data_id  path  offset  length       slice of a file (pread)
 //   C  case_id  ns:srchex[,ns:srchex...]   data_id[,data_id...]
-// case ids are 0..N in file order; `$RSVOL_YARA_START` skips ids below it (resume after a
-// crash), `$RSVOL_YARA_TIMEOUT` (seconds, default 30) aborts the process with a TIMEOUT
+// case ids are 0..N in file order; `$FASTVOL_YARA_START` skips ids below it (resume after a
+// crash), `$FASTVOL_YARA_TIMEOUT` (seconds, default 30) aborts the process with a TIMEOUT
 // record when one case runs too long.
 //
-// Output (`$RSVOL_YARA_OUT`, appended, flushed per case), tab separated:
+// Output (`$FASTVOL_YARA_OUT`, appended, flushed per case), tab separated:
 //   id BEGIN
 //   id COMPILE OK | id COMPILE ERR msg
 //   id data M ns rule tags(space separated) meta(name=i:N | name=b:0/1 | name=s:hex, space separated)
@@ -527,10 +527,10 @@ fn run_diff_case(id: usize, srcs: &[(String, String)], data_ids: &[String], data
 #[test]
 #[ignore]
 fn yara_rules_difftest_driver() {
-    let Ok(inp) = std::env::var("RSVOL_YARA_CASES") else { return };
-    let outp = std::env::var("RSVOL_YARA_OUT").unwrap_or_else(|_| format!("{inp}.out"));
-    let start: usize = std::env::var("RSVOL_YARA_START").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let timeout: f64 = std::env::var("RSVOL_YARA_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+    let Ok(inp) = crate::util::env::var("YARA_CASES") else { return };
+    let outp = crate::util::env::var("YARA_OUT").unwrap_or_else(|_| format!("{inp}.out"));
+    let start: usize = crate::util::env::var("YARA_START").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let timeout: f64 = crate::util::env::var("YARA_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
     let text = std::fs::read_to_string(&inp).expect("read cases");
     let mut specs: HashMap<String, DataSpec> = HashMap::new();
     let mut cases: Vec<(usize, Vec<(String, String)>, Vec<String>)> = Vec::new();

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """python `re` throughput over an mmapped window of a memory image (the reference for
-rsvol's regex engine; see bench/scripts/refbench.sh for the full comparison).
+fastvol's regex engine; see bench/scripts/refbench.sh for the full comparison).
 
 For every case of bench/refbench/regex_cases.tsv: compile time (re.purge() first, best
 of N) and `finditer` over the window (best of N), printing one machine-readable line

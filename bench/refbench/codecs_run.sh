@@ -10,7 +10,7 @@
 # best taken) so background load affects them alike. Besides wall-clock MB/s, both harnesses
 # read user-mode CPU cycles with perf_event_open; the cycle ratio is insensitive to frequency
 # changes and preemption (useful on a loaded machine). Files named *.mt.xz run unpinned
-# (multi-threaded decoders on both sides: lzma_stream_decoder_mt vs block-parallel rsvol);
+# (multi-threaded decoders on both sides: lzma_stream_decoder_mt vs block-parallel fastvol);
 # their cycle columns are the calling thread only and not comparable.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)

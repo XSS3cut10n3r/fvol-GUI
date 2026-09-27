@@ -259,7 +259,7 @@ def main():
     with open(cpath, "w") as fh:
         for cid, strs, d, exp, _ in cases:
             fh.write("%s\t%s\t%s\t%s\n" % (cid, ";".join(spec(s, m) for s, m in strs), d, exp))
-    env = dict(os.environ, RSVOL_YARA_CASES=cpath, RSVOL_YARA_OUT=opath)
+    env = dict(os.environ, FASTVOL_YARA_CASES=cpath, FASTVOL_YARA_OUT=opath)
     cmd = ["cargo", "test", "--profile", "fast", "yara_scan_difftest", "--", "--ignored", "--nocapture"]
     subprocess.run([LIMIT, "-m", "4G"] + cmd, cwd=ROOT, env=env, check=True)
     res = dict(l.split("\t", 1) for l in open(opath).read().splitlines())

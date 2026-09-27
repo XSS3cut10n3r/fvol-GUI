@@ -4,7 +4,7 @@
 # record python volatility3's answers for them (gen_containers.py --expect-only).
 #   gen_qemu_real.sh OUTDIR
 # The files are large (RAM sized) and are not committed; check them with
-#   RSVOL_CONTAINER_FIXTURES=OUTDIR cargo test --release python_differential_large -- --ignored
+#   FASTVOL_CONTAINER_FIXTURES=OUTDIR cargo test --release python_differential_large -- --ignored
 set -euo pipefail
 OUT="$(mkdir -p "$1" && cd "$1" && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"

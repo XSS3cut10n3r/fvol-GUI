@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// a value above this is corruption (a smeared / garbage `kallsyms_num_syms`). python has no
 /// such bound -- `get_core_symbols` does `for sym_idx in range(self._kallsyms_num_syms)`, so a
 /// corrupted count of, say, 1.8 billion makes python loop billions of times and hang forever.
-/// rsvol gives up on the affected enumeration instead (DESIGN "never hang on malformed memory";
+/// fastvol gives up on the affected enumeration instead (DESIGN "never hang on malformed memory";
 /// where python would hang forever, stop cleanly). Used by every count-driven loop below.
 const MAX_PLAUSIBLE_SYMS: u64 = 16 << 20;
 
@@ -1674,13 +1674,13 @@ mod tests {
     use crate::context::{Context, GlobalOptions};
 
     fn ctx() -> Context {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
         Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap()
     }
 
     /// Render python's `linux.kallsyms.Kallsyms` (no options) text output from this API, to
     /// diff against the python reference:
-    /// `RSVOL_BENCH_IMAGE=<img> RSVOL_TEST_OUT=<file> cargo test --profile fast
+    /// `FASTVOL_BENCH_IMAGE=<img> FASTVOL_TEST_OUT=<file> cargo test --profile fast
     /// kallsyms_like_plugin -- --ignored`.
     #[test]
     #[ignore]
@@ -1690,7 +1690,7 @@ mod tests {
         let k = ctx.linux_kernel().unwrap();
         let kas = Kallsyms::get(k).unwrap();
         let t0 = std::time::Instant::now();
-        let mut f = std::io::BufWriter::new(std::fs::File::create(std::env::var("RSVOL_TEST_OUT").unwrap()).unwrap());
+        let mut f = std::io::BufWriter::new(std::fs::File::create(crate::util::env::var("TEST_OUT").unwrap()).unwrap());
         writeln!(f, "Volatility 3 Framework 2.28.2\n\nAddr\tType\tSize\tExported\tSubSystem\tModuleName\tSymbolName\tDescription\n").unwrap();
         let mut n = 0;
         'outer: for part in 0..4 {
@@ -1770,11 +1770,11 @@ mod tests_lookup {
     use crate::context::{Context, GlobalOptions};
 
     /// `lookup_name` / `lookup_address` agree with the ISF for a few kernel symbols:
-    /// `RSVOL_BENCH_IMAGE=<img> cargo test --profile fast kallsyms_lookup_name -- --ignored`.
+    /// `FASTVOL_BENCH_IMAGE=<img> cargo test --profile fast kallsyms_lookup_name -- --ignored`.
     #[test]
     #[ignore]
     fn kallsyms_lookup_name() {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
         let ctx = Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap();
         let k = ctx.linux_kernel().unwrap();
         let kas = Kallsyms::get(k).unwrap();
@@ -1791,7 +1791,7 @@ mod tests_lookup {
                 assert_eq!(back.address, s.address);
             }
         }
-        assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
+        assert!(kas.lookup_name("fastvol_no_such_symbol").unwrap().is_none());
     }
 }
 
@@ -1843,7 +1843,7 @@ mod tests_robustness {
     //! `kallsyms_num_syms` was garbaged to 1,852,554,667 made `linux.kallsyms.Kallsyms` hang
     //! (the timeout fired). python has no bound either -- `get_core_symbols` does
     //! `for sym_idx in range(self._kallsyms_num_syms)` -- so it would loop ~1.8 billion times
-    //! and hang forever; rsvol gives up on the enumeration at [`MAX_PLAUSIBLE_SYMS`] instead.
+    //! and hang forever; fastvol gives up on the enumeration at [`MAX_PLAUSIBLE_SYMS`] instead.
     use super::*;
     use crate::layers::FileLayer;
     use crate::objects::Module;
@@ -1887,7 +1887,7 @@ mod tests_robustness {
         // one file per call: the tests run concurrently and each removes its file
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let k = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-fuzz-{}-{k}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("fastvol-kallsyms-fuzz-{}-{k}", std::process::id()));
         std::fs::write(&p, vec![0u8; 8192]).unwrap();
         let l = FileLayer::open(&p).unwrap();
         let _ = std::fs::remove_file(&p); // the mmap keeps the mapping alive
@@ -1910,7 +1910,7 @@ mod tests_robustness {
                 rows < 1_000_000 // stop early if the guard ever regresses, so the test can't hang
             });
             assert_eq!(rows, 0, "num_syms={n}: core enumeration should be skipped, not looped");
-            assert!(kas.lookup_name("rsvol_no_such_symbol").unwrap().is_none());
+            assert!(kas.lookup_name("fastvol_no_such_symbol").unwrap().is_none());
             assert!(t.elapsed() < std::time::Duration::from_secs(5), "num_syms={n}: took too long");
         }
     }
@@ -1927,7 +1927,7 @@ mod tests_robustness {
         );
         let blob = build_blob(isf.as_bytes(), &BuildOptions::default()).expect("build_blob");
         let t: TableRef = Box::leak(Box::new(SymbolTable::from_blob(Blob::Owned(blob), "t", "u").expect("from_blob")));
-        let p = std::env::temp_dir().join(format!("rsvol-kallsyms-blocks-{}-{size}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("fastvol-kallsyms-blocks-{}-{size}", std::process::id()));
         std::fs::write(&p, vec![0u8; size]).unwrap();
         let l = FileLayer::open(&p).unwrap();
         let _ = std::fs::remove_file(&p);

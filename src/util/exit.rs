@@ -19,8 +19,8 @@
 //!
 //! Caveat, CPU accounting: the teardown's CPU time is charged to the helper, so the caller's
 //! `wait4`/`getrusage(RUSAGE_CHILDREN)`/`time` no longer include it (the cgroup still does).
-//! It is only used by the one-shot CLI ([`arm`]): never by `vol serve`, tests or embedders.
-//! `RSVOL_EXIT_HELPER=0` turns it off (and with it the collapse below).
+//! It is only used by the one-shot CLI ([`arm`]): never by `fvol serve`, tests or embedders.
+//! `FASTVOL_EXIT_HELPER=0` turns it off (and with it the collapse below).
 //!
 //! **Huge-page text.** The release binary is linked with 2 MB-aligned segments
 //! (`.cargo/config.toml`), so the kernel can map its code and read-only data with 2 MB page-table
@@ -31,30 +31,26 @@
 //! collapse those ranges (`MADV_COLLAPSE`): real work the first time (a few ms) and again only
 //! if memory pressure split the folios; a cheap check when they are already huge; an error
 //! (unsupported kernel or file system, no free huge page) is ignored and the next run just
-//! tries again. `RSVOL_EXIT_HELPER=nothp` keeps the helper but skips the collapse.
+//! tries again. `FASTVOL_EXIT_HELPER=nothp` keeps the helper but skips the collapse.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Let the next [`detach_teardown`] act: called by the one-shot CLI once it knows it is not
-/// `vol serve`.
+/// `fvol serve`.
 pub fn arm() {
     ARMED.store(true, Ordering::Relaxed);
 }
 
-/// `RSVOL_EXIT_HELPER`: unset (or anything else) = helper + huge-page collapse, `0` (or empty)
+/// `FASTVOL_EXIT_HELPER`: unset (or anything else) = helper + huge-page collapse, `0` (or empty)
 /// = neither, `nothp` = the helper without the collapse. `None` = off.
 fn knob() -> Option<bool> {
-    unsafe extern "C" {
-        fn getenv(name: *const std::ffi::c_char) -> *const std::ffi::c_char;
-    }
-    let v = unsafe { getenv(c"RSVOL_EXIT_HELPER".as_ptr()) };
-    if v.is_null() {
+    // (no allocation: the environment snapshot was taken at startup, see `crate::util::env`)
+    let Some(v) = crate::util::env::get("EXIT_HELPER") else {
         return Some(true);
-    }
-    // SAFETY: getenv returns null or a NUL-terminated string
-    match unsafe { std::ffi::CStr::from_ptr(v) }.to_bytes() {
+    };
+    match std::os::unix::ffi::OsStrExt::as_bytes(v) {
         b"" | b"0" => None,
         b"nothp" => Some(false),
         _ => Some(true),

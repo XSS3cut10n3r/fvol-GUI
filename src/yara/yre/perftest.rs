@@ -1,5 +1,5 @@
 //! Developer micro-benchmark of ReString::verify over real memory (ignored test):
-//!   RSVOL_YRE_SRC='{ FF 15 ?? ?? ?? ?? ( 85 C0 | 48 85 C0 | 3B C3 ) 7? }' cargo test --profile fast yara_yre_verify_perf -- --ignored --nocapture
+//!   FASTVOL_YRE_SRC='{ FF 15 ?? ?? ?? ?? ( 85 C0 | 48 85 C0 | 3B C3 ) 7? }' cargo test --profile fast yara_yre_verify_perf -- --ignored --nocapture
 
 use crate::util::mmap::Mmap;
 use crate::yara::memchr::Memmem;
@@ -10,7 +10,7 @@ use std::time::Instant;
 #[test]
 #[ignore]
 fn yara_yre_verify_perf() {
-    let src = std::env::var("RSVOL_YRE_SRC").unwrap_or_else(|_| "{ FF 15 ?? ?? ?? ?? ( 85 C0 | 48 85 C0 | 3B C3 ) 7? }".into());
+    let src = crate::util::env::var("YRE_SRC").unwrap_or_else(|_| "{ FF 15 ?? ?? ?? ?? ( 85 C0 | 48 85 C0 | 3B C3 ) 7? }".into());
     let Ok(f) = std::fs::File::open("/home/user/cbc2/task2/memory-dirty.raw") else { return };
     let Ok(m) = Mmap::map(&f) else { return };
     let len: usize = 256 << 20;

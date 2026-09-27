@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Cold / warm start benchmark: rsvol (private RSVOL_CACHE) vs vol-rs (private HOME).
+"""Cold / warm start benchmark: fastvol (private FASTVOL_CACHE) vs vol-rs (private HOME).
 
 Usage: coldbench.py [-n N] [--bin BIN] [--base BIN] [--no-volrs] [--only NAME[,NAME]] [--scratch DIR]
-                    [--py-cache DIR] [--rsvol-args "ARGS"] [--rsvol-env K=V[,K=V]]
+                    [--py-cache DIR] [--fastvol-args "ARGS"] [--fastvol-env K=V[,K=V]]
 
---py-cache DIR: python's cache directory the rsvol runs read (`--cache-path DIR`: its
-identifier.cache seeds rsvol's identifier index, see below). --rsvol-args / --rsvol-env: extra
-global options / environment for the rsvol runs only (e.g. `--rsvol-env
-RSVOL_NO_PY_IDENT_SEED=1`: rsvol's own identifier index).
+--py-cache DIR: python's cache directory the fastvol runs read (`--cache-path DIR`: its
+identifier.cache seeds fastvol's identifier index, see below). --fastvol-args / --fastvol-env (old names --rsvol-args / --rsvol-env): extra
+global options / environment for the fastvol runs only (e.g. `--fastvol-env
+FASTVOL_NO_PY_IDENT_SEED=1`: fastvol's own identifier index).
 
-Cases per (image, plugin), for each rsvol binary (--base: a baseline build, measured
+Cases per (image, plugin), for each fastvol binary (--base: a baseline build, measured
 interleaved with --bin so machine load affects both alike):
-  cold     empty rsvol cache (first time the image AND the symbol files are seen)
+  cold     empty fastvol cache (first time the image AND the symbol files are seen)
   newimg   symbol caches warm (ISF blobs + identifier index), automagic/scan caches empty
   isfnew   newimg + no ISF blobs: a new image whose kernel ISF was indexed but never loaded
   symcold  automagic caches warm, symbol caches (ISF blobs + identifier index + ISF choices) empty
@@ -20,13 +20,13 @@ vol-rs is measured with HOME=<scratch>/volrs-home (its symbol store copied there
 for cold). Wall time, best of N (default 5). Timing only: outputs go to /dev/null.
 
 The cold and symcold numbers depend on python's identifier cache (python's
-`~/.cache/volatility3/identifier.cache`, or the one in --py-cache), which rsvol replays instead
+`~/.cache/volatility3/identifier.cache`, or the one in --py-cache), which fastvol replays instead
 of reading every symbol file:
   regime A: python's cache has a row for every ISF on the search path (python ran with the same
             -s dirs since they last changed): the index costs 1-4 ms; cold = decode + index of
             the one kernel ISF (e.g. noble 6.8 ~65 ms, mac ~30 ms);
   regime B: it lacks rows for the ISFs of -s testdata/symbols (e.g. python never ran with that
-            dir, or the dir grew since): rsvol reads every ISF python would read (179 files,
+            dir, or the dir grew since): fastvol reads every ISF python would read (179 files,
             ~7 s of CPU, 0.5-0.9 s wall) exactly like python's update, so cold is 10-30x slower.
 Which regime a machine is in changes over time (python rewrites its cache whenever it runs), so
 compare binaries interleaved in one invocation, and pin python's cache with --py-cache: build a
@@ -46,14 +46,14 @@ def opt(name, default=None):
         return args[args.index(name) + 1]
     return default
 N = int(opt("-n", "5"))
-BIN = opt("--bin", os.path.join(ROOT, "target/release/vol"))
+BIN = opt("--bin", os.path.join(ROOT, "target/release/fvol"))
 BASE = opt("--base")
 SCRATCH = opt("--scratch", os.path.join(ROOT, "testdata/scratch/coldstart"))
 ONLY = opt("--only")
-RSVOL_ARGS = (opt("--rsvol-args") or "").split()
+FASTVOL_ARGS = (opt("--fastvol-args") or opt("--rsvol-args") or "").split()
 if opt("--py-cache"):
-    RSVOL_ARGS = ["--cache-path", os.path.abspath(opt("--py-cache"))] + RSVOL_ARGS
-RSVOL_ENV = dict(kv.split("=", 1) for kv in (opt("--rsvol-env") or "").split(",") if kv)
+    FASTVOL_ARGS = ["--cache-path", os.path.abspath(opt("--py-cache"))] + FASTVOL_ARGS
+FASTVOL_ENV = dict(kv.split("=", 1) for kv in (opt("--fastvol-env") or opt("--rsvol-env") or "").split(",") if kv)
 VOLRS = os.path.expanduser("~/cbc2/vol-rs/target/release/vol-rs")
 SYMS = "/home/user/rs-vol/testdata/symbols"
 T = "/home/user/rs-vol/testdata/images"
@@ -74,14 +74,14 @@ os.makedirs(SCRATCH, exist_ok=True)
 VHOME = os.path.join(SCRATCH, "volrs-home")
 
 def own_helpers(cache):
-    """rsvol's detached helpers (`rsvol-isfb-helper`: symbol-table blobs, converted PDB tables)
-    started by runs with this RSVOL_CACHE (other users' helpers are not waited for)"""
-    pids = subprocess.run(["pgrep", "-f", "^rsvol-isfb-helper"], capture_output=True, text=True).stdout.split()
+    """fastvol's detached helpers (`fastvol-isfb-helper`: symbol-table blobs, converted PDB tables)
+    started by runs with this FASTVOL_CACHE (other users' helpers are not waited for)"""
+    pids = subprocess.run(["pgrep", "-f", "^(fastvol|rsvol)-isfb-helper"], capture_output=True, text=True).stdout.split()
     n = 0
     for pid in pids:
         try:
             with open(f"/proc/{pid}/environ", "rb") as f:
-                n += f"RSVOL_CACHE={cache}".encode() in f.read().split(b"\0")
+                n += f"FASTVOL_CACHE={cache}".encode() in f.read().split(b"\0")
         except OSError:
             pass
     return n
@@ -98,7 +98,7 @@ def run(cmd, env):
     t = time.perf_counter()
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     d = time.perf_counter() - t
-    wait_helpers(env.get("RSVOL_CACHE"))
+    wait_helpers(env.get("FASTVOL_CACHE"))
     return d, r.returncode
 
 def rm(cache, *names):
@@ -121,17 +121,19 @@ MODES = [
     ("warm", ()),
 ]
 
-def rsvol_all(binary, cache, img, plugin, extra):
+def fastvol_all(binary, cache, img, plugin, extra):
     """best time per mode over N rounds of cold, newimg, symcold, warm (each mode starts from
     the caches the previous run left)"""
-    env = dict(os.environ, RSVOL_CACHE=cache, **RSVOL_ENV)
+    # both names: the --base binary may predate the rename (RSVOL_* only)
+    env = dict(os.environ, FASTVOL_CACHE=cache, RSVOL_CACHE=cache, **FASTVOL_ENV)
+    env.pop("FASTVOL_TRACE", None)
     env.pop("RSVOL_TRACE", None)
     best = {m: 1e9 for m, _ in MODES}
     rc = 0
     for _ in range(N):
         for mode, names in MODES:
             rm(cache, *names)()
-            d, r = run([binary, "-q"] + RSVOL_ARGS + extra + ["-f", img, plugin], env)
+            d, r = run([binary, "-q"] + FASTVOL_ARGS + extra + ["-f", img, plugin], env)
             rc = rc or r
             best[mode] = min(best[mode], d)
     return best, rc
@@ -158,15 +160,15 @@ if "--no-volrs" not in args:
     hdr += " | vol-rs: cold    warm"
 print(hdr + f"   (ms, best of {N})", flush=True)
 for name, img, plugin, extra in CASES:
-    cur, rc = rsvol_all(BIN, os.path.join(SCRATCH, "bench-cache"), img, plugin, extra)
+    cur, rc = fastvol_all(BIN, os.path.join(SCRATCH, "bench-cache"), img, plugin, extra)
     line = f"{name:16} " + " ".join(ms(cur[m]) for m, _ in MODES)
     if BASE:
-        base, brc = rsvol_all(BASE, os.path.join(SCRATCH, "bench-cache-base"), img, plugin, extra)
+        base, brc = fastvol_all(BASE, os.path.join(SCRATCH, "bench-cache-base"), img, plugin, extra)
         line += " |       " + " ".join(ms(base[m]) for m, _ in MODES)
     if "--no-volrs" not in args:
         vc, vrc = volrs(img, plugin, extra, True)
         vw, _ = volrs(img, plugin, extra, False)
         line += f" |        {ms(vc)} {ms(vw)}" + (f" (volrs rc={vrc})" if vrc else "")
     if rc:
-        line += f"  (rsvol rc={rc})"
+        line += f"  (fastvol rc={rc})"
     print(line, flush=True)

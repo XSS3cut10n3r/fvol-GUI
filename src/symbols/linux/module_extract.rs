@@ -373,13 +373,13 @@ mod tests {
 
     /// Extract every `lsmod` module like python's `linux.lsmod --dump` (files
     /// `kernel_module.<name>.<offset>.elf`) to diff against python's output:
-    /// `RSVOL_BENCH_IMAGE=<img> RSVOL_TEST_OUT=<dir> cargo test --profile fast
+    /// `FASTVOL_BENCH_IMAGE=<img> FASTVOL_TEST_OUT=<dir> cargo test --profile fast
     /// extract_all_modules -- --ignored`.
     #[test]
     #[ignore]
     fn extract_all_modules() {
-        let image = std::env::var("RSVOL_BENCH_IMAGE").unwrap();
-        let out = std::env::var("RSVOL_TEST_OUT").unwrap();
+        let image = crate::util::env::var("BENCH_IMAGE").unwrap();
+        let out = crate::util::env::var("TEST_OUT").unwrap();
         let ctx = Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap();
         let k = ctx.linux_kernel().unwrap();
         let t = std::time::Instant::now();

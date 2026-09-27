@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="rsvol-version" content="{{VERSION}}">
+<meta name="fastvol-version" content="{{VERSION}}">
 <meta name="color-scheme" content="dark light">
-<title>rsvol</title>
+<title>fastvol</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preload" href="/assets/mono-400.woff2" as="font" type="font/woff2" crossorigin>
 <script src="/assets/theme.js"></script>
@@ -15,9 +15,9 @@
 <body>
 <a class="skip" href="#main">Skip to results</a>
 <header class="topbar" role="banner">
-  <div class="brand" aria-label="rsvol">
-    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6 15h3l2-6 2 9 2-5h3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
-    <span>rsvol</span>
+  <div class="brand" aria-label="fastvol">
+    <img class="brand-mark" src="/favicon.svg" width="22" height="22" alt="">
+    <svg class="wordmark" viewBox="-1 38 256 64" width="60" height="15" aria-hidden="true"><g transform="translate(18 0) skewX(-10)"><g fill="none" stroke="#e0662b" stroke-width="10"><path d="M5 100V58A13 13 0 0 1 18 45H27"/><path d="M-4 65H24"/><circle cx="52" cy="80" r="15"/><path d="M67 60V100"/><path fill="#e0662b" stroke="none" d="M115 60H92A14 12.125 0 0 0 92 84.25H101A4 3.625 0 0 1 101 91.5H78V100H101A14 12.125 0 0 0 101 75.75H92A4 3.625 0 0 1 92 68.5H115Z"/><path d="M129 46V100"/><path d="M120 65H141"/></g><g fill="none" stroke="currentColor" stroke-width="10"><path fill="currentColor" stroke="none" d="M146 60H156.5L164 83.1L171.5 60H182L169 100H159Z"/><circle cx="206" cy="80" r="15"/><path d="M236 40V100"/></g></g></svg>
   </div>
   <button class="evidence" id="evidence" type="button" title="Evidence details (open another image)">
     <span class="ev-tag">EVIDENCE</span>
@@ -64,7 +64,7 @@
   </main>
 </div>
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
-<div class="conn" id="conn" role="alert" hidden>Connection to the rsvol server lost — reconnecting…</div>
-<noscript><p class="noscript">The rsvol UI needs JavaScript.</p></noscript>
+<div class="conn" id="conn" role="alert" hidden>Connection to the fastvol server lost — reconnecting…</div>
+<noscript><p class="noscript">The fastvol UI needs JavaScript.</p></noscript>
 </body>
 </html>
