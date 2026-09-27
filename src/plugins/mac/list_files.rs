@@ -137,8 +137,9 @@ impl Walker {
             off_v_name: t.offset_of("vnode", "v_name")?,
             off_v_parent: t.offset_of("vnode", "v_parent")?,
             off_tqe_next: mnt.addr + mnt.member_offset("tqe_next")?,
-            entries: Vec::new(),
-            index: FxHashMap::with_capacity_and_hasher(1 << 17, Default::default()),
+            // sized for ~100k vnodes: no regrowth copies (untouched capacity costs nothing)
+            entries: Vec::with_capacity(1 << 17),
+            index: FxHashMap::with_capacity_and_hasher(100_000, Default::default()),
             null_valid: None,
             valid_cache: vec![(u64::MAX, false); VALID_CACHE],
         })
