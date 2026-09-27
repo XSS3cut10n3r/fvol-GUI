@@ -112,19 +112,37 @@ pub fn stream_chunks(out: &mut dyn RowSink, n: usize, chunk: usize, f: impl Fn(s
     let enc = out.encoder();
     let enc = enc.as_ref();
     let mut res = Ok(());
+    let mut panicked = None;
     crate::util::par::par_map_stream(
         n.div_ceil(chunk),
         4 * crate::util::par::threads(),
+        // a panic (python's uncaught exceptions are panics) is caught on the worker and
+        // resumed here, in order, like the serial loop would have raised it (an uncaught
+        // worker panic would leave the stream waiting forever)
         |c| {
             let mut b = RowBlock::new(enc);
-            let err = f(c * chunk..((c + 1) * chunk).min(n), &mut b);
-            (b, err)
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(c * chunk..((c + 1) * chunk).min(n), &mut b)));
+            (b, r)
         },
-        |_, (b, err)| {
-            res = b.emit(out).and(err.map_or(Ok(()), Err));
-            res.is_ok()
+        |_, (b, r)| {
+            // the rows before the error / panic first
+            res = b.emit(out);
+            match r {
+                _ if res.is_err() => false,
+                Ok(err) => {
+                    res = err.map_or(Ok(()), Err);
+                    res.is_ok()
+                }
+                Err(p) => {
+                    panicked = Some(p);
+                    false
+                }
+            }
         },
     );
+    if let Some(p) = panicked {
+        std::panic::resume_unwind(p);
+    }
     res
 }
 
@@ -218,5 +236,27 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(sink.rows.len(), 50);
         assert!(sink.rows.iter().enumerate().all(|(i, (d, v))| *d == 0 && matches!(v[0], Value::Int(x) if x == i as i128)));
+    }
+
+    /// A panic on a worker (python's uncaught exceptions) comes back on the calling thread
+    /// after every row before it, like the serial loop; it does not hang the stream.
+    #[test]
+    fn stream_chunks_resumes_worker_panics() {
+        let mut sink = CollectSink::default();
+        sink.begin(cols()).unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = stream_chunks(&mut sink, 1000, 7, |range, b| {
+                for i in range {
+                    if i == 500 {
+                        panic!("ValueError: boom");
+                    }
+                    b.push_ref(&row(i));
+                }
+                None
+            });
+        }));
+        let p = r.expect_err("the worker's panic is resumed");
+        assert_eq!(p.downcast_ref::<&str>().copied(), Some("ValueError: boom"));
+        assert_eq!(sink.rows.len(), 500);
     }
 }

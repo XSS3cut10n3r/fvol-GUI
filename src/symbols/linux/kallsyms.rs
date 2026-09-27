@@ -1251,31 +1251,46 @@ impl Kallsyms {
             let chunks = offsets.len().div_ceil(CHUNK);
             let mut done = false;
             let mut resume: Option<usize> = None;
+            let mut panicked = None;
             let threads = crate::util::par::threads();
             crate::util::par::par_map_stream(
                 chunks,
                 4 * threads,
                 // (block, stopped, first unreadable symbol)
-                |c| -> (B, bool, Option<usize>) {
-                    let mut names = PageReader::new(self.layer);
-                    let mut tokens = PageReader::new(self.layer);
-                    let lo = c * CHUNK;
-                    let hi = (lo + CHUNK).min(offsets.len());
+                // (block, stopped, first unreadable symbol, panic): a panic is caught on the
+                // worker and resumed on the calling thread after the block's symbols (an
+                // uncaught worker panic would leave the stream waiting forever)
+                |c| {
                     let mut b = new_block();
-                    for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
-                        let r = match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
-                            Ok((s, _)) => Ok(s),
-                            Err(e) if e.is_invalid_address() => return (b, false, Some(i)),
-                            Err(e) => Err(e),
-                        };
-                        if !push(&mut b, r) {
-                            return (b, true, None);
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> (bool, Option<usize>) {
+                        let mut names = PageReader::new(self.layer);
+                        let mut tokens = PageReader::new(self.layer);
+                        let lo = c * CHUNK;
+                        let hi = (lo + CHUNK).min(offsets.len());
+                        for (i, &off) in offsets.iter().enumerate().take(hi).skip(lo) {
+                            let r = match self.get_symbol_at(&mut names, &mut tokens, off, i as u64) {
+                                Ok((s, _)) => Ok(s),
+                                Err(e) if e.is_invalid_address() => return (false, Some(i)),
+                                Err(e) => Err(e),
+                            };
+                            if !push(&mut b, r) {
+                                return (true, None);
+                            }
                         }
+                        (false, None)
+                    }));
+                    match r {
+                        Ok((stopped, invalid)) => (b, stopped, invalid, None),
+                        Err(p) => (b, true, None, Some(p)),
                     }
-                    (b, false, None)
                 },
-                |_, (b, stopped, invalid)| {
-                    if !emit(b) || stopped {
+                |_, (b, stopped, invalid, p)| {
+                    let emitted = emit(b);
+                    if !emitted || stopped {
+                        // (a stop inside the block: python never got to the panic)
+                        if emitted {
+                            panicked = p;
+                        }
                         done = true;
                         return false;
                     }
@@ -1286,6 +1301,9 @@ impl Kallsyms {
                     true
                 },
             );
+            if let Some(p) = panicked {
+                std::panic::resume_unwind(p);
+            }
             match resume {
                 _ if done => return,
                 None => return,
@@ -1971,6 +1989,27 @@ mod tests_robustness {
                 true
             });
             assert_eq!(seen, vec![101], "num_syms={n}");
+            // a panic in `push` on a worker comes back here (the stream does not hang)
+            let pushes = std::sync::atomic::AtomicUsize::new(0);
+            let mut got = 0usize;
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                kas.for_each_core_block(
+                    &Vec::new,
+                    &|b: &mut Vec<u8>, _| {
+                        if pushes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 3000 {
+                            panic!("boom");
+                        }
+                        b.push(0);
+                        true
+                    },
+                    &mut |b| {
+                        got += b.len();
+                        true
+                    },
+                )
+            }));
+            assert!(r.is_err(), "num_syms={n}");
+            assert!(got < n as usize, "num_syms={n}");
         }
     }
 
