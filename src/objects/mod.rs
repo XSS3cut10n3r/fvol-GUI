@@ -120,6 +120,17 @@ pub fn read_into(layer: LayerRef, addr: u64, buf: &mut [u8]) -> Result<()> {
     }
 }
 
+/// python's int of an `n`-byte (1..=8) little-endian integer loaded as `raw`.
+#[inline(always)]
+fn le_int(raw: u64, n: usize, signed: bool) -> i128 {
+    if !signed || n == 0 {
+        raw as i128
+    } else {
+        let shift = 64 - 8 * n as u32;
+        (((raw << shift) as i64) >> shift) as i128
+    }
+}
+
 /// Little-endian unsigned load of `n <= 8` bytes.
 #[inline(always)]
 fn load_le(s: &[u8]) -> u64 {
@@ -520,12 +531,7 @@ impl Obj {
                     u64::from_le_bytes(b)
                 }
             };
-            return Ok(if !p.signed {
-                raw as i128
-            } else {
-                let shift = 64 - 8 * n as u32;
-                (((raw << shift) as i64) >> shift) as i128
-            });
+            return Ok(le_int(raw, n, p.signed));
         }
         let mut b = [0u8; 16];
         read_into(self.sp.layer, self.addr, &mut b[..n])?;
@@ -880,8 +886,9 @@ impl Field {
     pub fn int_from(&self, rec: &[u8], native_mask: u64) -> Option<i128> {
         let prim_at = |p: Prim| -> Option<i128> {
             let o = usize::try_from(self.offset).ok()?;
-            let b = rec.get(o..o.checked_add(p.size as usize)?)?;
-            Some(p.decode_int(b))
+            let n = p.size as usize;
+            let b = rec.get(o..o.checked_add(n)?)?;
+            Some(if n <= 8 && !p.big_endian { le_int(load_le(b), n, p.signed) } else { p.decode_int(b) })
         };
         match self.ty {
             Ty::Int(p) if self.sp.is_none() => prim_at(p),
