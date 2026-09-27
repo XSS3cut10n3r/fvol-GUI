@@ -6,7 +6,7 @@
 use crate::context::Context;
 use crate::error::Result;
 use crate::objects::util::array_to_string;
-use crate::plugins::windows::pe_symbols::{CollectedModules, Range, SymbolCache, get_process_modules_cached, get_vads_for_process_cache, path_and_symbol_for_address_cached};
+use crate::plugins::windows::pe_symbols::{CollectedModules, Range, SymbolCache, get_process_modules_cached, get_vads_for_process_cache, path_and_symbol_for_address_cached, prefetch_vads};
 use crate::plugins::windows::threads::list_process_threads;
 use crate::plugins::{Config, Plugin};
 use crate::renderers::{ColType, Column, RowSink, Value};
@@ -66,6 +66,15 @@ impl Plugin for SuspendedThreads {
             Ok(Some((owner, pid, name, tid, start, win32)))
         };
         let pres = crate::util::par::par_map(threads.len(), |i| threads[i].as_ref().ok().map(pre));
+        // the first suspended thread makes python walk its owner's VADs, then (usually) every
+        // process' VADs: walk them all at once
+        let owners: Vec<crate::objects::Obj> = pres.iter().filter_map(|r| match r {
+            Some(Ok(Some(v))) => Some(v.0),
+            _ => None,
+        }).collect();
+        if !owners.is_empty() {
+            prefetch_vads(k, &owners, &mut vads_cache);
+        }
         for (thread, r) in threads.into_iter().zip(pres) {
             thread?;
             let r = r.unwrap_or(Ok(None));

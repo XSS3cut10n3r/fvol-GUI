@@ -636,6 +636,23 @@ pub fn get_vads_for_process_cache<'c>(cache: &'c mut FxHashMap<u64, Vec<Range>>,
     Ok(if v.is_empty() { None } else { Some(v) })
 }
 
+/// Fill python's `vads_cache` with the file-mapping VADs of every listed process and of
+/// `extra` processes, walked in parallel (what the first [`get_vads_for_process_cache`] +
+/// [`get_process_modules_cached`] calls of a plugin would walk one after the other). Only
+/// successful walks are cached: a failing one is redone (and raises) where python walks it.
+pub fn prefetch_vads(k: &WinKernel, extra: &[Obj], cache: &mut FxHashMap<u64, Vec<Range>>) {
+    let mut procs: Vec<Obj> = extra.to_vec();
+    procs.extend(super::pslist::list_processes(k, &|_| Ok(false)).into_iter().map_while(|p| p.ok()));
+    let mut seen = crate::util::FxHashSet::default();
+    procs.retain(|p| !cache.contains_key(&p.addr) && seen.insert(p.addr));
+    let walked = crate::util::par::par_map(procs.len(), |i| get_proc_vads_with_file_paths(&procs[i]).ok());
+    for (p, v) in procs.iter().zip(walked) {
+        if let Some(v) = v {
+            cache.insert(p.addr, v);
+        }
+    }
+}
+
 /// python `PESymbols.get_all_vads_with_file_paths(context, kernel)`: (process, process layer,
 /// file-mapping VADs) for every process whose layer can be built. A trailing `Err` marks
 /// where python raised.
