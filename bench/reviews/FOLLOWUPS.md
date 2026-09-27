@@ -21,3 +21,13 @@ Status after the optimization pass: warm windows.pslist 1005 -> 710 us locally (
 - **`vol -h`**: ~6.1M instructions of help formatting (not on the warm path).
 - **Huge pages for the text on the VM**: the benchmark VM's kernel lacks CONFIG_READ_ONLY_THP_FOR_FS, so
   that step is a no-op there (works locally).
+
+## Runtime (thread pool, timeliner, statistics)
+Done: panic propagation, one persistent pool (20-task round ~10 us vs 180-1100 us spawning), negative
+kernel-discovery cache (mac timeliner 0.56-1.07 s -> 2.4-3.3 ms, Windows ~500 -> ~300 ms), statistics
+11.2 -> 4.5 ms.
+- **windows.statistics** still ~2 ms above floor: ~35 back-to-back parallel rounds + ~1 ms upper-level work.
+  Prefetch the next round, or add a translate that stops at a given page-table level (intel.rs).
+- **Pool wall-time win on 5-15 ms plugins** is unmeasured (box saturated): re-measure on the quiet VM.
+- **Timeliner** starts one thread per plugin per run (deliberately off the pool: long blocking threads);
+  a dedicated small thread set could shave the spawn cost.

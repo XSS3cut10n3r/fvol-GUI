@@ -299,12 +299,25 @@ impl Context {
         let am = match cached {
             Some(a) => a,
             None => {
+                use crate::automagic::cache::{get, load_failure, store_failure};
                 use crate::automagic::windows::{EarlyIndex, KernelFound, WinAutomagic, find_dtb, find_kernel_with};
+                // a remembered failure (e.g. timeliner's Windows plugins on a Linux image): fail
+                // the same way without the scans (they read nothing but the image)
+                const NO_DTB: &str = "no Windows DTB found";
+                const NO_KERNEL: &str = "No suitable kernels found during pdbscan";
+                if let Some(kv) = load_failure(&image, &cache_kind, |_| true) {
+                    let paths = if get(&kv, "missing") == Some("symbols") { SYMS } else { LAYER };
+                    return Err(self.unsatisfied(&Error::msg(get(&kv, "detail").unwrap_or_default()), paths));
+                }
+                let fail = |detail: &str, missing: &str, paths: &[&str]| {
+                    store_failure(&image, &cache_kind, &[("detail", detail.to_string()), ("missing", missing.to_string())]);
+                    self.unsatisfied(&Error::msg(detail), paths)
+                };
                 // the identifier index builds meanwhile (the lookup below waits for it)
                 let early = EarlyIndex::start(self.symbol_path());
                 let d = {
                     let _t = crate::util::trace::span("windows dtb scan");
-                    find_dtb(phys_arc).map_err(|e| self.unsatisfied(&e, LAYER))?.ok_or_else(|| self.unsatisfied(&Error::msg("no Windows DTB found"), LAYER))?
+                    find_dtb(phys_arc).map_err(|e| self.unsatisfied(&e, LAYER))?.ok_or_else(|| fail(NO_DTB, "layer", LAYER))?
                 };
                 let vl = IntelLayer::new("layer_name", phys_arc.clone(), d.dtb, d.mode, PteFlavor::Windows);
                 let k = {
@@ -312,9 +325,7 @@ impl Context {
                     let path = self.symbol_path();
                     let offline = self.opts.offline;
                     let on_candidate = |k: &KernelFound| spec.start(path, k, offline, Some(early.state()));
-                    find_kernel_with(&vl, *phys, &on_candidate)
-                        .map_err(|e| self.unsatisfied(&e, SYMS))?
-                        .ok_or_else(|| self.unsatisfied(&Error::msg("No suitable kernels found during pdbscan"), SYMS))?
+                    find_kernel_with(&vl, *phys, &on_candidate).map_err(|e| self.unsatisfied(&e, SYMS))?.ok_or_else(|| fail(NO_KERNEL, "symbols", SYMS))?
                 };
                 early.kernel(Some((&k.pdb.pdb_name, &k.pdb.guid, k.pdb.age)));
                 let a = WinAutomagic { dtb: d.dtb, mode: d.mode, kvo: k.kvo, pdb_name: k.pdb.pdb_name, guid: k.pdb.guid, age: k.pdb.age };

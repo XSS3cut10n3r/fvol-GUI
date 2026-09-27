@@ -1879,13 +1879,30 @@ impl IdentifierIndex {
     /// the end) and when python would first rescan a candidate it trusts now although the file
     /// is newer than its row.
     pub fn choice_deps(&self, os: &str, identifier: &[u8]) -> Vec<(&'static str, String)> {
+        self.deps_of(|e| e.os == os && e.identifier == identifier, false)
+    }
+
+    /// Key material a remembered *failure* to find an `os` kernel depends on (checked by
+    /// [`choice_deps_hold`] as well): [`IdentifierIndex::choice_deps`] with every ISF of `os`
+    /// (and every unidentified one) as a candidate, since any of them could hold the image's
+    /// banner, in both index modes (rsvol's own index re-reads a modified ISF too).
+    pub fn os_deps(&self, os: &str) -> Vec<(&'static str, String)> {
+        self.deps_of(|e| e.os == os || e.os.is_empty(), true)
+    }
+
+    /// [`IdentifierIndex::choice_deps`] for the entries `want` selects; `all_modes`: list the
+    /// candidates for an index not seeded from python's database too.
+    fn deps_of(&self, want: impl Fn(&IdentEntry) -> bool, all_modes: bool) -> Vec<(&'static str, String)> {
         use super::pycache;
         let mut out = vec![("idseed", paths::hex(self.seed_state.as_bytes())), ("idtree", paths::hex(&self.tree))];
-        let Some(py_cached) = &self.py_cached else { return out };
+        let py_cached = self.py_cached.as_deref();
+        if py_cached.is_none() && !all_modes {
+            return out;
+        }
         let mut cands: Vec<u8> = Vec::new();
         let mut until: Option<i64> = None;
         for (i, e) in self.entries.iter().enumerate() {
-            if e.os != os || e.identifier != identifier {
+            if !want(e) {
                 continue;
             }
             let file = match &self.locations[i] {
@@ -1899,7 +1916,7 @@ impl IdentifierIndex {
                 cands.extend_from_slice(b);
                 cands.extend_from_slice(&stamp_bytes(f));
             }
-            if let Some(c) = py_cached[i]
+            if let Some(c) = py_cached.and_then(|p| p[i])
                 && pycache::update_pathname(&e.url).and_then(|p| pycache::mtime_local(&p)).is_some_and(|ts| c < ts)
             {
                 let t = pycache::rescan_window_opens(c);
