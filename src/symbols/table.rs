@@ -392,8 +392,8 @@ pub struct SymbolTable {
     /// blob holds only the natives, enums and metadata.
     lazy: Option<std::sync::Arc<super::lazy::LazyCore>>,
     /// Process-unique id, the key of the per-thread lookup caches (never reused, unlike the
-    /// table's address).
-    id: u64,
+    /// table's address; 0 = no caching, after 4 billion tables).
+    id: u32,
 }
 
 // ----- per-thread lookup caches -----
@@ -402,36 +402,72 @@ pub struct SymbolTable {
 // `cast("_EX_FAST_REF")`). The name is almost always a literal, so its address identifies it:
 // the caches are direct-mapped on (table id, user type, name address, name length), and a hit
 // still compares the name bytes (against the table's copy), so a reused address (a freed
-// `String`) can never return another member. Only successful lookups are cached.
+// `String`) can never return another member. Misses are cached separately with a copy of the
+// name.
 
-static NEXT_TABLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_TABLE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
+/// A new table id (0 once the ids are exhausted: that table is not cached).
+fn next_table_id() -> u32 {
+    let mut v = NEXT_TABLE_ID.load(Ordering::Relaxed);
+    loop {
+        if v == u32::MAX {
+            return 0;
+        }
+        match NEXT_TABLE_ID.compare_exchange_weak(v, v + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return v,
+            Err(x) => v = x,
+        }
+    }
+}
+
+/// A positive member lookup, one cache line: the name is compared against the inline copy
+/// (names up to [`MNAME_INLINE`] bytes, nearly all) or the table's copy.
 #[derive(Clone, Copy)]
+#[repr(C, align(64))]
 struct MEntry {
-    id: u64,
+    id: u32,
     ut: u32,
-    nlen: u32,
     nptr: usize,
     /// the member's name as stored in the table (lives as long as the table)
     mname: *const u8,
     offset: u64,
     ty: Ty,
+    nlen: u8,
+    name: [u8; MNAME_INLINE],
 }
-const MCACHE_BITS: u32 = 9;
+const MNAME_INLINE: usize = 19;
+const _: () = assert!(std::mem::size_of::<MEntry>() == 64);
+const MCACHE_BITS: u32 = 8;
 const TCACHE_BITS: u32 = 7;
 /// longest type name the type cache stores (inline copy)
 const TCACHE_NAME: usize = 46;
 #[derive(Clone, Copy)]
 struct TEntry {
-    id: u64,
+    id: u32,
     nptr: usize,
     nlen: u8,
     name: [u8; TCACHE_NAME],
     ty: Ty,
 }
+/// A negative member lookup (the name is kept: there is no table copy to compare against).
+#[derive(Clone, Copy)]
+struct NEntry {
+    id: u32,
+    ut: u32,
+    nlen: u8,
+    nptr: usize,
+    name: [u8; NCACHE_NAME],
+}
+const NCACHE_BITS: u32 = 7;
+/// longest member name the negative cache stores
+const NCACHE_NAME: usize = 40;
 thread_local! {
+    static NCACHE: std::cell::UnsafeCell<[NEntry; 1 << NCACHE_BITS]> = const {
+        std::cell::UnsafeCell::new([NEntry { id: 0, ut: 0, nlen: 0, nptr: 0, name: [0; NCACHE_NAME] }; 1 << NCACHE_BITS])
+    };
     static MCACHE: std::cell::UnsafeCell<[MEntry; 1 << MCACHE_BITS]> = const {
-        std::cell::UnsafeCell::new([MEntry { id: 0, ut: 0, nlen: 0, nptr: 0, mname: std::ptr::null(), offset: 0, ty: Ty::Void }; 1 << MCACHE_BITS])
+        std::cell::UnsafeCell::new([MEntry { id: 0, ut: 0, nptr: 0, mname: std::ptr::null(), offset: 0, ty: Ty::Void, nlen: 0, name: [0; MNAME_INLINE] }; 1 << MCACHE_BITS])
     };
     static TCACHE: std::cell::UnsafeCell<[TEntry; 1 << TCACHE_BITS]> = const {
         std::cell::UnsafeCell::new([TEntry { id: 0, nptr: 0, nlen: 0, name: [0; TCACHE_NAME], ty: Ty::Void }; 1 << TCACHE_BITS])
@@ -439,8 +475,8 @@ thread_local! {
 }
 
 #[inline(always)]
-fn cache_slot(id: u64, ut: u32, nptr: usize, bits: u32) -> usize {
-    let h = (nptr as u64 ^ (ut as u64).rotate_left(40) ^ id.rotate_left(20)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+fn cache_slot(id: u32, ut: u32, nptr: usize, bits: u32) -> usize {
+    let h = (nptr as u64 ^ (ut as u64).rotate_left(40) ^ (id as u64).rotate_left(20)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h >> (64 - bits)) as usize
 }
 
@@ -546,7 +582,7 @@ impl SymbolTable {
             exact_linear: AtomicU32::new(0),
             checked,
             lazy: None,
-            id: NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed),
+            id: next_table_id(),
         })
     }
 
@@ -773,19 +809,50 @@ impl SymbolTable {
         let slot = cache_slot(self.id, ut, nptr, MCACHE_BITS);
         // SAFETY: thread-local; the entry is copied out. `mname` points into this table (same
         // id, ids are never reused), which outlives the returned `Member<'_>`.
-        let e = MCACHE.with(|c| unsafe { (*c.get())[slot] });
-        if e.id == self.id && e.ut == ut && e.nptr == nptr && e.nlen as usize == nb.len() {
-            let m = unsafe { std::slice::from_raw_parts(e.mname, nb.len()) };
-            if same_bytes(m, nb) {
+        let e = MCACHE.with(|c| unsafe { &(*c.get())[slot] as *const MEntry });
+        // SAFETY: the entry is read in place (no reference escapes; nothing writes it meanwhile)
+        let e = unsafe { &*e };
+        if e.id == self.id && e.ut == ut && e.nptr == nptr && e.nlen as usize == nb.len() && self.id != 0 {
+            let n = nb.len();
+            // SAFETY: `mname` points to `n` bytes of this table's copy of the name
+            let m = unsafe { std::slice::from_raw_parts(e.mname, n) };
+            if if n <= MNAME_INLINE { same_bytes(&e.name[..n], nb) } else { same_bytes(m, nb) } {
                 return Some(Member { name: unsafe { std::str::from_utf8_unchecked(m) }, offset: e.offset, ty: e.ty });
             }
         }
+        self.member_miss(ut, name, slot)
+    }
+
+    /// [`member`](Self::member) past the positive cache: the negative cache (`has_member`
+    /// probes for members other kernel versions have), then the index.
+    #[inline(never)]
+    fn member_miss(&self, ut: u32, name: &str, slot: usize) -> Option<Member<'_>> {
+        let nb = name.as_bytes();
+        let nptr = nb.as_ptr() as usize;
+        let short = nb.len() <= NCACHE_NAME;
+        let nslot = slot & ((1 << NCACHE_BITS) - 1);
+        if short {
+            // SAFETY: thread-local, copied out
+            let e = NCACHE.with(|c| unsafe { (*c.get())[nslot] });
+            if e.id == self.id && e.ut == ut && e.nptr == nptr && e.nlen as usize == nb.len() && same_bytes(&e.name[..nb.len()], nb) {
+                return None;
+            }
+        }
         let r = self.member_uncached(ut, name);
-        if let Some(m) = &r
-            && nb.len() <= u32::MAX as usize
-        {
-            let e = MEntry { id: self.id, ut, nlen: nb.len() as u32, nptr, mname: m.name.as_ptr(), offset: m.offset, ty: m.ty };
-            MCACHE.with(|c| unsafe { (*c.get())[slot] = e });
+        match &r {
+            Some(m) if nb.len() <= u8::MAX as usize && self.id != 0 => {
+                let mut e = MEntry { id: self.id, ut, nptr, mname: m.name.as_ptr(), offset: m.offset, ty: m.ty, nlen: nb.len() as u8, name: [0; MNAME_INLINE] };
+                if nb.len() <= MNAME_INLINE {
+                    e.name[..nb.len()].copy_from_slice(nb);
+                }
+                MCACHE.with(|c| unsafe { (*c.get())[slot] = e });
+            }
+            None if short && self.id != 0 => {
+                let mut e = NEntry { id: self.id, ut, nlen: nb.len() as u8, nptr, name: [0; NCACHE_NAME] };
+                e.name[..nb.len()].copy_from_slice(nb);
+                NCACHE.with(|c| unsafe { (*c.get())[nslot] = e });
+            }
+            _ => {}
         }
         r
     }
@@ -1155,7 +1222,7 @@ impl SymbolTable {
         // per-thread cache of successful lookups (hot plugins resolve the same few type names
         // for every object); a hit compares the stored copy of the name
         let nb = name.as_bytes();
-        if nb.len() > TCACHE_NAME {
+        if nb.len() > TCACHE_NAME || self.id == 0 {
             return self.get_type_uncached(name);
         }
         let nptr = nb.as_ptr() as usize;

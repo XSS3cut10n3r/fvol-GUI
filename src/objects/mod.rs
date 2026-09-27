@@ -804,20 +804,24 @@ fn half_to_f64(h: u16) -> f64 {
 }
 
 /// Resolve an `Unresolved` type (cross-table `table!Type` references) into (space, type).
-#[inline]
+#[inline(always)]
 fn fix_ty(sp: &'static Space, ty: Ty, addr: u64) -> Result<Obj> {
     match ty {
-        Ty::Unresolved(i) => {
-            let name = sp.table.unresolved_name(i);
-            match resolve_ref(sp.table, name) {
-                Some((t, ty)) => {
-                    let sp2 = sp.with_table(t);
-                    Ok(Obj { sp: sp2, ty, addr: addr & sp2.layer_mask })
-                }
-                None => Err(Error::Symbol(format!("Unknown symbol: {name}"))),
-            }
-        }
+        Ty::Unresolved(i) => fix_unresolved(sp, i, addr),
         _ => Ok(Obj { sp, ty, addr }),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn fix_unresolved(sp: &'static Space, i: crate::symbols::TypeIdx, addr: u64) -> Result<Obj> {
+    let name = sp.table.unresolved_name(i);
+    match resolve_ref(sp.table, name) {
+        Some((t, ty)) => {
+            let sp2 = sp.with_table(t);
+            Ok(Obj { sp: sp2, ty, addr: addr & sp2.layer_mask })
+        }
+        None => Err(Error::Symbol(format!("Unknown symbol: {name}"))),
     }
 }
 
