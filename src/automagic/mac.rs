@@ -93,11 +93,29 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
     let am = match cache_load(&image, &fp) {
         Some(a) => a,
         None => {
+            // a remembered failure (e.g. timeliner's mac plugins on a Windows image): fail the
+            // same way without the scan, as long as every banner's ISF choice is unchanged
+            let failure_kind = format!("mac-{fp}");
+            if let Some(kv) = crate::automagic::cache::load_failure(&image, &failure_kind, symbols::store::choice_deps_hold) {
+                let detail = crate::automagic::cache::get(&kv, "detail").unwrap_or_default();
+                return Err(unsatisfied(ctx, &Error::msg(detail), LAYER));
+            }
             // python: the MacIntelStacker built no layer
             let mut index = None;
             let r = run_indexed(phys_arc, &mut index);
             symbols::store::keep_decoded_for(None);
-            let a = r.map_err(|e| unsatisfied(ctx, &e, LAYER))?;
+            let a = r.map_err(|e| {
+                // no banner / no banner that validates (not an exception): only the image and
+                // the banners' ISFs decide that
+                if let (Some(i), Error::Msg(m)) = (index, &e)
+                    && (m == NO_BANNERS || m == NO_MATCH)
+                {
+                    let mut kv = vec![("detail", m.clone())];
+                    kv.extend(i.os_deps("mac"));
+                    crate::automagic::cache::store_failure(&image, &failure_kind, &kv);
+                }
+                unsatisfied(ctx, &e, LAYER)
+            })?;
             let deps = index.map(|i| i.choice_deps("mac", &a.banner)).unwrap_or_default();
             cache_store(&image, &fp, &a, deps);
             a
@@ -123,6 +141,9 @@ pub fn init(ctx: &Context) -> Result<MacKernel> {
 
 /// python: no translation layer -> both kernel requirements are unsatisfied.
 const LAYER: &[&str] = &["kernel.layer_name", "kernel.symbol_table_name"];
+/// The stacker's failures that are not exceptions (python's log messages).
+const NO_BANNERS: &str = "No Mac banners found - if this is a mac plugin, please check your symbol files location";
+const NO_MATCH: &str = "No suitable mac banner could be matched";
 /// python: a layer but no kernel symbol table.
 const SYMS: &[&str] = &["kernel.symbol_table_name"];
 
@@ -179,7 +200,7 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
         d
     };
     if banners.is_empty() {
-        return Err(Error::msg("No Mac banners found - if this is a mac plugin, please check your symbol files location"));
+        return Err(Error::msg(NO_BANNERS));
     }
     let scanner = BannerScanner::new(banners.iter().map(|(b, _)| b.as_slice()).collect());
     let abort = |e: Error| Error::msg(format!("Exception during stacking (MacIntelStacker): {e}"));
@@ -198,7 +219,7 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
         first
     };
     let Some((off, idx)) = first else {
-        return Err(Error::msg("No suitable mac banner could be matched"));
+        return Err(Error::msg(NO_MATCH));
     };
     {
         let _t = span("mac: banner validation");
@@ -235,7 +256,7 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
     match result {
         Some(Ok(a)) => Ok(a),
         Some(Err(e)) => Err(abort(e)),
-        None => Err(Error::msg("No suitable mac banner could be matched")),
+        None => Err(Error::msg(NO_MATCH)),
     }
 }
 

@@ -72,6 +72,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // the output is complete: now the blobs of lazily loaded symbol tables
     symbols::store::finish_deferred();
     util::bg::join_all();
+    // no worker thread outlives the run into the teardown hand-off
+    util::pool::shutdown();
     // nothing is written after this: the address-space teardown moves to a helper process
     util::exit::detach_teardown();
     std::process::exit(code)
