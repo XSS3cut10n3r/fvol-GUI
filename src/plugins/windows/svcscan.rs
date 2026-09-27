@@ -1,8 +1,9 @@
 //! windows.svcscan.SvcScan (python `plugins/windows/svcscan.py`) plus the python
 //! `symbols/windows/extensions/services.py` classes (`SERVICE_RECORD`, `SERVICE_HEADER`) and the
 //! machinery `windows.svclist.SvcList` / `windows.malware.svcdiff.SvcDiff` reuse:
-//! [`get_prereq_info`] (services symbol table + registry binary map), [`service_scan`],
-//! [`enumerate_headers`] and [`ServiceRow`] (python `get_record_tuple`).
+//! [`get_prereq_info`] / [`with_prereq`] (services symbol table + registry binary map),
+//! [`service_scan`] / [`service_list`] (the memory walks planned first, see [`ServicePlan`], then
+//! the rows) and [`ServiceRow`] (python `get_record_tuple`).
 //!
 //! Derived from Volatility 3 (Volatility Software License 1.0).
 
@@ -191,11 +192,16 @@ pub struct Prereq {
 /// python `SvcScan.get_prereq_info(context, config_path, kernel_module_name)`.
 pub fn get_prereq_info(ctx: &Context, k: &WinKernel) -> Result<Prereq> {
     let table = create_service_table(ctx, k)?;
-    let binary_map = match get_service_key(ctx, k)? {
-        Some(key) => get_service_binary_map(&key)?,
-        None => BinaryMap::default(),
-    };
+    let binary_map = get_binary_map(ctx, k)?;
     Ok(Prereq { table, binary_map })
+}
+
+/// The registry part of `get_prereq_info`: `_get_service_binary_map(_get_service_key(...))`.
+fn get_binary_map(ctx: &Context, k: &WinKernel) -> Result<BinaryMap> {
+    match get_service_key(ctx, k)? {
+        Some(key) => get_service_binary_map(&key),
+        None => Ok(BinaryMap::default()),
+    }
 }
 
 /// python `pslist.PsList.create_name_filter(["services.exe"])`.
@@ -537,11 +543,6 @@ impl Traverse {
 
 /// Where the rows of a walk go (python's loop body over the records).
 trait RowConsumer {
-    /// Whether the row of (`offset`, record address) is known to make [`RowConsumer::row`]
-    /// return false (python's `break`), so the walk can stop there without computing it.
-    fn known(&self, _offset: u64, _rec: u64) -> bool {
-        false
-    }
     /// python's loop body for one row; false = `break`.
     fn row(&mut self, row: ServiceRow) -> Result<bool>;
 }
@@ -549,126 +550,193 @@ trait RowConsumer {
 /// Fewer candidates than this are computed on the calling thread.
 const PAR_MIN: usize = 24;
 
-/// The rows of `cands` in order (formatted with `enc` when given), in parallel when worth it.
+/// The row of `c` (formatted with `enc` when given: the values are then dropped).
+fn row_of(rec: &Rec, map: &BinaryMap, enc: Option<&RowEncoder>, c: &Cand) -> Result<ServiceRow> {
+    let mut row = rec.row(&c.rec, c.offset, map)?;
+    if let Some(e) = enc {
+        let mut b = Vec::new();
+        e.row(&mut b, &row.values);
+        row.values = Vec::new();
+        row.enc = Some(b);
+    }
+    Ok(row)
+}
+
+/// The rows of `cands` in order, in parallel when worth it.
 fn rows_of(rec: &Rec, map: &BinaryMap, enc: Option<&RowEncoder>, cands: &[Cand]) -> Vec<Result<ServiceRow>> {
-    let one = |c: &Cand| -> Result<ServiceRow> {
-        let mut row = rec.row(&c.rec, c.offset, map)?;
-        if let Some(e) = enc {
-            let mut b = Vec::new();
-            e.row(&mut b, &row.values);
-            row.values = Vec::new();
-            row.enc = Some(b);
-        }
-        Ok(row)
-    };
     if cands.len() < PAR_MIN {
-        cands.iter().map(one).collect()
+        cands.iter().map(|c| row_of(rec, map, enc, c)).collect()
     } else {
-        crate::util::par::par_map(cands.len(), |i| one(&cands[i]))
+        crate::util::par::par_map(cands.len(), |i| row_of(rec, map, enc, &cands[i]))
     }
 }
 
-/// Feed the rows of a walk to `c` in python's order. The pointer walk runs ahead in windows
-/// (small first: a header whose first record was already seen stops right there) and the rows
-/// of each window are computed in parallel. A row error / walk error is returned where python
-/// raises (after the rows before it).
-fn walk_rows(rec: &Rec, map: &BinaryMap, enc: Option<&RowEncoder>, mut walk: Traverse, c: &mut dyn RowConsumer) -> Result<()> {
-    let mut win = 32usize;
-    let mut cands: Vec<Cand> = Vec::new();
-    loop {
-        cands.clear();
-        let mut tail: Option<Error> = None;
-        let mut ended = false;
-        let mut stop = false;
-        while cands.len() < win {
-            match walk.next() {
-                None => {
-                    ended = true;
-                    break;
-                }
-                Some(Err(e)) => {
-                    tail = Some(e);
-                    ended = true;
-                    break;
-                }
-                Some(Ok(cand)) => {
-                    if c.known(cand.offset, cand.rec.addr) {
-                        stop = true;
-                        break;
-                    }
-                    cands.push(cand);
-                }
-            }
-        }
-        for row in rows_of(rec, map, enc, &cands) {
-            if !c.row(row?)? {
-                return Ok(());
-            }
-        }
-        if stop {
-            return Ok(());
-        }
-        if let Some(e) = tail {
-            return Err(e);
-        }
-        if ended {
-            return Ok(());
-        }
-        win = (win * 8).min(4096);
-    }
-}
-
-/// python `SvcScan.enumerate_vista_or_later_header(...)` for the `_SERVICE_HEADER` candidate at
-/// `offset`: the rows of `ServiceRecord.traverse()`, handed to `c`.
-fn enumerate_header(rec: &Rec, map: &BinaryMap, enc: Option<&RowEncoder>, offset: u64, c: &mut dyn RowConsumer) -> Result<()> {
+/// python `SvcScan.enumerate_vista_or_later_header(...)`'s checks of the `_SERVICE_HEADER`
+/// candidate at `offset`: its first record when python walks from it.
+fn header_first(rec: &Rec, offset: u64) -> Result<Option<Obj>> {
     if offset % 8 != 0 {
-        return Ok(());
+        return Ok(None);
     }
     let header = Obj::named(rec.sp, "_SERVICE_HEADER", offset)?;
     // SERVICE_HEADER.is_valid(): ServiceRecord.is_valid()
     let first = match header.m("ServiceRecord").and_then(|p| p.u64()) {
         Ok(v) => rec.record(v)?,
-        Err(e) if e.is_invalid_address() => return Ok(()),
+        Err(e) if e.is_invalid_address() => return Ok(None),
         Err(e) => return Err(e),
     };
-    if !rec.is_valid(&first) {
-        return Ok(());
-    }
-    walk_rows(rec, map, enc, Traverse::new(*rec, first), c)
+    Ok(rec.is_valid(&first).then_some(first))
 }
 
-/// python `SvcList.service_list`'s loop over `enumerate_vista_or_later_header(...)` for the
-/// header candidates `offsets` of `proc_layer`: every row, in order, to `f` (formatted with
-/// `enc` when given).
-pub fn enumerate_headers(table: TableRef, map: &BinaryMap, proc_layer: LayerRef, offsets: &[u64], enc: Option<&RowEncoder>, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
-    struct All<'a>(&'a mut dyn FnMut(ServiceRow) -> Result<()>);
-    impl RowConsumer for All<'_> {
-        fn row(&mut self, row: ServiceRow) -> Result<bool> {
-            (self.0)(row)?;
-            Ok(true)
+/// How a planned walk ended.
+enum WalkEnd {
+    /// the records ran out
+    Finished,
+    /// python raised after the planned records
+    Raised(Error),
+    /// the walk goes on from here (a record already planned by an earlier walk, or the plan's
+    /// size cap), if python gets that far
+    Resume(Traverse),
+}
+
+enum Planned {
+    /// the records of one header's walk (indices into the plan's unique records)
+    Walk { ids: Vec<u32>, end: WalkEnd },
+    /// python raised checking this header
+    Raise(Error),
+}
+
+/// Most records walked ahead of their rows over the headers of one process (bounds the
+/// memory); the walks beyond it go on record by record.
+const PLAN_CAP: usize = 1 << 18;
+
+/// The pointer walks of python's loop over `enumerate_vista_or_later_header(offset)` for the
+/// header candidates of one process, made before any row is computed (see [`plan_headers`]).
+struct HeaderPlan {
+    rec: Rec,
+    walks: Vec<Planned>,
+    /// the distinct records walked (their rows are computed in one parallel pass)
+    cands: Vec<Cand>,
+    /// (offset, record address) -> index into `cands`
+    ids: FxHashMap<(u64, u64), u32>,
+}
+
+/// Walk the pointers of every header candidate in `offsets` (cheap, serial), each walk
+/// stopping at a record an earlier walk already visited when `stop_at_visited` (svcscan: the
+/// records after it are the ones that walk visited, and python's `seen` break comes at the
+/// first of them whose row is comparable).
+fn plan_headers(rec: Rec, offsets: &[u64], stop_at_visited: bool) -> HeaderPlan {
+    let mut walks: Vec<Planned> = Vec::new();
+    let mut cands: Vec<Cand> = Vec::new();
+    let mut ids: FxHashMap<(u64, u64), u32> = FxHashMap::default();
+    let mut total = 0usize;
+    for &offset in offsets {
+        let first = match header_first(&rec, offset) {
+            Ok(Some(f)) => f,
+            Ok(None) => continue,
+            Err(e) => {
+                walks.push(Planned::Raise(e));
+                break;
+            }
+        };
+        let mut t = Traverse::new(rec, first);
+        let mut walk = Vec::new();
+        let end = loop {
+            if total >= PLAN_CAP {
+                break WalkEnd::Resume(t);
+            }
+            match t.next() {
+                None => break WalkEnd::Finished,
+                Some(Err(e)) => break WalkEnd::Raised(e),
+                Some(Ok(cand)) => {
+                    total += 1;
+                    match ids.get(&(cand.offset, cand.rec.addr)) {
+                        Some(&id) => {
+                            walk.push(id);
+                            if stop_at_visited {
+                                break WalkEnd::Resume(t);
+                            }
+                        }
+                        None => {
+                            let id = cands.len() as u32;
+                            ids.insert((cand.offset, cand.rec.addr), id);
+                            cands.push(cand);
+                            walk.push(id);
+                        }
+                    }
+                }
+            }
+        };
+        walks.push(Planned::Walk { ids: walk, end });
+    }
+    HeaderPlan { rec, walks, cands, ids }
+}
+
+/// The rows of a [`HeaderPlan`] to `c` in python's order: the rows of the distinct records are
+/// computed in one parallel pass, then the walks are replayed; a walk that goes on past its
+/// planned records continues record by record with the rows computed (a record's row only
+/// depends on the record and its offset).
+fn replay_headers(hp: HeaderPlan, map: &BinaryMap, enc: Option<&RowEncoder>, c: &mut dyn RowConsumer) -> Result<()> {
+    let HeaderPlan { rec, walks, cands, ids } = hp;
+    // an error is python raising at the first use
+    let mut rows: Vec<Option<Result<ServiceRow>>> = rows_of(&rec, map, enc, &cands).into_iter().map(Some).collect();
+    drop(cands);
+    let mut take = |i: usize| -> Result<ServiceRow> {
+        match &rows[i] {
+            Some(Ok(r)) => Ok(r.clone()),
+            _ => rows[i].take().expect("a failed row raises once"),
+        }
+    };
+    'walks: for p in walks {
+        match p {
+            Planned::Raise(e) => return Err(e),
+            Planned::Walk { ids: walk, end } => {
+                for id in walk {
+                    if !c.row(take(id as usize)?)? {
+                        continue 'walks;
+                    }
+                }
+                match end {
+                    WalkEnd::Finished => {}
+                    WalkEnd::Raised(e) => return Err(e),
+                    WalkEnd::Resume(mut t) => loop {
+                        let cand = match t.next() {
+                            None => break,
+                            Some(Err(e)) => return Err(e),
+                            Some(Ok(cand)) => cand,
+                        };
+                        let row = match ids.get(&(cand.offset, cand.rec.addr)) {
+                            Some(&id) => take(id as usize)?,
+                            None => row_of(&rec, map, enc, &cand)?,
+                        };
+                        if !c.row(row)? {
+                            break;
+                        }
+                    },
+                }
+            }
         }
     }
-    let rec = Rec::new(proc_layer, table, RecFields::new(table));
-    let mut all = All(f);
-    for &offset in offsets {
-        enumerate_header(&rec, map, enc, offset, &mut all)?;
-    }
     Ok(())
+}
+
+/// Every row to a callback (svclist).
+struct All<'a>(&'a mut dyn FnMut(ServiceRow) -> Result<()>);
+
+impl RowConsumer for All<'_> {
+    fn row(&mut self, row: ServiceRow) -> Result<bool> {
+        (self.0)(row)?;
+        Ok(true)
+    }
 }
 
 /// svcscan's `seen` list: `break` at the first row equal to an earlier one.
 struct Dedup<'a> {
     /// python's `seen` list, indexed by offset (only comparable tuples can ever match)
     seen: FxHashMap<u64, Vec<RowKey>>,
-    /// (offset, record) of every row in `seen`: the same pair gives the same (equal) row
-    pairs: crate::util::FxHashSet<(u64, u64)>,
     f: &'a mut dyn FnMut(ServiceRow) -> Result<()>,
 }
 
 impl RowConsumer for Dedup<'_> {
-    fn known(&self, offset: u64, rec: u64) -> bool {
-        self.pairs.contains(&(offset, rec))
-    }
     fn row(&mut self, row: ServiceRow) -> Result<bool> {
         if let Some(key) = &row.key {
             let v = self.seen.entry(key.offset).or_default();
@@ -676,70 +744,180 @@ impl RowConsumer for Dedup<'_> {
                 return Ok(false);
             }
             v.push(key.clone());
-            self.pairs.insert((key.offset, row.rec));
         }
         (self.f)(row)?;
         Ok(true)
     }
 }
 
-/// python `SvcScan.service_scan(...)`: rows in python order; `f` gets every row python yields
-/// (formatted with `enc` when given).
-pub fn service_scan(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
-    let table = pre.table;
-    let map = &pre.binary_map;
-    let fields = RecFields::new(table);
-    let is_vista_or_later = versions::IS_VISTA_OR_LATER.check(k.table);
-    let tag: &[u8] = if is_vista_or_later { b"serH" } else { b"sErv" };
-    let tag_off = Obj::named(Space::on(k.vlayer, table), "_SERVICE_RECORD", 0)?.member_offset("Tag")?;
-    let mut dedup = Dedup { seen: FxHashMap::default(), pairs: Default::default(), f };
-    for task in crate::plugins::windows::pslist::list_processes(k, &services_filter) {
-        let task = task?;
-        let proc_layer = match task.m("UniqueProcessId").and_then(|_| task.add_process_layer()) {
-            Ok(l) => l,
-            Err(e) if e.is_invalid_address() => continue,
-            Err(e) => return Err(e),
-        };
-        let mut sections = Vec::new();
-        for vad in task.get_vad_root()?.traverse() {
-            let vad = vad?;
-            let base = vad.get_start()?;
-            let size = vad.get_size()?;
-            if size != 0 {
-                sections.push((base, vad.get_size()?));
+/// What one process contributes to a service walk.
+enum ProcPlan {
+    /// Vista and later: `_SERVICE_HEADER` walks
+    Headers(HeaderPlan),
+    /// XP / 2003: every valid `_SERVICE_RECORD` at a tag hit, then where python raised
+    Records { rec: Rec, cands: Vec<Cand>, tail: Option<Error> },
+}
+
+/// svcscan's / svclist's memory walks (everything but the rows, which need the registry's
+/// binary map): the processes' plans, then where python raised (after their rows).
+pub struct ServicePlan {
+    procs: Vec<ProcPlan>,
+    raise: Option<Error>,
+}
+
+/// The walks of python `SvcScan.service_scan(...)` over the `services.exe` processes.
+pub fn plan_service_scan(k: &WinKernel, table: TableRef) -> ServicePlan {
+    let mut procs = Vec::new();
+    let raise = (|| -> Result<()> {
+        let fields = RecFields::new(table);
+        let is_vista_or_later = versions::IS_VISTA_OR_LATER.check(k.table);
+        let tag: &[u8] = if is_vista_or_later { b"serH" } else { b"sErv" };
+        let tag_off = Obj::named(Space::on(k.vlayer, table), "_SERVICE_RECORD", 0)?.member_offset("Tag")?;
+        for task in crate::plugins::windows::pslist::list_processes(k, &services_filter) {
+            let task = task?;
+            let proc_layer = match task.m("UniqueProcessId").and_then(|_| task.add_process_layer()) {
+                Ok(l) => l,
+                Err(e) if e.is_invalid_address() => continue,
+                Err(e) => return Err(e),
+            };
+            let mut sections = Vec::new();
+            for vad in task.get_vad_root()?.traverse() {
+                let vad = vad?;
+                let base = vad.get_start()?;
+                let size = vad.get_size()?;
+                if size != 0 {
+                    sections.push((base, vad.get_size()?));
+                }
             }
-        }
-        let hits = scan(proc_layer, &BytesScanner::new(tag), Some(&sections));
-        let rec = Rec::new(proc_layer, table, fields);
-        if !is_vista_or_later {
-            // every valid record is a row: python's order, rows computed in windows
-            for window in hits.chunks(1024) {
-                let mut cands = Vec::with_capacity(window.len());
-                let mut tail = None;
-                for &offset in window {
-                    match rec.record(offset.wrapping_sub(tag_off)) {
-                        Ok(r) if rec.is_valid(&r) => cands.push(Cand { rec: r, offset: r.addr }),
-                        Ok(_) => {}
-                        Err(e) => {
-                            tail = Some(e);
-                            break;
-                        }
+            let hits = scan(proc_layer, &BytesScanner::new(tag), Some(&sections));
+            let rec = Rec::new(proc_layer, table, fields);
+            if is_vista_or_later {
+                procs.push(ProcPlan::Headers(plan_headers(rec, &hits, true)));
+                continue;
+            }
+            // every valid record is a row
+            let mut cands = Vec::new();
+            let mut tail = None;
+            for offset in hits {
+                match rec.record(offset.wrapping_sub(tag_off)) {
+                    Ok(r) if rec.is_valid(&r) => cands.push(Cand { rec: r, offset: r.addr }),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tail = Some(e);
+                        break;
                     }
                 }
-                for row in rows_of(&rec, map, enc, &cands) {
-                    (dedup.f)(row?)?;
+            }
+            procs.push(ProcPlan::Records { rec, cands, tail });
+        }
+        Ok(())
+    })()
+    .err();
+    ServicePlan { procs, raise }
+}
+
+/// The walks of python `SvcList.service_list(...)` (the `Sc27` headers inside the
+/// services.exe image).
+pub fn plan_service_list(k: &WinKernel, table: TableRef) -> ServicePlan {
+    let mut procs = Vec::new();
+    if !k.table.is_64bit() || !versions::IS_WIN10_15063_OR_LATER.check(k.table) {
+        // python: vollog.warning("This plugin only supports Windows 10 version 15063+ ...")
+        return ServicePlan { procs, raise: None };
+    }
+    let raise = (|| -> Result<()> {
+        let fields = RecFields::new(table);
+        for proc in crate::plugins::windows::pslist::list_processes(k, &services_filter) {
+            let proc = proc?;
+            let proc_layer = match proc.add_process_layer() {
+                Ok(l) => l,
+                Err(e) if e.is_invalid_address() => {
+                    // the warning's f-string reads the pid
+                    proc.m("UniqueProcessId")?.int()?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let Some(range) = get_exe_range(&proc)? else { continue };
+            let offsets = scan(proc_layer, &BytesScanner::new(b"Sc27"), Some(&[range]));
+            procs.push(ProcPlan::Headers(plan_headers(Rec::new(proc_layer, table, fields), &offsets, false)));
+        }
+        Ok(())
+    })()
+    .err();
+    ServicePlan { procs, raise }
+}
+
+/// python `SvcList._get_exe_range(proc)`: `[(start, size)]` of the VAD mapping
+/// `...\services.exe`, or None.
+fn get_exe_range(proc: &Obj) -> Result<Option<(u64, u64)>> {
+    for vad in proc.get_vad_root()?.traverse() {
+        let vad = vad?;
+        if let Value::Str(f) = vad.get_file_name() {
+            if f.to_lowercase().ends_with("\\services.exe") {
+                return Ok(Some((vad.get_start()?, vad.get_size()?)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The rows python yields for a [`ServicePlan`], in order, to `f` (formatted with `enc` when
+/// given); `dedup` = svcscan's `seen` break (the header walks of svclist have none).
+pub fn replay_services(plan: ServicePlan, map: &BinaryMap, enc: Option<&RowEncoder>, dedup: bool, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
+    let mut seen = Dedup { seen: FxHashMap::default(), f };
+    for p in plan.procs {
+        match p {
+            ProcPlan::Headers(hp) => {
+                if dedup {
+                    replay_headers(hp, map, enc, &mut seen)?;
+                } else {
+                    replay_headers(hp, map, enc, &mut All(&mut *seen.f))?;
+                }
+            }
+            ProcPlan::Records { rec, cands, tail } => {
+                for window in cands.chunks(4096) {
+                    for row in rows_of(&rec, map, enc, window) {
+                        (seen.f)(row?)?;
+                    }
                 }
                 if let Some(e) = tail {
                     return Err(e);
                 }
             }
-            continue;
-        }
-        for offset in hits {
-            enumerate_header(&rec, map, enc, offset, &mut dedup)?;
         }
     }
-    Ok(())
+    match plan.raise {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// python `SvcScan.service_scan(...)`: rows in python order; `f` gets every row python yields
+/// (formatted with `enc` when given).
+pub fn service_scan(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
+    replay_services(plan_service_scan(k, pre.table), &pre.binary_map, enc, true, f)
+}
+
+/// python `SvcList.service_list(...)`: every row python yields, in order (formatted with `enc`
+/// when given).
+pub fn service_list(k: &WinKernel, pre: &Prereq, enc: Option<&RowEncoder>, f: &mut dyn FnMut(ServiceRow) -> Result<()>) -> Result<()> {
+    replay_services(plan_service_list(k, pre.table), &pre.binary_map, enc, false, f)
+}
+
+/// python's `get_prereq_info(...)` followed by `plan(table)`, with the registry part of the
+/// prerequisites (the ServiceDll / ImagePath map, which only the rows need) read on another
+/// thread meanwhile. python's error order: the prerequisites raise first.
+pub fn with_prereq<P>(ctx: &Context, k: &WinKernel, plan: impl FnOnce(TableRef) -> P) -> Result<(Prereq, P)> {
+    let table = create_service_table(ctx, k)?;
+    std::thread::scope(|s| {
+        let h = s.spawn(|| get_binary_map(ctx, k));
+        let p = plan(table);
+        let map = match h.join() {
+            Ok(m) => m?,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        Ok((Prereq { table, binary_map: map }, p))
+    })
 }
 
 /// The TreeGrid columns of SvcScan and its subclasses.
@@ -769,9 +947,9 @@ impl Plugin for SvcScan {
     fn run(&self, ctx: &Context, _cfg: &Config, out: &mut dyn RowSink) -> Result<()> {
         out.begin(columns())?;
         let k = ctx.windows_kernel()?;
-        let pre = get_prereq_info(ctx, k)?;
+        let (pre, plan) = with_prereq(ctx, k, |table| plan_service_scan(k, table))?;
         let enc = out.encoder();
-        service_scan(k, &pre, enc.as_ref(), &mut |row| row.emit(out))
+        replay_services(plan, &pre.binary_map, enc.as_ref(), true, &mut |row| row.emit(out))
     }
 }
 
@@ -869,7 +1047,7 @@ mod tests {
             assert!(want.len() > 500, "{img}: {} rows", want.len());
             assert_eq!(format!("{got:?}"), format!("{want:?}"), "{img} svcscan");
             let mut got = Vec::new();
-            crate::plugins::windows::svclist::service_list(k, &pre, None, &mut |r| {
+            service_list(k, &pre, None, &mut |r| {
                 got.push(r.values);
                 Ok(())
             })

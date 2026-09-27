@@ -187,9 +187,12 @@ enum Iv {
     Bad { start: u64, len: u64, phys: u64, lower: Option<usize> },
 }
 
-/// Most intervals one chunk may produce; a chunk with more is finished by python's loop (keeps
-/// the memory of the chunks in flight bounded).
+/// Most intervals one chunk may produce; a chunk with more is finished by python's loop.
 const CHUNK_CAP: usize = 1 << 14;
+
+/// Most intervals kept for all chunks (bounds the memory: ~20 MiB); the chunks walked after
+/// the budget ran out are finished by python's loop.
+const RUN_BUDGET: usize = 1 << 19;
 
 /// The runs of `[start, end)` in address order (`end` = 0: to the end of the 64-bit space),
 /// and where the walk stopped early (a chunk with more than `cap` runs, or a page-table answer
@@ -392,17 +395,28 @@ fn statistics_with(il: &IntelLayer, top_bits: u32, ch_bits: u32, cap: usize) -> 
         }
         a = r_end;
     }
+    // every chunk at once (most are one run: a streaming hand-off per chunk would cost more
+    // than the walk); the runs kept are capped by RUN_BUDGET, chunks over it are left to
+    // python's loop
+    let used = std::sync::atomic::AtomicUsize::new(0);
+    let runs = crate::util::par::par_map(chunks.len(), |i| {
+        let (start, end) = chunks[i];
+        if used.load(std::sync::atomic::Ordering::Relaxed) > RUN_BUDGET {
+            return (Vec::new(), Some(start));
+        }
+        let (v, stop) = walk_chunk(il, &deps, start, end, cap);
+        if used.fetch_add(v.len(), std::sync::atomic::Ordering::Relaxed) + v.len() > RUN_BUDGET {
+            return (Vec::new(), Some(start));
+        }
+        (v, stop)
+    });
     let mut rp = Replay { st: Steps::new(il), il, deps: &deps, cur: (0, 0), pending: false };
-    let lookahead = crate::util::par::threads() * 4;
-    crate::util::par::par_map_stream(
-        chunks.len(),
-        lookahead,
-        |i| walk_chunk(il, &deps, chunks[i].0, chunks[i].1, cap),
-        |i, (ivs, stop)| {
-            rp.chunk(&ivs, stop, chunks[i].1);
-            !rp.st.done
-        },
-    );
+    for ((ivs, stop), (_, end)) in runs.iter().zip(&chunks) {
+        if rp.st.done {
+            break;
+        }
+        rp.chunk(ivs, *stop, *end);
+    }
     rp.finish();
     rp.st.c
 }
