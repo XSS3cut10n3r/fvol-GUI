@@ -191,12 +191,15 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
     let first = {
         let _t = span("mac: banner scan (first hit)");
         let mut first = None;
-        // chunks of FIRST_HIT_CHUNK, the first batch one per core, doubling (`RSVOL_MAC_FIRST_HIT=0`:
-        // python's chunking, batches of 2, 4... chunks)
+        // the same bytes per batch as python's chunking in batches of 2, 4... chunks (32 MB,
+        // 64 MB...: more would read past the banner, ~70 MB into the 10.9 image, and a wide
+        // batch of page-faulting threads contends), in chunks of FIRST_HIT_CHUNK spread over
+        // the cores (`RSVOL_MAC_FIRST_HIT=0`: python's chunking)
         let threads = crate::util::par::threads();
         let fine = std::env::var_os("RSVOL_MAC_FIRST_HIT").is_none_or(|v| v != "0");
+        let per = if fine { (scanner.chunk_size() / FIRST_HIT_CHUNK).max(1) as usize } else { 1 };
         let fh = FirstHit { inner: &scanner, cs: if fine { FIRST_HIT_CHUNK } else { scanner.chunk_size() } };
-        let (fb, mb) = if fine { (threads, threads * 8) } else { (2, threads * 4) };
+        let (fb, mb) = (2 * per, threads * 4 * per);
         crate::layers::scan::scan_each_ramp(phys.as_ref(), &fh, fb, mb, |h| h.0, |h| {
             first = Some(h);
             false
