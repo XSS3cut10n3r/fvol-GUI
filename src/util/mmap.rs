@@ -13,6 +13,25 @@ unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    fn sysconf(name: i32) -> std::ffi::c_long;
+}
+
+/// The kernel's page size: 4 KiB on x86-64, 4, 16 or 64 KiB on arm64 kernels. Mapping offsets
+/// and madvise ranges must be multiples of it. Read once.
+pub fn page_size() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static PAGE: AtomicUsize = AtomicUsize::new(0);
+    match PAGE.load(Ordering::Relaxed) {
+        0 => {
+            const SC_PAGESIZE: i32 = 30; // glibc and musl
+            // SAFETY: sysconf has no preconditions
+            let v = unsafe { sysconf(SC_PAGESIZE) };
+            let v = if v > 0 && (v as usize).is_power_of_two() { v as usize } else { 4096 };
+            PAGE.store(v, Ordering::Relaxed);
+            v
+        }
+        v => v,
+    }
 }
 
 const PROT_READ: i32 = 1;
@@ -72,8 +91,7 @@ impl Mmap {
         if self.len == 0 || off >= self.len {
             return;
         }
-        let page = 4096;
-        let start = off & !(page - 1);
+        let start = off & !(page_size() - 1);
         let end = (off + len).min(self.len);
         unsafe {
             madvise(self.ptr.add(start), end - start, advice);
@@ -108,7 +126,7 @@ impl MmapMut {
         if len == 0 {
             return Ok(MmapMut { ptr: std::ptr::NonNull::<u8>::dangling().as_ptr(), len: 0 });
         }
-        if off & 0xfff != 0 {
+        if off % page_size() as u64 != 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "unaligned mapping offset"));
         }
         let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ | PROT_WRITE, MAP_SHARED, file.as_raw_fd(), off as i64) };
@@ -154,7 +172,7 @@ impl MapWindow {
         if len == 0 {
             return Ok(MapWindow { base: std::ptr::NonNull::<u8>::dangling().as_ptr(), map_len: 0, skip: 0, len: 0 });
         }
-        let aligned = off & !0xfff;
+        let aligned = off & !(page_size() as u64 - 1);
         let skip = (off - aligned) as usize;
         let map_len = skip + len;
         let flags = MAP_SHARED | if populate { MAP_POPULATE } else { 0 };

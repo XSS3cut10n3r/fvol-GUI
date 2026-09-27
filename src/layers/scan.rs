@@ -1737,6 +1737,7 @@ pub struct MultiStringScanner {
     first: [bool; 256],
     /// first-two-bytes filter (bitmap over u16), only when every pattern has >= 2 bytes
     pair: Option<Box<[u64; 1024]>>,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     teddy: Option<Teddy>,
     min_len: usize,
     max_len: usize,
@@ -1755,6 +1756,7 @@ struct TrieNode {
 /// table is stored twice, once per 128-bit lane of a `vpshufb`).
 #[derive(Clone)]
 struct Teddy {
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     m: usize,
     lo: [[u8; 32]; 3],
     hi: [[u8; 32]; 3],
@@ -1783,6 +1785,7 @@ impl Teddy {
 
     /// Scalar evaluation of the prefilter at `data[i..i + m]`.
     #[inline(always)]
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     fn accepts(&self, data: &[u8], i: usize) -> bool {
         let mut r = 0xffu8;
         for j in 0..self.m {

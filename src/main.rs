@@ -39,12 +39,13 @@ unsafe extern "C" {
 /// syscalls), and installs an alternate signal stack (mmap + mprotect + sigaltstack).
 /// Only the parts with observable effects are kept: closed standard fds are reopened on
 /// /dev/null and SIGPIPE is ignored (writes to a closed pipe fail with EPIPE), exactly as std
-/// does. Arguments still come from glibc's `.init_array` hook, and `process::exit` flushes
-/// stdout like a return from a Rust `main`. A stack overflow now ends in a plain SIGSEGV
+/// does. The arguments are taken from `argv` here (std's copy needs glibc's `.init_array`
+/// hook, which other C libraries such as musl do not run), and `process::exit` flushes stdout
+/// like a return from a Rust `main`. A stack overflow now ends in a plain SIGSEGV
 /// instead of std's message + SIGABRT; an escaping panic still exits with status 101.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+pub extern "C" fn main(argc: i32, argv: *const *const std::ffi::c_char) -> i32 {
     // a detached helper building a symbol table blob (see symbols::store::finish_deferred)
     if let Some(spec) = util::env::var_os(symbols::store::HELPER_ENV_NAME) {
         std::process::exit(symbols::store::run_helper(&spec));
@@ -65,7 +66,16 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
         signal(SIGPIPE, SIG_IGN);
     }
-    let code = std::panic::catch_unwind(cli::main).unwrap_or(101);
+    // SAFETY: argv holds argc NUL-terminated strings (the C runtime's, alive for the process)
+    let args: Vec<std::ffi::OsString> = (0..argc.max(0) as usize)
+        .map(|i| unsafe { *argv.add(i) })
+        .take_while(|p| !p.is_null())
+        .map(|p| {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(unsafe { std::ffi::CStr::from_ptr(p) }.to_bytes()).to_os_string()
+        })
+        .collect();
+    let code = std::panic::catch_unwind(|| cli::main(args)).unwrap_or(101);
     // background cache writes finish after the output, before exit
     use std::io::Write;
     let _ = std::io::stdout().flush();

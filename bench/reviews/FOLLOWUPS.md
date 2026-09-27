@@ -96,3 +96,11 @@ Source: `bench/handoff/coldstart.md`.
   preset for the in-run write.
 - Unmeasured: mac first-hit fine chunking (drop if no gain on a quiet box), `RSVOL_PREBUILD` sibling
   blobs, regime B (python DB lacking rows; only the two biggest target-OS ISFs decode while indexed).
+
+## arm64
+The arm64 build (2026-09-27) runs the portable fallbacks of every x86 SIMD path.
+- **NEON versions of the hot SIMD kernels**: the scan searchers (memchr / teddy / pair filters),
+  JSON structure and identifier scans, xpress / snappy / bzip2 decoders, SHA-256 (ARMv8 SHA2
+  extension) and AES (ARMv8 AES). Measure on a native arm64 box against the x86 numbers first.
+- The exit-teardown helper (util/exit.rs) and the pool's `set_tid_address` exit are x86-64 only;
+  arm64 uses the portable paths (normal thread exit, in-process teardown).

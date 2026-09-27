@@ -456,7 +456,7 @@ pub(crate) fn decompress_to_file_with(data: &[u8], file: &std::fs::File, buf_max
                 }
                 if blk.out_len > buf_max {
                     // map the block's pages (from the page boundary below its start)
-                    let a = blk.out_start & !0xfff;
+                    let a = blk.out_start & !(crate::util::mmap::page_size() - 1);
                     let mut map = crate::util::mmap::MmapMut::map(file, a as u64, blk.out_start - a + blk.out_len).map_err(io)?;
                     decode_block(data, blk, &mut map.as_mut_slice()[blk.out_start - a..])?;
                     continue;

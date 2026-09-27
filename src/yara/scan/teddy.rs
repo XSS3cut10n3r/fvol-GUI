@@ -425,6 +425,7 @@ fn dbyte<const DIFF: bool>(hay: &[u8], i: usize) -> u8 {
 }
 
 /// Candidate buffer of the SIMD core: `position << 8 | bucket bits`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const CAND_CAP: usize = 256;
 
 /// The SIMD loop, kept out of line so the eight nibble tables stay in registers:
@@ -536,6 +537,7 @@ unsafe fn core_avx2<const M: usize, const DIFF: bool, const ASCII: bool>(
 pub(crate) static FORCE_SCALAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[inline(always)]
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(crate) fn force_scalar() -> bool {
     #[cfg(test)]
     {

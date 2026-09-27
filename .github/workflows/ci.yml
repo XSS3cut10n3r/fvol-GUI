@@ -1,6 +1,6 @@
-# Every commit: a warning-free build and the unit tests, on the latest stable Rust and on the
-# minimum supported version (Cargo.toml `rust-version`), plus a check that the generated README
-# artwork matches its sources. The release workflow runs this workflow first.
+# Every commit: a warning-free build and the unit tests on x86-64 (the latest stable Rust and the
+# minimum supported version, Cargo.toml `rust-version`) and on arm64 (stable), plus a check that
+# the generated README artwork matches its sources. The release workflow runs this workflow first.
 #
 # The parity gates against python volatility3 (bench/scripts/check_*.sh) need GBs of memory
 # images and python reference outputs that are not in the repository; run them locally before a
@@ -31,13 +31,17 @@ env:
 
 jobs:
   test:
-    name: test (Rust ${{ matrix.toolchain }})
-    runs-on: ubuntu-24.04
+    name: test (${{ matrix.arch }}, Rust ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.95"]
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, toolchain: stable }
+          - { arch: x86_64, runner: ubuntu-24.04, toolchain: "1.95" }
+          # native arm64 runner: the portable (non-x86) paths are what runs there
+          - { arch: arm64, runner: ubuntu-24.04-arm, toolchain: stable }
     steps:
       - uses: actions/checkout@v4
 

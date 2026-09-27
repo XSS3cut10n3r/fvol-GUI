@@ -175,6 +175,8 @@ impl Walker {
     /// visits it next; its lines usually come from DRAM).
     #[inline]
     fn prefetch_vnode(&self, base: u64) {
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = base;
         #[cfg(target_arch = "x86_64")]
         if let Some(s) = self.layer.slice(base, self.vnode_size as usize) {
             use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};

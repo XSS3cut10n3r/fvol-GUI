@@ -69,9 +69,10 @@ impl Write for RawStdout {
     }
 }
 
-/// Entry point; returns the process exit code.
-pub fn main() -> i32 {
-    let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+/// Entry point; returns the process exit code. `args` is the C `main`'s argv (std's own copy
+/// comes from a glibc-only startup hook, so it is empty with other C libraries such as musl).
+pub fn main(args: Vec<std::ffi::OsString>) -> i32 {
+    let argv: Vec<String> = args.into_iter().map(|a| a.to_string_lossy().into_owned()).collect();
     // `fvol serve ...`: the built-in web UI; `fvol completion` / `fvol __complete`: shell tab
     // completion (python volatility has no plugin or option by these names)
     match argv.get(1).map(String::as_str) {

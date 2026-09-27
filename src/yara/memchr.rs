@@ -497,10 +497,12 @@ use super::regex::hir::ByteSet;
 #[derive(Clone, Debug)]
 pub struct SetDesc {
     pub set: ByteSet,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     kind: DescKind,
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 enum DescKind {
     One(u8),
     Two(u8, u8),
@@ -672,6 +674,7 @@ mod vset {
 
 /// A set of bytes with a fast SIMD "find first byte in set" search.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub struct ByteSetFinder {
     set: [bool; 256],
     lo: [u8; 16],
@@ -754,6 +757,7 @@ const FALLBACK_WINDOW: usize = 64 << 10;
 pub struct Memmem {
     needle: Box<[u8]>,
     i1: usize,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     i2: usize,
     tw: TwoWay,
 }

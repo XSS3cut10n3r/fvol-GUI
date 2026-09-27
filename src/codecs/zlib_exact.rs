@@ -1092,6 +1092,8 @@ impl Deflater {
     /// In F6 mode the 6-byte hash is kept for that insert when p's 8 bytes are final data.
     #[inline(always)]
     fn prefetch_buckets<const F6: bool>(&mut self, p: usize) {
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = p;
         #[cfg(target_arch = "x86_64")]
         // SAFETY: p + 8 <= window.len() (p <= window_size - MIN_LOOKAHEAD + 1 in the callers'
         // loops, 16 bytes of padding); bucket indices are masked; prefetch never faults.

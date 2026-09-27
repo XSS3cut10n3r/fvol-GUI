@@ -373,8 +373,8 @@ GitHub Actions (`.github/workflows/`, also runnable by Forgejo Actions):
 
 | Workflow      | Runs on                                   | What it does                                                                 |
 | ------------- | ----------------------------------------- | ---------------------------------------------------------------------------- |
-| `ci.yml`      | every push to any branch, pull requests   | warning-free build, unit tests and a smoke test of `fvol`, on stable Rust and on the minimum version (1.95); checks that `docs/assets` matches `python3 docs/assets/build.py` |
-| `release.yml` | tags `vX.Y.Z` (or by hand, as a dry run)  | runs `ci.yml`, builds static fat-LTO binaries for any x86-64 CPU and for x86-64-v3 (AVX2), and publishes them as a GitHub release with SHA-256 sums and the commits since the previous tag |
+| `ci.yml`      | every push to any branch, pull requests   | warning-free build, unit tests and a smoke test of `fvol` on x86-64 (stable Rust and the minimum version, 1.95) and on a native arm64 runner; checks that `docs/assets` matches `python3 docs/assets/build.py` |
+| `release.yml` | tags `vX.Y.Z` (or by hand, as a dry run)  | runs `ci.yml`, builds static fat-LTO binaries for any x86-64 CPU, for x86-64-v3 (AVX2) and for any arm64 CPU, and publishes them as a GitHub release with SHA-256 sums and the commits since the previous tag |
 
 CI cannot run the parity gates: they need GBs of memory images and python reference outputs that
 are not in the repository. Tests that use those files are `#[ignore]`d or skip themselves, so the

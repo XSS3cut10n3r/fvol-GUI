@@ -921,7 +921,7 @@ fn spawn_helper_spec(spec: &str) -> bool {
 unsafe extern "C" {
     fn setsid() -> i32;
     fn flock(fd: i32, op: i32) -> i32;
-    fn close_range(first: u32, last: u32, flags: i32) -> i32;
+    fn syscall(n: std::ffi::c_long, ...) -> std::ffi::c_long;
     fn close(fd: i32) -> i32;
     fn sched_setscheduler(pid: i32, policy: i32, param: *const i32) -> i32;
     fn setpriority(which: i32, who: u32, prio: i32) -> i32;
@@ -950,7 +950,10 @@ pub fn run_helper(spec: &std::ffi::OsStr) -> i32 {
     // SAFETY: plain syscalls on this process
     unsafe {
         setsid();
-        if close_range(3, u32::MAX, 0) != 0 {
+        // close_range(2): number 436 on every architecture, and not a libc function everywhere
+        // (musl); an older kernel falls back to closing one by one
+        const SYS_CLOSE_RANGE: std::ffi::c_long = 436;
+        if syscall(SYS_CLOSE_RANGE, 3u32, u32::MAX, 0u32) != 0 {
             for fd in 3..1024 {
                 close(fd);
             }

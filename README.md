@@ -46,7 +46,7 @@
 
 ## Install
 
-Requires Rust 1.95+. Tested on Linux x86-64.
+Requires Rust 1.95+. Linux on x86-64 and arm64.
 
 ```bash
 cargo build --release    # -> target/release/fvol

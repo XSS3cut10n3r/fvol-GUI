@@ -2366,7 +2366,9 @@ mod tests {
         attr[0] = 64u64 << 32;
         attr[1] = pmu << 32;
         attr[5] = (1 << 5) | (1 << 6);
-        let fd = unsafe { syscall(298, attr.as_ptr(), 0 as c_int, -1 as c_int, -1 as c_int, 0 as c_ulong) } as c_int;
+        // perf_event_open
+        let nr: c_long = if cfg!(target_arch = "aarch64") { 241 } else { 298 };
+        let fd = unsafe { syscall(nr, attr.as_ptr(), 0 as c_int, -1 as c_int, -1 as c_int, 0 as c_ulong) } as c_int;
         if fd >= 0 {
             unsafe { ioctl(fd, 0x2400, 0 as c_ulong) };
         }

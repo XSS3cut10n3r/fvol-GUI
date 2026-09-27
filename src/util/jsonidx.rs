@@ -1045,6 +1045,7 @@ pub fn ident_marks(buf: &[u8]) -> Option<IdentMarks> {
 
 /// The exact test behind the candidate prefilter of [`ident_marks`].
 #[inline]
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn ident_cand_at(buf: &[u8], p: usize) -> bool {
     let r = &buf[p..];
     r.starts_with(b"\"version\"") || r.starts_with(b"\"linux_banner\"")

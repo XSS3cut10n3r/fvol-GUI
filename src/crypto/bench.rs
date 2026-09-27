@@ -58,19 +58,19 @@ struct Cycles(i32);
 
 impl Cycles {
     fn open() -> Cycles {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(target_os = "linux")]
         {
             // struct perf_event_attr (PERF_ATTR_SIZE_VER8 = 136 bytes): type=HARDWARE(0),
             // size, config=CPU_CYCLES(0), flags: exclude_kernel(bit 5) | exclude_hv(bit 6).
             let mut attr = [0u64; 17];
             attr[0] = 136u64 << 32;
             attr[5] = (1 << 5) | (1 << 6);
-            const SYS_PERF_EVENT_OPEN: i64 = 298;
+            const SYS_PERF_EVENT_OPEN: i64 = if cfg!(target_arch = "aarch64") { 241 } else { 298 };
             let fd =
                 unsafe { syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0i32, -1i32, -1i32, 0u64) };
             Cycles(fd as i32)
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        #[cfg(not(target_os = "linux"))]
         {
             Cycles(-1)
         }

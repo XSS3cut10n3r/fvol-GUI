@@ -88,8 +88,18 @@ pub(crate) fn find_json_escape(s: &[u8]) -> Option<usize> {
             let zero = |y: u64| y.wrapping_sub(L) & !y & H;
             (x.wrapping_sub(0x20 * L) & !x & H) | (x & H) | zero(x ^ (b'"' as u64 * L)) | zero(x ^ (b'\\' as u64 * L)) | zero(x ^ (0x7f * L))
         };
-        if any(w(&s[..8])) | any(w(&s[s.len() - 8..])) == 0 {
-            return None;
+        if s.len() <= 16 {
+            if any(w(&s[..8])) | any(w(&s[s.len() - 8..])) == 0 {
+                return None;
+            }
+        } else {
+            // longer strings (no SSE path on this architecture): word by word, then the exact
+            // position from the first word that has one
+            let mut i = 0;
+            while i + 8 <= s.len() && any(w(&s[i..i + 8])) == 0 {
+                i += 8;
+            }
+            return s[i..].iter().position(|&c| escaped(c)).map(|p| p + i);
         }
     }
     s.iter().position(|&c| escaped(c))

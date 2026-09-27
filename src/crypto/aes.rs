@@ -174,6 +174,7 @@ fn expand_portable(key: &[u8], out: &mut Keys) {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Hw {
     Portable = 0,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Ni = 1,
     Vaes = 2,
 }

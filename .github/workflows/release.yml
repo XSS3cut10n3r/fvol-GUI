@@ -1,5 +1,5 @@
 # Release: pushing a tag vX.Y.Z (made by bench/scripts/release.sh) runs CI, builds portable static
-# binaries, and publishes them as a GitHub release with SHA-256 sums and the commit list since the
+# binaries (x86-64, x86-64-v3, arm64; each on a native runner), and publishes them as a GitHub release with SHA-256 sums and the commit list since the
 # previous tag. Run it by hand (workflow_dispatch) for a dry run: same builds, artifacts only.
 name: Release
 
@@ -26,7 +26,7 @@ jobs:
   build:
     name: build (${{ matrix.name }})
     needs: ci
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: true
@@ -34,10 +34,16 @@ jobs:
         include:
           # any x86-64 CPU; the SIMD paths still pick AVX2 / SHA-NI / AES-NI at run time
           - name: x86_64-linux
+            runner: ubuntu-24.04
             cpu: x86-64
           # CPUs with AVX2 (Intel Haswell, AMD Zen and newer): a few helpers compile to AVX2 / BMI2
           - name: x86_64-v3-linux
+            runner: ubuntu-24.04
             cpu: x86-64-v3
+          # any 64-bit ARM CPU (ARMv8-A): Graviton, Ampere, Raspberry Pi 4/5, Apple silicon VMs
+          - name: aarch64-linux
+            runner: ubuntu-24.04-arm
+            cpu: generic
     steps:
       - uses: actions/checkout@v4
 
@@ -114,7 +120,7 @@ jobs:
           {
             echo "fastvol ${GITHUB_REF_NAME#v}: output byte-identical to python volatility3 $(sed -n 's/.*"Volatility 3 Framework \(.*\)".*/\1/p' src/main.rs | head -1)."
             echo
-            echo "Static Linux binaries: \`x86_64-linux\` runs on any x86-64 CPU, \`x86_64-v3-linux\` needs AVX2 (Haswell / Zen or newer)."
+            echo "Static Linux binaries: \`x86_64-linux\` runs on any x86-64 CPU, \`x86_64-v3-linux\` needs AVX2 (Haswell / Zen or newer), \`aarch64-linux\` runs on any 64-bit ARM CPU."
             echo
             echo "## Changes"
             echo

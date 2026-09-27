@@ -213,6 +213,9 @@ mod perf {
         fn ioctl(fd: c_int, req: c_ulong, ...) -> c_int;
         fn close(fd: c_int) -> c_int;
     }
+    #[cfg(target_arch = "aarch64")]
+    const SYS_PERF_EVENT_OPEN: c_long = 241;
+    #[cfg(not(target_arch = "aarch64"))]
     const SYS_PERF_EVENT_OPEN: c_long = 298;
     const IOC_ENABLE: c_ulong = 0x2400;
     const IOC_DISABLE: c_ulong = 0x2401;

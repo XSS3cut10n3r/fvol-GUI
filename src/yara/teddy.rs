@@ -22,6 +22,7 @@ pub struct Teddy {
     /// No fingerprinted byte is >= 0x80: `vpshufb` on the raw byte already yields the
     /// low-nibble entry for ASCII bytes and 0 for the others (whose high-nibble entry is
     /// 0 anyway), so the low-nibble mask can be skipped.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     ascii: bool,
 }
 
