@@ -3,6 +3,7 @@
 
 pub mod bg;
 pub mod download;
+pub mod exit;
 pub mod fxhash;
 pub mod json;
 pub mod jsonidx;

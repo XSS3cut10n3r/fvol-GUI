@@ -2,6 +2,23 @@
 # crt-static: a static-pie binary skips the dynamic loader (library search, ~500k instructions of
 # symbol binding, ~25 syscalls), about 0.4 ms of every run's fixed cost. rsvol only needs libc
 # functions that work statically (no NSS / dlopen / iconv).
-rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+crt-static"]
+#
+# 2 MB-aligned segments, code starting on a 2 MB boundary (separate-code): the kernel can then map
+# the executable's code and read-only data with huge pages once they are 2 MB folios in the page
+# cache (src/util/exit.rs collapses them after a run). Costs up to ~4 MB of sparse padding in the
+# file and 9 bits of the load address's ASLR entropy (it stays position-independent/randomized).
+#
+# pack-relative-relocs (RELR, glibc 2.36+): the ~10,500 relative relocations the static-pie applies
+# to itself at startup as a compact bitmap instead of 24-byte RELA entries (250 KB less to read,
+# ~60% fewer instructions in _dl_relocate_static_pie).
+rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+crt-static",
+             "-C", "link-arg=-Wl,-z,max-page-size=0x200000", "-C", "link-arg=-Wl,-z,separate-code",
+             "-C", "link-arg=-Wl,-z,pack-relative-relocs"]
 # Several agents build concurrently on this 20-core / 62 GB box; keep each build's footprint bounded.
 jobs = 6
+
+[target.x86_64-unknown-linux-gnu]
+# cc (rust-lld) + hot-text ordering from .cargo/symbol-order.txt for the release `vol` binary;
+# every other link is passed through unchanged. See .cargo/linker.sh (its name must not look like
+# a known linker: rustc infers the linker flavour and its arguments from the name).
+linker = ".cargo/linker.sh"
