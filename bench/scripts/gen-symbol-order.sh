@@ -14,6 +14,7 @@
 # are simply not moved, see .cargo/linker.sh), then rebuild the release binary. Takes a few minutes.
 # Images: WIN_IMG, LINUX_IMG, MAC_IMG, SYMBOLS (defaults: the test images of this repo); cases
 # whose image is missing are skipped. Extra cases: ORDER_CASES="args|args|..." (vol arguments).
+# Needs cc, python3, nm and readelf (binutils), and ptrace (Linux).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 S=${1:-$ROOT/testdata/scratch/symorder}
@@ -42,9 +43,18 @@ CASES=(
 IFS='|' read -r -a extra <<< "${ORDER_CASES:-}"
 CASES+=("${extra[@]}")
 
+# memory-capped systemd scopes where available (this repo's machine-sharing rules), else plain
+if command -v systemd-run > /dev/null 2>&1; then
+  limited() { "$ROOT/bench/scripts/limit.sh" -m 4G "$@"; }
+  CARGO=$ROOT/bench/scripts/cargo.sh
+else
+  limited() { "$@"; }
+  CARGO=cargo
+fi
+
 echo "== building an unstripped release binary in $S/target"
 CARGO_PROFILE_RELEASE_STRIP=false RSVOL_SYMBOL_ORDER=0 \
-  "$ROOT/bench/scripts/cargo.sh" build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$S/target" 2>&1 | tail -2
+  "$CARGO" build --release --manifest-path "$ROOT/Cargo.toml" --target-dir "$S/target" 2>&1 | tail -2
 BIN=$S/target/release/vol
 [ -x "$BIN" ] || { echo "build failed"; exit 1; }
 cc -O2 -o "$S/hottrace" "$ROOT/bench/scripts/hottrace.c" || exit 1
@@ -62,7 +72,7 @@ for c in "${CASES[@]}"; do
   # twice untraced: the cache is warm and any background cache write is done
   "$BIN" "${args[@]}" > /dev/null 2>&1; "$BIN" "${args[@]}" > /dev/null 2>&1
   printf '%-50s ' "$c"
-  "$ROOT/bench/scripts/limit.sh" -m 4G "$S/hottrace" -o "$S/trace.$n.txt" -- "$BIN" "${args[@]}"
+  limited "$S/hottrace" -o "$S/trace.$n.txt" -- "$BIN" "${args[@]}"
   n=$((n + 1))
 done
 
