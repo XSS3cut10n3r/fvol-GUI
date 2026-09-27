@@ -161,7 +161,8 @@ rsvol makes the same decisions from the same evidence:
 
 python scans the whole image and then chooses; rsvol streams the scan in python's hit order and
 stops at the first hit python would pick. The result is stored per image in the automagic cache,
-so a warm run does no scanning at all.
+so a warm run does no scanning at all. So is a failure to find an OS's kernel: timeliner runs the
+plugins of every OS, and a warm run does not look for the other two kernels again.
 
 ## Scanning
 
@@ -245,7 +246,7 @@ The design rule is to know the hardware and do the minimum work. The techniques,
 | ----------------------------- | --------------------------------------------------------------------- |
 | Memory mapping                | The image, and cached symbol tables, are mapped, never read into memory. Scans map private windows per worker. |
 | Zero-copy access              | `slice()` hands out mapped bytes; symbol tables are used in place.    |
-| Parallelism                   | Scans, per-process work, ISF builds, the identifier index and row formatting use all cores through `std::thread::scope` with work stealing. |
+| Parallelism                   | Scans, per-process work, ISF builds, the identifier index and row formatting use all cores through one persistent worker pool with work stealing: no thread is started per parallel section, sections nest and run concurrently, and a panic in a worker reaches the caller like one on its own thread. |
 | SIMD                          | AVX2 pattern search, AVX2 and PCLMULQDQ JSON indexing, AES-NI and VAES, SHA-NI, selected at run time. |
 | Caching                       | Symbol tables, the identifier index, automagic results and raw scan hits. |
 | Speculation                   | Likely kernel symbol tables are built while the scans that confirm them run. |
