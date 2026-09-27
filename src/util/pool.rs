@@ -56,6 +56,8 @@ struct State {
     workers: usize,
     /// workers still to be started by the ones starting (see [`grow`])
     to_start: usize,
+    /// workers whose thread runs (or ran)
+    started: usize,
 }
 
 // SAFETY: the job pointers are only dereferenced under the rules of `run_job`
@@ -72,7 +74,7 @@ struct Pool {
 }
 
 static POOL: Pool = Pool {
-    state: Mutex::new(State { jobs: Vec::new(), idle: 0, spinning: 0, workers: 0, to_start: 0 }),
+    state: Mutex::new(State { jobs: Vec::new(), idle: 0, spinning: 0, workers: 0, to_start: 0, started: 0 }),
     wake: Condvar::new(),
     done: Condvar::new(),
     epoch: AtomicU64::new(0),
@@ -94,12 +96,45 @@ fn spin() -> std::time::Duration {
 /// due, so `k` workers are up after ~log2(k) thread creations instead of `k` in a row.
 fn grow(s: &mut State, k: usize) -> bool {
     let k = k.min(crate::util::par::threads().saturating_sub(s.workers));
-    if k == 0 {
+    if k == 0 || SHUTDOWN.load(Ordering::Relaxed) {
         return false;
     }
     s.workers += k;
     s.to_start += k - 1;
     true
+}
+
+/// Set by [`shutdown`]: workers leave, and every section runs on its caller alone.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// One word per started worker: nonzero until its thread has left the address space (see
+/// [`leave`]).
+static GONE: Mutex<Vec<&'static std::sync::atomic::AtomicU32>> = Mutex::new(Vec::new());
+
+/// Stop the pool at the end of a one-shot run (`main`, before `util::exit` hands the address
+/// space to its teardown helper): every worker leaves, and when this returns no worker thread
+/// uses the address space any more. For idle workers (no section running); later sections run
+/// on their caller alone.
+pub fn shutdown() {
+    {
+        let mut s = lock(&POOL.state);
+        if SHUTDOWN.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // workers not started yet never will be
+        s.workers -= std::mem::take(&mut s.to_start);
+        POOL.epoch.fetch_add(1, Ordering::Release);
+    }
+    POOL.wake.notify_all();
+    // the workers being started (whose words are not listed yet) first
+    let mut s = lock(&POOL.state);
+    while s.started < s.workers {
+        s = POOL.done.wait(s).unwrap_or_else(|e| e.into_inner());
+    }
+    drop(s);
+    for gone in lock(&GONE).iter() {
+        wait_zero(gone);
+    }
 }
 
 /// Stack of a worker: nested sections run their items on the thread that waits for them, below
@@ -109,6 +144,15 @@ const WORKER_STACK: usize = 8 << 20;
 
 fn spawn_worker() {
     let started = std::thread::Builder::new().name("rsvol-pool".into()).stack_size(WORKER_STACK).spawn(|| {
+        let gone: &'static std::sync::atomic::AtomicU32 = Box::leak(Box::new(std::sync::atomic::AtomicU32::new(1)));
+        {
+            let mut s = lock(&POOL.state);
+            s.started += 1;
+            lock(&GONE).push(gone);
+            if SHUTDOWN.load(Ordering::Relaxed) {
+                POOL.done.notify_all();
+            }
+        }
         // start the others still due first (each start is ~10-20 us of kernel work)
         loop {
             let mut s = lock(&POOL.state);
@@ -120,11 +164,67 @@ fn spawn_worker() {
             spawn_worker();
         }
         worker();
+        leave(gone);
     });
     if started.is_err() {
         // without workers every owner simply runs its whole job itself
         let mut s = lock(&POOL.state);
         s.workers -= 1 + std::mem::take(&mut s.to_start);
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            POOL.done.notify_all();
+        }
+    }
+}
+
+/// End a worker's thread after [`shutdown`]: the kernel zeroes `gone` (and wakes its waiter)
+/// once the thread no longer uses the address space (`set_tid_address`). The thread ends right
+/// away, without the thread library's exit: its thread-locals are not dropped and its stack is
+/// not unmapped (nothing is left that uses them; the process exits next and its teardown
+/// frees them), which keeps the exit path short.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn leave(gone: &'static std::sync::atomic::AtomicU32) -> ! {
+    unsafe extern "C" {
+        fn syscall(n: std::ffi::c_long, ...) -> std::ffi::c_long;
+    }
+    const SYS_EXIT: std::ffi::c_long = 60;
+    const SYS_SET_TID_ADDRESS: std::ffi::c_long = 218;
+    // SAFETY: `gone` lives forever; a thread exit takes no other resource with it
+    unsafe {
+        syscall(SYS_SET_TID_ADDRESS, gone.as_ptr());
+        loop {
+            syscall(SYS_EXIT, 0);
+        }
+    }
+}
+
+/// [`leave`] elsewhere: the thread ends normally, after it is counted out.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn leave(gone: &'static std::sync::atomic::AtomicU32) {
+    gone.store(0, Ordering::Release);
+}
+
+/// Wait until `word` is zero (the kernel zeroes and wakes it, see [`leave`]).
+fn wait_zero(word: &std::sync::atomic::AtomicU32) {
+    loop {
+        let v = word.load(Ordering::Acquire);
+        if v == 0 {
+            return;
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            unsafe extern "C" {
+                fn syscall(n: std::ffi::c_long, ...) -> std::ffi::c_long;
+            }
+            const SYS_FUTEX: std::ffi::c_long = 202;
+            // FUTEX_WAIT without the private flag: the kernel's wake at thread exit is shared
+            const FUTEX_WAIT: std::ffi::c_int = 0;
+            // SAFETY: a futex wait on a live word; returns on a wake, a changed value or a signal
+            unsafe {
+                syscall(SYS_FUTEX, word.as_ptr(), FUTEX_WAIT, v, std::ptr::null::<u8>());
+            }
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        std::thread::yield_now();
     }
 }
 
@@ -144,6 +244,9 @@ fn worker() {
     let mut s = lock(&p.state);
     let mut spun = false;
     loop {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return;
+        }
         // the newest job first: the innermost of nested sections, which holds up the others
         let pick = s.jobs.iter().rev().copied().find(|&h| {
             // SAFETY: a published job is alive (its owner unpublishes it under this lock)
@@ -217,7 +320,7 @@ fn notify(k: usize, all: bool) {
 /// is left to claim (it may also consume results), while up to `max_helpers` pool workers
 /// join `work`. Returns (or unwinds) only after every helper has left the job.
 pub(crate) fn run_job<R>(work: &(dyn Work + '_), max_helpers: usize, owner: impl FnOnce() -> R) -> R {
-    if max_helpers == 0 || crate::util::par::threads() <= 1 {
+    if max_helpers == 0 || crate::util::par::threads() <= 1 || SHUTDOWN.load(Ordering::Relaxed) {
         return owner();
     }
     // SAFETY: only the lifetime is erased. The job is unpublished and every helper has left
@@ -415,6 +518,46 @@ mod tests {
         }
         let r = std::panic::catch_unwind(|| map(8, |i| map(8, |j| if i == 3 && j == 5 { panic!("inner {i} {j}") } else { j }).len()));
         assert_eq!(r.unwrap_err().downcast_ref::<String>().map(|s| s.as_str()), Some("inner 3 5"));
+    }
+
+    /// After [`shutdown`] no worker thread is left (the process has its main thread only) and
+    /// sections still work, on their caller. Runs in a child process: the pool is global.
+    #[test]
+    fn shutdown_leaves_no_worker() {
+        if std::env::var_os("RSVOL_POOL_SHUTDOWN_CHILD").is_some() {
+            // threads other than the harness's (libtest may run the test on a thread of its own)
+            let tasks = || {
+                std::fs::read_dir("/proc/self/task")
+                    .map(|d| d.flatten().filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c.starts_with("rsvol-pool"))).count())
+                    .unwrap_or(0)
+            };
+            // nested sections: all workers started
+            let v = map(64, |i| map(8, |j| i * j).iter().sum::<usize>());
+            assert_eq!(v.len(), 64);
+            // (workers may still be starting: shutdown waits for them too)
+            shutdown();
+            assert_eq!(tasks(), 0, "workers left after shutdown");
+            let gone = lock(&GONE);
+            assert!(crate::util::par::threads() <= 1 || !gone.is_empty());
+            assert!(gone.iter().all(|g| g.load(Ordering::Relaxed) == 0));
+            drop(gone);
+            assert_eq!(map(100, |i| i * 2), (0..100).map(|i| i * 2).collect::<Vec<_>>());
+            let mut seen = 0;
+            crate::util::par::par_map_stream(50, 4, |i| i, |_, _| {
+                seen += 1;
+                true
+            });
+            assert_eq!(seen, 50);
+            shutdown();
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "util::pool::tests::shutdown_leaves_no_worker", "--test-threads=1", "--nocapture"])
+            .env("RSVOL_POOL_SHUTDOWN_CHILD", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
     }
 
     #[test]
