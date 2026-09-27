@@ -1493,10 +1493,10 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     }
     let mut out = vec![0u8; b.len() / 2];
     let (mut ok, mut bad) = (HIGH, 0u8);
-    let mut o = out.chunks_exact_mut(4);
-    let mut i = b.chunks_exact(8);
-    for (o, w) in (&mut o).zip(&mut i) {
-        let x = u64::from_le_bytes([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]);
+    let (words, tail) = b.as_chunks::<8>();
+    let (outw, outtail) = out.as_chunks_mut::<4>();
+    for (o, w) in outw.iter_mut().zip(words) {
+        let x = u64::from_le_bytes(*w);
         // per byte (all < 0x80, so the additions never carry into the next byte):
         // '0'..='9', and 'a'..='f' after folding 'A'..='F' to lower case
         let digit = x.wrapping_add(0x50 * ONES) & !x.wrapping_add(0x46 * ONES);
@@ -1506,9 +1506,9 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         let nib = (x & 0x0f * ONES) + ((alpha & HIGH) >> 7) * 9;
         // high nibble of each pair from the even bytes, low nibble from the odd ones
         let pairs = (nib << 4) | (nib >> 8);
-        o.copy_from_slice(&[pairs as u8, (pairs >> 16) as u8, (pairs >> 32) as u8, (pairs >> 48) as u8]);
+        *o = [pairs as u8, (pairs >> 16) as u8, (pairs >> 32) as u8, (pairs >> 48) as u8];
     }
-    for (o, p) in o.into_remainder().iter_mut().zip(i.remainder().chunks_exact(2)) {
+    for (o, p) in outtail.iter_mut().zip(tail.chunks_exact(2)) {
         let (h, l) = (NIB[p[0] as usize], NIB[p[1] as usize]);
         bad |= h | l;
         *o = h << 4 | l;

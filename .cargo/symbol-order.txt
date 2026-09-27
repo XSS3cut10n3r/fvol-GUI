@@ -458,9 +458,6 @@ std::sys::fs::unix::try_statx
 syscall
 vol::cli::quote_path
 core::ptr::drop_glue::<core::option::Option<vol::cli::Location>>
-std::sys::random::linux::hashmap_random_keys
-getrandom
-getrandom_vdso
 vol::cli::path_exists
 <vol::cli::argparse::Namespace>::get
 vol::cli::run_inner::{closure#18}
@@ -485,8 +482,9 @@ readlink
 <std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<vol::symbols::store::python_install>::{closure#0}, !>
 <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::initialize<<std::sync::once_lock::OnceLock<core::option::Option<std::path::PathBuf>>>::get_or_init<vol::symbols::store::python_install>::{closure#0}, !>::{closure#0}>::{closure#0}
 vol::symbols::store::python_install::{closure#0}
-vol::util::paths::xdg_cache_home
 vol::util::paths::vol3_cache_dir
+<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::xdg_cache_home::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::xdg_cache_home::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
 vol::renderers::text::create
 sysmalloc_mmap
 mmap64
@@ -502,7 +500,9 @@ __is_decorate_maps_enabled
 <vol::context::Context>::image_url
 <std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::get_or_init<<vol::context::Context>::image_path::{closure#0}>::{closure#0}, !>
 <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<std::path::PathBuf, alloc::string::String>>>::get_or_init<<vol::context::Context>::image_path::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::util::paths::rsvol_cache_dir
+vol::util::resource::open
+<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::rsvol_cache_dir::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::initialize<<std::sync::once_lock::OnceLock<std::path::PathBuf>>::get_or_init<vol::util::paths::rsvol_cache_dir::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
 vol::util::resource::open_in
 <vol::layers::file::FileLayer>::open
 <std::fs::OpenOptions>::_open
@@ -562,7 +562,6 @@ vol::symbols::store::py_seed
 <std::sys::pal::unix::time::Timespec>::now
 clock_gettime
 <std::sys::pal::unix::time::Timespec>::sub_timespec
-vol::symbols::store::unhex
 vol::symbols::store::stamp_bytes
 vol::util::paths::path_to_file_uri
 vol::symbols::load_location
@@ -611,6 +610,7 @@ core::ptr::drop_glue::<alloc::vec::Vec<vol::plugins::Requirement>>
 <vol::plugins::Config>::get
 <vol::renderers::text::Quick as vol::renderers::RowSink>::begin
 <str>::to_uppercase
+vol::symbols::store::unhex
 vol::objects::resolve_named
 <vol::layers::intel::IntelLayer as vol::layers::Layer>::is_valid
 <vol::symbols::table::SymbolTable>::node
@@ -631,12 +631,9 @@ core::ptr::drop_glue::<vol::plugins::ConfigValue>
 <vol::cli::argparse::PyVal as core::clone::Clone>::clone
 vol::cli::pyval_to_cv
 <vol::plugins::Config>::set
-<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
-<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
-<hashbrown::raw::RawTable<(alloc::string::String, vol::plugins::ConfigValue)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, vol::plugins::ConfigValue, std::hash::random::RandomState>::{closure#0}>
+<hashbrown::raw::RawTable<(alloc::string::String, vol::plugins::ConfigValue)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, vol::plugins::ConfigValue, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
 core::ptr::drop_glue::<vol::cli::argparse::PyVal>
 <vol::plugins::ConfigValue as core::clone::Clone>::clone
-<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
 vol::automagic::stackers_key
 <vol::layers::registry::RegistryHive as vol::layers::Layer>::as_registry_hive
 <str>::trim_matches::<char>
@@ -658,8 +655,6 @@ core::ptr::drop_glue::<alloc::vec::Vec<alloc::sync::Arc<dyn vol::layers::Layer>>
 vol::symbols::store::find_windows_isf
 <u32 as core::fmt::Display>::fmt
 <alloc::vec::Vec<vol::symbols::store::Root> as core::fmt::Debug>::fmt
-vol::symbols::store::find_location_cached::{closure#5}
-vol::symbols::pycache::location_of
 vol::util::paths::unquote
 core::ptr::drop_glue::<core::option::Option<vol::util::trace::Span>>
 core::ptr::drop_glue::<std::collections::hash::map::HashMap<usize, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>
@@ -681,6 +676,8 @@ vol::objects::util::address_to_string
 vol::objects::util::gather_contiguous_bytes::{closure#0}
 vol::objects::strings::bytes_to_decoded_string
 <vol::plugins::windows::pslist::PsList as vol::plugins::Plugin>::description
+vol::symbols::store::find_location_cached::{closure#5}
+vol::symbols::pycache::location_of
 vol::plugins::windows::pslist::list_processes
 <vol::symbols::table::SymbolTable>::offset_of
 <vol::objects::Obj as vol::symbols::windows::ext::WinExt>::to_list
@@ -695,9 +692,14 @@ vol::renderers::pyfmt::push_datetime_cli
 <vol::objects::Module>::object_abs
 <alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::str::iter::Split<char>, vol::cli::run_inner::{closure#21}>>>::from_iter
 <core::iter::adapters::map::Map<core::str::iter::Split<char>, vol::cli::run_inner::{closure#21}> as core::iter::traits::iterator::Iterator>::next
+<alloc::raw_vec::RawVec<core::option::Option<vol::automagic::windows::PdbSig>>>::grow_one
+<alloc::raw_vec::RawVec<vol::util::resource::Codec>>::grow_one
 <vol::symbols::store::SymbolPath>::os_fingerprint
 vol::automagic::mac::cache_load::{closure#0}
 <vol::objects::Module>::object_from_symbol
+__open_nocancel
+__read_nocancel
+lseek64
 <vol::plugins::windows::pslist::PsList as vol::plugins::Plugin>::requirements
 <vol::plugins::windows::pslist::PsList as vol::plugins::Plugin>::run
 vol::plugins::windows::pslist::rows
@@ -710,8 +712,10 @@ vol::plugins::windows::pslist::rows
 <vol::renderers::Value as core::clone::Clone>::clone
 <vol::plugins::windows::info::Info as vol::plugins::Plugin>::description
 <vol::symbols::table::SymbolTable>::base_type_ty
+<alloc::raw_vec::RawVec<core::result::Result<vol::plugins::windows::handles::HandleItem, vol::error::Error>>>::grow_one
 <vol::layers::intel::IntelLayer as vol::layers::Layer>::name
 <vol::objects::Module>::object
+<i64 as core::fmt::Display>::fmt
 vol::objects::strings::decode_utf16
 <vol::symbols::table::SymbolTable>::enum_constants
 <vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::description
@@ -721,8 +725,6 @@ vol::automagic::linux::init
 <vol::layers::containers::segmented::SegmentedLayer>::with_blocks
 <vol::layers::containers::segmented::SegmentedLayer>::build
 core::slice::sort::shared::smallsort::insertion_sort_shift_left::<vol::layers::containers::segmented::Seg, <[vol::layers::containers::segmented::Seg]>::sort_by_key<u64, <vol::layers::containers::segmented::SegmentedLayer>::build::{closure#3}>::{closure#0}>
-<alloc::raw_vec::RawVec<core::option::Option<vol::automagic::windows::PdbSig>>>::grow_one
-<alloc::raw_vec::RawVec<vol::util::resource::Codec>>::grow_one
 <vol::layers::containers::segmented::SegmentedLayer as vol::layers::Layer>::read
 vol::automagic::linux::unhex
 vol::automagic::linux::isf_from_key
@@ -739,91 +741,6 @@ vol::symbols::linux::ext::follow
 core::ptr::drop_glue::<vol::symbols::linux::ext::ListState>
 __floattidf
 <vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::description
-__open_nocancel
-__read_nocancel
-lseek64
-<std::io::stdio::Stderr as core::io::write::Write>::write_all
-<std::sys::stdio::unix::Stderr as core::io::write::Write>::write_all
-<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::description
-<vol::plugins::mac::lsmod::Lsmod as vol::plugins::Plugin>::description
-<vol::cli::argparse::Parser>::formatter
-ioctl
-<&alloc::borrow::Cow<str> as core::fmt::Display>::fmt
-<vol::cli::help::Formatter>::format_args
-<vol::cli::help::Formatter>::metavar
-<vol::cli::help::Formatter>::format_usage
-core::ptr::drop_glue::<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::chain::Chain<alloc::vec::into_iter::IntoIter<alloc::vec::Vec<usize>>, alloc::vec::into_iter::IntoIter<alloc::vec::Vec<usize>>>>>
-<vol::cli::help::Formatter>::format_usage::{closure#2}
-<alloc::string::String as core::iter::traits::collect::FromIterator<char>>::from_iter::<core::iter::adapters::skip::Skip<core::str::iter::Chars>>
-vol::renderers::text::push_default
-<vol::plugins::mac::list_files::ListFiles as vol::plugins::Plugin>::requirements
-<vol::plugins::windows::info::Info as vol::plugins::Plugin>::run
-vol::symbols::load_isf
-<&vol::symbols::store::SymbolPath as core::fmt::Pointer>::fmt
-<vol::symbols::table::SymbolTable>::base_type_name
-<vol::symbols::store::SymbolPath>::find_first
-<vol::symbols::store::SymbolPath>::find_first::{closure#0}
-vol::symbols::store::embedded_matches
-vol::symbols::store::embedded_named
-vol::symbols::store::embedded_rel
-<alloc::raw_vec::RawVec<core::result::Result<vol::plugins::windows::handles::HandleItem, vol::error::Error>>>::grow_one
-std::sys::fs::symlink_metadata
-vol::symbols::table::ty_encode
-<vol::plugins::windows::info::Info as vol::plugins::Plugin>::run::{closure#0}
-<vol::symbols::table::SymbolTable>::is_64bit
-vol::layers::metadata
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::own_metadata
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::dependencies
-<vol::layers::file::FileLayer as vol::layers::Layer>::own_metadata
-<vol::layers::file::FileLayer as vol::layers::Layer>::dependencies
-core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<alloc::sync::Arc<dyn vol::layers::Layer>>>
-core::ptr::drop_glue::<vol::cli::Settings>
-<vol::layers::intel::IntelLayer as vol::layers::Layer>::class_name
-<vol::context::Context>::physical_listing
-vol::plugins::windows::info::get_version_structure
-<i128 as alloc::string::SpecToString>::spec_to_string
-vol::plugins::windows::info::get_kuser_structure
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_time
-vol::util::time::py_str
-<i64 as core::fmt::Display>::fmt
-<char as core::fmt::Display>::fmt
-<vol::objects::Obj>::read_string
-<vol::objects::Obj>::description
-<vol::symbols::table::SymbolTable>::enum_base
-<vol::symbols::table::SymbolTable>::enum_lookup
-vol::plugins::windows::info::get_ntheader_structure
-vol::symbols::windows::pe::get_nt_header
-<vol::objects::Obj>::named
-<vol::objects::Obj>::cast
-vol::util::time::asctime
-<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::requirements
-<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::run
-vol::plugins::linux::pslist::list_tasks
-<vol::symbols::table::SymbolTable>::type_name
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::is_valid
-vol::symbols::linux::ext::task_is_valid
-vol::plugins::linux::pslist::pid_filter::{closure#0}
-vol::plugins::linux::pslist::run_rows::{closure#0}
-vol::plugins::linux::pslist::get_task_fields
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::get_boottime
-vol::symbols::linux::vmlinux_of
-<vol::symbols::linux::timespec::Timespec>::from_nsec
-fmodf64
-__fixdfti
-__fixunsdfti
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::get_parent_pid
-<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::cred_value
-<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::requirements
-<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::run
-<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-vol::automagic::mac::init
-<std::path::PathBuf as core::fmt::Debug>::fmt
-vol::automagic::mac::loc_decode
-<vol::plugins::Config>::get_str
-vol::plugins::mac::pslist::list_tasks
-<vol::objects::Obj as vol::symbols::mac::MacExt>::walk_list
-vol::plugins::mac::pslist::pid_filter::{closure#0}
 vol::util::time::fromtimestamp_local
 <std::sync::once::Once>::call_once::<vol::util::time::fromtimestamp_local::{closure#0}>::{closure#0}
 tzset
@@ -871,51 +788,19 @@ localtime_r
 __tz_convert
 __tzfile_compute
 __offtime
-alloc::boxed::box_new_uninit
-<vol::renderers::text::Json as vol::renderers::RowSink>::begin
-core::slice::sort::shared::smallsort::insertion_sort_shift_left::<(alloc::string::String, usize), <[(alloc::string::String, usize)]>::sort_by<<vol::renderers::text::Json as vol::renderers::RowSink>::begin::{closure#0}>::{closure#0}>
-vol::renderers::pyfmt::push_json_str
-<vol::renderers::text::Json as vol::renderers::RowSink>::row
-<vol::renderers::text::Json as vol::renderers::RowSink>::row_ref
-<vol::renderers::text::Json>::close_to
-<vol::renderers::text::Json>::emit_ready
-vol::renderers::text::push_json_node
-vol::renderers::text::write_json_cell
-vol::renderers::pyfmt::push_datetime_iso
-vol::renderers::pyfmt::push_date_time
-vol::renderers::text::write_json_default
-<vol::renderers::text::Json as vol::renderers::text::TextRenderer>::finish
-<alloc::raw_vec::RawVec<alloc::vec::Vec<u8>>>::grow_one
-<alloc::vec::Vec<u8>>::append_elements
-core::ptr::drop_glue::<vol::renderers::text::Json>
-core::ptr::drop_glue::<alloc::collections::vec_deque::VecDeque<core::option::Option<vol::renderers::text::JNode>>>
-<vol::plugins::linux::bash::Bash as vol::plugins::Plugin>::requirements
-<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run
-<std::sync::once_lock::OnceLock<usize>>::initialize::<<std::sync::once_lock::OnceLock<usize>>::get_or_init<vol::util::par::threads::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<usize>>::initialize<<std::sync::once_lock::OnceLock<usize>>::get_or_init<vol::util::par::threads::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
-std::thread::functions::available_parallelism
-std::fs::buffer_capacity_required
-alloc::io::read::default_read_to_end::<&std::fs::File>
-std::sys::fs::exists
-<std::path::PathBuf>::pop
-<std::path::Path>::_starts_with
+<std::io::stdio::Stderr as core::io::write::Write>::write_all
+<std::sys::stdio::unix::Stderr as core::io::write::Write>::write_all
 <std::path::Components as core::iter::traits::iterator::Iterator>::next
-<std::path::Component as core::cmp::PartialEq>::eq
-<&std::fs::File as alloc::io::read::Read>::read_to_string
-alloc::io::read::default_read_to_end::small_probe_read::<&std::fs::File>
-sched_getaffinity
-std::thread::current::init_current
-<std::thread::thread::Thread>::new_current
+<alloc::vec::Vec<char> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<char, core::str::iter::Chars>>::from_iter
+<alloc::string::String as core::iter::traits::collect::FromIterator<&char>>::from_iter::<core::slice::iter::Iter<char>>
+systrim.constprop.0
 <std::thread::thread::Thread>::new
-gettid
-<std::sync::once_lock::OnceLock<u64>>::initialize::<<std::sync::once_lock::OnceLock<u64>>::get_or_init<<std::sync::once_lock::OnceLock<u64>>::try_insert::{closure#0}>::{closure#0}, !>
-<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<u64>>::initialize<<std::sync::once_lock::OnceLock<u64>>::get_or_init<<std::sync::once_lock::OnceLock<u64>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+std::thread::spawnhook::run_spawn_hooks
+std::sys::thread_local::destructors::linux_like::register
 <std::sys::thread_local::key::racy::LazyKey>::lazy_init
 pthread_key_create
 pthread_key_delete
 pthread_setspecific
-std::thread::spawnhook::run_spawn_hooks
-std::sys::thread_local::destructors::linux_like::register
 <alloc::raw_vec::RawVecInner<std::alloc::System>>::grow_amortized
 <alloc::raw_vec::RawVecInner<std::alloc::System>>::finish_grow
 <std::thread::spawnhook::SpawnHooks as core::ops::drop::Drop>::drop
@@ -953,39 +838,20 @@ __printf_buffer_write
 _itoa_word
 __printf_buffer_done
 <std::sys::thread::unix::Thread>::new::thread_start
+gettid
+<std::sync::once_lock::OnceLock<u64>>::initialize::<<std::sync::once_lock::OnceLock<u64>>::get_or_init<<std::sync::once_lock::OnceLock<u64>>::try_insert::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<u64>>::initialize<<std::sync::once_lock::OnceLock<u64>>::get_or_init<<std::sync::once_lock::OnceLock<u64>>::try_insert::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
 arena_get2
 new_heap
 alloc_new_heap
-<std::thread::lifecycle::spawn_unchecked<vol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>, <vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
 std::sys::backtrace::__rust_begin_short_backtrace::<std::thread::lifecycle::spawn_unchecked<vol::util::bg::spawn<<vol::symbols::store::IdentifierIndex>::update_with::{closure#5}>::{closure#0}, ()>::{closure#1}::{closure#0}::{closure#0}, ()>
 <std::thread::spawnhook::ChildSpawnHooks>::inherit_and_run
 core::ptr::drop_glue::<[alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send>]>
-std::sys::backtrace::__rust_begin_short_backtrace::<vol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>, <vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>
-<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::add_process_layer
-get_nprocs
-read_sysfs_file
-next_line
-__memchr_avx2
-__isoc23_strtoumax
-____strtoull_l_internal
-__close_nocancel_nostatus
-vol::symbols::windows::ext::process_layer
-<std::thread::lifecycle::JoinInner<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>::join
-pthread_join
-__pthread_clockjoin_ex
-pthread_testcancel
-__futex_abstimed_wait_cancelable64
 __syscall_cancel_arch
 __syscall_cancel_arch_start
-<std::sys::sync::mutex::futex::Mutex>::lock_contended
-<hashbrown::raw::RawTable<((usize, u64), &dyn vol::layers::Layer)>>::reserve_rehash::<hashbrown::map::make_hasher<(usize, u64), &dyn vol::layers::Layer, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
-<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_string
-<vol::layers::intel::IntelLayer>::translate_swap
+__syscall_cancel_arch_end
 __lll_lock_wait_private
 __lll_lock_wake_private
-<vol::layers::intel::IntelLayer>::read_impl::{closure#1}
-core::ptr::drop_glue::<core::option::Option<core::result::Result<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>, alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>>
 <std::sys::pal::unix::stack_overflow::Handler as core::ops::drop::Drop>::drop
 __nptl_deallocate_tsd
 std::sys::thread_local::guard::key::enable::run
@@ -996,10 +862,235 @@ __resolv_context_freeres
 __libc_dlerror_result_free
 __malloc_arena_thread_freeres
 __getrandom_vdso_release
-__syscall_cancel_arch_end
+pthread_join
+__pthread_clockjoin_ex
+pthread_testcancel
 __nptl_free_tcb
 __nptl_deallocate_stack
 <alloc::sync::Arc<std::thread::thread::Inner, std::alloc::System>>::drop_slow
+<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::description
+<vol::plugins::mac::lsmod::Lsmod as vol::plugins::Plugin>::description
+<vol::cli::argparse::Parser>::formatter
+ioctl
+<&alloc::borrow::Cow<str> as core::fmt::Display>::fmt
+<vol::cli::help::Formatter>::format_args
+<vol::cli::help::Formatter>::metavar
+<vol::cli::help::Formatter>::format_usage
+core::ptr::drop_glue::<core::iter::adapters::enumerate::Enumerate<core::iter::adapters::chain::Chain<alloc::vec::into_iter::IntoIter<alloc::vec::Vec<usize>>, alloc::vec::into_iter::IntoIter<alloc::vec::Vec<usize>>>>>
+<vol::cli::help::Formatter>::format_usage::{closure#2}
+<alloc::string::String as core::iter::traits::collect::FromIterator<char>>::from_iter::<core::iter::adapters::skip::Skip<core::str::iter::Chars>>
+vol::renderers::text::push_default
+<vol::plugins::mac::list_files::ListFiles as vol::plugins::Plugin>::requirements
+<vol::plugins::windows::info::Info as vol::plugins::Plugin>::run
+vol::symbols::load_isf
+<&vol::symbols::store::SymbolPath as core::fmt::Pointer>::fmt
+<vol::symbols::table::SymbolTable>::base_type_name
+<vol::symbols::store::SymbolPath>::find_first
+<vol::symbols::store::SymbolPath>::find_first::{closure#0}
+vol::symbols::store::embedded_matches
+vol::symbols::store::embedded_named
+std::sys::fs::symlink_metadata
+vol::symbols::table::ty_encode
+<vol::plugins::windows::info::Info as vol::plugins::Plugin>::run::{closure#0}
+<vol::symbols::table::SymbolTable>::is_64bit
+vol::layers::metadata
+<vol::layers::intel::IntelLayer as vol::layers::Layer>::own_metadata
+<vol::layers::intel::IntelLayer as vol::layers::Layer>::dependencies
+<vol::layers::file::FileLayer as vol::layers::Layer>::own_metadata
+<vol::layers::file::FileLayer as vol::layers::Layer>::dependencies
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<alloc::sync::Arc<dyn vol::layers::Layer>>>
+core::ptr::drop_glue::<vol::cli::Settings>
+<vol::layers::intel::IntelLayer as vol::layers::Layer>::class_name
+<vol::context::Context>::physical_listing
+vol::plugins::windows::info::get_version_structure
+<i128 as alloc::string::SpecToString>::spec_to_string
+vol::plugins::windows::info::get_kuser_structure
+<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_time
+vol::util::time::py_str
+<char as core::fmt::Display>::fmt
+<vol::objects::Obj>::read_string
+<vol::objects::Obj>::description
+<vol::symbols::table::SymbolTable>::enum_base
+<vol::symbols::table::SymbolTable>::enum_lookup
+vol::plugins::windows::info::get_ntheader_structure
+vol::symbols::windows::pe::get_nt_header
+<vol::objects::Obj>::named
+<vol::objects::Obj>::cast
+vol::util::time::asctime
+<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::requirements
+<vol::plugins::linux::pslist::PsList as vol::plugins::Plugin>::run
+vol::plugins::linux::pslist::list_tasks
+<vol::symbols::table::SymbolTable>::type_name
+<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::is_valid
+vol::symbols::linux::ext::task_is_valid
+vol::plugins::linux::pslist::pid_filter::{closure#0}
+vol::plugins::linux::pslist::run_rows::{closure#0}
+vol::plugins::linux::pslist::get_task_fields
+<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::get_boottime
+vol::symbols::linux::vmlinux_of
+<vol::symbols::linux::timespec::Timespec>::from_nsec
+fmodf64
+__fixdfti
+__fixunsdfti
+<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::get_parent_pid
+<vol::objects::Obj as vol::symbols::linux::ext::LinuxExt>::cred_value
+<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::requirements
+<vol::plugins::mac::pslist::PsList as vol::plugins::Plugin>::run
+<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::initialize::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::initialize<<std::sync::once_lock::OnceLock<core::result::Result<vol::automagic::mac::MacKernel, alloc::string::String>>>::get_or_init<<vol::context::Context>::mac_kernel::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+vol::automagic::mac::init
+<std::path::PathBuf as core::fmt::Debug>::fmt
+vol::automagic::mac::loc_decode
+<vol::plugins::Config>::get_str
+vol::plugins::mac::pslist::list_tasks
+<vol::objects::Obj as vol::symbols::mac::MacExt>::walk_list
+vol::plugins::mac::pslist::pid_filter::{closure#0}
+alloc::boxed::box_new_uninit
+<vol::renderers::text::Json as vol::renderers::RowSink>::begin
+core::slice::sort::shared::smallsort::insertion_sort_shift_left::<(alloc::string::String, usize), <[(alloc::string::String, usize)]>::sort_by<<vol::renderers::text::Json as vol::renderers::RowSink>::begin::{closure#0}>::{closure#0}>
+vol::renderers::pyfmt::push_json_str
+vol::symbols::store::set_banner_hint
+vol::symbols::store::identifier_index_with
+vol::symbols::pycache::python_symbol_roots
+<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<vol::symbols::store::Root>, vol::symbols::pycache::python_symbol_roots::{closure#0}>, vol::symbols::pycache::python_symbol_roots::{closure#1}> as core::iter::traits::iterator::Iterator>::next
+<std::path::PathBuf>::_push
+vol::symbols::pycache::rglob_dirs
+vol::symbols::pycache::rglob_dirs::{closure#0}
+std::sys::fs::read_dir
+opendir
+opendir_tail
+<core::iter::adapters::map::Map<core::iter::adapters::filter_map::FilterMap<std::fs::ReadDir, vol::symbols::pycache::rglob_dirs::{closure#0}::{closure#0}>, vol::symbols::pycache::rglob_dirs::{closure#0}::{closure#1}> as core::iter::traits::iterator::Iterator>::next
+<std::sys::fs::unix::ReadDir as core::iter::traits::iterator::Iterator>::next
+readdir64
+getdents64
+<alloc::sync::Arc<std::sys::fs::unix::InnerReadDir>>::drop_slow
+<std::sys::fs::unix::DirStream as core::ops::drop::Drop>::drop
+dirfd
+closedir
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<(std::path::PathBuf, alloc::vec::Vec<(std::ffi::os_str::OsString, bool)>)>>
+vol::symbols::pycache::read
+<vol::util::sqlite::Database>::table
+<vol::util::sqlite::Database>::leaf_cell
+vol::util::sqlite::varint
+vol::util::sqlite::decode_record
+<alloc::raw_vec::RawVec<vol::layers::scancache::Rec<vol::plugins::windows::mftscan::DataBatch>>>::grow_one
+core::ptr::drop_glue::<[vol::util::sqlite::SchemaEntry]>
+<core::ops::range::Range<usize> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::any::check<usize, vol::util::sqlite::parse_create_table::{closure#8}>::{closure#0}, core::ops::control_flow::ControlFlow<()>>
+core::ptr::drop_glue::<alloc::vec::Vec<vol::util::sqlite::Tok>>
+<alloc::vec::Vec<vol::util::sqlite::Value>>::resize
+<vol::util::sqlite::Value as core::clone::Clone>::clone
+<vol::util::sqlite::Value>::into_owned
+<[u8]>::eq_ignore_ascii_case_chunks::<16>
+<alloc::raw_vec::RawVec<vol::symbols::pycache::CacheRow>>::grow_one
+<vol::symbols::store::IdentifierIndex>::from_python_rows::<<vol::symbols::store::IdentifierIndex>::seeded::{closure#0}>
+vol::symbols::pycache::file_symbol_urls
+vol::symbols::pycache::file_symbol_urls::{closure#0}
+<hashbrown::map::HashMap<alloc::string::String, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
+<hashbrown::raw::RawTable<(alloc::string::String, ())>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
+<hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
+<hashbrown::map::HashMap<&str, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
+vol::util::pyset::py_hash_str_seed0
+<vol::util::pyset::PySet<alloc::string::String>>::add
+<vol::util::pyset::PySet<alloc::string::String>>::resize
+vol::util::pyset::insert_clean::<alloc::string::String>
+<hashbrown::map::HashMap<alloc::string::String, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::contains_key::<alloc::string::String>
+<hashbrown::map::HashMap<&str, (), core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::contains_key::<str>
+core::ptr::drop_glue::<vol::symbols::pycache::CacheRow>
+core::ptr::drop_glue::<[vol::util::sqlite::Value; 4]>
+<hashbrown::raw::RawTable<(&str, &vol::symbols::store::IsfLocation)>>::reserve_rehash::<hashbrown::map::make_hasher<&str, &vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
+<hashbrown::map::HashMap<&str, &vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
+<vol::util::pyset::PySet<alloc::string::String>>::difference
+<vol::util::pyset::PySet<alloc::string::String>>::union
+<vol::util::pyset::PySet<alloc::string::String>>::update
+vol::symbols::pycache::sql_datetime
+vol::symbols::pycache::insert_or_replace
+vol::symbols::pycache::update::<<vol::symbols::store::IdentifierIndex>::seeded::{closure#0}>::{closure#7}
+<hashbrown::raw::RawTable<(alloc::string::String, vol::symbols::store::IsfLocation)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
+<vol::symbols::store::IsfLocation as core::clone::Clone>::clone
+<hashbrown::map::HashMap<alloc::string::String, vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>::insert
+core::ptr::drop_glue::<std::collections::hash::map::HashMap<alloc::string::String, vol::symbols::store::IsfLocation, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>>
+core::ptr::drop_glue::<alloc::vec::Vec<(alloc::string::String, vol::symbols::store::IsfLocation)>>
+vol::symbols::pycache::fromisoformat
+vol::util::time::days_from_civil
+<alloc::vec::Vec<&[u8]> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&[u8], core::slice::iter::Split<u8, vol::symbols::pycache::fromisoformat::{closure#2}>>>::from_iter
+vol::symbols::pycache::fromisoformat::{closure#0}
+core::ptr::drop_glue::<vol::symbols::pycache::Updated>
+<alloc::raw_vec::RawVec<((vol::symbols::store::SymbolPath, core::option::Option<alloc::string::String>, alloc::string::String), &vol::symbols::store::IdentifierIndex)>>::grow_one
+<vol::symbols::store::IdentifierIndex>::choice_deps
+vol::symbols::pycache::update_pathname
+vol::symbols::pycache::update_pathname::url_path
+vol::symbols::pycache::mtime_local
+<alloc::ffi::c_str::CString>::_from_vec_unchecked
+pthread_self
+pthread_setname_np
+prctl
+<std::thread::lifecycle::spawn_unchecked<vol::util::bg::spawn<vol::symbols::store::find_location_cached::{closure#8}>::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+std::sys::backtrace::__rust_begin_short_backtrace::<vol::util::bg::spawn<vol::symbols::store::find_location_cached::{closure#8}>::{closure#0}, ()>
+vol::util::paths::write_atomic_parts
+<std::fs::DirBuilder>::_create
+<std::sys::fs::unix::DirBuilder>::mkdir
+mkdir
+std::sys::io::error::unix::decode_error_kind
+getpid
+<std::path::Path>::_with_extension
+<std::path::PathBuf>::_set_extension
+<std::fs::File as core::io::write::Write>::write_all
+std::sys::fs::rename
+rename
+<alloc::sync::Arc<std::sync::poison::mutex::Mutex<core::option::Option<vol::symbols::store::find_location_cached::{closure#8}>>>>::drop_slow
+<vol::renderers::text::Json as vol::renderers::RowSink>::row
+<vol::renderers::text::Json as vol::renderers::RowSink>::row_ref
+<vol::renderers::text::Json>::close_to
+<vol::renderers::text::Json>::emit_ready
+vol::renderers::text::push_json_node
+vol::renderers::text::write_json_cell
+vol::renderers::pyfmt::push_datetime_iso
+vol::renderers::pyfmt::push_date_time
+vol::renderers::text::write_json_default
+<vol::renderers::text::Json as vol::renderers::text::TextRenderer>::finish
+<alloc::raw_vec::RawVec<alloc::vec::Vec<u8>>>::grow_one
+<alloc::vec::Vec<u8>>::append_elements
+core::ptr::drop_glue::<vol::renderers::text::Json>
+core::ptr::drop_glue::<alloc::collections::vec_deque::VecDeque<core::option::Option<vol::renderers::text::JNode>>>
+<alloc::sync::Arc<std::thread::lifecycle::Packet<()>>>::drop_slow
+core::ptr::drop_glue::<std::thread::lifecycle::Packet<()>>
+core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<std::thread::join_handle::JoinHandle<()>>>
+<vol::plugins::linux::bash::Bash as vol::plugins::Plugin>::requirements
+<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run
+<std::sync::once_lock::OnceLock<usize>>::initialize::<<std::sync::once_lock::OnceLock<usize>>::get_or_init<vol::util::par::threads::{closure#0}>::{closure#0}, !>
+<std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<usize>>::initialize<<std::sync::once_lock::OnceLock<usize>>::get_or_init<vol::util::par::threads::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+std::thread::functions::available_parallelism
+std::fs::buffer_capacity_required
+alloc::io::read::default_read_to_end::<&std::fs::File>
+std::sys::fs::exists
+<std::path::PathBuf>::pop
+<std::path::Path>::_starts_with
+<std::path::Component as core::cmp::PartialEq>::eq
+<&std::fs::File as alloc::io::read::Read>::read_to_string
+alloc::io::read::default_read_to_end::small_probe_read::<&std::fs::File>
+sched_getaffinity
+std::thread::current::init_current
+<std::thread::thread::Thread>::new_current
+<std::thread::lifecycle::spawn_unchecked<vol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>, <vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+std::sys::backtrace::__rust_begin_short_backtrace::<vol::util::par::par_map_bounded<core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>, <vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}>::{closure#0}::{closure#0}::{closure#0}, alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>
+<vol::plugins::windows::cmdline::CmdLine as vol::plugins::Plugin>::run::{closure#1}
+<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::add_process_layer
+get_nprocs
+read_sysfs_file
+next_line
+__memchr_avx2
+__isoc23_strtoumax
+____strtoull_l_internal
+__close_nocancel_nostatus
+<std::thread::lifecycle::JoinInner<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>::join
+__futex_abstimed_wait_cancelable64
+vol::symbols::windows::ext::process_layer
+<std::sys::sync::mutex::futex::Mutex>::lock_contended
+<hashbrown::raw::RawTable<((usize, u64), &dyn vol::layers::Layer)>>::reserve_rehash::<hashbrown::map::make_hasher<(usize, u64), &dyn vol::layers::Layer, core::hash::BuildHasherDefault<vol::util::fxhash::FxHasher>>::{closure#0}>
+<vol::objects::Obj as vol::symbols::windows::ext::WinExt>::get_string
+<vol::layers::intel::IntelLayer>::translate_swap
+<vol::layers::intel::IntelLayer>::read_impl::{closure#1}
+core::ptr::drop_glue::<core::option::Option<core::result::Result<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>, alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>>
 <alloc::sync::Arc<std::thread::lifecycle::Packet<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>>::drop_slow
 core::ptr::drop_glue::<std::thread::lifecycle::Packet<alloc::vec::Vec<(usize, core::option::Option<core::result::Result<alloc::vec::Vec<vol::renderers::Value>, vol::error::Error>>)>>>
 __nptl_free_stacks
@@ -1231,11 +1322,8 @@ core::slice::sort::shared::smallsort::sort4_stable::<(alloc::string::String, all
 <&str as core::str::pattern::Pattern>::is_contained_in
 vol::cli::help::collapse_ws
 vol::cli::help::wrap
-<alloc::vec::Vec<char> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<char, core::str::iter::Chars>>::from_iter
-<alloc::string::String as core::iter::traits::collect::FromIterator<&char>>::from_iter::<core::slice::iter::Iter<char>>
 <vol::cli::help::Formatter>::format_action
 core::str::count::do_count_chars
-systrim.constprop.0
 core::ptr::drop_glue::<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<(alloc::string::String, core::option::Option<alloc::string::String>)>>>>
 core::slice::sort::unstable::ipnsort::<&str, <&str as core::cmp::PartialOrd>::lt>
 core::slice::sort::unstable::quicksort::quicksort::<&str, <&str as core::cmp::PartialOrd>::lt>
