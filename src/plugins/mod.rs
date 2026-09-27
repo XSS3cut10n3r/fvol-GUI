@@ -21,7 +21,6 @@ pub mod windows;
 use crate::context::Context;
 use crate::error::Result;
 use crate::renderers::{RowSink, Value};
-use std::collections::HashMap;
 
 /// Kind of a CLI-visible requirement (mirrors volatility3's SimpleTypeRequirement subclasses,
 /// ListRequirement and ChoiceRequirement).
@@ -85,10 +84,12 @@ impl Requirement {
     }
 }
 
-/// Values for one plugin run (CLI options after parsing, defaults applied).
+/// Values for one plugin run (CLI options after parsing, defaults applied). (FxHash: std's
+/// randomly seeded SipHash costs a `getrandom` system call per process for nothing; every user
+/// of the map sorts or looks up, none depends on its order.)
 #[derive(Clone, Debug, Default)]
 pub struct Config {
-    pub values: HashMap<String, ConfigValue>,
+    pub values: crate::util::FxHashMap<String, ConfigValue>,
 }
 
 impl Config {
