@@ -21,7 +21,8 @@ mod reader;
 mod scan;
 
 pub use download::{
-    download_and_convert, download_pdb, fetch_pdb, isf_relative_path, pdb_cache_path, set_python_cache, symbol_server_urls, SYMBOL_SERVER_URL,
+    convert_ahead, download_and_convert, download_and_convert_with, download_pdb, fetch_pdb, isf_relative_path, pdb_cache_path, pdb_file_guid, finish_ahead,
+    set_python_cache, symbol_server_urls, IsfWrite, SYMBOL_SERVER_URL,
 };
 pub use pe::{find_mz_before, find_rsds, guid_string, pe_codeview_info, pe_image_size, rsds_scan, rsds_search, CodeViewInfo, PdbNameScan, PdbScanResult, RsdsMatch};
 

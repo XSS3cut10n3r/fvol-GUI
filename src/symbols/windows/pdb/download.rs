@@ -91,6 +91,60 @@ pub fn fetch_pdb(pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<
     fetch_pdb_in(&dir, reuse, pdb_name, guid, age, offline)
 }
 
+/// Downloads of this process by cache file: one lock per file (a fetch waits for a download of
+/// the same file in progress, e.g. a speculative [`prefetch`]) holding whether this process
+/// downloaded it (then it is used even where older downloads are not, after `--clear-cache`).
+fn fetch_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<bool>> {
+    type Locks = Vec<(PathBuf, std::sync::Arc<std::sync::Mutex<bool>>)>;
+    static LOCKS: std::sync::Mutex<Locks> = std::sync::Mutex::new(Vec::new());
+    let mut g = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, l)) = g.iter().find(|(p, _)| p == path) {
+        return l.clone();
+    }
+    let l = std::sync::Arc::new(std::sync::Mutex::new(false));
+    g.push((path.to_path_buf(), l.clone()));
+    l
+}
+
+/// The GUID in a PDB file's PDB info stream (the stream `pdbconv` takes the GUID from), as
+/// the symbol server path spells it; `None` for a file that is not an MSF PDB.
+pub fn pdb_file_guid(pdb: &[u8]) -> Option<String> {
+    let msf = super::msf::Msf::open(pdb).ok()?;
+    let info = msf.paged(1)?;
+    let at = info.m(12);
+    let mut g = [0u8; 16];
+    for (i, x) in g.iter_mut().enumerate() {
+        *x = info.u8(info.m(at + i as u64)).ok()?;
+    }
+    Some(super::guid_string(&g))
+}
+
+/// Kernel PDBs (8-13 MB on current Windows, 2-9 MB on older ones): their ranged download sends
+/// parts covering 12.5 MiB with the size probe.
+fn is_kernel_pdb(pdb_name: &str) -> bool {
+    matches!(pdb_name.to_ascii_lowercase().as_str(), "ntkrnlmp.pdb" | "ntoskrnl.pdb" | "ntkrnlpa.pdb" | "ntkrpamp.pdb")
+}
+
+/// How a PDB is downloaded (see [`crate::util::download::download_ranged_to`]): a kernel PDB
+/// in parallel parts of 800 KiB, sixteen of them sent with the size probe (a 12.4 MB
+/// `ntkrnlmp.pdb`: 0.6-0.8 s instead of 1.1-1.9 s as one request, measured interleaved; 8
+/// parts of 1.5 MiB: 0.7-1.0 s); others in parts of 1 MiB, two with the probe (a small driver
+/// PDB is then one part).
+fn range_plan(pdb_name: &str) -> crate::util::download::RangePlan {
+    use crate::util::download::RangePlan;
+    // `RSVOL_PDB_RANGES=<first wave>,<part KiB>,<max parts>` (measurements)
+    if let Some(v) = std::env::var("RSVOL_PDB_RANGES").ok().map(|v| v.split(',').filter_map(|x| x.parse::<u64>().ok()).collect::<Vec<_>>())
+        && let [w, kib, m] = v[..]
+    {
+        return RangePlan { first_wave: w as usize, part: kib << 10, max_parts: m as usize };
+    }
+    if is_kernel_pdb(pdb_name) {
+        RangePlan { first_wave: 16, part: 800 << 10, max_parts: 24 }
+    } else {
+        RangePlan { first_wave: 2, part: 1 << 20, max_parts: 12 }
+    }
+}
+
 fn fetch_pdb_in(dir: &Path, reuse: bool, pdb_name: &str, guid: &str, age: u32, offline: bool) -> Result<PathBuf> {
     if offline {
         return Err(Error::Unsatisfied(format!(
@@ -101,11 +155,26 @@ fn fetch_pdb_in(dir: &Path, reuse: bool, pdb_name: &str, guid: &str, age: u32, o
     let mut last_err = None;
     for url in symbol_server_urls(pdb_name, guid, age) {
         let path = pdb_cache_path(dir, &url);
-        if reuse && std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+        let lock = fetch_lock(&path);
+        let mut here = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if (reuse || *here) && std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
             return Ok(path);
         }
-        match crate::util::download::download_to(&url, &path) {
-            Ok(()) if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) => return Ok(path),
+        // the ranged parts must add up to the PDB asked for (a `.pd_` is a CAB: not checked)
+        let want = guid.to_uppercase();
+        let verify = |p: &Path| {
+            !url.ends_with(".pdb")
+                || std::fs::File::open(p).ok().and_then(|f| crate::util::mmap::Mmap::map(&f).ok()).and_then(|m| pdb_file_guid(m.as_slice())).is_some_and(|g| g == want)
+        };
+        let got = {
+            let _t = crate::util::trace::span("pdb download");
+            crate::util::download::download_ranged_to(&url, &path, range_plan(pdb_name), &verify)
+        };
+        match got {
+            Ok(()) if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) => {
+                *here = true;
+                return Ok(path);
+            }
             Ok(()) => {
                 let _ = std::fs::remove_file(&path);
                 last_err = Some(Error::Msg(format!("empty response from {url}")));
@@ -139,6 +208,13 @@ fn open_output(dirs: &[PathBuf], rel: &Path) -> Option<(PathBuf, PathBuf)> {
 /// xz-compressed. Returns its path and the JSON (so the caller need not decompress it again).
 /// Nothing but directories is left behind on failure.
 pub fn download_and_convert(pdb_name: &str, guid: &str, age: u32, dirs: &[PathBuf], offline: bool) -> Result<(PathBuf, Vec<u8>)> {
+    download_and_convert_with(pdb_name, guid, age, dirs, offline, false).map(|(p, j, _)| (p, j))
+}
+
+/// [`download_and_convert`]; with `defer`, the table is not compressed and written here: the
+/// returned [`IsfWrite`] does it later (after the output, in a helper process, see
+/// `store::finish_deferred`), and the file stays under its temporary name meanwhile.
+pub fn download_and_convert_with(pdb_name: &str, guid: &str, age: u32, dirs: &[PathBuf], offline: bool, defer: bool) -> Result<(PathBuf, Vec<u8>, Option<IsfWrite>)> {
     check_name(pdb_name)?;
     if offline {
         // python's PdbRetreiver does not go to the network then, and nothing is written
@@ -149,28 +225,190 @@ pub fn download_and_convert(pdb_name: &str, guid: &str, age: u32, dirs: &[PathBu
             "Cannot write downloaded symbols, please add the appropriate symbols or add/modify a symbols directory that is writable".into(),
         ));
     };
-    let res = (|| -> Result<Vec<u8>> {
-        let file = std::fs::File::open(fetch_pdb(pdb_name, guid, age, false)?)?;
-        let pdb = crate::util::mmap::Mmap::map(&file)?;
-        let json = {
-            let _t = crate::util::trace::span("pdb conversion");
-            super::pdb_to_isf_json_named(pdb.as_slice(), Some(pdb_name))?.into_bytes()
+    let res = (|| -> Result<(Vec<u8>, Option<IsfWrite>)> {
+        let c = match take_ahead(pdb_name, guid, age) {
+            Some(c) => c,
+            None => convert(&fetch_pdb(pdb_name, guid, age, false)?, pdb_name)?,
         };
-        drop(pdb);
-        let xz = {
-            let _t = crate::util::trace::span("pdb isf xz compression");
-            xz_isf(&json)
-        };
-        std::fs::write(&tmp, &xz)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(json)
+        let job = IsfWrite { pdb: c.pdb, pdb_name: pdb_name.to_string(), datetime: c.datetime, tmp: tmp.clone(), path: path.clone() };
+        if defer {
+            return Ok((c.json, Some(job)));
+        }
+        write_isf(&job.tmp, &job.path, &c.json)?;
+        Ok((c.json, None))
     })();
     match res {
-        Ok(json) => Ok((path, json)),
+        Ok((json, job)) => Ok((path, json, job)),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
+    }
+}
+
+/// A converted table: the PDB, the producer datetime written into the JSON, the JSON.
+struct Converted {
+    pdb: PathBuf,
+    datetime: String,
+    json: Vec<u8>,
+}
+
+/// python `PdbReader(ctx, url, pdb_name).get_json()` of the PDB file `pdb`.
+fn convert(pdb: &Path, pdb_name: &str) -> Result<Converted> {
+    let file = std::fs::File::open(pdb)?;
+    let map = crate::util::mmap::Mmap::map(&file)?;
+    let datetime = super::python_now_isoformat();
+    let _t = crate::util::trace::span("pdb conversion");
+    let json = super::pdb_to_isf_bytes(map.as_slice(), Some(pdb_name), &datetime)?;
+    Ok(Converted { pdb: pdb.to_path_buf(), datetime, json })
+}
+
+/// Compress `json` into `tmp` and rename it to `path`; the (size, mtime) of the file.
+fn write_isf(tmp: &Path, path: &Path, json: &[u8]) -> Result<(u64, i128)> {
+    let xz = {
+        let _t = crate::util::trace::span("pdb isf xz compression");
+        xz_isf(json)
+    };
+    std::fs::write(tmp, &xz)?;
+    let stamp = crate::util::paths::file_stamp(tmp).ok_or_else(|| Error::msg("cannot stat the converted table"))?;
+    std::fs::rename(tmp, path)?;
+    Ok(stamp)
+}
+
+type Ahead = ((String, String, u32), std::thread::JoinHandle<Option<Converted>>);
+
+/// Conversions started by [`convert_ahead`].
+static AHEAD: std::sync::Mutex<Vec<Ahead>> = std::sync::Mutex::new(Vec::new());
+
+/// Start converting the PDB of `pdb_name` + `guid` + `age` on another thread, in memory only,
+/// for a lookup that is likely to convert it next: the conversion that follows uses the result
+/// ([`download_and_convert_with`]); nothing is written otherwise. `download`: fetch the PDB
+/// first if python's cache lacks it (the speculative kernel lookup, once no ISF was found for
+/// it: python downloads the same file unless a later KDBG hit changes the kernel); else only
+/// a PDB in the cache is converted (e.g. while the identifier index is built).
+pub fn convert_ahead(pdb_name: &str, guid: &str, age: u32, download: bool) {
+    if check_name(pdb_name).is_err() {
+        return;
+    }
+    let key = (pdb_name.to_string(), guid.to_uppercase(), age);
+    let mut g = AHEAD.lock().unwrap_or_else(|e| e.into_inner());
+    if g.iter().any(|(k, _)| *k == key) {
+        return;
+    }
+    let pdb = if download {
+        None
+    } else {
+        let (dir, reuse) = python_cache();
+        // (a PDB being downloaded right now is not waited for: the lookup waits for it later)
+        let cached = symbol_server_urls(pdb_name, guid, age).iter().map(|u| pdb_cache_path(&dir, u)).find(|p| {
+            let Ok(here) = fetch_lock(p).try_lock().map(|g| *g) else { return false };
+            (reuse || here) && std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0)
+        });
+        match cached {
+            Some(p) => Some(p),
+            None => return,
+        }
+    };
+    let (name, guid) = (pdb_name.to_string(), guid.to_string());
+    let job = move || {
+        let pdb = match pdb {
+            Some(p) => p,
+            None => {
+                let _t = crate::util::trace::span("pdb download (ahead)");
+                fetch_pdb(&name, &guid, age, false).ok()?
+            }
+        };
+        convert(&pdb, &name).ok()
+    };
+    if let Ok(h) = std::thread::Builder::new().name("rsvol-pdbconv".into()).spawn(job) {
+        g.push((key, h));
+    }
+}
+
+/// Wait for the [`convert_ahead`] work nothing used (a download in progress must not be cut
+/// off by the exit: no partial files are left in python's cache). `main` calls this after the
+/// output (via `store::finish_deferred`).
+pub fn finish_ahead() {
+    let left = std::mem::take(&mut *AHEAD.lock().unwrap_or_else(|e| e.into_inner()));
+    for (_, h) in left {
+        let _ = h.join();
+    }
+}
+
+/// The result of a [`convert_ahead`] of this PDB (waited for).
+fn take_ahead(pdb_name: &str, guid: &str, age: u32) -> Option<Converted> {
+    let key = (pdb_name.to_string(), guid.to_uppercase(), age);
+    let h = {
+        let mut g = AHEAD.lock().unwrap_or_else(|e| e.into_inner());
+        let i = g.iter().position(|(k, _)| *k == key)?;
+        g.swap_remove(i).1
+    };
+    h.join().ok().flatten()
+}
+
+/// A converted table whose `.json.xz` is still to be written ([`download_and_convert_with`]
+/// with `defer`): the PDB and the producer datetime of the JSON the run uses, so the file
+/// written later holds exactly that JSON; the temporary file and the final path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsfWrite {
+    pub pdb: PathBuf,
+    pub pdb_name: String,
+    pub datetime: String,
+    pub tmp: PathBuf,
+    pub path: PathBuf,
+}
+
+impl IsfWrite {
+    /// One line (a helper process's environment value): the fields hex-encoded.
+    pub fn encode(&self) -> String {
+        use crate::util::paths::hex;
+        let b = |p: &Path| hex(p.as_os_str().as_encoded_bytes());
+        format!("{}:{}:{}:{}:{}", b(&self.pdb), hex(self.pdb_name.as_bytes()), hex(self.datetime.as_bytes()), b(&self.tmp), b(&self.path))
+    }
+
+    pub fn decode(s: &str) -> Option<IsfWrite> {
+        use std::os::unix::ffi::OsStringExt;
+        let unhex = |h: &str| -> Option<Vec<u8>> {
+            (h.len() % 2 == 0).then_some(())?;
+            (0..h.len()).step_by(2).map(|i| u8::from_str_radix(h.get(i..i + 2)?, 16).ok()).collect()
+        };
+        let path = |h: &str| Some(PathBuf::from(std::ffi::OsString::from_vec(unhex(h)?)));
+        let f: Vec<&str> = s.split(':').collect();
+        let [pdb, name, dt, tmp, out] = f.as_slice() else { return None };
+        Some(IsfWrite {
+            pdb: path(pdb)?,
+            pdb_name: String::from_utf8(unhex(name)?).ok()?,
+            datetime: String::from_utf8(unhex(dt)?).ok()?,
+            tmp: path(tmp)?,
+            path: path(out)?,
+        })
+    }
+
+    /// Convert the PDB again (the same JSON: same datetime), compress it into the temporary
+    /// file and rename that into place. Returns the JSON and the (size, mtime) of the file
+    /// written (`None` on failure: the temporary file is removed, nothing else is left).
+    pub fn run(&self) -> Option<(Vec<u8>, (u64, i128))> {
+        let r = (|| -> Result<(Vec<u8>, (u64, i128))> {
+            let file = std::fs::File::open(&self.pdb)?;
+            let map = crate::util::mmap::Mmap::map(&file)?;
+            let json = super::pdb_to_isf_bytes(map.as_slice(), Some(&self.pdb_name), &self.datetime)?;
+            drop(map);
+            let stamp = write_isf(&self.tmp, &self.path, &json)?;
+            Ok((json, stamp))
+        })();
+        if r.is_err() {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+        r.ok()
+    }
+
+    /// Compress `json` (this job's JSON, still in memory) into place.
+    pub fn run_with(&self, json: &[u8]) -> bool {
+        let ok = write_isf(&self.tmp, &self.path, json).is_ok();
+        if !ok {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+        ok
     }
 }
 

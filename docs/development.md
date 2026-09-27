@@ -338,7 +338,10 @@ For quick measurements during development:
 
 Use `RSVOL_CACHE=<EMPTY_DIR>` to measure a cold run without touching your own cache. Always
 time release builds, through `limit.sh`, and keep the numbers before and after each
-optimization.
+optimization. A cold run replays python's identifier cache, so its time depends on whether that
+cache already covers the `-s` directories (milliseconds) or not (every ISF is read, like python's
+own update): compare binaries interleaved in one `coldbench.py` invocation and pin the cache with
+`--py-cache` (its docstring has the details).
 
 The published numbers come from a separate quiet machine. [bench/vm/method.md](../bench/vm/method.md)
 describes the procedure and `bench/vm/scripts/` holds the scripts. After a new run, regenerate

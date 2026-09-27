@@ -37,6 +37,10 @@ A binary symbol table is written after the run that first loads its ISF. For a b
 a Linux kernel's, that run resolves only the types and symbols it uses, and a helper process
 started after its output is complete writes the table in the background, at idle priority,
 while the run exits: `ps` shows it as `rsvol-isfb-helper`. Concurrent runs build a table once.
+The helper then builds the tables of up to three other ISFs of the same directory that have none
+yet, newest first (the other kernels of a symbol pack, the other builds of a Windows PDB), so a
+later first run on such an image maps a finished table. It stops once the tables in
+`~/.cache/rsvol/isf` take 512 MiB; `RSVOL_PREBUILD=0` turns this off.
 
 A downloaded PDB is converted to `windows/<PDB>/<GUID>-<AGE>.json.xz` in the first symbol
 directory where the file can be created, as python does: normally
@@ -44,7 +48,14 @@ directory where the file can be created, as python does: normally
 comes first. The PDB itself stays in python's cache directory under the name python gives it,
 `data_` and the SHA-512 of its symbol server URL, or in the `--cache-path` directory. python finds
 it there, and rsvol uses a PDB that python or rsvol downloaded before instead of downloading it
-again.
+again. rsvol downloads a PDB in parallel HTTP range requests, each part checked against the
+server's size and ETag and the whole file against the PDB's GUID, and falls back to one request,
+as python makes, whenever the server answers otherwise; the bytes are the same. When the kernel
+search has to scan the whole image, the kernel's PDB is downloaded while the scan runs.
+
+The run that converts a PDB uses the converted table from memory; the `.json.xz` file is written
+right after the output, by the helper process, with the same content (the same producer
+datetime). A run started in between converts the PDB once more.
 
 Downloads are named like python's, `data_` and the SHA-512 of the URL, and like python's they are
 never checked for changes on the server.
@@ -123,3 +134,7 @@ same contents. If you modify an image in place and restore its timestamp, clear 
 | `RSVOL_NO_PY_IDENT_SEED=1` | Build the identifier index without python's identifier cache, in search path order. |
 | `RSVOL_LAZY_ISF=0`       | Build every symbol table in full before the plugin runs.                            |
 | `RSVOL_DEFERRED_ISFB=<M>` | How the binary table of a lazily loaded ISF is written: `helper` (default), `thread` (by the run itself, before it exits) or `off`. |
+| `RSVOL_PREBUILD=<N>`     | Binary tables of other ISFs the helper builds after a run (default 3, `0`: none).   |
+| `RSVOL_STREAM_ISF=0`     | Decode a lazily loaded `.xz` ISF before indexing it, instead of while.              |
+| `RSVOL_RANGED_DOWNLOAD=0` | Download PDBs in one request, like python.                                        |
+| `RSVOL_PDB_ISF_WRITE=sync` | Write a converted PDB's `.json.xz` before the plugin runs, like python.          |

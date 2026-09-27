@@ -2,20 +2,39 @@
 """Cold / warm start benchmark: rsvol (private RSVOL_CACHE) vs vol-rs (private HOME).
 
 Usage: coldbench.py [-n N] [--bin BIN] [--base BIN] [--no-volrs] [--only NAME[,NAME]] [--scratch DIR]
-                    [--rsvol-args "ARGS"] [--rsvol-env K=V[,K=V]]
+                    [--py-cache DIR] [--rsvol-args "ARGS"] [--rsvol-env K=V[,K=V]]
 
---rsvol-args / --rsvol-env: extra global options / environment for the rsvol runs only (e.g.
-`--rsvol-args "--cache-path DIR"`: seed the identifier index from python's cache in DIR;
-`--rsvol-env RSVOL_NO_PY_IDENT_SEED=1`: rsvol's own identifier index).
+--py-cache DIR: python's cache directory the rsvol runs read (`--cache-path DIR`: its
+identifier.cache seeds rsvol's identifier index, see below). --rsvol-args / --rsvol-env: extra
+global options / environment for the rsvol runs only (e.g. `--rsvol-env
+RSVOL_NO_PY_IDENT_SEED=1`: rsvol's own identifier index).
 
 Cases per (image, plugin), for each rsvol binary (--base: a baseline build, measured
 interleaved with --bin so machine load affects both alike):
   cold     empty rsvol cache (first time the image AND the symbol files are seen)
   newimg   symbol caches warm (ISF blobs + identifier index), automagic/scan caches empty
-  symcold  automagic caches warm, symbol caches (ISF blobs + identifier index) empty
+  isfnew   newimg + no ISF blobs: a new image whose kernel ISF was indexed but never loaded
+  symcold  automagic caches warm, symbol caches (ISF blobs + identifier index + ISF choices) empty
   warm     everything cached
 vol-rs is measured with HOME=<scratch>/volrs-home (its symbol store copied there, caches empty
 for cold). Wall time, best of N (default 5). Timing only: outputs go to /dev/null.
+
+The cold and symcold numbers depend on python's identifier cache (python's
+`~/.cache/volatility3/identifier.cache`, or the one in --py-cache), which rsvol replays instead
+of reading every symbol file:
+  regime A: python's cache has a row for every ISF on the search path (python ran with the same
+            -s dirs since they last changed): the index costs 1-4 ms; cold = decode + index of
+            the one kernel ISF (e.g. noble 6.8 ~65 ms, mac ~30 ms);
+  regime B: it lacks rows for the ISFs of -s testdata/symbols (e.g. python never ran with that
+            dir, or the dir grew since): rsvol reads every ISF python would read (179 files,
+            ~7 s of CPU, 0.5-0.9 s wall) exactly like python's update, so cold is 10-30x slower.
+Which regime a machine is in changes over time (python rewrites its cache whenever it runs), so
+compare binaries interleaved in one invocation, and pin python's cache with --py-cache: build a
+regime-A one once with `bench/venv/bin/python volatility3/vol.py --cache-path DIR -s
+testdata/symbols -f testdata/scratch/review-symbols/zero.img linux.pslist` (it fails, after the
+update: about 1 minute), or copy one (testdata/scratch/review-symbols/pycache-full). Which of two sibling files
+(`x.json` / `x.json.xz`) python's cache lists last also decides whether the cold kernel ISF load
+maps a plain file or decodes an xz (noble: ~30 vs ~65 ms).
 """
 import os, shutil, subprocess, sys, time
 
@@ -32,6 +51,8 @@ BASE = opt("--base")
 SCRATCH = opt("--scratch", os.path.join(ROOT, "testdata/scratch/coldstart"))
 ONLY = opt("--only")
 RSVOL_ARGS = (opt("--rsvol-args") or "").split()
+if opt("--py-cache"):
+    RSVOL_ARGS = ["--cache-path", os.path.abspath(opt("--py-cache"))] + RSVOL_ARGS
 RSVOL_ENV = dict(kv.split("=", 1) for kv in (opt("--rsvol-env") or "").split(",") if kv)
 VOLRS = os.path.expanduser("~/cbc2/vol-rs/target/release/vol-rs")
 SYMS = "/home/user/rs-vol/testdata/symbols"
@@ -52,12 +73,24 @@ if ONLY:
 os.makedirs(SCRATCH, exist_ok=True)
 VHOME = os.path.join(SCRATCH, "volrs-home")
 
-def wait_helpers():
-    """wait for rsvol's detached symbol-table blob builders (`rsvol-isfb-helper`, started after
-    a run that loaded a table lazily) so they neither overlap the next timed run nor race its
+def own_helpers(cache):
+    """rsvol's detached helpers (`rsvol-isfb-helper`: symbol-table blobs, converted PDB tables)
+    started by runs with this RSVOL_CACHE (other users' helpers are not waited for)"""
+    pids = subprocess.run(["pgrep", "-f", "^rsvol-isfb-helper"], capture_output=True, text=True).stdout.split()
+    n = 0
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                n += f"RSVOL_CACHE={cache}".encode() in f.read().split(b"\0")
+        except OSError:
+            pass
+    return n
+
+def wait_helpers(cache):
+    """wait for this bench's helpers so they neither overlap the next timed run nor race its
     cache deletion"""
     for _ in range(6000):
-        if subprocess.run(["pgrep", "-f", "rsvol-isfb-helper"], stdout=subprocess.DEVNULL).returncode != 0:
+        if cache is None or not own_helpers(cache):
             return
         time.sleep(0.005)
 
@@ -65,7 +98,7 @@ def run(cmd, env):
     t = time.perf_counter()
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     d = time.perf_counter() - t
-    wait_helpers()
+    wait_helpers(env.get("RSVOL_CACHE"))
     return d, r.returncode
 
 def rm(cache, *names):
@@ -78,10 +111,13 @@ def rm(cache, *names):
                 os.remove(p)
     return f
 
+# (isfchoice: the Windows ISF choices, which spare warm runs the identifier index; a cold run
+# must not find them)
 MODES = [
-    ("cold", ("automagic", "scan", "isf", "identifiers.cache", "isfinfo.cache", "remote")),
+    ("cold", ("automagic", "scan", "isf", "identifiers.cache", "isfinfo.cache", "remote", "isfchoice")),
     ("newimg", ("automagic", "scan")),
-    ("symcold", ("isf", "identifiers.cache")),
+    ("isfnew", ("automagic", "scan", "isf")),
+    ("symcold", ("isf", "identifiers.cache", "isfchoice")),
     ("warm", ()),
 ]
 

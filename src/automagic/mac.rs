@@ -212,7 +212,16 @@ fn run_indexed(phys: &Arc<dyn Layer>, index: &mut Option<&'static symbols::store
     let first = {
         let _t = span("mac: banner scan (first hit)");
         let mut first = None;
-        scan_each_progressive(phys.as_ref(), &scanner, |h| h.0, |h| {
+        // the same bytes per batch as python's chunking in batches of 2, 4... chunks (32 MB,
+        // 64 MB...: more would read past the banner, ~70 MB into the 10.9 image, and a wide
+        // batch of page-faulting threads contends), in chunks of FIRST_HIT_CHUNK spread over
+        // the cores (`RSVOL_MAC_FIRST_HIT=0`: python's chunking)
+        let threads = crate::util::par::threads();
+        let fine = std::env::var_os("RSVOL_MAC_FIRST_HIT").is_none_or(|v| v != "0");
+        let per = if fine { (scanner.chunk_size() / FIRST_HIT_CHUNK).max(1) as usize } else { 1 };
+        let fh = FirstHit { inner: &scanner, cs: if fine { FIRST_HIT_CHUNK } else { scanner.chunk_size() } };
+        let (fb, mb) = (2 * per, threads * 4 * per);
+        crate::layers::scan::scan_each_ramp(phys.as_ref(), &fh, fb, mb, |h| h.0, |h| {
             first = Some(h);
             false
         });
@@ -415,6 +424,42 @@ impl Scanner for BannerScanner {
     fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
         let cs = self.chunk_size();
         self.search(data, |off, idx| {
+            if (off as u64) < cs {
+                hits.push((data_offset + off as u64, idx));
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+/// [`BannerScanner`] in chunks of `cs` bytes (same overlap), for the first hit only. python's
+/// first hit is the lowest offset where any banner occurs, whatever the chunking: the chunk
+/// holding it finds no earlier match to skip past, and reports it (it starts in the chunk's own
+/// part, and the overlap holds the longest banner). Its non-overlapping rule only drops matches
+/// that start inside an earlier match, never the first one. So smaller chunks find the same
+/// first hit, while a batch of them spreads over all cores: the scan to the kernel banner (tens
+/// of MB in) is limited by the memory bus instead of one thread per 16 MiB chunk.
+struct FirstHit<'a> {
+    inner: &'a BannerScanner,
+    cs: u64,
+}
+
+/// [`FirstHit`]'s chunk size.
+const FIRST_HIT_CHUNK: u64 = 2 << 20;
+
+impl Scanner for FirstHit<'_> {
+    type Hit = (u64, u32);
+    fn chunk_size(&self) -> u64 {
+        self.cs
+    }
+    fn overlap(&self) -> u64 {
+        self.inner.overlap()
+    }
+    fn scan(&self, data: &[u8], data_offset: u64, hits: &mut Vec<(u64, u32)>) {
+        let cs = self.cs;
+        self.inner.search(data, |off, idx| {
             if (off as u64) < cs {
                 hits.push((data_offset + off as u64, idx));
                 true
@@ -794,6 +839,53 @@ mod tests {
                     first.len() < 5
                 });
                 assert_eq!(first, want[..5]);
+            }
+        }
+    }
+
+    /// The first hit of the fine-chunked scan ([`FirstHit`]) is python's first hit (the
+    /// banner scanner with its own chunking), wherever the first banner sits: across chunk
+    /// boundaries of either chunking, after partial matches, a shorter banner inside a longer
+    /// one, on a layer with holes.
+    #[test]
+    fn first_hit_chunking_is_pythons() {
+        let pats: Vec<&[u8]> = vec![b"Darwin Kernel Version 13.1.0: A", b"Darwin Kernel Version 13.1.0: A-long", b"Darwin Kernel Version 14.0.0: B"];
+        let bs = BannerScanner::new(pats.clone());
+        let py = |layer: &dyn Layer| -> Option<(u64, u32)> {
+            let mut first = None;
+            scan_each_progressive(layer, &bs, |h| h.0, |h| {
+                first = Some(h);
+                false
+            });
+            first
+        };
+        let fine = |layer: &dyn Layer, cs: u64| -> Option<(u64, u32)> {
+            let mut first = None;
+            crate::layers::scan::scan_each_ramp(layer, &FirstHit { inner: &bs, cs }, 4, 16, |h| h.0, |h| {
+                first = Some(h);
+                false
+            });
+            first
+        };
+        let n = 3 << 20;
+        let mut places = vec![None, Some(5usize), Some((1 << 20) - 10), Some((2 << 20) - 3), Some(n - 40)];
+        places.extend((0..20).map(|i| Some((i * 150_001 + 7) % (n - 64))));
+        for (k, place) in places.into_iter().enumerate() {
+            let mut data = vec![b'.'; n];
+            // decoys: the common prefix alone, and a near miss, before the banner
+            data[100..122].copy_from_slice(b"Darwin Kernel Version ");
+            data[4000..4030].copy_from_slice(b"Darwin Kernel Version 13.1.0: ");
+            if let Some(p) = place {
+                let b = [&pats[1][..], pats[2], pats[0]][k % 3];
+                data[p..p + b.len()].copy_from_slice(b);
+            }
+            let flat: Arc<dyn Layer> = Arc::new(Buf(data));
+            let seg = Seg { lower: flat.clone(), runs: vec![(0, 1 << 20, 100), ((1 << 20) + 4096, 1 << 20, (1 << 20) + 4096)], max: n as u64 - 1 };
+            for layer in [flat.as_ref(), &seg as &dyn Layer] {
+                let want = py(layer);
+                for cs in [4096u64, 65536, 1 << 20, FIRST_HIT_CHUNK] {
+                    assert_eq!(fine(layer, cs), want, "case {k} cs {cs} layer {}", layer.name());
+                }
             }
         }
     }
