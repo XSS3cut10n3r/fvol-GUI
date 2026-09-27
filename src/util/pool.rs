@@ -536,6 +536,12 @@ mod tests {
             assert_eq!(v.len(), 64);
             // (workers may still be starting: shutdown waits for them too)
             shutdown();
+            // shutdown returns once every worker is past its last use of the address space (the
+            // kernel's set_tid_address wake); its /proc/self/task entry goes a moment later
+            let t0 = std::time::Instant::now();
+            while tasks() > 0 && t0.elapsed() < std::time::Duration::from_secs(2) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             assert_eq!(tasks(), 0, "workers left after shutdown");
             let gone = lock(&GONE);
             assert!(crate::util::par::threads() <= 1 || !gone.is_empty());

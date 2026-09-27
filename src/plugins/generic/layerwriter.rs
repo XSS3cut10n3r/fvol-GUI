@@ -123,7 +123,11 @@ pub fn write_layer(layer: &dyn Layer, out: &File, len: u64) -> std::io::Result<(
     } else {
         let direct = layer.lower().is_some_and(|l| l.as_file().is_some());
         layer.mapping(0, len, &mut |m| {
-            runs.push((m.offset, m.len.min(len - m.offset), if direct { Some(m.mapped) } else { None }));
+            let n = m.len.min(len - m.offset);
+            // only raw runs are file bytes: a compressed block maps to its compressed data and a
+            // fill run to its value, and `translate` answers None for both
+            let fo = if direct { layer.translate(m.offset).filter(|&(_, rem)| rem >= n).map(|(fo, _)| fo) } else { None };
+            runs.push((m.offset, n, fo));
             true
         });
     }

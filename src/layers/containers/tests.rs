@@ -460,6 +460,37 @@ fn adjacent_runs_merge_and_fill_pages() {
     std::fs::remove_file(p).unwrap();
 }
 
+/// layerwriter copies only raw runs straight from the image file: a fill run maps to the file
+/// position of its byte (and a compressed block to its compressed data), so those are written
+/// from the layer's own reads. The written file equals python's padded read of the layer.
+#[test]
+fn layerwriter_copies_only_raw_runs_from_the_file() {
+    let data: Vec<u8> = (0..6 * 4096u32).map(|i| (i % 251) as u8).collect();
+    let p = temp_file("lw", &data);
+    let file = open(&p);
+    let base = Base::from_file(&file);
+    let segs = vec![
+        Seg { start: 0, len: 4096, src: Src::Raw(4096) },
+        Seg { start: 4096, len: 8192, src: Src::Fill { at: 100, byte: data[100] } },
+        Seg { start: 12288, len: 5000, src: Src::Raw(123) },
+        Seg { start: 20480, len: 4096, src: Src::Fill { at: 7, byte: 0 } },
+        Seg { start: 24576, len: 4096, src: Src::Raw(2 * 4096) },
+    ];
+    let l = SegmentedLayer::new("T", &base, segs).unwrap();
+    let len = l.max_address() + 1;
+    let mut want = vec![0u8; len as usize];
+    l.read_padded(0, &mut want);
+    let out_path = temp_file("lw-out", &[]);
+    let out = std::fs::OpenOptions::new().read(true).write(true).open(&out_path).unwrap();
+    crate::plugins::generic::layerwriter::write_layer(&l, &out, len).unwrap();
+    let got = std::fs::read(&out_path).unwrap();
+    assert_eq!(got.len(), want.len());
+    let first_diff = got.iter().zip(&want).position(|(a, b)| a != b);
+    assert_eq!(first_diff, None, "written layer differs from the layer's padded read");
+    std::fs::remove_file(p).unwrap();
+    std::fs::remove_file(out_path).unwrap();
+}
+
 /// Scanning a non-linear layer (python `NonLinearlySegmentedLayer`: QEMU, AVML) reads the
 /// decoded data through the layer, one chunk series per python segment: the mapped offsets
 /// (fill bytes, compressed frames) are never scanned as data, adjacent same-byte fill pages
