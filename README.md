@@ -31,7 +31,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-dark.svg">
-    <img alt="Bar chart on a log scale of the total time to run each benchmark plugin once. Windows 11, 77 plugins: python volatility3 4,078 s; vol-rs 183.8 s on a first run and 148.6 s on a repeat run; fastvol 8.82 s and 2.18 s. Linux 6.8, 59 plugins: python volatility3 2,804 s; vol-rs 217.2 s and 105.2 s; fastvol 35.4 s and 4.42 s." src="docs/assets/benchmark.svg" width="840">
+    <img alt="Bar chart on a log scale of the total time to run each benchmark plugin once. Windows 11, 77 plugins: python volatility3 4,078 s; vol-rs 183.8 s on a first run and 148.6 s on a repeat run; fastvol 4.07 s and 1.40 s. Linux 6.8, 59 plugins: python volatility3 2,804 s; vol-rs 217.2 s and 105.2 s; fastvol 8.32 s and 2.79 s." src="docs/assets/benchmark.svg" width="840">
   </picture>
 </p>
 
@@ -39,7 +39,7 @@
 
 - **All 197 plugins** of volatility3 2.28.2, with the same options, `--help`, errors and exit codes.
 - **Byte-identical output** to python volatility3 on 31 images, Windows XP to 11, Linux 3.2 to 7.0, macOS.
-- **635-1,869x faster than python**, 6-68x faster than vol-rs.
+- **1,006-2,905x faster than python**, 38-106x faster than vol-rs (total time of repeat runs, Linux to Windows).
 - **Zero dependencies**: one static binary, Rust standard library only.
 - **Every common format**: raw, LiME, ELF core, crash dump, VMware, QEMU, AVML, Xen, gzip/bzip2/xz.
 - **Built-in web UI**: `fvol serve`.
@@ -116,15 +116,14 @@ Dedicated 32-vCPU KVM guest, image in page cache, sum of per-plugin best of 5
 
 |                              | python | vol-rs cold | vol-rs warm | fastvol cold | fastvol warm |
 | ---------------------------- | -----: | ----------: | ----------: | -----------: | -----------: |
-| Windows 11, 77 plugins       | 4078 s |     183.8 s |     148.6 s |       8.82 s |       2.18 s |
-| Windows, median plugin       | 4.49 s |      624 ms |      164 ms |      68.6 ms |       8.6 ms |
-| Linux 6.8, 59 plugins        | 2804 s |     217.2 s |     105.2 s |     35.4 s ¹ |       4.42 s |
-| Linux, median plugin         | 18.3 s |      2.23 s |      311 ms |     541 ms ¹ |       9.8 ms |
-| `windows.pslist` startup     | 1.87 s |      563 ms |     80.6 ms |      64.7 ms |       3.3 ms |
-| Output identical to python   |    ref |     104/136 |     104/136 |    136/136 ² |    136/136 ² |
+| Windows 11, 77 plugins       | 4078 s |     183.8 s |     148.6 s |       4.07 s |       1.40 s |
+| Windows, median plugin       | 4.49 s |      624 ms |      164 ms |      22.8 ms |       5.2 ms |
+| Linux 6.8, 59 plugins        | 2804 s |     217.2 s |     105.2 s |       8.32 s |       2.79 s |
+| Linux, median plugin         | 18.3 s |      2.23 s |      311 ms |      92.3 ms |       5.3 ms |
+| `windows.pslist` startup     | 1.98 s |      546 ms |     78.5 ms |      19.1 ms |       2.5 ms |
+| Output identical to python   |    ref |     104/136 |     104/136 |    136/136 ¹ |    136/136 ¹ |
 
-¹ 10.83 s total / 110 ms median with lazy symbol tables ([rerun](bench/vm/BENCHMARKS.md#first-runs-with-lazy-symbol-tables-rsvol-cold-rerun)).<br>
-² 132 byte for byte; 4 compared sorted or against the reference machine, as python's own order varies ([details](docs/differences.md)).
+¹ 132 byte for byte (2 against a python rerun, as python's symbol paths changed); 4 compared sorted or against the reference machine, as python's own order varies ([details](docs/differences.md)).
 
 Why it's fast: memory-mapped images and symbol tables, all-core scanning, lazy loading,
 content-keyed caches that can't change output, and from-scratch libraries that beat the C

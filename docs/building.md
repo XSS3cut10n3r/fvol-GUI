@@ -10,8 +10,8 @@ Applies to fastvol 0.1.0.
 
 You need a Rust toolchain of version 1.95 or newer, the `rust-version` in `Cargo.toml`: the
 project uses edition 2024 and `std::hint::cold_path`, which was stabilized in 1.95. Stable 1.95.0
-builds it and passes the tests and parity gates. The published benchmarks were built with rustc
-1.98.1. Linux on x86-64 is the tested platform.
+builds it and passes the tests and parity gates. The published benchmark was built with rustc
+1.100.0-nightly (2026-09-21), the earlier runs with 1.98.1. Linux on x86-64 is the tested platform.
 
 ## Build profiles
 
