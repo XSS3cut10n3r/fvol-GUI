@@ -1,16 +1,22 @@
 # Method — 3-way benchmark on a quiet VM
 
 Goal: a reproducible, like-for-like timing of **python volatility3** (the reference), **vol-rs**
-(the competing Rust port) and **rsvol** on a machine where nothing else runs.
+(the competing Rust port) and **fastvol** (called rsvol until `b400e76`) on a machine where nothing
+else runs.
 
-There were two runs on the same VM (same boot, same images, same python and vol-rs):
+There were three runs on the same VM (same boot, same images, same python and vol-rs). The report
+scripts and reports call runs 2 and 3 "pass 2" and "pass 3"; the passes inside run 1 below are
+something else.
 
 - **run 1** (00:12-04:07 VM time, rsvol `123c8d4` / `344e88c`): python, vol-rs and rsvol, one
   column per tool. Files: `results.tsv`, `raw/`, `BENCHMARKS-run1.md`. Described in the sections
   below up to "Run 2".
-- **run 2** (the final numbers in `BENCHMARKS.md`, rsvol `95528b2` = main HEAD after the scan-result
-  cache and the cold-start work): rsvol in three cache states and vol-rs cold/warm, python reused
-  from run 1. Files: `results2.tsv`, `raw2/`. Described in "Run 2 (final)".
+- **run 2** (rsvol `95528b2` = main HEAD after the scan-result cache and the cold-start work):
+  rsvol in three cache states and vol-rs cold/warm, python reused from run 1. Files:
+  `results2.tsv`, `raw2/`, `BENCHMARKS-run2.md`. Described in "Run 2".
+- **run 3** (the current numbers in `BENCHMARKS.md`, fvol `b400e76` after the hardware-floor
+  optimization pass): the three fastvol columns only, python and vol-rs reused from runs 1 and 2.
+  Files: `results3.tsv`, `raw3/`. Described in "Run 3".
 
 ## Machine
 
@@ -102,7 +108,7 @@ comparison), both timeliners (per-plugin row counts, and rsvol's Windows output 
 reference machine's python output), and `windows.dumpfiles` (sha256 of all 1,630 dumped files of
 python vs rsvol).
 
-## Run 2 (final)
+## Run 2
 
 Why: since run 1 rsvol gained on-disk caches that change what a "warm" run means: besides the
 binary symbol tables, identifier index and automagic results it now keeps a per-image **scan
@@ -167,12 +173,66 @@ cache left by the previous run.
 Order on the VM (`scripts/run2.sh`): Windows round, Linux round, startup; `/proc/loadavg` sampled
 every 10 s (`raw2/load.log`). Untimed checks afterwards (`raw2/checks2.md`).
 
+## Run 3
+
+Why: to time the optimized build (lazy symbol tables for first runs, then the hardware-floor
+optimization pass: startup, thread pool, scanning and memory access, object model, libraries,
+output, cold start; see `bench/handoff/*.md`) exactly as run 2 did. python's and vol-rs's binaries,
+the images and the plugin lists had not changed, so only fastvol was run again.
+
+Build: fvol `b400e76` (main after the fastvol/fvol rename), built on the dev box, not on the VM,
+with rustc 1.100.0-nightly (1303417c4 2026-09-21) and
+`RUSTFLAGS="-C target-cpu=znver2 -C target-feature=+crt-static"` plus the linker flags of
+[docs/building.md](../../docs/building.md#build-for-other-machines) (`-z max-page-size=0x200000`,
+`-z separate-code`, `-z pack-relative-relocs`): the repo config's flags with `target-cpu=znver2`
+in place of `native`, so the binary targets the VM's Zen 2 host and not the dev box. Release
+profile (fat LTO, codegen-units=1), linked by lld through the repo's `.cargo/linker.sh` (hot-text
+ordering). Static-pie, sha256 `fafe9aa0e981170e670431b9d4af9ff28f72f1e6b73c5c8e75262949e74253d6`,
+copied to the VM as `~/rsvol-bench/fastvol-b400e76/fvol`. Run 2's build was made on the VM with
+`target-cpu=native` (see Tools: LLVM's `znver1` plus the guest's AVX2/BMI2/SHA/AES/PCLMUL flags):
+the same instruction set; the tuning model differs.
+
+Procedure (`scripts/run3.sh`): the same `scripts/bench2_vm.py` and plugin lists as run 2, with
+`--vr-ref p2/<os>.jsonl` and `--py-ref raw_<os>.jsonl,p2/<os>.jsonl`. With `--vr-ref` the harness
+runs only the three fastvol columns (untimed warm-up of rs_steady and rs_warm, then 5 interleaved
+rounds rs_cold, rs_steady, rs_warm) and takes vol-rs's timed runs and output hashes from run 2's raw
+file; `--py-ref` takes python's from run 1, overridden per plugin by run 2's where run 2 ran python
+again (`isfinfo`, `frameworkinfo`, `windows.windows` and the 10 Linux plugins new in run 2). The
+cache columns are the same as in run 2 (`FASTVOL_CACHE`, `FASTVOL_NO_SCAN_CACHE=1`; the harness
+sets the `RSVOL_*` aliases too). Then `scripts/startup2_vm.py` for all three tools, so python and
+vol-rs were run again for the startup table only. Order and times (VM time, UTC-5,
+`raw3/timeline.txt`): start 23:19:53, Windows round 23:20:02, Linux round 23:21:14, startup
+23:22:46, end 23:23:01; `/proc/loadavg` every 10 s in `raw3/load.log`.
+
+Not controlled: fastvol hands work to detached processes after its output, at idle priority: the
+binary table of a lazily loaded ISF (plus up to three sibling ISFs, `docs/caching.md`) and the
+address-space teardown (`docs/building.md`, Startup). They run after the timed process has been
+reaped, so neither the wall time nor the CPU time (`wait4` of the fvol process) includes them, and
+the harness does not wait for them between runs.
+
+Environment change between run 2 and run 3: a new Windows kernel ISF
+(`ntkrnlmp.pdb/8E3373D6124E747F0E72EF8E02E676B3-1.json.xz`, written 19:02) appeared in the VM's
+python install symbols directory (`~/rsvol-bench/volatility3/volatility3/symbols/windows/`).
+python's `identifier.cache` had no row for it until python's own startup runs at 23:22, so every
+fastvol cold `isfinfo` run of the Windows round indexed that file itself (30.3 ms; 4 ms by hand
+afterwards, with fvol `b400e76` and rsvol `95528b2` alike), and python's own `windows.info` and
+`isfinfo` output changed (their symbol paths). Checked after run 3: both plugins were run side by
+side with python on the VM, and fvol's output was byte-identical to python's.
+
 ## Files
 
-- `results2.tsv`, `BENCHMARKS.md` — run 2 (final): one row per (os, plugin), every column's best /
-  median wall, CPU, max RSS, exit code, the output flags, like-for-like speedups, rsvol's run-1 time
-  and vol-rs's run-1 time, the per-plugin note. `python3 scripts/report2.py raw2 raw .` regenerates
+- `results3.tsv`, `BENCHMARKS.md` — run 3: one row per (os, plugin), every column's best / median
+  wall, CPU, max RSS, exit code, the output flags, like-for-like speedups, fastvol's run-2 times,
+  vol-rs's run-1 time, the per-plugin note. `python3 scripts/report3.py raw3 raw2 raw .` regenerates
   both.
+- `raw3/win.jsonl`, `raw3/linux.jsonl` — every single fastvol run of run 3 (warm-ups flagged), same
+  fields as run 2's; `raw3/win.tsv`, `raw3/linux.tsv`, `raw3/startup.tsv` — the summaries written on
+  the VM (with the reused python / vol-rs columns); `raw3/*.log`, `raw3/timeline.txt`,
+  `raw3/load.log`; `raw3/meta3.env`, `raw3/notes3.tsv`, `raw3/checks3.md`, `raw3/notfastest.md`,
+  `raw3/startup_note.md` — hand-written inputs of the report.
+- `results2.tsv`, `BENCHMARKS-run2.md` — run 2: the same per-plugin fields for rsvol `95528b2`
+  (rsvol's run-1 time instead of the run-2 times). `BENCHMARKS-run2.md` was generated by
+  `scripts/report2.py`, plus the hand-added section "First runs with lazy symbol tables".
 - `raw2/win.jsonl`, `raw2/linux.jsonl` — every single run of run 2 (warm-ups flagged), with wall,
   user, sys, max RSS, rc, stdout hash, line count, output bytes, bytes written to `-o`, load.
 - `raw2/win.tsv`, `raw2/linux.tsv`, `raw2/startup.tsv` — the summaries written on the VM;
@@ -191,5 +251,7 @@ every 10 s (`raw2/load.log`). Untimed checks afterwards (`raw2/checks2.md`).
 - `machine.txt` — lscpu, memory, kernel, tool versions, binary hashes, load summary, timeline.
 - `scripts/` — run 1: `bench_vm.py`, `startup_vm.py`, `report.py` (regenerates run 1's report and
   results.tsv: `cd bench/vm && python3 scripts/report.py raw /tmp/run1`; it writes BENCHMARKS.md, so
-  do not point it at `.`); run 2: `run2.sh`, `bench2_vm.py`, `startup2_vm.py`, `report2.py`, `tar_manifest.py` (the
-  RecoverFs archive comparison).
+  do not point it at `.`); run 2: `run2.sh`, `bench2_vm.py`, `startup2_vm.py`, `report2.py` (writes
+  BENCHMARKS-run2.md + results2.tsv; the committed report also has the hand-added section, so point
+  it at another directory), `tar_manifest.py` (the RecoverFs archive comparison); run 3: `run3.sh`,
+  `report3.py` (with run 2's `bench2_vm.py` and `startup2_vm.py`).

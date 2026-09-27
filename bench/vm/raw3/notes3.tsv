@@ -1,0 +1,17 @@
+os	plugin	flag	note	change
+windows	banners.Banners		warm: fastvol replays the cached hits of its whole-image banner scan
+windows	frameworkinfo.FrameworkInfo	sorted	python lists components in the readdir order of its install dir (ext4 here, btrfs on the reference machine): sorted outputs identical, and fastvol's output is byte-identical to python's on the reference machine
+windows	isfinfo.IsfInfo	rerun	python's recorded output predates a new kernel ISF in python's symbols dir; fastvol's output = python's, run side by side after pass 3 (see Checks). Cold: see Changes since pass 2	environment, not fastvol: a new ntkrnlmp ISF (`8E3373D6…-1.json.xz`, written 19:02) appeared in the VM's python install symbols dir between the passes, and python's `identifier.cache` had no row for it during the Windows round, so every cold run indexed that ISF itself (~62 ms CPU, ~30 ms wall; the warm columns reuse fastvol's own index: 2.6 ms). After python's pass-3 startup runs updated its identifier cache, isfinfo cold took 4 ms for both fvol `b400e76` and rsvol `95528b2` (by hand on the VM)
+windows	windows.info.Info	rerun	its Symbols row names the kernel ISF, which now resolves to python's install dir; fastvol's output = python's, run side by side after pass 3 (see Checks)
+windows	vmscan.Vmscan		vol-rs ships no VMCS ISFs and returns the empty table without reading the image; python and fastvol scan the whole 5 GiB image (fastvol warm: from its scan cache)
+windows	windows.crashinfo.Crashinfo		not a crash dump: every tool exits 1
+windows	windows.pe_symbols.PESymbols		needs arguments: usage error in every tool
+windows	windows.dumpfiles.DumpFiles		writes 1.48 GB of files per run (vol-rs: 4.5 GB, different set)
+windows	windows.windows.Windows	order	python's row order is nondeterministic (set iteration: its 3 runs in pass 2 printed 3 orders); sorted outputs identical
+windows	windows.statistics.Statistics		python's page walk is quadratic (re-walks every valid run per step); fastvol walks each page once
+windows	timeliner.Timeliner	refmachine	python's output depends on plugin discovery (readdir) order, see Checks; fastvol's output is byte-identical to python's on the reference machine
+linux	linux.kallsyms.Kallsyms		python raises TypeError after 204,803 rows; fastvol reproduces output and exit code
+linux	linux.pagecache.InodePages		needs --inode or --find: every tool prints the empty table and the error, exit 0
+linux	timeliner.Timeliner	refmachine	python's output depends on plugin discovery (readdir) order, see Checks; fastvol's output is byte-identical to python's on the reference machine
+linux	linux.pagecache.RecoverFs		writes a .tar.gz of the recovered file system per run (fastvol 905 MB, python 842 MB, vol-rs 626 MB; see Checks); python: 1 run, no warm-up
+linux	linux.vmcoreinfo.VMCoreInfo		warm: the VMCOREINFO magic scan is answered by the scan cache (new since pass 2); steady scans the image
