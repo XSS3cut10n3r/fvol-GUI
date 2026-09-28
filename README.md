@@ -31,7 +31,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-dark.svg">
-    <img alt="Bar chart on a log scale of the total time to run each benchmark plugin once. Windows 11, 77 plugins: python volatility3 4,078 s; vol-rs 183.8 s on a first run and 148.6 s on a repeat run; fastvol 4.07 s and 1.40 s. Linux 6.8, 59 plugins: python volatility3 2,804 s; vol-rs 217.2 s and 105.2 s; fastvol 8.32 s and 2.79 s." src="docs/assets/benchmark.svg" width="840">
+    <img alt="Bar chart on a log scale of the time for a triage session (the common plugins run one after another), measured on an Intel Core i7-12700KF desktop. Windows 11, 12 plugins: python volatility3 59.5 s; vol-rs 3.71 s on a first session and 3.44 s on a repeat; fastvol 126 ms and 35.1 ms. Linux 6.8, 10 plugins: python 80.8 s; vol-rs 2.76 s and 1.32 s; fastvol 227 ms and 33.2 ms." src="docs/assets/benchmark.svg" width="840">
   </picture>
 </p>
 
@@ -39,7 +39,7 @@
 
 - **All 197 plugins** of volatility3 2.28.2, with the same options, `--help`, errors and exit codes.
 - **Byte-identical output** to python volatility3 on 31 images, Windows XP to 11, Linux 3.2 to 7.0, macOS.
-- **1,006-2,905x faster than python**, 38-106x faster than vol-rs (total time of repeat runs, Linux to Windows).
+- **356-473x faster than python** and 12-29x faster than vol-rs on a first triage session ([how measured](#performance)).
 - **Zero dependencies**: one static binary, Rust standard library only.
 - **Every common format**: raw, LiME, ELF core, crash dump, VMware, QEMU, AVML, Xen, gzip/bzip2/xz.
 - **Built-in web UI**: `fvol serve`.
@@ -113,19 +113,35 @@ Every plugin's stdout, exit code and dumped files are diffed against python vola
 
 ## Performance
 
-Dedicated 32-vCPU KVM guest, image in page cache, sum of per-plugin best of 5
-([full results](bench/vm/BENCHMARKS.md)). Cold = all caches empty; warm = repeat run.
+Measured on a desktop: Intel Core i7-12700KF (12 cores, 20 threads), 64 GB RAM, NVMe SSD, Linux
+7.1.8. Medians of repeated runs, every run a separate process. Method, all numbers and raw data:
+[bench/local/BENCHMARKS.md](bench/local/BENCHMARKS.md).
 
-|                              | python | vol-rs cold | vol-rs warm | fastvol cold | fastvol warm |
-| ---------------------------- | -----: | ----------: | ----------: | -----------: | -----------: |
-| Windows 11, 77 plugins       | 4078 s |     183.8 s |     148.6 s |       4.07 s |       1.40 s |
-| Windows, median plugin       | 4.49 s |      624 ms |      164 ms |      22.8 ms |       5.2 ms |
-| Linux 6.8, 59 plugins        | 2804 s |     217.2 s |     105.2 s |       8.32 s |       2.79 s |
-| Linux, median plugin         | 18.3 s |      2.23 s |      311 ms |      92.3 ms |       5.3 ms |
-| `windows.pslist` startup     | 1.98 s |      546 ms |     78.5 ms |      19.1 ms |       2.5 ms |
-| Output identical to python   |    ref |     104/136 |     104/136 |    136/136 ¹ |    136/136 ¹ |
+**Triage session**: the common plugins run one after another on an image the tool has not seen
+(its cache empty at the start; python's symbol caches warm).
 
-¹ 132 byte for byte (2 against a python rerun, as python's symbol paths changed); 4 compared sorted or against the reference machine, as python's own order varies ([details](docs/differences.md)).
+|                                              | python | vol-rs |  fastvol | vs python | vs vol-rs |
+| -------------------------------------------- | -----: | -----: | -------: | --------: | --------: |
+| Windows 11, 12 plugins, image in memory | 59.5 s | 3.71 s | **126 ms** | 473x | 29.5x |
+| Windows 11, 12 plugins, image read from disk | 69.9 s | 6.47 s | **1.67 s** | 41.9x | 3.88x |
+| Linux 6.8, 10 plugins, image in memory | 80.8 s | 2.76 s | **227 ms** | 356x | 12.1x |
+| Linux 6.8, 10 plugins, image read from disk | 84.9 s | 3.59 s | **399 ms** | 213x | 9.01x |
+
+**Every plugin once**: per-plugin speedup, geometric mean (a sum would be dominated by the few
+slowest plugins).
+
+|            | plugins | vs python, no fastvol cache | vs python, symbol caches warm | vs vol-rs (cold / warm) | output = python | vol-rs output = python |
+| ---------- | ------: | --------------------------: | ----------------------------: | ----------------------: | --------------: | ---------------------: |
+| Windows 11 | 77 | 108x | 556x | 14.0x / 26.9x | 76/77 ² | 59/77 |
+| Linux 6.8 | 59 | 184x | 3,094x ¹ | 16.5x / 37.6x | 59/59 | 45/59 |
+
+`windows.pslist` from start to exit: python 537 ms, vol-rs 270 ms cold / 49.8 ms warm, fastvol
+21.7 ms cold / 1.3 ms warm.
+
+¹ python decompresses and parses the kernel's 61 MB JSON symbol file on every Linux run; fastvol
+keeps a binary symbol table in its cache. The no-cache column is the conservative comparison.<br>
+² `windows.windows`: python iterates a set, so its row order changes from run to run; fastvol's
+output equals python's after sorting ([details](docs/differences.md)).
 
 Why it's fast: memory-mapped images and symbol tables, all-core scanning, lazy loading,
 content-keyed caches that can't change output, and from-scratch libraries that beat the C

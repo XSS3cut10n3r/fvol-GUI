@@ -1,0 +1,21 @@
+{
+ "date": "2026-09-27 20:45 CDT",
+ "cpu": "12th Gen Intel(R) Core(TM) i7-12700KF",
+ "cpus": 20,
+ "cores": "12",
+ "max_mhz": "5000.0000",
+ "governor": "powersave",
+ "mem_gib": 62.5,
+ "kernel": "7.1.8-arch1-3",
+ "os": "Omarchy",
+ "storage": "btrfs on crypt, disk  Micron 2200S NVMe 1024GB, part",
+ "load1_start": 3.119140625,
+ "fastvol": "8870abe 0cca274f0ff0cf95",
+ "fastvol_rustc": "rustc 1.100.0-nightly (1303417c4 2026-09-21)",
+ "volrs": "vol-rs 1.0.0 (Volatility 3 framework 2.28.0) ac1e4ed6b64a6f07",
+ "python": "Python 3.14.7 / volatility3 v2.28.2-10-g3fcb731e",
+ "win_image": "/home/user/cbc2/task2/memory-dirty.raw (5.0 GiB)",
+ "linux_image": "/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf (3.0 GiB)",
+ "load1_end": 2.23681640625,
+ "finished": "2026-09-27 21:18 CDT"
+}

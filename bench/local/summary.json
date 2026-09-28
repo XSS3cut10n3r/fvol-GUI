@@ -1,0 +1,540 @@
+{
+ "machine": {
+  "date": "2026-09-27 20:45 CDT",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12700KF",
+  "cpus": 20,
+  "cores": "12",
+  "max_mhz": "5000.0000",
+  "governor": "powersave",
+  "mem_gib": 62.5,
+  "kernel": "7.1.8-arch1-3",
+  "os": "Omarchy",
+  "storage": "btrfs on crypt, disk  Micron 2200S NVMe 1024GB, part",
+  "load1_start": 3.119140625,
+  "fastvol": "8870abe 0cca274f0ff0cf95",
+  "fastvol_rustc": "rustc 1.100.0-nightly (1303417c4 2026-09-21)",
+  "volrs": "vol-rs 1.0.0 (Volatility 3 framework 2.28.0) ac1e4ed6b64a6f07",
+  "python": "Python 3.14.7 / volatility3 v2.28.2-10-g3fcb731e",
+  "win_image": "/home/user/cbc2/task2/memory-dirty.raw (5.0 GiB)",
+  "linux_image": "/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf (3.0 GiB)",
+  "load1_end": 2.23681640625,
+  "finished": "2026-09-27 21:18 CDT"
+ },
+ "rounds": {
+  "windows": {
+   "plugins": 77,
+   "total": {
+    "py": 2288.338364323834,
+    "vr_cold": 90.26453863625648,
+    "vr_warm": 72.60774360789219,
+    "fv_cold": 3.937382468546275,
+    "fv_steady": 2.353374784870539,
+    "fv_warm": 1.1892779129557312
+   },
+   "median": {
+    "py": 2.785807149950415,
+    "vr_cold": 0.3268963419832289,
+    "vr_warm": 0.09105843299767002,
+    "fv_cold": 0.024255329044535756,
+    "fv_steady": 0.0027550000231713057,
+    "fv_warm": 0.002301969041582197
+   },
+   "cpu": {
+    "py": 2283.210754,
+    "vr_cold": 282.286316,
+    "vr_warm": 266.787991,
+    "fv_cold": 27.045746,
+    "fv_steady": 23.234973,
+    "fv_warm": 3.421658
+   },
+   "speedup": {
+    "fv_cold/py": {
+     "geomean": 108.29095434012874,
+     "median": 130.51128083037824,
+     "p10": 25.450243929085907,
+     "p90": 408.0351704603227,
+     "min": 21.022831503429515,
+     "max": 39837.09062409437,
+     "min_plugin": "windows.info.Info",
+     "max_plugin": "windows.statistics.Statistics",
+     "slower": 0,
+     "total": 581.1826467467139
+    },
+    "fv_steady/py": {
+     "geomean": 556.2640657394653,
+     "median": 532.894139586129,
+     "p10": 231.37344208894137,
+     "p90": 1584.3696302602984,
+     "min": 48.22680818444867,
+     "max": 240411.7024375965,
+     "min_plugin": "vmscan.Vmscan",
+     "max_plugin": "windows.statistics.Statistics",
+     "slower": 0,
+     "total": 972.3646140152374
+    },
+    "fv_warm/py": {
+     "geomean": 1169.7014098061918,
+     "median": 1150.3915123239717,
+     "p10": 360.51791852999526,
+     "p90": 3467.727019362659,
+     "min": 134.16084181289102,
+     "max": 241386.03154281544,
+     "min_plugin": "windows.dumpfiles.DumpFiles",
+     "max_plugin": "windows.statistics.Statistics",
+     "slower": 0,
+     "total": 1924.1409761294485
+    },
+    "fv_cold/vr_cold": {
+     "geomean": 13.96120313822442,
+     "median": 12.947474764139963,
+     "p10": 9.75285309501774,
+     "p90": 21.28288037837648,
+     "min": 0.09847023193339781,
+     "max": 1544.2883528117654,
+     "min_plugin": "vmscan.Vmscan",
+     "max_plugin": "windows.statistics.Statistics",
+     "slower": 1,
+     "total": 22.92501156728702
+    },
+    "fv_steady/vr_warm": {
+     "geomean": 26.94073115783725,
+     "median": 28.17018864741835,
+     "p10": 10.507045670434099,
+     "p90": 54.12107610662459,
+     "min": 0.08863547545039054,
+     "max": 9256.662462534192,
+     "min_plugin": "vmscan.Vmscan",
+     "max_plugin": "windows.statistics.Statistics",
+     "slower": 1,
+     "total": 30.852605405086976
+    },
+    "fv_warm/vr_warm": {
+     "geomean": 56.65045282880308,
+     "median": 44.89702670455299,
+     "p10": 17.61694756488053,
+     "p90": 361.0191910942543,
+     "min": 1.7506452010951028,
+     "max": 9294.177423590532,
+     "min_plugin": "isfinfo.IsfInfo",
+     "max_plugin": "windows.statistics.Statistics",
+     "slower": 0,
+     "total": 61.05195666792383
+    }
+   },
+   "equal": {
+    "vr_cold": 59,
+    "vr_warm": 59,
+    "fv_cold": 76,
+    "fv_steady": 76,
+    "fv_warm": 76
+   },
+   "not_equal": {
+    "fv_cold": [
+     "windows.windows.Windows"
+    ],
+    "fv_steady": [
+     "windows.windows.Windows"
+    ],
+    "fv_warm": [
+     "windows.windows.Windows"
+    ]
+   }
+  },
+  "linux": {
+   "plugins": 59,
+   "total": {
+    "py": 1599.78378415521,
+    "vr_cold": 117.30579899880104,
+    "vr_warm": 66.2087840581662,
+    "fv_cold": 5.471087808953598,
+    "fv_steady": 2.6183867804938927,
+    "fv_warm": 2.2093976140604354
+   },
+   "median": {
+    "py": 10.612854500010144,
+    "vr_cold": 1.0522807009983808,
+    "vr_warm": 0.16166610596701503,
+    "fv_cold": 0.05832964100409299,
+    "fv_steady": 0.0027388149756006896,
+    "fv_warm": 0.002219196001533419
+   },
+   "cpu": {
+    "py": 1594.869477,
+    "vr_cold": 309.158994,
+    "vr_warm": 79.772286,
+    "fv_cold": 44.667433,
+    "fv_steady": 27.483719,
+    "fv_warm": 18.758658
+   },
+   "speedup": {
+    "fv_cold/py": {
+     "geomean": 183.64015365838253,
+     "median": 176.1000443422929,
+     "p10": 90.71071202916288,
+     "p90": 369.11828820074436,
+     "min": 31.02520445078444,
+     "max": 5540.347388578632,
+     "min_plugin": "linux.vmcoreinfo.VMCoreInfo",
+     "max_plugin": "linux.pscallstack.PsCallStack",
+     "slower": 0,
+     "total": 292.40689238018007
+    },
+    "fv_steady/py": {
+     "geomean": 3094.194100832369,
+     "median": 3721.8483764376406,
+     "p10": 1710.9206266634694,
+     "p90": 5902.559669942793,
+     "min": 48.2127364014919,
+     "max": 67714.49043836773,
+     "min_plugin": "linux.vmcoreinfo.VMCoreInfo",
+     "max_plugin": "linux.pscallstack.PsCallStack",
+     "slower": 0,
+     "total": 610.9806985251626
+    },
+    "fv_warm/py": {
+     "geomean": 4417.320711416443,
+     "median": 4228.413370610466,
+     "p10": 2861.6790922035884,
+     "p90": 6374.336108050577,
+     "min": 212.87929384757092,
+     "max": 68294.90154230541,
+     "min_plugin": "linux.pagecache.RecoverFs",
+     "max_plugin": "linux.pscallstack.PsCallStack",
+     "slower": 0,
+     "total": 724.0814301483399
+    },
+    "fv_cold/vr_cold": {
+     "geomean": 16.477067892238384,
+     "median": 17.3701248551877,
+     "p10": 15.71783095013752,
+     "p90": 19.6560269182284,
+     "min": 2.372550539234,
+     "max": 34.8470553950967,
+     "min_plugin": "banners.Banners",
+     "max_plugin": "linux.pagecache.RecoverFs",
+     "slower": 0,
+     "total": 21.44103752215905
+    },
+    "fv_steady/vr_warm": {
+     "geomean": 37.56805239896942,
+     "median": 42.526210184436756,
+     "p10": 21.799970636835837,
+     "p90": 63.69609512937437,
+     "min": 2.12933519564474,
+     "max": 147.1106881087802,
+     "min_plugin": "linux.sockscan.Sockscan",
+     "max_plugin": "linux.malware.hidden_modules.Hidden_modules",
+     "slower": 0,
+     "total": 25.286097742090487
+    },
+    "fv_warm/vr_warm": {
+     "geomean": 53.632749123561325,
+     "median": 48.420770826496266,
+     "p10": 34.393808026853826,
+     "p90": 86.21744137814007,
+     "min": 13.232681810958415,
+     "max": 785.173704565938,
+     "min_plugin": "timeliner.Timeliner",
+     "max_plugin": "linux.vmcoreinfo.VMCoreInfo",
+     "slower": 0,
+     "total": 29.96689397907313
+    }
+   },
+   "equal": {
+    "vr_cold": 45,
+    "vr_warm": 45,
+    "fv_cold": 59,
+    "fv_steady": 59,
+    "fv_warm": 59
+   },
+   "not_equal": {
+    "fv_cold": [],
+    "fv_steady": [],
+    "fv_warm": []
+   }
+  }
+ },
+ "triage": {
+  "windows": {
+   "cached": {
+    "first": {
+     "py": {
+      "total": 59.51025486201979,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 3.7116413610056043,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 0.12587650096975267,
+      "runs": 3,
+      "all_ok": true
+     }
+    },
+    "second": {
+     "py": {
+      "total": 59.62377857550746,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 3.442480300029274,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 0.03505450102966279,
+      "runs": 3,
+      "all_ok": true
+     }
+    }
+   },
+   "evicted": {
+    "first": {
+     "py": {
+      "total": 69.93943399746786,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 6.473385657998733,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 1.6697886170004494,
+      "runs": 3,
+      "all_ok": true
+     }
+    },
+    "second": {
+     "py": {
+      "total": 78.67134142300347,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 6.263746391050518,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 0.6354830299969763,
+      "runs": 3,
+      "all_ok": true
+     }
+    }
+   },
+   "plugins": 12
+  },
+  "linux": {
+   "cached": {
+    "first": {
+     "py": {
+      "total": 80.76268579851603,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 2.756306265015155,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 0.2271773120155558,
+      "runs": 3,
+      "all_ok": true
+     }
+    },
+    "second": {
+     "py": {
+      "total": 82.67121377351577,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 1.3232375589432195,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 0.03321611904539168,
+      "runs": 3,
+      "all_ok": true
+     }
+    }
+   },
+   "evicted": {
+    "first": {
+     "py": {
+      "total": 84.89518560250872,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 3.5926184380077757,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 0.3987512359744869,
+      "runs": 3,
+      "all_ok": true
+     }
+    },
+    "second": {
+     "py": {
+      "total": 84.95685063599376,
+      "runs": 2,
+      "all_ok": true
+     },
+     "vr": {
+      "total": 2.0610942450002767,
+      "runs": 3,
+      "all_ok": true
+     },
+     "fv": {
+      "total": 0.20650065201334655,
+      "runs": 3,
+      "all_ok": true
+     }
+    }
+   },
+   "plugins": 10
+  }
+ },
+ "startup": {
+  "fv_cold": 0.021711157023673877,
+  "fv_warm": 0.0013151759922038764,
+  "vr_cold": 0.26951411899062805,
+  "vr_warm": 0.04980208748020232,
+  "py": 0.5370518559939228
+ },
+ "py_parallel": {
+  "windows": [
+   "timeliner.Timeliner",
+   "windows.statistics.Statistics",
+   "windows.suspended_threads.SuspendedThreads",
+   "windows.symlinkscan.SymlinkScan",
+   "windows.thrdscan.ThrdScan",
+   "windows.threads.Threads",
+   "windows.timers.Timers",
+   "windows.truecrypt.Passphrase",
+   "windows.unloadedmodules.UnloadedModules",
+   "windows.vadinfo.VadInfo",
+   "windows.vadwalk.VadWalk",
+   "windows.verinfo.VerInfo",
+   "windows.virtmap.VirtMap",
+   "windows.windows.Windows",
+   "windows.windowstations.WindowStations"
+  ],
+  "linux": [
+   "banners.Banners",
+   "linux.bash.Bash",
+   "linux.boottime.Boottime",
+   "linux.capabilities.Capabilities",
+   "linux.check_afinfo.Check_afinfo",
+   "linux.check_creds.Check_creds",
+   "linux.check_idt.Check_idt",
+   "linux.check_modules.Check_modules",
+   "linux.check_syscall.Check_syscall",
+   "linux.ebpf.EBPF",
+   "linux.elfs.Elfs",
+   "linux.envars.Envars",
+   "linux.graphics.fbdev.Fbdev",
+   "linux.hidden_modules.Hidden_modules",
+   "linux.iomem.IOMem",
+   "linux.ip.Addr",
+   "linux.ip.Link",
+   "linux.kallsyms.Kallsyms",
+   "linux.keyboard_notifiers.Keyboard_notifiers",
+   "linux.kmsg.Kmsg",
+   "linux.kthreads.Kthreads",
+   "linux.library_list.LibraryList",
+   "linux.lsmod.Lsmod",
+   "linux.lsof.Lsof",
+   "linux.malfind.Malfind",
+   "linux.malware.check_afinfo.Check_afinfo",
+   "linux.malware.check_creds.Check_creds",
+   "linux.malware.check_idt.Check_idt",
+   "linux.malware.check_modules.Check_modules",
+   "linux.malware.check_syscall.Check_syscall",
+   "linux.malware.hidden_modules.Hidden_modules",
+   "linux.malware.keyboard_notifiers.Keyboard_notifiers",
+   "linux.malware.malfind.Malfind",
+   "linux.malware.modxview.Modxview",
+   "linux.malware.netfilter.Netfilter",
+   "linux.malware.process_spoofing.ProcessSpoofing",
+   "linux.malware.tty_check.Tty_Check",
+   "linux.modxview.Modxview",
+   "linux.mountinfo.MountInfo",
+   "linux.netfilter.Netfilter",
+   "linux.pagecache.Files",
+   "linux.pagecache.InodePages",
+   "linux.pagecache.RecoverFs",
+   "linux.pidhashtable.PIDHashTable",
+   "linux.proc.Maps",
+   "linux.psaux.PsAux",
+   "linux.pscallstack.PsCallStack",
+   "linux.pslist.PsList",
+   "linux.psscan.PsScan",
+   "linux.pstree.PsTree",
+   "linux.ptrace.Ptrace",
+   "linux.sockscan.Sockscan",
+   "linux.sockstat.Sockstat",
+   "linux.tracing.ftrace.CheckFtrace",
+   "linux.tracing.perf_events.PerfEvents",
+   "linux.tracing.tracepoints.CheckTracepoints",
+   "linux.tty_check.tty_check",
+   "linux.vmcoreinfo.VMCoreInfo",
+   "timeliner.Timeliner"
+  ]
+ },
+ "py_parallel_control": {
+  "plugins": {
+   "windows.filescan.FileScan": {
+    "solo": 14.337549170013517,
+    "parallel": 14.453765875019599,
+    "ratio": 1.0081057580781758
+   },
+   "windows.envars.Envars": {
+    "solo": 1.0645346580422483,
+    "parallel": 1.021049908013083,
+    "ratio": 0.9591514003788879
+   },
+   "windows.cmdline.CmdLine": {
+    "solo": 0.6561363689834252,
+    "parallel": 0.6389924000250176,
+    "ratio": 0.9738713325936049
+   },
+   "windows.dlllist.DllList": {
+    "solo": 4.432907141977921,
+    "parallel": 4.395864336984232,
+    "ratio": 0.991643676754943
+   },
+   "windows.getsids.GetSIDs": {
+    "solo": 1.7817825729725882,
+    "parallel": 1.6960375580238178,
+    "ratio": 0.9518768360127577
+   },
+   "windows.handles.Handles": {
+    "solo": 22.728181520011276,
+    "parallel": 22.368124095955864,
+    "ratio": 0.9841581068094517
+   }
+  },
+  "ratio_median": 0.9790147197015283
+ },
+ "vr_runs": {
+  "windows": [
+   1,
+   3
+  ],
+  "linux": [
+   1
+  ]
+ }
+}
