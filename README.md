@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>Volatility 3 memory forensics, rewritten in Rust.</b><br>
-  Same plugins, same output, a fraction of the time.
+  The result of telling claude ~"/goal max speed vol3 rewrite rust 0 deps"
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-dark.svg">
-    <img alt="Bar chart, linear time scale per system with the python bars cut off, of a triage session (the common plugins run one after another), measured on an Intel Core i7-12700KF desktop. Windows 11, 12 plugins: python volatility3 59.5 s; vol-rs 3.71 s on a first session and 3.44 s on a repeat; fastvol 126 ms and 35.1 ms. Linux 6.8, 10 plugins: python 80.8 s; vol-rs 2.76 s and 1.32 s; fastvol 227 ms and 33.2 ms." src="docs/assets/benchmark.svg" width="840">
+    <img alt="Column chart, log time scale, of a triage session (the common plugins run one after another), measured on an Intel Core i7-12700KF desktop. Windows 11, 12 plugins: python volatility3 59.5 s on a first session and 59.6 s on a repeat; vol-rs 3.71 s and 3.44 s; fastvol 126 ms and 35.1 ms. Linux 6.8, 10 plugins: python 80.8 s and 82.7 s; vol-rs 2.76 s and 1.32 s; fastvol 227 ms and 33.2 ms." src="docs/assets/benchmark.svg" width="840">
   </picture>
 </p>
 

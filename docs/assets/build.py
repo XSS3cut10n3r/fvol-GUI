@@ -203,145 +203,116 @@ CHART_THEMES = {
 }
 
 PANELS = (
-    ("windows", "Windows 11 x64, 5 GiB raw image"),
-    ("linux", "Ubuntu 24.04, Linux 6.8, 3 GiB ELF core"),
+    ("windows", "Windows 11 x64", "5 GiB raw image"),
+    ("linux", "Ubuntu 24.04, Linux 6.8", "3 GiB ELF core"),
 )
+
+# (name, summary key, colour) in plot order
+CHART_TOOLS = (("python volatility3", "py", "other"), ("vol-rs", "vr", "other"), ("fastvol", "fv", "accent"))
+
+
+def cpu_name(m):
+    return re.sub(r"\s+", " ", re.sub(r"^\d+th Gen |\(R\)|\(TM\)", "", m["cpu"])).strip()
 
 
 def machine_line(m):
-    cpu = re.sub(r"^\d+th Gen |\(R\)|\(TM\)|Intel Core ", "", m["cpu"]).replace("  ", " ").strip()
-    cpu = re.sub(r"\s+", " ", cpu)
-    return (f"Measured on a desktop: {cpu} ({m['cores']} cores, {m['cpus']} threads), {round(m['mem_gib'] / 8) * 8} GB RAM, "
+    return (f"Measured on a desktop: {cpu_name(m)} ({m['cores']} cores, {m['cpus']} threads), {round(m['mem_gib'] / 8) * 8} GB RAM, "
             f"NVMe SSD, Linux {m['kernel'].split('-')[0]}.")
 
 
 def build_chart():
     S = load_summary()
-    W = 840
-    X_TOOL, X_RUN, X0 = 28, 164, 256   # bars start at X0
-    BAR_W = W - X0 - 120               # linear scale: the axis maximum is BAR_W px
-    MIN_BAR = 3                        # the shortest bars stay visible
-    ROW, BAR, GROUP_GAP = 22, 12, 8
+    W, X_PAD, PANEL_GAP = 840, 28, 24
+    PANEL_W = (W - 2 * X_PAD - PANEL_GAP) / 2  # the two systems side by side
+    Y_LABELS = 50                              # tick-label column left of each plot
+    COL, PAIR = 24, 50                         # column width; first-to-repeat centre distance
+    INSET_L, INSET_R = 8, 20                   # plot insets; the right one leaves room for fastvol's labels
+    DECADE = 64                                # log scale: px per power of ten
     panels, values = [], []
-    for os_name, image in PANELS:
-        tr = S["triage"].get(os_name, {}).get("cached", {})
-        if not tr.get("first") or not tr.get("second"):
+    for os_name, system, image in PANELS:
+        tr = S["triage"].get(os_name, {})
+        c = tr.get("cached", {})
+        if not c.get("first") or not c.get("second"):
             continue
-        f, s2 = tr["first"], tr["second"]
-        py = f["py"]["total"]
-        n = S["triage"][os_name].get("plugins", 0)
-        panels.append(dict(
-            title=f"{image} · {n} plugins in a row",
-            tools=[
-                ("python volatility3", "other", [("every session", py, f"{fmt_seconds(py)}", None)]),
-                ("vol-rs", "other", [("first session", f["vr"]["total"], None, None),
-                                     ("repeat session", s2["vr"]["total"], None, None)]),
-                ("fastvol", "accent", [("first session", f["fv"]["total"], None, py / f["fv"]["total"]),
-                                       ("repeat session", s2["fv"]["total"], None, s2["py"]["total"] / s2["fv"]["total"])]),
-            ]))
-        values += [py, f["vr"]["total"], s2["vr"]["total"], f["fv"]["total"], s2["fv"]["total"]]
+        tools = []
+        for name, key, kind in CHART_TOOLS:
+            runs = []
+            for run, r in (("first", "first"), ("repeat", "second")):
+                v = c[r][key]["total"]
+                runs.append((run, v, c[r]["py"]["total"] / v if key == "fv" else None))
+                values.append(v)
+            tools.append((name, kind, runs))
+        panels.append(dict(system=system, image=f"{image} · {tr.get('plugins', 0)} plugins in a row", tools=tools))
     if not panels:
         sys.exit(f"build.py: no triage results in {SUMMARY}")
-    def axis(vals):
-        """Each panel's linear axis: up to its fastest-tools' longest bar, ticks every 1, 2 or
-        5 x 10^k (at most 4 steps). Bars past it (python) are cut with a break mark."""
-        v = max(vals)
-        step = next(m * 10 ** k for k in range(-3, 6) for m in (1, 2, 5) if v / (m * 10 ** k) <= 4)
-        top = math.ceil(v / step) * step
-        return top, [i * step for i in range(int(round(top / step)) + 1)]
+    # one axis for both systems, whole decades around every value
+    LO, HI = math.floor(math.log10(min(values))), math.ceil(math.log10(max(values)))
 
-    def tick_label(v):
-        return "0" if v == 0 else f"{v:g} s" if v >= 1 else f"{v * 1e3:,.0f} ms"
-
-    rounds = S.get("rounds", {})
-    gm = [f"{o.capitalize()} ({rounds[o]['plugins']} plugins) {fmt_factor(rounds[o]['speedup']['fv_cold/py']['geomean'])} "
-          f"with no fastvol cache, {fmt_factor(rounds[o]['speedup']['fv_steady/py']['geomean'])} with symbol caches warm"
-          for o, _ in PANELS if o in rounds]
+    def tick_label(k):
+        v = 10.0 ** k
+        return f"{v:g} s" if v >= 1 else f"{v * 1e3:g} ms"
 
     def render(theme):
         t = CHART_THEMES[theme]
         out, desc = [], []
-        y = 122
-        for p in panels:
-            fast = [v for tool, kind, runs in p["tools"] if tool != "python volatility3" for _, v, _, _ in runs]
-            top_v, grid_ticks = axis(fast)
+        top = 156                              # the HI gridline
+        base = top + (HI - LO) * DECADE        # the LO gridline, where the columns stand
 
-            def x_of(v, top_v=top_v):
-                return X0 + min(v, top_v) / top_v * BAR_W
+        def y_of(v):
+            return base - (math.log10(v) - LO) * DECADE
 
-            out.append(f'<text x="{X_TOOL}" y="{y}" class="h">{esc(p["title"])}</text>')
-            top = y + 12
-            ry = top
-            rows_svg = []
-            for tool, kind, runs in p["tools"]:
-                for k, (run, v, label, factor) in enumerate(runs):
-                    cy = ry + ROW / 2
-                    if k == 0:
-                        cls = "tool b" if kind == "accent" else "tool"
-                        ty = ry + len(runs) * ROW / 2
-                        rows_svg.append(f'<text x="{X_TOOL}" y="{ty + 4.5:.1f}" class="{cls}">{tool}</text>')
-                    rows_svg.append(f'<text x="{X_RUN}" y="{cy + 4.5:.1f}" class="run">{run}</text>')
-                    fill = t[kind + ("_soft" if run == "first session" else "")]
-                    cut = v > top_v
-                    x1 = X0 + BAR_W + 16 if cut else max(x_of(v), X0 + MIN_BAR)
-                    r = min(4, (x1 - X0) / 2)
-                    yb = cy - BAR / 2
-                    rows_svg.append(
-                        f'<path fill="{fill}" d="M{X0} {yb:.1f}H{x1 - r:.1f}A{r} {r} 0 0 1 {x1:.1f} {yb + r:.1f}'
-                        f'V{yb + BAR - r:.1f}A{r} {r} 0 0 1 {x1 - r:.1f} {yb + BAR:.1f}H{X0}Z"/>')
-                    if cut:
-                        # the break: a slanted gap in the background colour, just past the axis end
-                        xb = X0 + BAR_W + 3
-                        rows_svg.append(
-                            f'<path fill="{t["bg"]}" d="M{xb:.1f} {yb - 2:.1f}h5l-4 {BAR + 4}h-5z"/>')
-                    text = label or fmt_seconds(v)
-                    label_extra = ""
+        for i, p in enumerate(panels):
+            x0 = X_PAD + i * (PANEL_W + PANEL_GAP)
+            px0, px1 = x0 + Y_LABELS, x0 + PANEL_W
+            c0 = px0 + INSET_L + COL / 2
+            group = (px1 - INSET_R - COL / 2 - c0 - PAIR) / (len(p["tools"]) - 1)
+            out.append(f'<text x="{x0}" y="102" class="h">{esc(p["system"])}</text>')
+            out.append(f'<text x="{x0}" y="120" class="sub">{esc(p["image"])}</text>')
+            for k in range(LO, HI + 1):
+                gy = y_of(10.0 ** k)
+                out.append(f'<path d="M{px0} {gy:.1f}H{px1}" class="{"axis" if k == LO else "grid"}"/>')
+                out.append(f'<text x="{px0 - 8}" y="{gy + 4:.1f}" class="tick" text-anchor="end">{tick_label(k)}</text>')
+            for g, (tool, kind, runs) in enumerate(p["tools"]):
+                gc = c0 + g * group + PAIR / 2
+                out.append(f'<text x="{gc:.1f}" y="{base + 36}" class="{"tool b" if kind == "accent" else "tool"}" '
+                           f'text-anchor="middle">{tool}</text>')
+                for k, (run, v, factor) in enumerate(runs):
+                    cx = c0 + g * group + k * PAIR
+                    x, ty = cx - COL / 2, y_of(v)
+                    r = min(4, (base - ty) / 2)
+                    fill = t[kind + ("_soft" if run == "first" else "")]
+                    out.append(
+                        f'<path fill="{fill}" d="M{x:.1f} {base}V{ty + r:.1f}A{r} {r} 0 0 1 {x + r:.1f} {ty:.1f}'
+                        f'H{x + COL - r:.1f}A{r} {r} 0 0 1 {x + COL:.1f} {ty + r:.1f}V{base}Z">'
+                        f'<title>{esc(f"{tool}, {run} session: {fmt_seconds(v)}")}</title></path>')
                     vcls = "val b" if kind == "accent" else "val"
-                    extra = f'<tspan class="note" dx="8">{fmt_factor(factor)} faster than python</tspan>' if factor else label_extra
-                    rows_svg.append(f'<text x="{x1 + 7:.1f}" y="{cy + 4.5:.1f}" class="{vcls}">{esc(text)}{extra}</text>')
-                    desc.append(f"{p['title']}: {tool} {run} {fmt_seconds(v)}")
-                    ry += ROW
-                ry += GROUP_GAP
-            bottom = ry - GROUP_GAP
-            for tick in grid_ticks:
-                gx = x_of(tick)
-                out.append(f'<path d="M{gx:.1f} {top - 2}V{bottom + 2}" class="grid"/>')
-            out.extend(rows_svg)
-            for tick in grid_ticks:
-                out.append(f'<text x="{x_of(tick):.1f}" y="{bottom + 18}" class="tick" text-anchor="middle">{tick_label(tick)}</text>')
-            y = bottom + 58
-        foot_y = y - 10
-        foot = [
-            "Medians of repeated runs, image in the page cache. First session: the tool's cache empty at the start, as on a new image.",
-            "Repeat: the same session again. python's symbol caches are warm in both.",
-        ]
-        if gm:
-            foot.append("Every plugin once, per-plugin geometric-mean speedup over python (every scan really done):")
-            foot.append("; ".join(gm) + ".")
-        foot.append("Source: bench/local/BENCHMARKS.md")
-        for k, line in enumerate(foot):
-            out.append(f'<text x="{X_TOOL}" y="{foot_y + k * 17}" class="foot">{esc(line)}</text>')
-        H = foot_y + (len(foot) - 1) * 17 + 22
+                    out.append(f'<text x="{cx:.1f}" y="{ty - 8:.1f}" class="{vcls}" text-anchor="middle">{fmt_seconds(v)}</text>')
+                    if factor:
+                        out.append(f'<text x="{cx:.1f}" y="{ty - 23:.1f}" class="note" text-anchor="middle">'
+                                   f'{fmt_factor(factor)} faster</text>')
+                    out.append(f'<text x="{cx:.1f}" y="{base + 17}" class="run" text-anchor="middle">{run}</text>')
+                    desc.append(f"{p['system']}: {tool} {run} session {fmt_seconds(v)}")
+        H = base + 60
         title = "Time for a triage session"
         head = [
             f'<rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="12" fill="{t["bg"]}" stroke="{t["border"]}"/>',
-            f'<text x="{X_TOOL}" y="42" class="title">{title}</text>',
-            f'<text x="{X_TOOL}" y="64" class="sub">The common plugins run one after another, each as its own process. Linear scale, shorter is faster; python runs off it.</text>',
-            f'<text x="{X_TOOL}" y="84" class="sub">{esc(machine_line(S["machine"]))}</text>',
+            f'<text x="{X_PAD}" y="42" class="title">{title}</text>',
+            f'<text x="{X_PAD}" y="64" class="sub">Benchmarked on an {esc(cpu_name(S["machine"]))}</text>',
         ]
+        halo = f"paint-order:stroke;stroke:{t['bg']};stroke-width:5px;stroke-linejoin:round"
         style = f"""<style>
 text{{font-family:{FONT};fill:{t['text']}}}
 .title{{font-size:17px;font-weight:600}}
 .sub{{font-size:12.5px;fill:{t['text2']}}}
 .h{{font-size:13px;font-weight:600}}
 .tool{{font-size:13px;fill:{t['text2']}}}
-.run{{font-size:12px;fill:{t['muted']}}}
-.val{{font-size:12px;fill:{t['text2']};paint-order:stroke;stroke:{t['bg']};stroke-width:5px;stroke-linejoin:round}}
+.run{{font-size:11.5px;fill:{t['muted']}}}
+.val{{font-size:12px;fill:{t['text2']};{halo}}}
 .b{{font-weight:600;fill:{t['text']}}}
-.note{{font-weight:400;fill:{t['muted']}}}
+.note{{font-size:11px;fill:{t['muted']};{halo}}}
 .tick{{font-size:11px;fill:{t['muted']}}}
-.foot{{font-size:11px;fill:{t['muted']}}}
 .grid{{stroke:{t['grid']};stroke-width:1;fill:none}}
+.axis{{stroke:{t['border']};stroke-width:1;fill:none}}
 </style>"""
         return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-labelledby="t d">\n'
                 f"<!-- Generated by docs/assets/build.py from bench/local/summary.json. Do not edit. -->\n"
