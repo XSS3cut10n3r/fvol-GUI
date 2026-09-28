@@ -11,7 +11,7 @@ use std::time::Instant;
 #[ignore]
 fn yara_yre_verify_perf() {
     let src = crate::util::env::var("YRE_SRC").unwrap_or_else(|_| "{ FF 15 ?? ?? ?? ?? ( 85 C0 | 48 85 C0 | 3B C3 ) 7? }".into());
-    let Ok(f) = std::fs::File::open("/home/user/cbc2/task2/memory-dirty.raw") else { return };
+    let Ok(f) = std::fs::File::open(crate::util::testdata::win_image()) else { return };
     let Ok(m) = Mmap::map(&f) else { return };
     let len: usize = 256 << 20;
     let hay = &m.as_slice()[1 << 30..(1 << 30) + len];

@@ -2708,7 +2708,7 @@ mod tests {
     #[test]
     #[ignore]
     fn fast_identifier_on_all_isfs() {
-        let path = SymbolPath::new(&["/home/user/fvol/testdata/symbols".to_string()]);
+        let path = SymbolPath::new(&[crate::util::testdata::path("testdata/symbols")]);
         let mut buf = Vec::new();
         let (mut fast, mut n) = (0, 0);
         for loc in path.all() {
@@ -2727,7 +2727,7 @@ mod tests {
     #[test]
     #[ignore]
     fn ident_cost() {
-        let path = SymbolPath::new(&["/home/user/fvol/testdata/symbols".to_string()]);
+        let path = SymbolPath::new(&[crate::util::testdata::path("testdata/symbols")]);
         let (mut td, mut te, mut bytes) = (0f64, 0f64, 0usize);
         let mut buf = Vec::new();
         for loc in path.all() {

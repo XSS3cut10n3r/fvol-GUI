@@ -10,9 +10,17 @@ output (captured in-process, one parser build for all plugins).
 """
 import io
 import json
+import os
+import subprocess
 import sys
 
-sys.path.insert(0, "/home/user/fvol/volatility3")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+sys.path.insert(0, os.path.join(DATA, "volatility3"))
 
 HELPS = len(sys.argv) > 1 and sys.argv[1] == "--rsvol-plugin-helps"
 sys.argv = ["vol.py"] + ([] if HELPS else sys.argv[1:])

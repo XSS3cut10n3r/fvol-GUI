@@ -35,9 +35,9 @@ import hashlib, json, os, platform, shutil, statistics, subprocess, sys, tempfil
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 HOME = os.path.expanduser("~")
 FV = os.environ.get("FV_BIN", f"{ROOT}/target/release/fvol")
-VR = os.environ.get("VOLRS_BIN", f"{HOME}/cbc2/vol-rs/target/release/vol-rs")
+VR = os.environ.get("VOLRS_BIN", shutil.which("vol-rs") or "vol-rs")
 PY = [os.environ.get("PY_BIN", f"{ROOT}/bench/venv/bin/python"), f"{ROOT}/volatility3/vol.py"]
-WIN_IMG = os.environ.get("WIN_IMG", f"{HOME}/cbc2/task2/memory-dirty.raw")
+WIN_IMG = os.environ.get("WIN_IMG", f"{ROOT}/testdata/images/windows/memory-dirty.raw")
 LNX_IMG = os.environ.get("LNX_IMG", f"{ROOT}/testdata/images/linux/rsvol-noble-6.8.0-139.elf")
 LNX_ISF = f"{ROOT}/testdata/symbols/linux/rsvol-noble-6.8.0-139-generic.json.xz"
 
@@ -119,8 +119,8 @@ def machine():
         "fastvol_rustc": sh("rustc --version"),
         "volrs": sh(f"{VR} --version") + " " + sh(f"sha256sum {VR}")[:16],
         "python": sh(f"{PY[0]} --version") + " / volatility3 " + sh(f"cd {ROOT}/volatility3 && git describe --tags 2>/dev/null"),
-        "win_image": f"{WIN_IMG} ({os.path.getsize(WIN_IMG) / 2**30:.1f} GiB)",
-        "linux_image": f"{LNX_IMG} ({os.path.getsize(LNX_IMG) / 2**30:.1f} GiB)",
+        "win_image": f"{os.path.basename(WIN_IMG)} ({os.path.getsize(WIN_IMG) / 2**30:.1f} GiB)",
+        "linux_image": f"{os.path.basename(LNX_IMG)} ({os.path.getsize(LNX_IMG) / 2**30:.1f} GiB)",
     }
     del lscpu
     return info

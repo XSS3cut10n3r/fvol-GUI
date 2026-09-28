@@ -386,7 +386,7 @@ high effort; `libraries.md`).
   exposed the P1 bug.
 
 **Incident.** Two of my Windows runs without a writable `-s` dir wrote converted ISFs into the first writable
-root, `/home/user/rs-vol/volatility3/volatility3/symbols/windows/ntkrnlmp.pdb/`. That is python's own behaviour.
+root, `volatility3/volatility3/symbols/windows/ntkrnlmp.pdb/` of the main checkout. That is python's own behaviour.
 
 - The files: `8E3373D6…-1.json.xz` at 17:03, and `3844DBB9…-2.json.xz` at 17:23 (the latter after a real PDB
   download into my private `--cache-path`).

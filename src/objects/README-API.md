@@ -1,7 +1,7 @@
 # fastvol core API — python volatility3 → rust cheat-sheet
 
 For plugin porters. Everything here mirrors volatility3 2.28.2 semantics; when in doubt read the
-python source in `/home/user/fvol/volatility3/` and the doc comments of the rust items named
+python source in the main checkout's `volatility3/` and the doc comments of the rust items named
 below. Output must be byte-identical, so port *behaviour* (which exceptions are caught where,
 evaluation order when it decides which rows are skipped), not just the happy path.
 

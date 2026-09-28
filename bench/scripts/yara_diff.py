@@ -44,10 +44,15 @@ import yara  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-LIMIT = "/home/user/fvol/bench/scripts/limit.sh"
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+LIMIT = os.path.join(DATA, "bench/scripts/limit.sh")
 if not os.access(LIMIT, os.X_OK):
     LIMIT = os.path.join(ROOT, "bench/scripts/limit.sh")
-SCRATCH = "/home/user/fvol/testdata/scratch/yara"  # on disk, gitignored
+SCRATCH = os.path.join(DATA, "testdata/scratch/yara")  # on disk, gitignored
 FIRST = 32  # instances listed in clear per string (must match FIRST_INSTANCES in benchdrv.rs)
 
 STD64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -1073,7 +1078,7 @@ def main():
     ap.add_argument("-n", type=int, default=600, help="number of random cases (on top of the fixed ones)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--slices", type=int, default=6, help="memory slices of the image")
-    ap.add_argument("--img", default="/home/user/cbc2/task2/memory-dirty.raw")
+    ap.add_argument("--img", default=os.path.join(DATA, "testdata/images/windows/memory-dirty.raw"))
     ap.add_argument("--no-memory", action="store_true", help="synthetic data only")
     ap.add_argument("--keep", default=None)
     ap.add_argument("--profile", default="fast")

@@ -1214,7 +1214,7 @@ mod tests {
     #[test]
     fn disasm_detail_matches_capstone_corpora() {
         use std::io::BufRead;
-        let dir = std::path::Path::new("/home/user/fvol/testdata/scratch/disasm/ref");
+        let dir = std::path::PathBuf::from(crate::util::testdata::path("testdata/scratch/disasm/ref"));
         let names = |l: &RegList| l.names().collect::<Vec<_>>().join(",");
         let unhex = |s: &str| -> Vec<u8> {
             (0..s.len() / 2)

@@ -459,7 +459,7 @@ mod image_tests {
     #[ignore]
     fn lsof_like() {
         let image = crate::util::env::var("BENCH_IMAGE").unwrap();
-        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()], ..Default::default() };
+        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec![crate::util::testdata::path("testdata/symbols")], ..Default::default() };
         let ctx = Context::new(opts).unwrap();
         let k = ctx.linux_kernel().unwrap();
         crate::plugins::linux::pslist::list_tasks(k, &|_| Ok(false), true, &mut |task| {

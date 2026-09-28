@@ -3,7 +3,7 @@
 # When MemAvailable drops below THRESH_MB, SIGKILL the largest-RSS heavy worker process
 # (python/rustc/test binaries/vol/cargo), never claude itself. Logs to bench/memwatch.log.
 THRESH_MB=${THRESH_MB:-7000}
-LOG=/home/user/fvol/bench/memwatch.log
+LOG=$(cd "$(dirname "$0")/.." && pwd)/memwatch.log
 while true; do
   avail=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
   if [ "$avail" -lt "$THRESH_MB" ]; then

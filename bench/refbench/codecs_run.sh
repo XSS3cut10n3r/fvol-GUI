@@ -4,7 +4,7 @@
 #
 #   bench/refbench/codecs_run.sh [CORPUS_DIR] [RUNS] [NAME_FILTER]
 #
-# CORPUS_DIR (default /home/user/fvol/testdata/scratch/codecs/corpus) is made by
+# CORPUS_DIR (default testdata/scratch/codecs/corpus) is made by
 # bench/refbench/gen_corpus.sh; keep it on disk, never on tmpfs /tmp.
 # Both sides run pinned to one CPU ($CPU, default 8) and are interleaved ($ROUNDS rounds,
 # best taken) so background load affects them alike. Besides wall-clock MB/s, both harnesses
@@ -15,13 +15,16 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-CORPUS=${1:-/home/user/fvol/testdata/scratch/codecs/corpus}
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+CORPUS=${1:-$DATA/testdata/scratch/codecs/corpus}
 RUNS=${2:-10}
 FILTER=${3:-}
 CPU=${CPU:-8}
 ROUNDS=${ROUNDS:-3}
 # Memory-capped scopes (see DESIGN.md "Resource safety").
-LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
+LIMIT=${LIMIT:-$ROOT/bench/scripts/limit.sh}
 
 mkdir -p "$ROOT/target"
 REF="$ROOT/target/codecs_refbench"

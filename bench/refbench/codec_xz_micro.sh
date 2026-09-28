@@ -12,15 +12,19 @@
 #      RUSTFLAGS_EXTRA extra rustc flags.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WORK="${WORK:-/home/user/fvol/testdata/scratch/xzperf}"
+ROOT="$(cd "$HERE/../.." && pwd)"
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+WORK="${WORK:-$DATA/testdata/scratch/xzperf}"
 CPU="${CPU:-8}"
 ROUNDS="${ROUNDS:-3}"
 RUNS="${1:-10}"
 shift || true
 if [ $# -eq 0 ]; then
-    C=/home/user/fvol/testdata/scratch/codecs/corpus
+    C=$DATA/testdata/scratch/codecs/corpus
     set -- "$HOME/.cache/volatility3/symbols/windows/ntkrnlmp.pdb/8E3373D6124E747F0E72EF8E02E676B3-1.json.xz" \
-        "/home/user/fvol/testdata/symbols/mac/Kernel_Debug_Kit_10.15.4_build_19E287.dmg.json.xz" \
+        "$DATA/testdata/symbols/mac/Kernel_Debug_Kit_10.15.4_build_19E287.dmg.json.xz" \
         "$C/isf.json.xz" "$C/big.json.l1.xz" "$C/big.json.l6.xz" "$C/big.json.l9e.xz" \
         "$C/binary.bin.xz" "$C/binary.bin.x86.xz" "$C/random.bin.xz" "$C/repeat.bin.xz"
 fi

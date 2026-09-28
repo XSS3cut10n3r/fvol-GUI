@@ -102,7 +102,7 @@ fn env_size(name: &str, default: usize) -> usize {
 }
 
 fn bench_window() -> Window {
-    let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
     let w = Window::map(&img, env_size("BENCH_OFF", 1 << 30), env_size("BENCH_LEN", 1 << 30));
     w.warm();
     w

@@ -290,7 +290,7 @@ if local > 0 { budget.fetch_add(local, Ordering::Relaxed); }
 ## 8. Reproduction
 
 ```bash
-S=/home/user/rs-vol/testdata/scratch/review-scan
+S=$PWD/testdata/scratch/review-scan
 cd $S/hwbench && rustc --edition 2024 -O -C target-cpu=native hwbench.rs
 ./hwbench membw 16 2048 5                         # DRAM floor
 ./hwbench pread <IMG> 20 64 3 scan                # page-cache full-scan floor

@@ -5,10 +5,13 @@
 #
 #   bench/refbench/codecs_enc_verify.sh [-l LEVEL] FILE...      (LEVEL default: 9 gz/bz2, 6 xz)
 #
-# Outputs go to $OUT (default /home/user/fvol/testdata/scratch/codecs_enc_verify, on disk).
+# Outputs go to $OUT (default testdata/scratch/codecs_enc_verify, on disk).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
 LEVEL=
 while getopts "l:" o; do
     case $o in
@@ -17,11 +20,11 @@ while getopts "l:" o; do
     esac
 done
 shift $((OPTIND - 1))
-OUT=${OUT:-/home/user/fvol/testdata/scratch/codecs_enc_verify}
-PY=${PY:-/home/user/fvol/bench/venv/bin/python}
-LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
+OUT=${OUT:-$DATA/testdata/scratch/codecs_enc_verify}
+PY=${PY:-$DATA/bench/venv/bin/python}
+LIMIT=${LIMIT:-$ROOT/bench/scripts/limit.sh}
 mkdir -p "$OUT"
-BIN=$(cd "$ROOT" && /home/user/fvol/bench/scripts/cargo.sh test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
+BIN=$(cd "$ROOT" && "$ROOT/bench/scripts/cargo.sh" test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
 BIN="$ROOT/$BIN"
 fail=0
 for f in "$@"; do

@@ -51,7 +51,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fuzz_geom as G
 import fuzz_targets as T
 
-ROOT = '/home/user/fvol'
+HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the main checkout: the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is there,
+# and linked worktrees find it through git; FASTVOL_DATA overrides
+ROOT = os.environ.get('FASTVOL_DATA') or os.path.dirname(subprocess.run(
+    ['git', '-C', HERE, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    capture_output=True, text=True).stdout.strip() or os.path.join(HERE, '.git'))
 LIMIT = ROOT + '/bench/scripts/limit.sh'
 SCRATCH = ROOT + '/testdata/scratch/fuzz'
 SYMS = ROOT + '/testdata/symbols'
@@ -61,7 +66,7 @@ IMG = ROOT + '/testdata/images'
 FIXT = ROOT + '/tests/fixtures/containers'
 
 BASES = {
-    'win10': ('/home/user/cbc2/task2/memory-dirty.raw', 'windows'),
+    'win10': (IMG + '/windows/memory-dirty.raw', 'windows'),
     'win1809': (IMG + '/windows/rsvol-win10-x64-17763-imagery.raw', 'windows'),
     'noble-elf': (IMG + '/linux/rsvol-noble-6.8.0-139.elf', 'linux'),
     'noble-lime': (IMG + '/linux/rsvol-noble-6.8.0-139.lime', 'linux'),

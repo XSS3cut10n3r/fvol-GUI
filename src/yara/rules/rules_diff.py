@@ -9,7 +9,7 @@ evaluator) and compares the serialized results (matching rules, namespace,
 tags, meta, strings / instances) and compile errors.
 
 usage: rules_diff.py [N] [SEED]
-  env PYTHON-side: needs yara-python (use /home/user/fvol/bench/venv/bin/python)
+  env PYTHON-side: needs yara-python (use bench/venv/bin/python)
 """
 import os
 import random
@@ -20,7 +20,12 @@ import yara
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRATE = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-WORK = os.environ.get("FASTVOL_YARA_RULES_WORK", "/home/user/fvol/testdata/scratch/yara")
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", CRATE, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(CRATE, ".git"))
+WORK = os.environ.get("FASTVOL_YARA_RULES_WORK", os.path.join(DATA, "testdata/scratch/yara"))
 
 ALPH = b"abAB x\x00"
 TEXTS = ["a", "b", "ab", "ba", "A", "aa", "x", "bA", "a b"]

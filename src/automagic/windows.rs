@@ -1065,7 +1065,7 @@ mod tests {
     fn rsds_stream_on_images() {
         use crate::context::{Context, GlobalOptions};
         let names: Vec<Vec<u8>> = [&b"ntkrnlmp.pdb"[..], b"ntdll.pdb", b"tcpip.pdb", b"win32k.pdb", b"hal.pdb", b"kernel32.pdb"].iter().map(|n| n.to_vec()).collect();
-        for img in ["/home/user/cbc2/task2/memory-dirty.raw", "/home/user/fvol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw"] {
+        for img in &[crate::util::testdata::win_image(), crate::util::testdata::path("testdata/images/windows/rsvol-win10-x64-17763-imagery.raw")] {
             let ctx = Context::new(GlobalOptions { file: Some(img.into()), ..Default::default() }).unwrap();
             let k = ctx.windows_kernel().unwrap();
             for (lname, layer) in [("physical", k.phys), ("kernel", k.vlayer)] {

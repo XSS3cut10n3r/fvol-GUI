@@ -19,19 +19,28 @@ Applies to fastvol 0.1.0 and volatility3 2.28.2.
 
 ## Set up the test environment
 
-The scripts in `bench/scripts/` use absolute paths. They expect:
+The scripts in `bench/scripts/` find the repository from their own location. The data they read
+is not in git and goes in the checkout: a linked worktree uses the main checkout's, found through
+git, and `FASTVOL_DATA=<DIR>` points the scripts at another directory. They expect, in that
+directory:
 
-| Path                                             | Content                                                     |
-| ------------------------------------------------ | ----------------------------------------------------------- |
-| `/home/user/fvol`                               | The main checkout. Worktrees and clones work too; the scripts still read references and python from here. |
-| `/home/user/fvol/volatility3/`                  | A checkout of python volatility3 2.28.2, not tracked by git |
-| `/home/user/fvol/bench/venv/`                   | CPython 3.14 with capstone, yara-python, pycryptodome and pefile |
-| `/home/user/fvol/bench/ref/`                    | Reference outputs: `py/` and `pyargs/` for the main Windows image, `win1809/`, `linux/<image>/`, `mac/<image>/` |
-| `/home/user/fvol/testdata/`                     | Test images and ISF files, described in `testdata/README.md` |
-| `/home/user/cbc2/task2/memory-dirty.raw`          | The main Windows test image, x64 build 22000, 5 GiB          |
+| Path                                        | Content                                                     |
+| ------------------------------------------- | ----------------------------------------------------------- |
+| `volatility3/`                              | A checkout of python volatility3 2.28.2                     |
+| `bench/venv/`                               | CPython 3.14 with capstone, yara-python, pycryptodome and pefile |
+| `bench/ref/`                                | Reference outputs: `py/` and `pyargs/` for the main Windows image, `win1809/`, `linux/<image>/`, `mac/<image>/` |
+| `testdata/`                                 | Test images and ISF files, described in `testdata/README.md` |
+| `testdata/images/windows/memory-dirty.raw`  | The main Windows test image, x64 build 22000, 5 GiB; a symlink is fine |
 
-`bench/ref/` and `testdata/` are not in git. The python version matters: references were made
-with CPython 3.14.7, and CPython 3.13 prints some values differently.
+The directory the scripts use, `$DATA` in the commands below:
+
+```bash
+DATA=${FASTVOL_DATA:-$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")}
+```
+
+The benchmarks against vol-rs run `vol-rs` from `PATH`, or the binary in `VOLRS`. The python
+version matters: references were made with CPython 3.14.7, and CPython 3.13 prints some values
+differently.
 
 ## Follow the resource-safety rules
 
@@ -47,7 +56,7 @@ session, not only the process that used the memory. These rules are mandatory:
   `bench/scripts/py_refs*.sh` and `py_args_refs.sh` run 2 in parallel by default, bounded by
   `limit.sh`; set `PAR=1` when other agents are working, or a higher `PAR` on an idle machine.
 - Never read a memory image into a `Vec`. Map it or read ranges.
-- `/tmp` is in RAM. Put anything over about 50 MB in `/home/user/fvol/testdata/scratch/`.
+- `/tmp` is in RAM. Put anything over about 50 MB in `testdata/scratch/`.
 
 ## Build and test
 
@@ -65,7 +74,7 @@ as `FASTVOL_BENCH_IMG`. Run one with
 
 ## Port a plugin
 
-1. **Read the python plugin** in `/home/user/fvol/volatility3/volatility3/framework/plugins/`,
+1. **Read the python plugin** in `volatility3/volatility3/framework/plugins/`,
    and the extension classes and helpers it calls. Some plugins also live in
    `volatility3/volatility3/plugins/`.
 
@@ -174,9 +183,9 @@ cmp py.txt rs.txt && diff -r <DIR> <DIR2>
 To compare on another image, set `IMG` and `REF`, and pass symbol directories in `GLOBAL_ARGS`:
 
 ```bash
-IMG=/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf \
-REF=/home/user/fvol/bench/ref/linux/rsvol-noble-6.8.0-139-elf/linux.pslist.PsList.txt \
-GLOBAL_ARGS="-s /home/user/fvol/testdata/symbols" \
+IMG=$DATA/testdata/images/linux/rsvol-noble-6.8.0-139.elf \
+REF=$DATA/bench/ref/linux/rsvol-noble-6.8.0-139-elf/linux.pslist.PsList.txt \
+GLOBAL_ARGS="-s $DATA/testdata/symbols" \
 bench/scripts/compare.sh -b $PWD/target/fast/fvol linux.pslist.PsList
 ```
 
@@ -222,9 +231,9 @@ list:
 
 ```bash
 while read -r p; do
-  IMG=/home/user/fvol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw \
-  REF=/home/user/fvol/bench/ref/win1809/$p.txt \
-  OUTDIR=/home/user/fvol/testdata/scratch/out1809 \
+  IMG=$DATA/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw \
+  REF=$DATA/bench/ref/win1809/$p.txt \
+  OUTDIR=$DATA/testdata/scratch/out1809 \
   bench/scripts/compare.sh -b $PWD/target/release/fvol "$p"
 done < bench/win_noarg.txt
 ```
@@ -361,7 +370,8 @@ cd bench/vm && python3 scripts/report.py raw .
   the parity gates pass:
 
   ```bash
-  git fetch /home/user/fvol main && git merge FETCH_HEAD
+  main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")   # the main checkout
+  git fetch "$main" main && git merge FETCH_HEAD
   bench/scripts/cargo.sh build --release
   bench/scripts/cargo.sh test --profile fast
   bench/scripts/gates.sh $PWD/target/release/fvol

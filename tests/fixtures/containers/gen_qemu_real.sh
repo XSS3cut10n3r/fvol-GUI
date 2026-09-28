@@ -8,8 +8,12 @@
 set -euo pipefail
 OUT="$(mkdir -p "$1" && cd "$1" && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/../../.." && pwd)"
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
 IMAGE="${IMAGE:-rsvol-qemu}"
-PY="${PY:-/home/user/fvol/bench/venv/bin/python}"
+PY="${PY:-$DATA/bench/venv/bin/python}"
 
 run_vm() { # name machine mem
     local name="$1" machine="$2" mem="$3"

@@ -186,7 +186,7 @@ fn run_len(data: &[u8], chunks: &[Chunk], mode: Mode) -> Res {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = args.first().cloned().unwrap_or_else(|| "/home/user/fvol/testdata/scratch/disasm/ref/bin".into());
+    let dir = args.first().cloned().unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/scratch/disasm/ref/bin").into());
     let passes: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
     let only = args.get(2).cloned();
     // build the tables outside the timed region (capstone's are static data)

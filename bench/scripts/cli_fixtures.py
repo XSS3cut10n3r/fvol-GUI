@@ -9,19 +9,28 @@ Writes
 `cargo test` builds fake plugins with the same metadata and replays every case through
 `cli::run`.
 
-Run with:  /home/user/fvol/bench/venv/bin/python bench/scripts/cli_fixtures.py
+Run with:  bench/venv/bin/python bench/scripts/cli_fixtures.py
 """
 import json
 import os
 import subprocess
 import sys
 
-sys.path.insert(0, "/home/user/fvol/volatility3")
-
-PY = "/home/user/fvol/bench/venv/bin/python"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+sys.path.insert(0, os.path.join(DATA, "volatility3"))
+
+PY = os.path.join(DATA, "bench", "venv", "bin", "python")
 FIX = os.path.join(ROOT, "tests", "fixtures")
 DUMP = os.path.join(ROOT, "bench", "scripts", "vol_argdump.py")
+# python's source paths in its stderr (tracebacks, the INFO lines listing its plugin / symbol dirs)
+# are recorded as neutral ones, not where the checkouts are (stderr_comparable in src/cli/tests.rs
+# skips such stderr)
+SRC = {os.path.join(DATA, "volatility3"): "/src/volatility3", ROOT: "/src/fastvol"}
 # fixed sandbox shared with the rust test (src/cli/tests.rs)
 BASE = "/tmp/rsvol-cli-fixture"
 IMG = BASE + "/image.raw"
@@ -49,9 +58,15 @@ def env(columns=80):
     return e
 
 
+def neutral(s):
+    for path in sorted(SRC, key=len, reverse=True):  # the deeper one first: either may hold the other
+        s = s.replace(path + "/", SRC[path] + "/")
+    return s
+
+
 def run(args, columns=80):
     p = subprocess.run([PY, DUMP] + args, cwd=BASE, env=env(columns), capture_output=True, text=True)
-    return {"out": p.stdout, "err": p.stderr, "code": p.returncode}
+    return {"out": p.stdout, "err": neutral(p.stderr), "code": p.returncode}
 
 
 def plugin_metadata():

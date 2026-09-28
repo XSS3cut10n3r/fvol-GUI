@@ -7,11 +7,14 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$REPO/.git")")}
 ARCH=$1
 shift
-WORK=${1:-/home/user/fvol/testdata/scratch/disasm/arm}
+WORK=${1:-$DATA/testdata/scratch/disasm/arm}
 shift || true
-PY=/home/user/fvol/bench/venv/bin/python
+PY=$DATA/bench/venv/bin/python
 case $ARCH in
   arm64) GEN=$HERE/gen_arm64_spec.py; SPEC=$WORK/s64.json; OUT=$REPO/src/disasm/arm64/spec_data.rs;;
   arm)   GEN=$HERE/gen_arm32_spec.py; SPEC=$WORK/s32.json; OUT=$REPO/src/disasm/arm/spec_data.rs;;

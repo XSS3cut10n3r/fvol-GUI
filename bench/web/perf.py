@@ -15,10 +15,17 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+
 PORT = 18765
 TOKEN = "testtoken-win-0123456789"
 BIN = os.environ.get("BIN", "target/fast/fvol")
-IMG = "/home/user/cbc2/task2/memory-dirty.raw"
+IMG = os.path.join(DATA, "testdata/images/windows/memory-dirty.raw")
 conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=600)
 
 

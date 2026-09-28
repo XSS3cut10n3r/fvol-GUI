@@ -519,7 +519,7 @@ mod bench {
     #[ignore]
     fn smear_robustness() {
         use crate::symbols::windows::prelude::*;
-        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let (phys, _) = ctx.physical_arc().unwrap();
@@ -609,9 +609,9 @@ mod bench {
         use crate::renderers::{ColType, Column, Value};
         use crate::symbols::windows::objects::is_name_info_value_error;
         use crate::symbols::windows::prelude::*;
-        let ctx = Context::new(GlobalOptions { file: Some("/home/user/cbc2/task2/memory-dirty.raw".into()), ..Default::default() }).unwrap();
+        let ctx = Context::new(GlobalOptions { file: Some(crate::util::testdata::win_image()), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
-        let refdir = "/home/user/fvol/bench/ref/py";
+        let refdir = crate::util::testdata::path("bench/ref/py");
         let skip = |e: &Error| is_name_info_value_error(e) || e.is_invalid_address();
 
         // symlinkscan
@@ -761,7 +761,7 @@ mod bench {
             }
             println!("{name}: {n} ranges, {valid} valid, identical");
         };
-        let ctx = Context::new(GlobalOptions { file: Some("/home/user/cbc2/task2/memory-dirty.raw".into()), ..Default::default() }).unwrap();
+        let ctx = Context::new(GlobalOptions { file: Some(crate::util::testdata::win_image()), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         check("windows kernel", k.layer, 1);
         let procs: Vec<_> = crate::plugins::windows::pslist::list_processes(k, &|_| Ok(false)).into_iter().filter_map(|p| p.ok()).collect();
@@ -771,8 +771,8 @@ mod bench {
             check("windows process", &pl, dtb);
         }
         let ctx = Context::new(GlobalOptions {
-            file: Some("/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf".into()),
-            symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()],
+            file: Some(crate::util::testdata::path("testdata/images/linux/rsvol-noble-6.8.0-139.elf")),
+            symbol_dirs: vec![crate::util::testdata::path("testdata/symbols")],
             ..Default::default()
         })
         .unwrap();
@@ -790,8 +790,8 @@ mod bench {
         use crate::symbols::linux::LinuxExt;
         for img in ["rsvol-noble-6.8.0-139.elf", "rsvol-jammy-5.15.0-191.lime"] {
             let ctx = Context::new(GlobalOptions {
-                file: Some(format!("/home/user/fvol/testdata/images/linux/{img}")),
-                symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()],
+                file: Some(format!("{}/testdata/images/linux/{img}", crate::util::testdata::root())),
+                symbol_dirs: vec![crate::util::testdata::path("testdata/symbols")],
                 ..Default::default()
             })
             .unwrap();
@@ -854,10 +854,10 @@ mod bench {
     fn smear_robustness_mac() {
         use crate::automagic::mac::MacKernel;
         use crate::symbols::mac::{MAX_ELEMENTS, MacExt};
-        let img = "/home/user/fvol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp".to_string();
+        let img = crate::util::testdata::path("testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp");
         let ctx = Context::new(GlobalOptions {
             file: Some(img),
-            symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()],
+            symbol_dirs: vec![crate::util::testdata::path("testdata/symbols")],
             ..Default::default()
         })
         .unwrap();
@@ -934,8 +934,8 @@ mod bench {
         use crate::renderers::{ColType, Column, Value};
         use crate::symbols::windows::WinExt;
         use crate::util::time::wintime_to_datetime;
-        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
-        let refp = crate::util::env::var("BENCH_REF").unwrap_or_else(|_| "/home/user/fvol/bench/ref/py/windows.dlllist.DllList.txt".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
+        let refp = crate::util::env::var("BENCH_REF").unwrap_or_else(|_| crate::util::testdata::path("bench/ref/py/windows.dlllist.DllList.txt"));
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let mut out: Vec<u8> = b"Volatility 3 Framework 2.28.2\n".to_vec();
@@ -1013,7 +1013,7 @@ mod bench {
     #[ignore]
     fn module_pdb_lookup() {
         use crate::symbols::windows::WinExt;
-        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let m = crate::plugins::windows::modules::list_modules(k)
@@ -1035,7 +1035,7 @@ mod bench {
     #[test]
     #[ignore]
     fn translation_bench() {
-        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         let t = std::time::Instant::now();

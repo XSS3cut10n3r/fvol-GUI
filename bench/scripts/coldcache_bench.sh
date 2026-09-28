@@ -28,13 +28,17 @@
 # testdata/scratch/review-scan/tm.py), and user/sys CPU and major/minor faults of the best run.
 # stdout of the last run of each binary is kept in <scratch>/out-<label>.stdout.
 set -euo pipefail
-exec python3 - "$@" <<'PYEOF'
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+exec python3 - "$DATA" "$@" <<'PYEOF'
 import os, sys, shutil, subprocess, time, statistics, getopt
 
-ROOT = "/home/user/fvol"
+ROOT = sys.argv.pop(1)  # the data root (DATA above)
 T = f"{ROOT}/testdata/images"
 SYMS = ["-s", f"{ROOT}/testdata/symbols"]
-WIN = "/home/user/cbc2/task2/memory-dirty.raw"
+WIN = f"{T}/windows/memory-dirty.raw"
 # (name, image, extra files copied next to it, plugin args)
 CASES = [
     ("win-pslist", WIN, [], ["windows.pslist"]),

@@ -26,7 +26,7 @@ CORPUS=${CORPUS:-$ROOT/bench/out/corpus}
 if [ $# -gt 0 ]; then SOURCES=("$@"); else SOURCES=("$CORPUS/binary.bin" "$CORPUS/big.json"); fi
 CPU=${CPU:-12}
 ROUNDS=${ROUNDS:-3}
-LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
+LIMIT=${LIMIT:-$ROOT/bench/scripts/limit.sh}
 
 mkdir -p "$WORK/src" "$WORK/build/shim"
 SRC=$WORK/src

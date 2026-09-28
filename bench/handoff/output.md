@@ -1,7 +1,7 @@
 # Handoff: output paths and file writes (optimization agent)
 
 - **Branch:** `worktree-agent-aa1b2f06105ba46b8`
-- **Worktree:** `/home/user/rs-vol/.claude/worktrees/agent-aa1b2f06105ba46b8`
+- **Worktree:** `.claude/worktrees/agent-aa1b2f06105ba46b8`
 - **Merged main:** up to `e8b234e`, merge commit `c97c552`.
 - **Working tree:** clean. There are no WIP commits.
 
@@ -76,11 +76,11 @@ bench/scripts/check_dumps.sh [-b BIN] [-c CASE_GLOB]... [--py-only|--rs-only] [-
   - Linux: noble-6.8-elf complete; noble-6.8-lime, jammy-5.15-elf/lime, bionic64-4.15-elf, bionic32-4.15-pae-elf and deb12-6.1-686-raw have the RecoverFs seed plus some cases (debian7-3.2-x64 has 5 cases).
   - Not started: the other Linux images and both mac images.
   - A normal run generates the missing references. Expect about 1-5 min of python per case. mac `proc_maps --dump` will probably hit the 15 min SKIP, because python writes about 137 GB there.
-- Uses `/home/user/rs-vol/bench/scripts/limit.sh`; the nested-slot fix on main is needed.
+- Uses the main checkout's `bench/scripts/limit.sh`; the nested-slot fix on main is needed.
 
 ## Optimizations: before → after
 
-Baseline is `/home/user/rs-vol/target/release/vol` at the review commit. Runs are interleaved A/B, best of N, on a box at load 6-36, so treat absolute times as noisy.
+Baseline is `target/release/vol` of the main checkout at the review commit. Runs are interleaved A/B, best of N, on a box at load 6-36, so treat absolute times as noisy.
 
 | path | before | after | review floor |
 |---|---|---|---|

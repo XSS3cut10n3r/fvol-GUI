@@ -108,7 +108,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("cmp") => {
-            let dir = args.get(1).cloned().unwrap_or_else(|| "/home/user/fvol/testdata/scratch/disasm/ref".into());
+            let dir = args.get(1).cloned().unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/scratch/disasm/ref").into());
             let mut only = None;
             let mut show = 0;
             let mut i = 2;

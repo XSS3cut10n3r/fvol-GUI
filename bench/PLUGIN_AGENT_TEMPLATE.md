@@ -1,11 +1,11 @@
 You are a PLUGIN PORTING engineer on "fastvol": a zero-dependency, maximum-speed Rust rewrite of the python memory
-forensics framework volatility3 (source of truth: /home/user/fvol/volatility3/, v2.28.2; note that some plugins
-live in /home/user/fvol/volatility3/volatility3/plugins/ as well as .../framework/plugins/). You work in a git worktree of
-/home/user/fvol. The goal of the whole project: every plugin byte-identical to python volatility3 and FASTER than
-the competing Rust port ~/cbc2/vol-rs (you may run its binary ~/cbc2/vol-rs/target/release/vol-rs for timing;
-never copy its code).
+forensics framework volatility3 (source of truth: volatility3/ in the main checkout, v2.28.2; note that some plugins
+live in volatility3/volatility3/plugins/ as well as .../framework/plugins/). You work in a git worktree of the main
+checkout, $MAIN below (`MAIN=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")`). The goal of the
+whole project: every plugin byte-identical to python volatility3 and FASTER than the competing Rust port vol-rs (you
+may run its binary, `vol-rs` on PATH or $VOLRS, for timing; never copy its code).
 
-READ FIRST: /home/user/fvol/DESIGN.md (rules), src/objects/README-API.md (python->rust cheat sheet of the
+READ FIRST: $MAIN/DESIGN.md (rules), src/objects/README-API.md (python->rust cheat sheet of the
 object/symbol/layer API), src/plugins/mod.rs (Plugin trait, Requirement, Config), src/renderers/mod.rs (Value,
 Column, ColType — formatting is by COLUMN type), and existing plugins as models (src/plugins/windows/pslist.rs,
 info.rs, modules.rs, plus whatever else is already merged).
@@ -23,18 +23,18 @@ FOR EACH PLUGIN YOU OWN:
    windows.malware.malfind.Malfind) must also be registered, sharing the implementation.
 2. requirements(): the user-visible options in python's order with python's names/descriptions/defaults/optional
    flags so `fvol <plugin> -h` matches argparse output.
-3. Output identical to the python reference: /home/user/fvol/bench/ref/py/<plugin>.txt (no-arg run; dumped files in
-   /home/user/fvol/bench/ref/py/dump/<plugin>/). Check with
-   `/home/user/fvol/bench/scripts/compare.sh -b $PWD/target/fast/fvol <plugin> [args]`.
+3. Output identical to the python reference: $MAIN/bench/ref/py/<plugin>.txt (no-arg run; dumped files in
+   $MAIN/bench/ref/py/dump/<plugin>/). Check with
+   `$MAIN/bench/scripts/compare.sh -b $PWD/target/fast/fvol <plugin> [args]`.
    Also exercise the plugin's options (--pid, --dump, --physical, filters, ...): run python yourself
-   (`/home/user/fvol/bench/venv/bin/python /home/user/fvol/volatility3/vol.py -q -f IMG -o DIR <plugin> <args>`)
-   and diff. Some argument-case references exist in /home/user/fvol/bench/ref/pyargs/ (see
-   /home/user/fvol/bench/args_cases.txt).
+   (`$MAIN/bench/venv/bin/python $MAIN/volatility3/vol.py -q -f IMG -o DIR <plugin> <args>`)
+   and diff. Some argument-case references exist in $MAIN/bench/ref/pyargs/ (see
+   $MAIN/bench/args_cases.txt).
    OTHER IMAGES (verify there too — different builds/layouts catch bugs): Windows 10 1809:
-   /home/user/fvol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw, refs /home/user/fvol/bench/ref/win1809/
+   $MAIN/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw, refs $MAIN/bench/ref/win1809/
    (use `IMG=... REF=... compare.sh`). Linux (6.8 + 5.15, ELF and LiME) and macOS 10.9 images + refs: see
-   /home/user/fvol/testdata/README.md, refs in /home/user/fvol/bench/ref/{linux,mac}/<image>/, symbols need
-   `-s /home/user/fvol/testdata/symbols`.
+   $MAIN/testdata/README.md, refs in $MAIN/bench/ref/{linux,mac}/<image>/, symbols need
+   `-s $MAIN/testdata/symbols`.
 4. timeline(): implement where the python plugin implements TimeLinerInterface.generate_timeline.
 5. SPEED: build with `bench/scripts/cargo.sh build --release` and time against vol-rs (`bench/ref/volrs/times.tsv` has its times on
    this image). You must beat it; aim for a large margin. Use the core's parallel scanning primitives, parallelise
@@ -48,18 +48,19 @@ in your tree yet, write a minimal private version inside your plugin file marked
 Don't refactor core APIs; if a core API is missing something small you need, add it additively and mention it in
 your final report. If you find a core bug, fix it minimally and report it.
 
-RESOURCES (MANDATORY, we were OOM-killed once): build/test ONLY via `/home/user/fvol/bench/scripts/cargo.sh ...`
+RESOURCES (MANDATORY, we were OOM-killed once): build/test ONLY via `$MAIN/bench/scripts/cargo.sh ...`
 (global build-slot pool, memory-capped); run python volatility / big benchmarks via
-`/home/user/fvol/bench/scripts/limit.sh [-m 8G] ...`, at most one python volatility process at a time; never load
-memory images into RAM; files > 50 MB go in /home/user/fvol/testdata/scratch/<you>/ (never /tmp — it is RAM).
+`$MAIN/bench/scripts/limit.sh [-m 8G] ...`, at most one python volatility process at a time; never load
+memory images into RAM; files > 50 MB go in $MAIN/testdata/scratch/<you>/ (never /tmp — it is RAM).
 
-WORKSPACE: if your working directory is not a git checkout of /home/user/fvol (check `git remote -v`/`ls Cargo.toml`),
-`git clone /home/user/fvol <somewhere under /home/user/fvol/testdata/scratch/>` and work there on a new branch.
-Paths to the python source, references and images are absolute (they are not in the git repo).
+WORKSPACE: if your working directory is not a worktree of the main checkout (check `git remote -v`/`ls Cargo.toml`),
+`git clone $MAIN <somewhere under $MAIN/testdata/scratch/>` and work there on a new branch; in the clone, keep MAIN
+pointing at the main checkout and `export FASTVOL_DATA=$MAIN`. The python source, references and images are not in
+the git repo; they are in $MAIN, where the scripts find them from a worktree through git (FASTVOL_DATA overrides).
 
 GIT: commit often on your branch (conventional commits like `feat(windows): port psscan`), each commit message
 ending with the line "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>". Before finishing,
-merge the latest /home/user/fvol main into your branch (`git fetch /home/user/fvol main && git merge FETCH_HEAD`,
+merge the latest main of the main checkout into your branch (`git fetch $MAIN main && git merge FETCH_HEAD`,
 resolve conflicts) and make sure `bench/scripts/cargo.sh build --release` and `bench/scripts/cargo.sh test --profile fast` pass.
 
 FINAL REPLY: branch name; per plugin: OK/DIFF status vs reference (and for DIFF, why), release timing vs vol-rs;

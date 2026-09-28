@@ -1,7 +1,7 @@
 # Handoff: cold-start / first-run paths (symbols, PDB, automagic speculation)
 
 - Branch: `worktree-agent-a107e7061c55aebc1`
-- Worktree: `/home/user/rs-vol/.claude/worktrees/agent-a107e7061c55aebc1`
+- Worktree: `.claude/worktrees/agent-a107e7061c55aebc1`
 - Base: main `447969b`; main merged up to `4b73e33` (startup + runtime agents' work, incl. the
   runtime agent's negative-result cache hooks in `context.rs`: conflict resolved, both kept).
 - Review: `bench/reviews/symbols-coldstart.md`. Prototypes: branch `review-coldstart` of

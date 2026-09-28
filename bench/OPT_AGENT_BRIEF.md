@@ -3,18 +3,20 @@ Common brief for optimization agents (hardware-floor pass)
 You are a PERFORMANCE engineer on "fastvol" (formerly rsvol): a finished, zero-dependency (Rust std only,
 no crates ever) rewrite of python volatility3 2.28.2, byte-identical to python on 31 test images. The owner's goal:
 "get a majority of the code as close as it can be to the hardware floor ... ensure the changes do not break tests /
-general functionality". Six reviewers measured floors and prototyped fixes: read /home/user/fvol/bench/reviews/*.md
-(yours especially) and the prototype patch named in your task.
+general functionality". Six reviewers measured floors and prototyped fixes: read $MAIN/bench/reviews/*.md
+(yours especially) and the prototype patch named in your task. $MAIN is the main checkout:
+`MAIN=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")` from your worktree.
 
 RULES
-- Work in your git worktree (isolation). If your cwd is not a checkout of /home/user/fvol, clone it under
-  /home/user/fvol/testdata/scratch/opt-<you>/ and work on a new branch there.
-- Read /home/user/fvol/DESIGN.md (MANDATORY "Resource safety": build/test ONLY via /home/user/fvol/bench/scripts/cargo.sh;
+- Work in your git worktree (isolation). If your cwd is not a worktree of the main checkout, clone it under
+  $MAIN/testdata/scratch/opt-<you>/ and work on a new branch there, keeping MAIN pointing at the main checkout and
+  `export FASTVOL_DATA=$MAIN` (the scripts find the untracked data through git only from a worktree).
+- Read $MAIN/DESIGN.md (MANDATORY "Resource safety": build/test ONLY via $MAIN/bench/scripts/cargo.sh;
   heavy runs via bench/scripts/limit.sh; python ≤ 1 at a time with a private --cache-path; scratch on disk under
   testdata/scratch/, never /tmp (RAM); never load images into RAM). The machine is shared and noisy: measure with
   interleaved A/B runs, best-of-N, CPU cycles/instructions where wall time is noisy, pin with taskset where useful.
 - Stay inside your OWNED files (listed in your task). Other agents own other areas and are working concurrently.
-  Merge main often (`git fetch /home/user/fvol main && git merge FETCH_HEAD`); keep changes surgical.
+  Merge main often (`git fetch $MAIN main && git merge FETCH_HEAD`); keep changes surgical.
 - Output must stay byte-identical. GATES (must pass before you finish; run targeted checks while iterating and the
   full set at the end, since they take a while on a loaded box):
     bench/scripts/cargo.sh test --profile fast

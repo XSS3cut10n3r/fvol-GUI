@@ -376,7 +376,7 @@ mod tests {
     #[test]
     #[ignore]
     fn net_timelines() {
-        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
         let ctx = Context::new(GlobalOptions { file: Some(img), output_dir: ".".into(), ..Default::default() }).unwrap();
         let cfg = Config::default();
         for (name, p) in [("NetScan", &NetScan as &dyn Plugin), ("NetStat", &crate::plugins::windows::netstat::NetStat)] {

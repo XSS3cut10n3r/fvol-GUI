@@ -43,13 +43,18 @@ import sys
 import tarfile
 import time
 
-ROOT = "/home/user/fvol"
+HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the main checkout: the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is there,
+# and linked worktrees find it through git; FASTVOL_DATA overrides
+ROOT = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", HERE, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(HERE, ".git"))
 SCR = ROOT + "/testdata/scratch/dumpgate"
 PY = ROOT + "/bench/venv/bin/python"
 VOLPY = ROOT + "/volatility3/vol.py"
 LIMIT = ROOT + "/bench/scripts/limit.sh"
 MANIFEST = os.environ.get("MANIFEST", ROOT + "/bench/images.tsv")
-MAIN_IMG = "/home/user/cbc2/task2/memory-dirty.raw"
+MAIN_IMG = ROOT + "/testdata/images/windows/memory-dirty.raw"
 PY_TIMEOUT = int(os.environ.get("PY_TIMEOUT", 900))
 RS_TIMEOUT = int(os.environ.get("RS_TIMEOUT", 1800))
 TAR_NAMES = ("recovered_fs.tar.gz", "recovered_fs.tar.bz2", "recovered_fs.tar.xz")
@@ -62,7 +67,11 @@ def images():
             continue
         f = line.rstrip("\n").split("\t")
         name, os_, img, symargs, refdir = f[:5]
-        out.append(dict(name=name, os=os_, img=img, symargs=[] if symargs == "-" else symargs.split(), refdir=refdir))
+        # relative manifest paths (image, -s dirs, ref dir) are relative to the data root
+        symargs = [] if symargs == "-" else symargs.split()
+        symargs = [";".join(os.path.join(ROOT, d) for d in w.split(";")) if i and symargs[i - 1] == "-s" else w
+                   for i, w in enumerate(symargs)]
+        out.append(dict(name=name, os=os_, img=os.path.join(ROOT, img), symargs=symargs, refdir=os.path.join(ROOT, refdir)))
     out.append(dict(name="main", os="windows", img=MAIN_IMG, symargs=[], refdir=ROOT + "/bench/ref/py"))
     return out
 

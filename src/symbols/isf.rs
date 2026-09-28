@@ -3053,7 +3053,7 @@ pub(crate) mod tests {
     #[ignore]
     fn fused_on_all_isfs() {
         let mut files = Vec::new();
-        for root in ["/home/user/fvol/testdata/symbols", &format!("{}/.cache/volatility3/symbols", std::env::var("HOME").unwrap())] {
+        for root in [&crate::util::testdata::path("testdata/symbols"), &format!("{}/.cache/volatility3/symbols", std::env::var("HOME").unwrap())] {
             let mut stack = vec![std::path::PathBuf::from(root)];
             while let Some(d) = stack.pop() {
                 for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {

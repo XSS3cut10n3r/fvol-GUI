@@ -22,7 +22,12 @@ warnings.simplefilter("ignore")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-IMAGE = "/home/user/cbc2/task2/memory-dirty.raw"
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+IMAGE = os.path.join(DATA, "testdata/images/windows/memory-dirty.raw")
 
 RE_CHARS = "abcA0- "
 HEX_BYTES = ["61", "62", "63", "41", "00", "0A", "20"]

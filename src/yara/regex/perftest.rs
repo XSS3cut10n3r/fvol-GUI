@@ -9,7 +9,7 @@ use std::time::Instant;
 #[test]
 #[ignore]
 fn yara_regex_perf() {
-    let path = crate::util::env::var("IMAGE").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let path = crate::util::env::var("IMAGE").unwrap_or_else(|_| crate::util::testdata::win_image());
     let Ok(f) = std::fs::File::open(&path) else { return };
     let Ok(m) = Mmap::map(&f) else { return };
     let len: usize = crate::util::env::var("PERF_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(256 << 20);
@@ -73,7 +73,7 @@ fn yara_regex_perf() {
 #[ignore]
 fn yara_regex_ab() {
     let Ok(pats) = crate::util::env::var("AB_PATS") else { return };
-    let path = crate::util::env::var("IMAGE").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let path = crate::util::env::var("IMAGE").unwrap_or_else(|_| crate::util::testdata::win_image());
     let Ok(f) = std::fs::File::open(&path) else { return };
     let Ok(m) = Mmap::map(&f) else { return };
     let len: usize = crate::util::env::var("AB_LEN").ok().and_then(|s| s.parse().ok()).unwrap_or(1 << 30);

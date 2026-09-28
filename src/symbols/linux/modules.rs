@@ -675,7 +675,7 @@ mod tests {
 
     fn ctx() -> Context {
         let image = crate::util::env::var("BENCH_IMAGE").unwrap();
-        Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()], ..Default::default() }).unwrap()
+        Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec![crate::util::testdata::path("testdata/symbols")], ..Default::default() }).unwrap()
     }
 
     /// Time each module gatherer and print what it finds:

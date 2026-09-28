@@ -33,15 +33,21 @@ from collections import Counter
 
 import capstone
 
-DEFAULT_OUT = "/home/user/fvol/testdata/scratch/disasm/arm"
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-ELF_ROOTS = ["/usr/lib/go/src", "/opt/metasploit", "/home/user/.rustup/toolchains", "/usr/share/proxmark3",
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", REPO, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(REPO, ".git"))
+DEFAULT_OUT = os.path.join(DATA, "testdata/scratch/disasm/arm")
+ELF_ROOTS = ["/usr/lib/go/src", "/opt/metasploit", os.path.expanduser("~/.rustup/toolchains"), "/usr/share/proxmark3",
              "/usr/lib", "/usr/share"]
 MACH = {"arm64": 183, "arm": 40}
-# extra open-source C inputs for the cross-compiled corpus: (dir, filename regex, flags)
+# extra open-source C inputs for the cross-compiled corpus: (dir, filename regex, flags); the dirs of the
+# wuffs single-file library and of the libpng sources come from WUFFS_DIR / LIBPNG_DIR (skipped when unset)
 EXTRA_SOURCES = [
-    ("/home/user/vh2/g6", r"wuffs-v0\.3\.c", ["-DWUFFS_IMPLEMENTATION"]),
-    ("/home/user/lp16fuzz/src", r"png[a-z]*\.c", []),
+    (os.environ.get("WUFFS_DIR", ""), r"wuffs-v0\.3\.c", ["-DWUFFS_IMPLEMENTATION"]),
+    (os.environ.get("LIBPNG_DIR", ""), r"png[a-z]*\.c", []),
     ("/usr/share/libtool", r"ltdl\.c", []),
 ]
 BASE_ADDR = 0xFFFFFF8008080000

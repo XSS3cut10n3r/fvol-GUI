@@ -1,7 +1,7 @@
 # Handoff: object model + per-plugin row work (perf-plugins-objects)
 
-- **Branch:** `perf-plugins-objects`, worktree `/home/user/rs-vol/.claude/worktrees/agent-a0f0516ac31241c6c`
-  (a worktree of `/home/user/rs-vol`, so the branch is visible in the main repo). Head `c03de43` +
+- **Branch:** `perf-plugins-objects`, worktree `.claude/worktrees/agent-a0f0516ac31241c6c`
+  (a worktree of the main checkout, so the branch is visible in the main repo). Head `c03de43` +
   this note. Everything is committed; there are **no WIP commits**.
 - **Merged into it:** `main` up to `4b73e33` (startup + runtime work: pool, statistics, limit.sh
   fix), `perf-rows-nix` (Linux/mac sub-agent, head `23c7402`) and `perf-rows-win` (Windows

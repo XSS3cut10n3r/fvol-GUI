@@ -12,8 +12,14 @@ import subprocess
 import sys
 import time
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
 BIN = os.environ.get("BIN", "target/fast/fvol")
-SCR = "/home/user/fvol/testdata/scratch/webui/e2e"
+SCR = os.path.join(DATA, "testdata/scratch/webui/e2e")
 os.makedirs(SCR, exist_ok=True)
 fails = []
 passed = 0
@@ -110,9 +116,9 @@ def same_plugin(srv, image, plugin, args=None, argv=(), syms=None):
 
 
 def main():
-    win = "/home/user/cbc2/task2/memory-dirty.raw"
-    lnx = "/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf"
-    syms = "/home/user/fvol/testdata/symbols"
+    win = os.path.join(DATA, "testdata/images/windows/memory-dirty.raw")
+    lnx = os.path.join(DATA, "testdata/images/linux/rsvol-noble-6.8.0-139.elf")
+    syms = os.path.join(DATA, "testdata/symbols")
     w = Server(18765, "testtoken-win-0123456789")
     l = Server(18766, "testtoken-lnx-0123456789")
 

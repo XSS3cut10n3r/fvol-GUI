@@ -28,11 +28,16 @@ from multiprocessing import Pool
 import capstone
 
 MODES = {32: capstone.CS_MODE_32, 64: capstone.CS_MODE_64}
-DEFAULT_OUT = "/home/user/fvol/testdata/scratch/disasm/ref"  # on disk: /tmp is RAM-backed
-DEFAULT_PE = [
-    "/home/user/fvol/testdata/scratch/disasm/pe",
-]
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", REPO, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(REPO, ".git"))
+DEFAULT_OUT = os.path.join(DATA, "testdata/scratch/disasm/ref")  # on disk: /tmp is RAM-backed
+DEFAULT_PE = [
+    os.path.join(DATA, "testdata/scratch/disasm/pe"),
+]
 
 
 def md_for(bits):

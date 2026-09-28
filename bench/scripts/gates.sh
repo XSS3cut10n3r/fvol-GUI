@@ -8,7 +8,7 @@ mkdir -p "$S"
 export FASTVOL_CACHE=$S/cache RSVOL_CACHE=$S/cache   # RSVOL_*: for a BIN from before the rename
 for pass in cold warm; do
   [ $pass = cold ] && rm -rf "$FASTVOL_CACHE"
-  OUTDIR=$S/out-win /home/user/fvol/bench/scripts/check_all.sh -b "$BIN" > "$S/win-$pass.txt" 2>&1
+  OUTDIR=$S/out-win "$(dirname "$0")/check_all.sh" -b "$BIN" > "$S/win-$pass.txt" 2>&1
   echo "windows $pass: $(tail -1 "$S/win-$pass.txt")"
 done
 for pass in cold warm; do

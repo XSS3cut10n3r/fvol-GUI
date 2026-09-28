@@ -3,11 +3,10 @@
 # Prints wall time for each and the speedup.
 #
 # Usage: bench/scripts/vs_python.sh [-f IMAGE] [--cold] [PLUGIN ...]
-#   -f IMAGE  memory image (default ~/cbc2/task2/memory-dirty.raw)
+#   -f IMAGE  memory image (default testdata/images/windows/memory-dirty.raw)
 #   --cold    give fastvol an empty private cache for every run (first-ever-run timings)
 #   PLUGIN    plugins to compare (default: a quick mixed set)
 # Env: PY=<python interpreter> (default: the bench venv with capstone/yara, else python3)
-IMG=$HOME/cbc2/task2/memory-dirty.raw
 COLD=0
 PLUGINS=()
 while [ $# -gt 0 ]; do
@@ -22,6 +21,10 @@ done
   windows.filescan.FileScan windows.netscan.NetScan windows.registry.hivelist.HiveList
   windows.registry.printkey.PrintKey windows.malware.malfind.Malfind windows.vadinfo.VadInfo)
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+IMG=${IMG:-$DATA/testdata/images/windows/memory-dirty.raw}
 RS=$ROOT/target/release/fvol
 PY=${PY:-$ROOT/bench/venv/bin/python}; [ -x "$PY" ] || PY=python3
 VOL=$ROOT/volatility3/vol.py

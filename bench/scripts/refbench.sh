@@ -27,10 +27,13 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$(dirname "$HERE")")
-LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+LIMIT=${LIMIT:-$DATA/bench/scripts/limit.sh}
 [ -x "$LIMIT" ] || LIMIT=$ROOT/bench/scripts/limit.sh
-PY=${PY:-/home/user/fvol/bench/venv/bin/python}
-IMG=/home/user/cbc2/task2/memory-dirty.raw
+PY=${PY:-$DATA/bench/venv/bin/python}
+IMG=$DATA/testdata/images/windows/memory-dirty.raw
 OFF=1G; LEN=1G; PYLEN=; REPS=5; YREPS=3; PYREPS=3
 PROFILE=release; DO_REGEX=1; DO_YARA=1; DO_PY=1; ONLY=; ROUNDS=1; CPU=
 OUT=$ROOT/target/refbench

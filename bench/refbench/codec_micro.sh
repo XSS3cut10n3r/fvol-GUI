@@ -5,7 +5,11 @@
 # (run bench/refbench/run.sh once first to build the reference harness and the vectors)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WORK="${WORK:-/home/user/fvol/testdata/scratch/refbench}"
+ROOT="$(cd "$HERE/../.." && pwd)"
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+WORK="${WORK:-$DATA/testdata/scratch/refbench}"
 REPS="${1:-9}"
 FILTER="${2:-}"
 export FASTVOL_BENCH_CPU="${FASTVOL_BENCH_CPU:-${RSVOL_BENCH_CPU:-2}}"

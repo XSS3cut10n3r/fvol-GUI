@@ -1,16 +1,22 @@
 #!/bin/bash
 # Generates the codec benchmark corpus.
-#   bench/refbench/gen_corpus.sh [CORPUS_DIR]   (default: /home/user/fvol/testdata/scratch/codecs/corpus, on disk: never tmpfs)
+#   bench/refbench/gen_corpus.sh [CORPUS_DIR]   (default: testdata/scratch/codecs/corpus, on disk: never tmpfs)
 # Naming: BASE[.VARIANT].EXT, where BASE is the uncompressed reference file.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-CORPUS=${1:-/home/user/fvol/testdata/scratch/codecs/corpus}
+ROOT=$(cd "$HERE/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+CORPUS=${1:-$DATA/testdata/scratch/codecs/corpus}
 mkdir -p "$CORPUS"
 cd "$CORPUS"
 
 ISF=${ISF:-$HOME/.cache/volatility3/symbols/windows/ntkrnlmp.pdb/8E3373D6124E747F0E72EF8E02E676B3-1.json.xz}
-LINUX_ISF=${LINUX_ISF:-/home/user/nsaCodebreaker/task3/linux-5.15.134.json}
-ISF2=${ISF2:-/home/user/bugcrowd-ctf/forensics/volatile/venv/lib/python3.13/site-packages/volatility3/symbols/windows/ntkrnlmp.pdb/2B2A15FA1FE2122BB1A39ED3572741D2-1.json.xz}
+# two more real ISFs for big.json, no default (set one to "" to leave it out); the corpus the codec
+# benchmarks ran on used linux-5.15.134.json (dwarf2json) and ntkrnlmp.pdb/2B2A15FA1FE2122BB1A39ED3572741D2-1.json.xz
+: "${LINUX_ISF?set LINUX_ISF to a dwarf2json linux ISF (.json), or to \"\" to leave it out of big.json}"
+: "${ISF2?set ISF2 to a second windows kernel ISF (.json.xz), or to \"\" to leave it out of big.json}"
 
 # 1. The real ISF exactly as volatility ships/caches it (python lzma output).
 cp "$ISF" isf.json.xz

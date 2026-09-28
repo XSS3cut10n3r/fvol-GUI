@@ -6,22 +6,28 @@ in tests/fixtures/render_grid.json, renders it with every python CLI renderer (p
 hide-column variants) and writes the expected outputs to tests/fixtures/render_expected.json.
 `cargo test` renders the same spec with the Rust renderers and compares byte for byte.
 
-Run with:  /home/user/fvol/bench/venv/bin/python bench/scripts/render_fixtures.py
+Run with:  bench/venv/bin/python bench/scripts/render_fixtures.py
 """
 import datetime
 import io
 import json
 import os
+import subprocess
 import sys
 
-sys.path.insert(0, "/home/user/fvol/volatility3")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+sys.path.insert(0, os.path.join(DATA, "volatility3"))
 
 from volatility3.cli import text_filter, text_renderer  # noqa: E402
 from volatility3.framework import contexts, renderers  # noqa: E402
 from volatility3.framework.layers import physical  # noqa: E402
 from volatility3.framework.renderers import format_hints  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIX = os.path.join(ROOT, "tests", "fixtures")
 
 TYPES = {

@@ -1,6 +1,10 @@
 #!/bin/bash
+HERE=$(cd "$(dirname "$0")/../.." && pwd)
+# the main checkout: the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is there,
+# and linked worktrees find it through git; FASTVOL_DATA overrides
+ROOT=${FASTVOL_DATA:-$(dirname "$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$HERE/.git")")}
 # Each invocation writes to its own dir (concurrent runs used to clobber a shared bench/out).
-GATE_OUT=${GATE_OUT:-/home/user/fvol/testdata/scratch/gates/run-$$}; mkdir -p $GATE_OUT; find /home/user/fvol/testdata/scratch/gates -maxdepth 1 -name "run-*" -mmin +360 -exec rm -rf {} + 2>/dev/null
+GATE_OUT=${GATE_OUT:-$ROOT/testdata/scratch/gates/run-$$}; mkdir -p $GATE_OUT; find $ROOT/testdata/scratch/gates -maxdepth 1 -name "run-*" -mmin +360 -exec rm -rf {} + 2>/dev/null
 # Shared driver of check_nix.sh / check_win_images.sh: compare our binary against the python references of
 # the images in bench/images.tsv (columns: name, os, image_path, symbol_args, ref_dir[, plugin_list]).
 # Usage: check_images.sh -o OS[,OS...] [-b BIN] [NAME|PATTERN ...]
@@ -8,7 +12,6 @@ GATE_OUT=${GATE_OUT:-/home/user/fvol/testdata/scratch/gates/run-$$}; mkdir -p $G
 #   NAME    manifest names (bash globs allowed); default = every image of the selected OSes
 # Each plugin of bench/{win,linux,mac}_noarg.txt that has <ref_dir>/<plugin>.txt is run via compare.sh
 # (isfinfo.IsfInfo, which compare.sh checks against a live python run, only once per distinct symbol_args).
-ROOT=/home/user/fvol
 BIN=$ROOT/target/fast/fvol
 OSES=
 while [ $# -gt 0 ]; do
@@ -29,6 +32,9 @@ while IFS=$'\t' read -r name os img symargs refdir plist; do
   [[ ",$OSES," == *",$os,"* ]] || continue
   if [ ${#SEL[@]} -gt 0 ]; then selected "$name" || continue; fi
   [ "$symargs" = "-" ] && symargs=
+  # relative manifest paths (image, -s dirs, ref dir) are relative to the data root
+  [[ $img == /* ]] || img=$ROOT/$img; [[ $refdir == /* ]] || refdir=$ROOT/$refdir
+  symargs=$(sed -E "s#((^| )-s +|;)([^/; ])#\1$ROOT/\3#g" <<< "$symargs")
   case $os in windows) list=$ROOT/bench/win_noarg.txt;; linux) list=$ROOT/bench/linux_noarg.txt;;
               mac) list=$ROOT/bench/mac_noarg.txt;; *) continue;; esac
   if [ ! -r "$img" ]; then echo "== $name: image missing ($img)"; continue; fi

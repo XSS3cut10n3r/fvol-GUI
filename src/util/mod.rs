@@ -18,6 +18,8 @@ pub mod pyset;
 pub mod pytar;
 pub mod resource;
 pub mod sqlite;
+#[cfg(test)]
+pub mod testdata;
 pub mod time;
 pub mod trace;
 

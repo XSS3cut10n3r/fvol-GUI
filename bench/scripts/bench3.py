@@ -4,11 +4,17 @@ so all three see the same machine load. Records wall time and CPU time (user+sys
 Usage: bench3.py PLUGIN_LIST OUT.tsv [--py-runs 1] [--rs-runs 3]
 Python runs go through limit.sh (memory cap). One process at a time."""
 import os, resource, subprocess, sys, time, shutil, tempfile
-IMG = os.environ.get("IMG", "/home/user/cbc2/task2/memory-dirty.raw")
-LIMIT = "/home/user/fvol/bench/scripts/limit.sh"
-PY = ["/home/user/fvol/bench/venv/bin/python", "/home/user/fvol/volatility3/vol.py"]
-VOLRS = [os.path.expanduser("~/cbc2/vol-rs/target/release/vol-rs")]
-OURS = [os.environ.get("OURS", "/home/user/fvol/testdata/scratch/vol-bench3")]
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+IMG = os.environ.get("IMG", DATA + "/testdata/images/windows/memory-dirty.raw")
+LIMIT = ROOT + "/bench/scripts/limit.sh"
+PY = [DATA + "/bench/venv/bin/python", DATA + "/volatility3/vol.py"]
+VOLRS = [os.environ.get("VOLRS", "vol-rs")]
+OURS = [os.environ.get("OURS", DATA + "/testdata/scratch/vol-bench3")]
 args = sys.argv[1:]
 plist, out = args[0], args[1]
 py_runs = int(args[args.index("--py-runs") + 1]) if "--py-runs" in args else 1
@@ -17,7 +23,7 @@ rs_runs = int(args[args.index("--rs-runs") + 1]) if "--rs-runs" in args else 3
 def run(cmd, plugin, n):
     best = None
     for _ in range(n):
-        d = tempfile.mkdtemp(dir="/home/user/fvol/testdata/scratch")
+        d = tempfile.mkdtemp(dir=DATA + "/testdata/scratch")
         r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
         t0 = time.perf_counter()
         rc = subprocess.call(cmd + ["-q", "-o", d, "-f", IMG, plugin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

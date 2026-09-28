@@ -639,7 +639,7 @@ mod tests {
     fn mac_scan_bench() {
         let Some(img) = crate::util::env::var_os("MAC_IMAGE") else { return };
         let phys: Arc<dyn Layer> = crate::automagic::stack_physical(std::path::Path::new(&img), None, false, None).unwrap().layer;
-        let sp = symbols::SymbolPath::new(&["/home/user/fvol/testdata/symbols".to_string()]);
+        let sp = symbols::SymbolPath::new(&[crate::util::testdata::path("testdata/symbols")]);
         let banners = symbols::store::identifier_index(&sp).dictionary("mac");
         let pats: Vec<&[u8]> = banners.iter().map(|(b, _)| b.as_slice()).collect();
         let gb = phys.max_address() as f64 / 1e9;

@@ -86,7 +86,7 @@ pub(crate) fn bench_rule(name: &str) -> Vec<(Vec<u8>, Modifiers)> {
         "big" => {
             // 400 distinct identifiers from the volatility3 sources (rarely in memory).
             let mut ids = std::collections::BTreeSet::new();
-            let mut stack = vec![std::path::PathBuf::from("/home/user/fvol/volatility3/volatility3/framework")];
+            let mut stack = vec![std::path::PathBuf::from(crate::util::testdata::path("volatility3/volatility3/framework"))];
             while let Some(d) = stack.pop() {
                 let Ok(rd) = std::fs::read_dir(&d) else { continue };
                 for e in rd.flatten() {
@@ -235,7 +235,7 @@ pub(crate) fn rule_source(strings: &[(Vec<u8>, Modifiers)]) -> String {
 #[test]
 #[ignore]
 fn yara_scan_bench() {
-    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
     let env = |k: &str, d: usize| crate::util::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let off = env("YARA_OFF", 1 << 30);
     let len = env("YARA_LEN", 1 << 30);
@@ -351,7 +351,7 @@ fn yara_scan_bench() {
 #[test]
 #[ignore]
 fn yara_scan_window_model() {
-    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
     let f = std::fs::File::open(&img).expect("open image");
     let map = Mmap::map(&f).expect("mmap");
     let data = &map.as_slice()[1 << 30..(1 << 30) + (256 << 20)];
@@ -407,7 +407,7 @@ fn yara_scan_window_model() {
 #[ignore]
 fn yara_scan_measure_bigrams() {
     let Ok(outp) = crate::util::env::var("YARA_BIGRAM_OUT") else { return };
-    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+    let img = crate::util::env::var("YARA_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
     let f = std::fs::File::open(&img).expect("open image");
     let map = Mmap::map(&f).expect("mmap");
     let data = map.as_slice();

@@ -1,7 +1,7 @@
 # Handoff: libraries optimization agent (hardware-floor pass)
 
 * Branch: `worktree-agent-aed98a4db91d4678a`
-* Worktree: `/home/user/rs-vol/.claude/worktrees/agent-aed98a4db91d4678a`. Scratch, scripts and
+* Worktree: `.claude/worktrees/agent-aed98a4db91d4678a`. Scratch, scripts and
   binaries: `testdata/scratch/opt-libs/` inside that worktree (the Write tool refuses the
   shared checkout's `testdata/`).
 * Review: `bench/reviews/libraries.md`. Prototype: `testdata/scratch/review-libs/prototype.patch`

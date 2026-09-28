@@ -17,16 +17,19 @@
 # Needs cc, python3, nm and readelf (binutils), and ptrace (Linux).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
 S=${1:-$ROOT/testdata/scratch/symorder}
 mkdir -p "$S"
 S=$(cd "$S" && pwd)
-WIN_IMG=${WIN_IMG:-/home/user/cbc2/task2/memory-dirty.raw}
+WIN_IMG=${WIN_IMG:-$DATA/testdata/images/windows/memory-dirty.raw}
 LINUX_IMG=${LINUX_IMG:-$ROOT/testdata/images/linux/rsvol-noble-6.8.0-139.elf}
 MAC_IMG=${MAC_IMG:-$ROOT/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp}
 SYMBOLS=${SYMBOLS:-$ROOT/testdata/symbols}
-[ -d "$SYMBOLS" ] || SYMBOLS=/home/user/fvol/testdata/symbols
-[ -e "$LINUX_IMG" ] || LINUX_IMG=/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf
-[ -e "$MAC_IMG" ] || MAC_IMG=/home/user/fvol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp
+[ -d "$SYMBOLS" ] || SYMBOLS=$DATA/testdata/symbols
+[ -e "$LINUX_IMG" ] || LINUX_IMG=$DATA/testdata/images/linux/rsvol-noble-6.8.0-139.elf
+[ -e "$MAC_IMG" ] || MAC_IMG=$DATA/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp
 
 # the cases (vol arguments; @W/@L/@M/@S = the Windows/Linux/mac image and the symbol dir)
 CASES=(

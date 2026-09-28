@@ -13,9 +13,16 @@ import urllib.request
 
 import websocket  # websocket-client
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+
 
 class Chrome:
-    def __init__(self, width=1440, height=900, port=9339, profile="/home/user/fvol/testdata/scratch/webui/chrome-profile"):
+    def __init__(self, width=1440, height=900, port=9339, profile=os.path.join(DATA, "testdata/scratch/webui/chrome-profile")):
         shutil.rmtree(profile, ignore_errors=True)
         os.makedirs(profile, exist_ok=True)
         self.proc = subprocess.Popen(

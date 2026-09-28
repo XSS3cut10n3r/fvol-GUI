@@ -3,19 +3,22 @@
 # Rust side (examples/disasm_bench.rs, release build), under the memory-capped job wrapper.
 #
 # Usage: bench/refbench/capstone_bench.sh [--rust] [CORPUS_DIR] [PASSES] [WORKLOADS]
-#   CORPUS_DIR  default /home/user/fvol/testdata/scratch/disasm/ref/bin (bench/scripts/disasm_bench_corpus.py output)
+#   CORPUS_DIR  default testdata/scratch/disasm/ref/bin (bench/scripts/disasm_bench_corpus.py output)
 #   PASSES      best of N (default 5)
 #   WORKLOADS   comma list of text,line,detail,cdetail,len (default all)
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-limit=/home/user/fvol/bench/scripts/limit.sh
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+data=${FASTVOL_DATA:-$(dirname "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$repo/.git")")}
+limit=$repo/bench/scripts/limit.sh
 rust=0
 if [ "$1" = "--rust" ]; then rust=1; shift; fi
-dir=${1:-/home/user/fvol/testdata/scratch/disasm/ref/bin}
+dir=${1:-$data/testdata/scratch/disasm/ref/bin}
 passes=${2:-5}
 work=${3:-text,line,detail,cdetail,len}
-out=/home/user/fvol/testdata/scratch/disasm/perf/capstone_bench
+out=$data/testdata/scratch/disasm/perf/capstone_bench
 mkdir -p "$(dirname "$out")"
 gcc -O3 -march=native -o "$out" "$here/capstone_bench.c" -lcapstone
 $limit -m 4G "$out" "$dir" "$passes" "$work"

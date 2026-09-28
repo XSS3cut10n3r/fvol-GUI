@@ -1,6 +1,6 @@
 # Handoff: memory access + scanning (hardware-floor pass)
 
-Branch `worktree-agent-a8fe8f6e9b5d7d736`, worktree `/home/user/rs-vol/.claude/worktrees/agent-a8fe8f6e9b5d7d736`.
+Branch `worktree-agent-a8fe8f6e9b5d7d736`, worktree `.claude/worktrees/agent-a8fe8f6e9b5d7d736`.
 HEAD `bfbfd6c`, main merged at 1667990 (nothing newer on main when I stopped). All commits are ready. There is no WIP.
 
 | Commit | What |

@@ -145,7 +145,7 @@ fn main() {
     }
     let path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/home/user/fvol/testdata/scratch/disasm/ref/real64.ref".into());
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/scratch/disasm/ref/real64.ref").into());
     let f = std::fs::File::open(&path).expect("open corpus");
     let mut wins: Vec<([u8; 15], u8, Mode, u64)> = Vec::new();
     for line in std::io::BufReader::new(f).lines() {

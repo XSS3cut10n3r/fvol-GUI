@@ -860,8 +860,8 @@ mod tests {
     #[ignore]
     fn verinfo_matches_python_reference() {
         use crate::context::GlobalOptions;
-        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
-        let reference = std::fs::read_to_string("/home/user/fvol/bench/ref/py/windows.verinfo.VerInfo.txt").unwrap();
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
+        let reference = std::fs::read_to_string(crate::util::testdata::path("bench/ref/py/windows.verinfo.VerInfo.txt")).unwrap();
         let mut want = std::collections::HashMap::new();
         for line in reference.lines() {
             let f: Vec<&str> = line.split('\t').collect();
@@ -901,7 +901,7 @@ mod tests {
     #[ignore]
     fn find_version_info_on_image() {
         use crate::context::GlobalOptions;
-        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
+        let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| crate::util::testdata::win_image());
         let ctx = Context::new(GlobalOptions { file: Some(img), ..Default::default() }).unwrap();
         let k = ctx.windows_kernel().unwrap();
         for name in ["CONHOST.EXE", "conhost.exe", "cmd.exe", "NOTEPAD.EXE"] {

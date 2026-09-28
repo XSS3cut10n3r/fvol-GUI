@@ -34,7 +34,7 @@ makes it **2.7x faster in wall time and 4.7x cheaper in CPU, with byte-identical
   game). Wherever possible the numbers are best-of-N **user-mode cycles** pinned to P-core 4.
   Wall times are indicative only, and every A/B comparison was interleaved.
 * All code changes were made in a clone, `testdata/scratch/review-libs/rsvol`. The diff is
-  `testdata/scratch/review-libs/prototype.patch`. Nothing in `/home/user/rs-vol` was modified
+  `testdata/scratch/review-libs/prototype.patch`. Nothing in the main checkout was modified
   apart from this file.
 
 ## Summary

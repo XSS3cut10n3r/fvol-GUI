@@ -20,11 +20,17 @@ import argparse
 import mmap
 import os
 import re
+import subprocess
 import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
 
 
 def parse_size(s):
@@ -47,7 +53,7 @@ def load_cases(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--img", default="/home/user/cbc2/task2/memory-dirty.raw")
+    ap.add_argument("--img", default=os.path.join(DATA, "testdata/images/windows/memory-dirty.raw"))
     ap.add_argument("--off", type=parse_size, default=1 << 30)
     ap.add_argument("--len", type=parse_size, default=1 << 30)
     ap.add_argument("--reps", type=int, default=3)

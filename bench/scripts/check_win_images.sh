@@ -6,4 +6,4 @@
 #   DIFFLINES=3  diff lines shown per DIFF;  OUTBASE=bench/out  where our outputs go (<OUTBASE>/<name>/)
 # Plugins without a reference file in the image's ref dir are skipped (format-variant images only have
 # references for a reduced list, see bench/win_fmt_noarg.txt).
-exec /home/user/fvol/bench/scripts/check_images.sh -o windows "$@"
+exec "$(dirname "$0")/check_images.sh" -o windows "$@"

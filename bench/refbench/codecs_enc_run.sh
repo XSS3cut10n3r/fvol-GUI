@@ -29,13 +29,13 @@ shift $((OPTIND - 1))
 SPECS=$1
 shift
 CPU=${CPU:-8}
-LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
+LIMIT=${LIMIT:-$ROOT/bench/scripts/limit.sh}
 MEM=${MEM:-4G}
 
 mkdir -p "$ROOT/target"
 REF="$ROOT/target/codecs_enc_refbench"
 gcc -O3 -march=native -o "$REF" "$HERE/codecs_enc_refbench.c" -llzma -lz -lbz2 -ldeflate -lpthread
-BIN=$(cd "$ROOT" && /home/user/fvol/bench/scripts/cargo.sh test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
+BIN=$(cd "$ROOT" && "$ROOT/bench/scripts/cargo.sh" test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
 BIN="$ROOT/$BIN"
 
 if [[ $THREADS == 1 ]]; then pin=("$LIMIT" -m "$MEM" taskset -c "$CPU"); else pin=("$LIMIT" -m "$MEM"); fi

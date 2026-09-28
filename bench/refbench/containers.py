@@ -13,10 +13,17 @@ import mmap
 import os
 import random
 import struct
+import subprocess
 import sys
 import time
 
-sys.path.insert(0, "/home/user/fvol/volatility3")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
+sys.path.insert(0, os.path.join(DATA, "volatility3"))
 sys.dont_write_bytecode = True
 PAGE = 0x1000
 MB = 1 << 20

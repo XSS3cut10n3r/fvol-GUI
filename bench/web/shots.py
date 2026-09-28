@@ -11,12 +11,12 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from cdp import Chrome  # noqa: E402
+from cdp import DATA, Chrome  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=18765)
 ap.add_argument("--name", default="win")
-ap.add_argument("--out", default="/home/user/fvol/testdata/scratch/webui/shots")
+ap.add_argument("--out", default=os.path.join(DATA, "testdata/scratch/webui/shots"))
 ap.add_argument("--size", default="1440x900")
 ap.add_argument("steps", nargs="*")
 a = ap.parse_args()
@@ -244,7 +244,8 @@ def nosession():
 def openimage():
     c.eval("document.getElementById('evidence').click()")
     c.wait("document.querySelector('.dialog .fslist button')", 10)
-    c.eval("(() => { const i = document.querySelector('.dialog input'); i.value = '/home/user/fvol/testdata/images/'; i.dispatchEvent(new Event('input')); })()")
+    c.eval("(() => { const i = document.querySelector('.dialog input'); i.value = %s; i.dispatchEvent(new Event('input')); })()"
+           % json.dumps(DATA + "/testdata/images/"))
     c.pump(1.0)
     shot("17-open-image")
     c.key("Escape")

@@ -15,7 +15,10 @@
 # rows of sub-plugins that failed. References therefore run with their own --cache-path (downloads still
 # land in the first -s dir; ~/.cache/volatility3/symbols stays on python's symbol path).
 # Retry pass: rc!=0 runs whose .err shows such a symbol/cache failure are re-run (RETRIES times, default 2).
-ROOT=/home/user/fvol
+HERE=$(cd "$(dirname "$0")/../.." && pwd)
+# the main checkout: the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is there,
+# and linked worktrees find it through git; FASTVOL_DATA overrides
+ROOT=${FASTVOL_DATA:-$(dirname "$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$HERE/.git")")}
 MANIFEST=${MANIFEST:-$ROOT/bench/images.tsv}
 LISTOVR=
 if [ "$1" = "-l" ]; then LISTOVR=$2; shift 2; fi
@@ -43,6 +46,9 @@ for n in "${names[@]}"; do
   [ -n "$row" ] || { echo "unknown image $n" >&2; continue; }
   IFS=$'\t' read -r name os IMG SYMARGS OUT PLIST <<< "$row"
   [ "$SYMARGS" = "-" ] && SYMARGS=
+  # relative manifest paths (image, -s dirs, ref dir) are relative to the data root
+  [[ $IMG == /* ]] || IMG=$ROOT/$IMG; [[ $OUT == /* ]] || OUT=$ROOT/$OUT
+  SYMARGS=$(sed -E "s#((^| )-s +|;)([^/; ])#\1$ROOT/\3#g" <<< "$SYMARGS")
   case $os in windows) LIST=$ROOT/bench/win_noarg.txt; warm=windows.info.Info;;
               linux) LIST=$ROOT/bench/linux_noarg.txt; warm=banners.Banners;;
               mac) LIST=$ROOT/bench/mac_noarg.txt; warm=banners.Banners;; esac

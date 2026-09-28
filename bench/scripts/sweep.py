@@ -8,7 +8,7 @@ variants (file names and contents), string / regex / YARA options, invalid value
 bad regexes, missing files), every renderer, and the global options (--filters, --hide-columns,
 -o name collisions, --single-location, --save-config / -c round trips).
 
-Run with /home/user/fvol/bench/venv/bin/python (yara-python builds the compiled-rules input):
+Run with bench/venv/bin/python (yara-python builds the compiled-rules input):
 
     sweep.py gen    [-i IMG ...]                        write the case lists
     sweep.py py     [-i IMG ...] [-m RE] [-j 2] [--max-est 600] [--force]
@@ -23,7 +23,7 @@ runs once and is cached; `py` never runs more than -j (at most 2) python process
 limit.sh with an 8G cap and a 10 min timeout. Cases whose estimated python time (the plugin's
 no-argument time on that image) exceeds --max-est are skipped.
 
-Layout under /home/user/fvol/testdata/scratch/sweep/:
+Layout under testdata/scratch/sweep/:
     inputs/            YARA rules, strings files and other inputs shared by both sides
     harvest/IMG.json   the real values (PIDs, offsets, bases, ...) the cases were built from
     cases/IMG.jsonl    one case per line: id, argv, mode, est
@@ -52,8 +52,12 @@ import sys
 import threading
 import time
 
-ROOT = "/home/user/fvol"
 HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the main checkout: the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is there,
+# and linked worktrees find it through git; FASTVOL_DATA overrides
+ROOT = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", HERE, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(HERE, ".git"))
 SCR = ROOT + "/testdata/scratch/sweep"
 PY = ROOT + "/bench/venv/bin/python"
 VOLPY = ROOT + "/volatility3/vol.py"
@@ -64,7 +68,9 @@ NONDET = HERE + "/bench/nondeterministic.txt"
 PLUGINS_JSON = HERE + "/tests/fixtures/cli_plugins.json"
 
 IMAGES = {
-    "win": dict(os="windows", path="/home/user/cbc2/task2/memory-dirty.raw", ref=REF + "/py", sym=False),
+    # realpath: --save-config output records the -f path, and cached python runs may predate a symlink here
+    "win": dict(os="windows", path=os.path.realpath(ROOT + "/testdata/images/windows/memory-dirty.raw"), ref=REF + "/py",
+                sym=False),
     "win1809": dict(os="windows", path=ROOT + "/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw",
                     ref=REF + "/win1809", sym=True),
     "noble": dict(os="linux", path=ROOT + "/testdata/images/linux/rsvol-noble-6.8.0-139.elf",

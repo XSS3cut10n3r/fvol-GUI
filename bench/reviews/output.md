@@ -130,7 +130,7 @@ Smaller, also validated: the `fbdev` PNG conversion fast path, 16.0 → 7.6 ms (
 - **Syscalls.** `strace -f -c`, and `-w` for wall time per syscall.
 - **Spans.** `RSVOL_TRACE=1` gives the plugin's own spans.
 - **Timing.** `timeit.py` reports best and median, with user and system time. `ab.py` interleaves the
-  baseline (`/home/user/rs-vol/target/release/vol`, HEAD) and the prototype, with a fresh output
+  baseline (`target/release/vol` of the main checkout, HEAD) and the prototype, with a fresh output
   directory for every run.
 - **Parity.**
   - Stdout and dumped files are compared with `cmp` and `diff -r` against the baseline.
@@ -475,7 +475,7 @@ it is sequential by nature) and reading the 4 MB framebuffer.
 ## 8. Reproduce
 
 ```sh
-cd /home/user/rs-vol/testdata/scratch/review-output
+cd testdata/scratch/review-output
 floors/floors {memcpy|null|pipe|write|parwrite|create|cfr|mmapw} fw [IMG]   # floors, fw = btrfs scratch dir
 floors/onefile o/memmap_sample.txt fw 2116 {write|pwrite_mt N|direct|mmap|falloc}
 floors/replay SRC_DUMP_DIR fw/rp {1|8}                                     # replay floor of a dump set

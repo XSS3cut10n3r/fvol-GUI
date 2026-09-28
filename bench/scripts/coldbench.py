@@ -40,6 +40,11 @@ import os, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA = os.environ.get("FASTVOL_DATA") or os.path.dirname(subprocess.run(
+    ["git", "-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    capture_output=True, text=True).stdout.strip() or os.path.join(ROOT, ".git"))
 args = sys.argv[1:]
 def opt(name, default=None):
     if name in args:
@@ -54,12 +59,12 @@ FASTVOL_ARGS = (opt("--fastvol-args") or opt("--rsvol-args") or "").split()
 if opt("--py-cache"):
     FASTVOL_ARGS = ["--cache-path", os.path.abspath(opt("--py-cache"))] + FASTVOL_ARGS
 FASTVOL_ENV = dict(kv.split("=", 1) for kv in (opt("--fastvol-env") or opt("--rsvol-env") or "").split(",") if kv)
-VOLRS = os.path.expanduser("~/cbc2/vol-rs/target/release/vol-rs")
-SYMS = "/home/user/fvol/testdata/symbols"
-T = "/home/user/fvol/testdata/images"
+VOLRS = os.environ.get("VOLRS", "vol-rs")
+SYMS = os.path.join(DATA, "testdata/symbols")
+T = os.path.join(DATA, "testdata/images")
 CASES = [
-    ("win-main pslist", "/home/user/cbc2/task2/memory-dirty.raw", "windows.pslist", []),
-    ("win-main info", "/home/user/cbc2/task2/memory-dirty.raw", "windows.info", []),
+    ("win-main pslist", f"{T}/windows/memory-dirty.raw", "windows.pslist", []),
+    ("win-main info", f"{T}/windows/memory-dirty.raw", "windows.info", []),
     ("win-1809 pslist", f"{T}/windows/rsvol-win10-x64-17763-imagery.raw", "windows.pslist", []),
     ("win-1809 info", f"{T}/windows/rsvol-win10-x64-17763-imagery.raw", "windows.info", []),
     ("noble pslist", f"{T}/linux/rsvol-noble-6.8.0-139.elf", "linux.pslist", ["-s", SYMS]),

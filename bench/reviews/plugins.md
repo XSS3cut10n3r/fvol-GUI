@@ -6,8 +6,8 @@ plugins themselves. Scan engine throughput and startup/automagic belong to the o
 appear here only where a plugin's own design puts them on its critical path, as in timeliner.
 
 Date 2026-09-26. rsvol `6825849` (main). Prototype: branch `perf-review` in
-`/home/user/rs-vol/testdata/scratch/review-plugins/rsvol` (commit `41783e6`), with the patch in
-`/home/user/rs-vol/testdata/scratch/review-plugins/0001-perf-objects-plugins-prototype-from-the-plugin-perfo.patch`.
+`testdata/scratch/review-plugins/rsvol` (commit `41783e6`), with the patch in
+`testdata/scratch/review-plugins/0001-perf-objects-plugins-prototype-from-the-plugin-perfo.patch`.
 
 ## Verdict
 
@@ -72,7 +72,7 @@ vmcoreinfo, banners, vmscan and mbrscan. Their post-scan work in warm mode is sm
   purpose. Later work made many plugins 3 to 5x faster: dlllist is 26.8 ms there and 5.7 ms here.
   suspended_threads and debugregisters, called out as the smallest margins against vol-rs, now run
   in 10.7 and 6.4 ms here, against vol-rs warm 103 and 95 ms on the VM.
-* Scripts are in `/home/user/rs-vol/testdata/scratch/review-plugins/`: `tim.py`, `ab.py`,
+* Scripts are in `testdata/scratch/review-plugins/`: `tim.py`, `ab.py`,
   `abinst.sh`, `prof.sh`, `profsweep.sh`, `timeline.sh` and `micro/*.c`. Raw results are in
   `res/`.
 

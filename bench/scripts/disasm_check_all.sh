@@ -4,8 +4,11 @@
 # corpora with mismatches; exits non-zero if any mismatch was found.
 #   bench/scripts/disasm_check_all.sh [BIN]
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
 BIN=${1:-$ROOT/target/fast/examples/disasm_diff}
-SCR=${DISASM_SCRATCH:-/home/user/fvol/testdata/scratch/disasm}
+SCR=${DISASM_SCRATCH:-$DATA/testdata/scratch/disasm}
 rc=0
 for d in ref ref2 real2 small simd pp; do
   [ -d "$SCR/$d" ] || continue

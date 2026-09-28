@@ -15,8 +15,8 @@
   "fastvol_rustc": "rustc 1.100.0-nightly (1303417c4 2026-09-21)",
   "volrs": "vol-rs 1.0.0 (Volatility 3 framework 2.28.0) ac1e4ed6b64a6f07",
   "python": "Python 3.14.7 / volatility3 v2.28.2-10-g3fcb731e",
-  "win_image": "/home/user/cbc2/task2/memory-dirty.raw (5.0 GiB)",
-  "linux_image": "/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf (3.0 GiB)",
+  "win_image": "memory-dirty.raw (5.0 GiB)",
+  "linux_image": "rsvol-noble-6.8.0-139.elf (3.0 GiB)",
   "load1_end": 2.23681640625,
   "finished": "2026-09-27 21:18 CDT"
  },

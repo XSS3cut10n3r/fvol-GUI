@@ -3,17 +3,21 @@
 # Runs our binary on the Windows test image and diffs stdout against the Python volatility3
 # reference in bench/ref/py/PLUGIN.txt (first line - the version banner - is compared too).
 # Prints "OK <plugin> <secs>" or "DIFF <plugin>" followed by the first diff lines.
-BIN=/home/user/fvol/target/fast/fvol
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# the untracked test data (testdata/, bench/ref/, bench/venv/, volatility3/) is in the main checkout,
+# which linked worktrees find through git; FASTVOL_DATA overrides
+DATA=${FASTVOL_DATA:-$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$ROOT/.git")")}
+BIN=$DATA/target/fast/fvol
 if [ "$1" = "-b" ]; then BIN=$2; shift 2; fi
 P=$1; shift
-IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
-REF=${REF:-/home/user/fvol/bench/ref/py/$P.txt}
-OUTDIR=${OUTDIR:-/home/user/fvol/bench/out}
+IMG=${IMG:-$DATA/testdata/images/windows/memory-dirty.raw}
+REF=${REF:-$DATA/bench/ref/py/$P.txt}
+OUTDIR=${OUTDIR:-$DATA/bench/out}
 # isfinfo lists whatever symbol files are on disk right now (plus python's sqlite cache state), so a stored
 # reference goes stale whenever symbol dirs change: compare it against a fresh python run instead.
 if [ "$P" = "isfinfo.IsfInfo" ] && [ -z "$NO_LIVE_ISFINFO" ]; then
   mkdir -p $OUTDIR; LIVE=$OUTDIR/isfinfo.live.ref
-  /home/user/fvol/bench/scripts/limit.sh -m 4G /home/user/fvol/bench/venv/bin/python /home/user/fvol/volatility3/vol.py -q $GLOBAL_ARGS -f $IMG isfinfo.IsfInfo > $LIVE 2>/dev/null
+  $ROOT/bench/scripts/limit.sh -m 4G $DATA/bench/venv/bin/python $DATA/volatility3/vol.py -q $GLOBAL_ARGS -f $IMG isfinfo.IsfInfo > $LIVE 2>/dev/null
   REF=$LIVE
 fi
 rm -rf $OUTDIR/dump/$P; mkdir -p $OUTDIR/dump/$P
@@ -24,10 +28,10 @@ e=$(date +%s%N)
 secs=$(( (e - s) / 1000000 ))
 if cmp -s $OUTDIR/$P.txt $REF; then
   echo "OK $P ${secs}ms"
-elif grep -qx "$P" /home/user/fvol/bench/nondeterministic.txt && cmp -s <(sort $OUTDIR/$P.txt) <(sort $REF); then
+elif grep -qx "$P" $ROOT/bench/nondeterministic.txt && cmp -s <(sort $OUTDIR/$P.txt) <(sort $REF); then
   echo "OK~ $P ${secs}ms (order; python order is nondeterministic)"
 elif [ "$P" = windows.info.Info ] && [ -z "$NO_LIVE_SYMBOLS" ] && cmp -s <(grep -v '^Symbols	' $OUTDIR/$P.txt) <(grep -v '^Symbols	' $REF) \
-     && /home/user/fvol/bench/scripts/limit.sh -m 4G /home/user/fvol/bench/venv/bin/python /home/user/fvol/volatility3/vol.py -q $GLOBAL_ARGS -f $IMG $P > $OUTDIR/$P.live.ref 2>/dev/null \
+     && $ROOT/bench/scripts/limit.sh -m 4G $DATA/bench/venv/bin/python $DATA/volatility3/vol.py -q $GLOBAL_ARGS -f $IMG $P > $OUTDIR/$P.live.ref 2>/dev/null \
      && cmp -s $OUTDIR/$P.txt $OUTDIR/$P.live.ref; then
   # the Symbols line names the kernel ISF python's identifier cache lists last: with the same ISF in several
   # symbol dirs it depends on the cache's history, which a stored reference cannot capture

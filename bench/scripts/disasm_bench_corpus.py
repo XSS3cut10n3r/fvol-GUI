@@ -8,7 +8,7 @@ Writes DIR/real32.bin, DIR/real64.bin (concatenated section bytes) and DIR/real3
 DIR/real64.idx (one line per chunk: `vaddr_hex<TAB>length`, in file order).  All-zero 4 KiB
 pages are dropped by default (memory-dumped PE sections are 50-70% zero fill, which would make
 the benchmark mostly `add byte ptr [rax], al`); each chunk is a run of non-zero pages.  Default DIR is
-/home/user/fvol/testdata/scratch/disasm/ref/bin, default limit 48 MB per mode.  Sections are streamed to disk one at a
+testdata/scratch/disasm/ref/bin, default limit 48 MB per mode.  Sections are streamed to disk one at a
 time.  Consumers (bench/refbench/capstone_bench.c, examples/disasm_bench.rs) linearly sweep each
 section, skipping one byte after an undecodable instruction.
 """
@@ -17,7 +17,7 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from disasm_diff import DEFAULT_PE, elf_exec_sections, pe_exec_sections  # noqa: E402
+from disasm_diff import DEFAULT_OUT, DEFAULT_PE, elf_exec_sections, pe_exec_sections  # noqa: E402
 
 
 def files_in_order(pe_dirs):
@@ -58,7 +58,7 @@ def nonzero_runs(va, body, page=4096):
 
 
 def main(argv):
-    out = "/home/user/fvol/testdata/scratch/disasm/ref/bin"
+    out = os.path.join(DEFAULT_OUT, "bin")
     pe_dirs = []
     limit = 48 << 20
     keep_zero = False

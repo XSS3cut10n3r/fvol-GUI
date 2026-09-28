@@ -1,8 +1,8 @@
 //! Differential tester for the capstone *detail mode* API of src/disasm (regs_access, detail
 //! operands, opcode bytes) against the reference written by bench/scripts/disasm_detail_diff.py.
 //!
-//!   cargo run --profile fast --example disasm_detail_diff -- cmp /home/user/fvol/testdata/scratch/disasm/ref [--only real64] [--show N]
-//!   cargo run --profile fast --example disasm_detail_diff -- bench /home/user/fvol/testdata/scratch/disasm/ref/real64.det
+//!   cargo run --profile fast --example disasm_detail_diff -- cmp testdata/scratch/disasm/ref [--only real64] [--show N]
+//!   cargo run --profile fast --example disasm_detail_diff -- bench testdata/scratch/disasm/ref/real64.det
 //!
 //! `cmp` reads DIR/NAME.det, decodes each window with our decoder and compares, per category,
 //! against capstone:
@@ -40,7 +40,7 @@ fn unhex(s: &str) -> Vec<u8> {
 }
 
 /// Where bench/scripts/disasm_detail_diff.py writes the references (on disk: /tmp is RAM).
-const DEFAULT_DIR: &str = "/home/user/fvol/testdata/scratch/disasm/ref";
+const DEFAULT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/scratch/disasm/ref");
 
 const NCAT: usize = 14;
 const CATS: [&str; NCAT] = [

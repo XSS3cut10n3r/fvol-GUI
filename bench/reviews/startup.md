@@ -41,7 +41,7 @@ instructions, plus the data-page faults that a `pread` design would remove.
 - **Warm cases.** Private cache `RSVOL_CACHE=testdata/scratch/review-startup/cache`, warmed first; python's
   `~/.cache/volatility3/identifier.cache` present as usual. Outputs were checked byte-identical to the
   baseline for every variant and knob.
-  - `winps` = `-q -f /home/user/cbc2/task2/memory-dirty.raw windows.pslist.PsList`
+  - `winps` = `-q -f testdata/images/windows/memory-dirty.raw windows.pslist.PsList`
   - `wininfo` = the same image with `windows.info.Info`
   - `linps` = `-q -s testdata/symbols -f testdata/images/linux/rsvol-noble-6.8.0-139.elf linux.pslist.PsList`
   - `macps` = `-q -s testdata/symbols -f testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp mac.pslist.PsList`
@@ -305,7 +305,7 @@ After steps 1-4, winps would sit at ~1.6x the mmap floor. The remainder is:
 
 ## 10. Reproduce
 
-Everything is in `/home/user/rs-vol/testdata/scratch/review-startup/`:
+Everything is in `testdata/scratch/review-startup/`:
 
 - `tools/final.sh CASE N`: the random-interleaved table.
 - `tools/summ.py final.all2.txt`: the summary.

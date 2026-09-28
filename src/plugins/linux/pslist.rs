@@ -167,7 +167,7 @@ mod tests {
         let out = crate::util::env::var("TEST_OUT").unwrap();
         let opts = crate::context::GlobalOptions {
             file: Some(image),
-            symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()],
+            symbol_dirs: vec![crate::util::testdata::path("testdata/symbols")],
             output_dir: out,
             ..Default::default()
         };
