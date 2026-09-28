@@ -242,16 +242,16 @@ def build_chart():
         values += [py, f["vr"]["total"], s2["vr"]["total"], f["fv"]["total"], s2["fv"]["total"]]
     if not panels:
         sys.exit(f"build.py: no triage results in {SUMMARY}")
-    # the longest bar spans the axis; ticks every 1, 2 or 5 x 10^k (at most 5 steps)
-    top_v = max(values)
-    step = next(m * 10 ** k for k in range(-3, 6) for m in (1, 2, 5) if top_v / (m * 10 ** k) <= 5)
-    grid_ticks = [i * step for i in range(int(top_v // step) + 1)]
-
-    def x_of(v):
-        return X0 + v / top_v * BAR_W
+    def axis(vals):
+        """Each panel's linear axis: up to its fastest-tools' longest bar, ticks every 1, 2 or
+        5 x 10^k (at most 4 steps). Bars past it (python) are cut with a break mark."""
+        v = max(vals)
+        step = next(m * 10 ** k for k in range(-3, 6) for m in (1, 2, 5) if v / (m * 10 ** k) <= 4)
+        top = math.ceil(v / step) * step
+        return top, [i * step for i in range(int(round(top / step)) + 1)]
 
     def tick_label(v):
-        return "0" if v == 0 else f"{v:,.0f} s" if v >= 1 else f"{v * 1e3:,.0f} ms"
+        return "0" if v == 0 else f"{v:g} s" if v >= 1 else f"{v * 1e3:,.0f} ms"
 
     rounds = S.get("rounds", {})
     gm = [f"{o.capitalize()} ({rounds[o]['plugins']} plugins) {fmt_factor(rounds[o]['speedup']['fv_cold/py']['geomean'])} "
@@ -263,6 +263,12 @@ def build_chart():
         out, desc = [], []
         y = 122
         for p in panels:
+            fast = [v for tool, kind, runs in p["tools"] if tool != "python volatility3" for _, v, _, _ in runs]
+            top_v, grid_ticks = axis(fast)
+
+            def x_of(v, top_v=top_v):
+                return X0 + min(v, top_v) / top_v * BAR_W
+
             out.append(f'<text x="{X_TOOL}" y="{y}" class="h">{esc(p["title"])}</text>')
             top = y + 12
             ry = top
@@ -276,15 +282,22 @@ def build_chart():
                         rows_svg.append(f'<text x="{X_TOOL}" y="{ty + 4.5:.1f}" class="{cls}">{tool}</text>')
                     rows_svg.append(f'<text x="{X_RUN}" y="{cy + 4.5:.1f}" class="run">{run}</text>')
                     fill = t[kind + ("_soft" if run == "first session" else "")]
-                    x1 = max(x_of(v), X0 + MIN_BAR)
+                    cut = v > top_v
+                    x1 = X0 + BAR_W + 16 if cut else max(x_of(v), X0 + MIN_BAR)
                     r = min(4, (x1 - X0) / 2)
                     yb = cy - BAR / 2
                     rows_svg.append(
                         f'<path fill="{fill}" d="M{X0} {yb:.1f}H{x1 - r:.1f}A{r} {r} 0 0 1 {x1:.1f} {yb + r:.1f}'
                         f'V{yb + BAR - r:.1f}A{r} {r} 0 0 1 {x1 - r:.1f} {yb + BAR:.1f}H{X0}Z"/>')
+                    if cut:
+                        # the break: a slanted gap in the background colour, just past the axis end
+                        xb = X0 + BAR_W + 3
+                        rows_svg.append(
+                            f'<path fill="{t["bg"]}" d="M{xb:.1f} {yb - 2:.1f}h5l-4 {BAR + 4}h-5z"/>')
                     text = label or fmt_seconds(v)
+                    label_extra = ""
                     vcls = "val b" if kind == "accent" else "val"
-                    extra = f'<tspan class="note" dx="8">{fmt_factor(factor)} faster than python</tspan>' if factor else ""
+                    extra = f'<tspan class="note" dx="8">{fmt_factor(factor)} faster than python</tspan>' if factor else label_extra
                     rows_svg.append(f'<text x="{x1 + 7:.1f}" y="{cy + 4.5:.1f}" class="{vcls}">{esc(text)}{extra}</text>')
                     desc.append(f"{p['title']}: {tool} {run} {fmt_seconds(v)}")
                     ry += ROW
@@ -294,11 +307,10 @@ def build_chart():
                 gx = x_of(tick)
                 out.append(f'<path d="M{gx:.1f} {top - 2}V{bottom + 2}" class="grid"/>')
             out.extend(rows_svg)
-            y = bottom + 40
-        axis_y = y - 18
-        for tick in grid_ticks:
-            out.append(f'<text x="{x_of(tick):.1f}" y="{axis_y}" class="tick" text-anchor="middle">{tick_label(tick)}</text>')
-        foot_y = axis_y + 34
+            for tick in grid_ticks:
+                out.append(f'<text x="{x_of(tick):.1f}" y="{bottom + 18}" class="tick" text-anchor="middle">{tick_label(tick)}</text>')
+            y = bottom + 58
+        foot_y = y - 10
         foot = [
             "Medians of repeated runs, image in the page cache. First session: the tool's cache empty at the start, as on a new image.",
             "Repeat: the same session again. python's symbol caches are warm in both.",
@@ -314,7 +326,7 @@ def build_chart():
         head = [
             f'<rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="12" fill="{t["bg"]}" stroke="{t["border"]}"/>',
             f'<text x="{X_TOOL}" y="42" class="title">{title}</text>',
-            f'<text x="{X_TOOL}" y="64" class="sub">The common plugins run one after another, each as its own process. Linear scale: shorter is faster.</text>',
+            f'<text x="{X_TOOL}" y="64" class="sub">The common plugins run one after another, each as its own process. Linear scale, shorter is faster; python runs off it.</text>',
             f'<text x="{X_TOOL}" y="84" class="sub">{esc(machine_line(S["machine"]))}</text>',
         ]
         style = f"""<style>
