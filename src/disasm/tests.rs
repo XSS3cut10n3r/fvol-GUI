@@ -57,7 +57,7 @@ fn disasm_never_panics_on_random_bytes() {
 #[test]
 fn disasm_matches_capstone_corpora() {
     use std::io::BufRead;
-    let dir = std::path::Path::new("/home/user/rs-vol/testdata/scratch/disasm/ref");
+    let dir = std::path::Path::new("/home/user/fvol/testdata/scratch/disasm/ref");
     if !dir.is_dir() {
         eprintln!("disasm corpora not found in {dir:?}; skipping");
         return;

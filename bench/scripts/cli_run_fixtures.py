@@ -3,14 +3,14 @@
 (loaded with -p) for every renderer and failure mode; stdout and the exit status are recorded
 in tests/fixtures/cli_run.json. `cargo test` runs an equivalent fake plugin through `cli::run`.
 
-Run with:  /home/user/rs-vol/bench/venv/bin/python bench/scripts/cli_run_fixtures.py
+Run with:  /home/user/fvol/bench/venv/bin/python bench/scripts/cli_run_fixtures.py
 """
 import json
 import os
 import subprocess
 
-PY = "/home/user/rs-vol/bench/venv/bin/python"
-VOL = "/home/user/rs-vol/volatility3/vol.py"
+PY = "/home/user/fvol/bench/venv/bin/python"
+VOL = "/home/user/fvol/volatility3/vol.py"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PLUGINS = os.path.join(ROOT, "bench", "scripts", "py_plugins")
 FIX = os.path.join(ROOT, "tests", "fixtures")

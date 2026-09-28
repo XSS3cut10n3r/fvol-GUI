@@ -12,7 +12,7 @@ import io
 import json
 import sys
 
-sys.path.insert(0, "/home/user/rs-vol/volatility3")
+sys.path.insert(0, "/home/user/fvol/volatility3")
 
 HELPS = len(sys.argv) > 1 and sys.argv[1] == "--rsvol-plugin-helps"
 sys.argv = ["vol.py"] + ([] if HELPS else sys.argv[1:])

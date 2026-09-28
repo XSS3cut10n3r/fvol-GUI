@@ -1675,7 +1675,7 @@ mod tests {
 
     fn ctx() -> Context {
         let image = crate::util::env::var("BENCH_IMAGE").unwrap();
-        Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap()
+        Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()], ..Default::default() }).unwrap()
     }
 
     /// Render python's `linux.kallsyms.Kallsyms` (no options) text output from this API, to
@@ -1775,7 +1775,7 @@ mod tests_lookup {
     #[ignore]
     fn kallsyms_lookup_name() {
         let image = crate::util::env::var("BENCH_IMAGE").unwrap();
-        let ctx = Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap();
+        let ctx = Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()], ..Default::default() }).unwrap();
         let k = ctx.linux_kernel().unwrap();
         let kas = Kallsyms::get(k).unwrap();
         let mask = k.vlayer.address_mask();

@@ -13,7 +13,7 @@ import sys
 import time
 
 BIN = os.environ.get("BIN", "target/fast/fvol")
-SCR = "/home/user/rs-vol/testdata/scratch/webui/e2e"
+SCR = "/home/user/fvol/testdata/scratch/webui/e2e"
 os.makedirs(SCR, exist_ok=True)
 fails = []
 passed = 0
@@ -111,8 +111,8 @@ def same_plugin(srv, image, plugin, args=None, argv=(), syms=None):
 
 def main():
     win = "/home/user/cbc2/task2/memory-dirty.raw"
-    lnx = "/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf"
-    syms = "/home/user/rs-vol/testdata/symbols"
+    lnx = "/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf"
+    syms = "/home/user/fvol/testdata/symbols"
     w = Server(18765, "testtoken-win-0123456789")
     l = Server(18766, "testtoken-lnx-0123456789")
 

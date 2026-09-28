@@ -44,10 +44,10 @@ import yara  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-LIMIT = "/home/user/rs-vol/bench/scripts/limit.sh"
+LIMIT = "/home/user/fvol/bench/scripts/limit.sh"
 if not os.access(LIMIT, os.X_OK):
     LIMIT = os.path.join(ROOT, "bench/scripts/limit.sh")
-SCRATCH = "/home/user/rs-vol/testdata/scratch/yara"  # on disk, gitignored
+SCRATCH = "/home/user/fvol/testdata/scratch/yara"  # on disk, gitignored
 FIRST = 32  # instances listed in clear per string (must match FIRST_INSTANCES in benchdrv.rs)
 
 STD64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"

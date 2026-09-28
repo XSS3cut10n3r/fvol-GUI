@@ -947,7 +947,7 @@ mod image_tests {
     #[ignore]
     fn net_like_ip() {
         let image = crate::util::env::var("BENCH_IMAGE").unwrap();
-        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
+        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()], ..Default::default() };
         let ctx = Context::new(opts).unwrap();
         let k = ctx.linux_kernel().unwrap();
         let t = k.table.name().to_string();

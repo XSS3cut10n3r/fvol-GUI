@@ -31,7 +31,7 @@ set -euo pipefail
 exec python3 - "$@" <<'PYEOF'
 import os, sys, shutil, subprocess, time, statistics, getopt
 
-ROOT = "/home/user/rs-vol"
+ROOT = "/home/user/fvol"
 T = f"{ROOT}/testdata/images"
 SYMS = ["-s", f"{ROOT}/testdata/symbols"]
 WIN = "/home/user/cbc2/task2/memory-dirty.raw"

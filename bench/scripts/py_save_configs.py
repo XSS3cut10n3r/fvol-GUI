@@ -19,7 +19,7 @@ import os
 import shlex
 import sys
 
-sys.path.insert(0, "/home/user/rs-vol/volatility3")
+sys.path.insert(0, "/home/user/fvol/volatility3")
 
 outdir, global_args, listfile = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(outdir, exist_ok=True)

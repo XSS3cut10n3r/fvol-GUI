@@ -1,6 +1,6 @@
 #!/bin/bash
 # Each invocation writes to its own dir (concurrent runs used to clobber a shared bench/out).
-GATE_OUT=${GATE_OUT:-/home/user/rs-vol/testdata/scratch/gates/run-$$}; mkdir -p $GATE_OUT; find /home/user/rs-vol/testdata/scratch/gates -maxdepth 1 -name "run-*" -mmin +360 -exec rm -rf {} + 2>/dev/null
+GATE_OUT=${GATE_OUT:-/home/user/fvol/testdata/scratch/gates/run-$$}; mkdir -p $GATE_OUT; find /home/user/fvol/testdata/scratch/gates -maxdepth 1 -name "run-*" -mmin +360 -exec rm -rf {} + 2>/dev/null
 # Shared driver of check_nix.sh / check_win_images.sh: compare our binary against the python references of
 # the images in bench/images.tsv (columns: name, os, image_path, symbol_args, ref_dir[, plugin_list]).
 # Usage: check_images.sh -o OS[,OS...] [-b BIN] [NAME|PATTERN ...]
@@ -8,7 +8,7 @@ GATE_OUT=${GATE_OUT:-/home/user/rs-vol/testdata/scratch/gates/run-$$}; mkdir -p 
 #   NAME    manifest names (bash globs allowed); default = every image of the selected OSes
 # Each plugin of bench/{win,linux,mac}_noarg.txt that has <ref_dir>/<plugin>.txt is run via compare.sh
 # (isfinfo.IsfInfo, which compare.sh checks against a live python run, only once per distinct symbol_args).
-ROOT=/home/user/rs-vol
+ROOT=/home/user/fvol
 BIN=$ROOT/target/fast/fvol
 OSES=
 while [ $# -gt 0 ]; do

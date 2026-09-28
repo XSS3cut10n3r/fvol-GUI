@@ -1075,7 +1075,7 @@ mod tests {
     #[test]
     #[ignore]
     fn service_walks_match_sequential_reference() {
-        for img in ["/home/user/cbc2/task2/memory-dirty.raw", "/home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw"] {
+        for img in ["/home/user/cbc2/task2/memory-dirty.raw", "/home/user/fvol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw"] {
             if !std::path::Path::new(img).exists() {
                 continue;
             }

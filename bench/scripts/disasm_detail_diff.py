@@ -12,7 +12,7 @@ Usage (bench venv python, which has capstone; run through bench/scripts/limit.sh
   disasm_detail_diff.py learn [--dir DIR] [--only ...]                 relearn the access rules from DIR/*.det and
                                                                        rewrite SPEC in src/disasm/x86/access_spec.rs
 
-DIR defaults to /home/user/rs-vol/testdata/scratch/disasm/ref (on disk: /tmp is RAM-backed tmpfs).
+DIR defaults to /home/user/fvol/testdata/scratch/disasm/ref (on disk: /tmp is RAM-backed tmpfs).
 Full regeneration: `disasm_diff.py gen` (the .ref corpora), then `gen`, `gen-mut`, `learn`, `cmp`.
 
 `gen` streams DIR/NAME.ref (written by disasm_diff.py gen; one unique instruction window per
@@ -35,7 +35,7 @@ import sys
 import capstone
 from capstone import x86
 
-DEFAULT_DIR = "/home/user/rs-vol/testdata/scratch/disasm/ref"
+DEFAULT_DIR = "/home/user/fvol/testdata/scratch/disasm/ref"
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CORPORA = ["real64", "real32"]
 

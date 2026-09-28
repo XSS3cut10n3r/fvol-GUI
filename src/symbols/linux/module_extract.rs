@@ -380,7 +380,7 @@ mod tests {
     fn extract_all_modules() {
         let image = crate::util::env::var("BENCH_IMAGE").unwrap();
         let out = crate::util::env::var("TEST_OUT").unwrap();
-        let ctx = Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() }).unwrap();
+        let ctx = Context::new(GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()], ..Default::default() }).unwrap();
         let k = ctx.linux_kernel().unwrap();
         let t = std::time::Instant::now();
         let mut n = 0;

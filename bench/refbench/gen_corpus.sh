@@ -1,10 +1,10 @@
 #!/bin/bash
 # Generates the codec benchmark corpus.
-#   bench/refbench/gen_corpus.sh [CORPUS_DIR]   (default: /home/user/rs-vol/testdata/scratch/codecs/corpus, on disk: never tmpfs)
+#   bench/refbench/gen_corpus.sh [CORPUS_DIR]   (default: /home/user/fvol/testdata/scratch/codecs/corpus, on disk: never tmpfs)
 # Naming: BASE[.VARIANT].EXT, where BASE is the uncompressed reference file.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-CORPUS=${1:-/home/user/rs-vol/testdata/scratch/codecs/corpus}
+CORPUS=${1:-/home/user/fvol/testdata/scratch/codecs/corpus}
 mkdir -p "$CORPUS"
 cd "$CORPUS"
 

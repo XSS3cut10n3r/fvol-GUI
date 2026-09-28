@@ -6,7 +6,7 @@
 #
 # PNG_CORPUS_DIR (default testdata/png_corpus) is made by
 #   bench/venv/bin/python bench/refbench/png_pillow_oracle.py DIR
-# General-purpose inputs come from /home/user/rs-vol/testdata/scratch/codecs/corpus (gen_corpus.sh).
+# General-purpose inputs come from /home/user/fvol/testdata/scratch/codecs/corpus (gen_corpus.sh).
 # The zlib part feeds Pillow's filtered scanline stream (decompressed IDAT) one (4W+1)-byte row
 # per deflate(Z_NO_FLUSH) call with Pillow's parameters (6, 15, 9, Z_FILTERED), and the general
 # files in one deflate(Z_FINISH) with python zlib.compress's parameters (L, 15, 8, default).
@@ -15,16 +15,16 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 PNGDIR=${1:-$ROOT/testdata/png_corpus}
 RUNS=${2:-5}
-CORPUS=${CORPUS:-/home/user/rs-vol/testdata/scratch/codecs/corpus}
+CORPUS=${CORPUS:-/home/user/fvol/testdata/scratch/codecs/corpus}
 CPU=${CPU:-8}
 ROUNDS=${ROUNDS:-3}
-PY=${PY:-/home/user/rs-vol/bench/venv/bin/python}
-LIMIT=${LIMIT:-/home/user/rs-vol/bench/scripts/limit.sh}
+PY=${PY:-/home/user/fvol/bench/venv/bin/python}
+LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
 
 mkdir -p "$ROOT/target"
 REF="$ROOT/target/zlib_exact_ref"
 gcc -O3 -march=native -o "$REF" "$HERE/zlib_exact_ref.c" -lz
-BIN=$(cd "$ROOT" && /home/user/rs-vol/bench/scripts/cargo.sh test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
+BIN=$(cd "$ROOT" && /home/user/fvol/bench/scripts/cargo.sh test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
 BIN="$ROOT/$BIN"
 "$PY" "$HERE/png_pillow_bench.py" extract "$PNGDIR"
 pin=("$LIMIT" -m 2G taskset -c "$CPU")

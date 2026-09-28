@@ -14,4 +14,4 @@ case ${1:-all} in
   all) oses=linux,mac; [ $# -gt 0 ] && shift;;
   *) oses=linux,mac;;
 esac
-exec /home/user/rs-vol/bench/scripts/check_images.sh -o $oses "${args[@]}" "$@"
+exec /home/user/fvol/bench/scripts/check_images.sh -o $oses "${args[@]}" "$@"

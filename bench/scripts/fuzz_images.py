@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fuzz_geom as G
 import fuzz_targets as T
 
-ROOT = '/home/user/rs-vol'
+ROOT = '/home/user/fvol'
 LIMIT = ROOT + '/bench/scripts/limit.sh'
 SCRATCH = ROOT + '/testdata/scratch/fuzz'
 SYMS = ROOT + '/testdata/symbols'

@@ -15,7 +15,7 @@ import websocket  # websocket-client
 
 
 class Chrome:
-    def __init__(self, width=1440, height=900, port=9339, profile="/home/user/rs-vol/testdata/scratch/webui/chrome-profile"):
+    def __init__(self, width=1440, height=900, port=9339, profile="/home/user/fvol/testdata/scratch/webui/chrome-profile"):
         shutil.rmtree(profile, ignore_errors=True)
         os.makedirs(profile, exist_ok=True)
         self.proc = subprocess.Popen(

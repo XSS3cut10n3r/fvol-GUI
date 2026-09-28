@@ -1,8 +1,8 @@
 #!/bin/bash
 # Time vol-rs on each plugin (sequential, warm), saving outputs.
 IMG=${IMG:-/home/user/cbc2/task2/memory-dirty.raw}
-OUT=/home/user/rs-vol/bench/ref/volrs
-LIST=${1:-/home/user/rs-vol/bench/win_noarg.txt}
+OUT=/home/user/fvol/bench/ref/volrs
+LIST=${1:-/home/user/fvol/bench/win_noarg.txt}
 : > $OUT/times.tsv
 while read p; do
   d=$OUT/dump/$p; rm -rf $d; mkdir -p $d

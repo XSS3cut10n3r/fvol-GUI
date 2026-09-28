@@ -5,7 +5,7 @@
 #   bench/scripts/disasm_check_all.sh [BIN]
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN=${1:-$ROOT/target/fast/examples/disasm_diff}
-SCR=${DISASM_SCRATCH:-/home/user/rs-vol/testdata/scratch/disasm}
+SCR=${DISASM_SCRATCH:-/home/user/fvol/testdata/scratch/disasm}
 rc=0
 for d in ref ref2 real2 small simd pp; do
   [ -d "$SCR/$d" ] || continue

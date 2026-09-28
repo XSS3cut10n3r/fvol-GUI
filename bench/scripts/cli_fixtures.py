@@ -9,16 +9,16 @@ Writes
 `cargo test` builds fake plugins with the same metadata and replays every case through
 `cli::run`.
 
-Run with:  /home/user/rs-vol/bench/venv/bin/python bench/scripts/cli_fixtures.py
+Run with:  /home/user/fvol/bench/venv/bin/python bench/scripts/cli_fixtures.py
 """
 import json
 import os
 import subprocess
 import sys
 
-sys.path.insert(0, "/home/user/rs-vol/volatility3")
+sys.path.insert(0, "/home/user/fvol/volatility3")
 
-PY = "/home/user/rs-vol/bench/venv/bin/python"
+PY = "/home/user/fvol/bench/venv/bin/python"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIX = os.path.join(ROOT, "tests", "fixtures")
 DUMP = os.path.join(ROOT, "bench", "scripts", "vol_argdump.py")

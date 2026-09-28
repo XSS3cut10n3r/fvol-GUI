@@ -26,7 +26,7 @@ live in src/plugins/pyreqs.rs.
 import json
 import sys
 
-sys.path.insert(0, "/home/user/rs-vol/volatility3")
+sys.path.insert(0, "/home/user/fvol/volatility3")
 
 from volatility3 import framework, plugins  # noqa: E402
 from volatility3.framework import interfaces  # noqa: E402

@@ -5,11 +5,11 @@
 #   bench/refbench/codec_xz_verify.sh [FILE|DIR]...
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WORK="${WORK:-/home/user/rs-vol/testdata/scratch/xzperf}"
+WORK="${WORK:-/home/user/fvol/testdata/scratch/xzperf}"
 mkdir -p "$WORK"
 rustc --edition 2024 -C opt-level=3 -C target-cpu=native -C codegen-units=1 \
     -o "$WORK/codec_xz_verify" "$HERE/codec_xz_micro.rs" || exit 1
-[ $# -eq 0 ] && set -- /home/user/rs-vol/testdata/scratch/codecs/corpus /home/user/rs-vol/testdata/symbols \
+[ $# -eq 0 ] && set -- /home/user/fvol/testdata/scratch/codecs/corpus /home/user/fvol/testdata/symbols \
     "$HOME/.cache/volatility3/symbols"
 n=0
 bad=0

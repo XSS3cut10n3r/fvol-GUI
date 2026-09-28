@@ -86,7 +86,7 @@ pub(crate) fn bench_rule(name: &str) -> Vec<(Vec<u8>, Modifiers)> {
         "big" => {
             // 400 distinct identifiers from the volatility3 sources (rarely in memory).
             let mut ids = std::collections::BTreeSet::new();
-            let mut stack = vec![std::path::PathBuf::from("/home/user/rs-vol/volatility3/volatility3/framework")];
+            let mut stack = vec![std::path::PathBuf::from("/home/user/fvol/volatility3/volatility3/framework")];
             while let Some(d) = stack.pop() {
                 let Ok(rd) = std::fs::read_dir(&d) else { continue };
                 for e in rd.flatten() {

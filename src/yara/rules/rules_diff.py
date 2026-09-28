@@ -9,7 +9,7 @@ evaluator) and compares the serialized results (matching rules, namespace,
 tags, meta, strings / instances) and compile errors.
 
 usage: rules_diff.py [N] [SEED]
-  env PYTHON-side: needs yara-python (use /home/user/rs-vol/bench/venv/bin/python)
+  env PYTHON-side: needs yara-python (use /home/user/fvol/bench/venv/bin/python)
 """
 import os
 import random
@@ -20,7 +20,7 @@ import yara
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRATE = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-WORK = os.environ.get("FASTVOL_YARA_RULES_WORK", "/home/user/rs-vol/testdata/scratch/yara")
+WORK = os.environ.get("FASTVOL_YARA_RULES_WORK", "/home/user/fvol/testdata/scratch/yara")
 
 ALPH = b"abAB x\x00"
 TEXTS = ["a", "b", "ab", "ba", "A", "aa", "x", "bA", "a b"]

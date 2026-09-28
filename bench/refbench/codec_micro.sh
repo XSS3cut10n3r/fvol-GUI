@@ -5,7 +5,7 @@
 # (run bench/refbench/run.sh once first to build the reference harness and the vectors)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WORK="${WORK:-/home/user/rs-vol/testdata/scratch/refbench}"
+WORK="${WORK:-/home/user/fvol/testdata/scratch/refbench}"
 REPS="${1:-9}"
 FILTER="${2:-}"
 export FASTVOL_BENCH_CPU="${FASTVOL_BENCH_CPU:-${RSVOL_BENCH_CPU:-2}}"

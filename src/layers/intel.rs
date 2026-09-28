@@ -1688,7 +1688,7 @@ mod tests {
         use crate::context::{Context, GlobalOptions};
         let opts = GlobalOptions {
             file: Some(image.to_string()),
-            symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()],
+            symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()],
             ..Default::default()
         };
         let ctx: &'static Context = Box::leak(Box::new(Context::new(opts).unwrap()));
@@ -1735,12 +1735,12 @@ mod tests {
     fn walk_ranges_images() {
         let images = [
             "/home/user/cbc2/task2/memory-dirty.raw",
-            "/home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw",
-            "/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf",
-            "/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.lime",
-            "/home/user/rs-vol/testdata/images/linux/rsvol-jammy-5.15.0-191.elf",
-            "/home/user/rs-vol/testdata/images/linux/rsvol-jammy-5.15.0-191.lime",
-            "/home/user/rs-vol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp",
+            "/home/user/fvol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw",
+            "/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf",
+            "/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.lime",
+            "/home/user/fvol/testdata/images/linux/rsvol-jammy-5.15.0-191.elf",
+            "/home/user/fvol/testdata/images/linux/rsvol-jammy-5.15.0-191.lime",
+            "/home/user/fvol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp",
         ];
         for image in images {
             let t0 = std::time::Instant::now();

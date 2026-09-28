@@ -36,7 +36,7 @@ fn check_block(what: &str, got: &str, exp: &[&str], bad: &mut usize, total: &mut
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let refdir = args.get(1).cloned().unwrap_or_else(|| "/home/user/rs-vol/bench/ref/py".into());
+    let refdir = args.get(1).cloned().unwrap_or_else(|| "/home/user/fvol/bench/ref/py".into());
     let image = args.get(2).cloned().unwrap_or_else(|| "/home/user/cbc2/task2/memory-dirty.raw".into());
 
     // ---------------------------------------------------------------- malfind

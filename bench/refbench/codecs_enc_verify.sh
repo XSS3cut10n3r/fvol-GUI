@@ -5,7 +5,7 @@
 #
 #   bench/refbench/codecs_enc_verify.sh [-l LEVEL] FILE...      (LEVEL default: 9 gz/bz2, 6 xz)
 #
-# Outputs go to $OUT (default /home/user/rs-vol/testdata/scratch/codecs_enc_verify, on disk).
+# Outputs go to $OUT (default /home/user/fvol/testdata/scratch/codecs_enc_verify, on disk).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -17,11 +17,11 @@ while getopts "l:" o; do
     esac
 done
 shift $((OPTIND - 1))
-OUT=${OUT:-/home/user/rs-vol/testdata/scratch/codecs_enc_verify}
-PY=${PY:-/home/user/rs-vol/bench/venv/bin/python}
-LIMIT=${LIMIT:-/home/user/rs-vol/bench/scripts/limit.sh}
+OUT=${OUT:-/home/user/fvol/testdata/scratch/codecs_enc_verify}
+PY=${PY:-/home/user/fvol/bench/venv/bin/python}
+LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
 mkdir -p "$OUT"
-BIN=$(cd "$ROOT" && /home/user/rs-vol/bench/scripts/cargo.sh test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
+BIN=$(cd "$ROOT" && /home/user/fvol/bench/scripts/cargo.sh test --release --no-run 2>&1 | grep -oE 'Executable .*\((.*)\)' | sed -E 's/.*\((.*)\)/\1/' | head -1)
 BIN="$ROOT/$BIN"
 fail=0
 for f in "$@"; do

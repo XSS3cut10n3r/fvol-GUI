@@ -4,18 +4,18 @@
 # Mirrors bench/scripts/py_refs.sh (the Windows equivalent) but for Linux images.
 IMG=${IMG:?set IMG to the memory image path}
 NAME=${NAME:?set NAME to the image short name}
-SYM=${SYM:-/home/user/rs-vol/testdata/symbols}
-VOL=/home/user/rs-vol/volatility3/vol.py
-PY=/home/user/rs-vol/bench/venv/bin/python
-OUT=/home/user/rs-vol/bench/ref/linux/$NAME
-LIST=${LIST:-/home/user/rs-vol/bench/linux_noarg.txt}
+SYM=${SYM:-/home/user/fvol/testdata/symbols}
+VOL=/home/user/fvol/volatility3/vol.py
+PY=/home/user/fvol/bench/venv/bin/python
+OUT=/home/user/fvol/bench/ref/linux/$NAME
+LIST=${LIST:-/home/user/fvol/bench/linux_noarg.txt}
 mkdir -p "$OUT"
 run() {
   p=$1
   [ -s "$OUT/$p.txt" ] && return
   d=$OUT/dump/$p; mkdir -p "$d"
   s=$(date +%s.%N)
-  /home/user/rs-vol/bench/scripts/limit.sh -m 8G timeout 3600 nice -n 10 "$PY" "$VOL" -q -s "$SYM" -o "$d" -f "$IMG" "$p" > "$OUT/$p.tmp" 2> "$OUT/$p.err"
+  /home/user/fvol/bench/scripts/limit.sh -m 8G timeout 3600 nice -n 10 "$PY" "$VOL" -q -s "$SYM" -o "$d" -f "$IMG" "$p" > "$OUT/$p.tmp" 2> "$OUT/$p.err"
   rc=$?
   e=$(date +%s.%N)
   mv "$OUT/$p.tmp" "$OUT/$p.txt"

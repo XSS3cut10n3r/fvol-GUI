@@ -33,7 +33,7 @@ from collections import Counter
 
 import capstone
 
-DEFAULT_OUT = "/home/user/rs-vol/testdata/scratch/disasm/arm"
+DEFAULT_OUT = "/home/user/fvol/testdata/scratch/disasm/arm"
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ELF_ROOTS = ["/usr/lib/go/src", "/opt/metasploit", "/home/user/.rustup/toolchains", "/usr/share/proxmark3",
              "/usr/lib", "/usr/share"]

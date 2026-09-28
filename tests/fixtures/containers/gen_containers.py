@@ -22,7 +22,7 @@ import random
 import struct
 import sys
 
-sys.path.insert(0, "/home/user/rs-vol/volatility3")
+sys.path.insert(0, "/home/user/fvol/volatility3")
 sys.dont_write_bytecode = True
 
 from volatility3 import framework  # noqa: E402

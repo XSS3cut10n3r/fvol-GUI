@@ -28,9 +28,9 @@ from multiprocessing import Pool
 import capstone
 
 MODES = {32: capstone.CS_MODE_32, 64: capstone.CS_MODE_64}
-DEFAULT_OUT = "/home/user/rs-vol/testdata/scratch/disasm/ref"  # on disk: /tmp is RAM-backed
+DEFAULT_OUT = "/home/user/fvol/testdata/scratch/disasm/ref"  # on disk: /tmp is RAM-backed
 DEFAULT_PE = [
-    "/home/user/rs-vol/testdata/scratch/disasm/pe",
+    "/home/user/fvol/testdata/scratch/disasm/pe",
 ]
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 

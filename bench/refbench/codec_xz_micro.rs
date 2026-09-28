@@ -61,7 +61,7 @@ pub(crate) fn try_zeroed(n: usize) -> crate::error::Result<Vec<u8>> {
 /// Previous decoder for A/B runs: $WORK/old/mod.rs holds `pub mod lzma; pub mod xz; pub use
 /// crate::{crc, try_zeroed};` next to copies of the old lzma.rs and xz.rs.
 #[cfg(old_lzma)]
-#[path = "/home/user/rs-vol/testdata/scratch/xzperf/old/mod.rs"]
+#[path = "/home/user/fvol/testdata/scratch/xzperf/old/mod.rs"]
 mod old;
 
 fn pin(cpu: usize) {

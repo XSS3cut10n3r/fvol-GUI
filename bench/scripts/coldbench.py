@@ -55,8 +55,8 @@ if opt("--py-cache"):
     FASTVOL_ARGS = ["--cache-path", os.path.abspath(opt("--py-cache"))] + FASTVOL_ARGS
 FASTVOL_ENV = dict(kv.split("=", 1) for kv in (opt("--fastvol-env") or opt("--rsvol-env") or "").split(",") if kv)
 VOLRS = os.path.expanduser("~/cbc2/vol-rs/target/release/vol-rs")
-SYMS = "/home/user/rs-vol/testdata/symbols"
-T = "/home/user/rs-vol/testdata/images"
+SYMS = "/home/user/fvol/testdata/symbols"
+T = "/home/user/fvol/testdata/images"
 CASES = [
     ("win-main pslist", "/home/user/cbc2/task2/memory-dirty.raw", "windows.pslist", []),
     ("win-main info", "/home/user/cbc2/task2/memory-dirty.raw", "windows.info", []),

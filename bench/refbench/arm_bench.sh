@@ -5,7 +5,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
-BIN=${ARM_BENCH_BIN:-/home/user/rs-vol/testdata/scratch/disasm/arm/bin}
+BIN=${ARM_BENCH_BIN:-/home/user/fvol/testdata/scratch/disasm/arm/bin}
 mkdir -p "$BIN"
 gcc -O3 -march=native -o "$BIN/arm_bench" "$HERE/arm_bench.c" -lcapstone
 (cd "$REPO" && cargo build -q --release --example disasm_diff_arm)

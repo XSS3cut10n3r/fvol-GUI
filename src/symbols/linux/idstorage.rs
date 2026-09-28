@@ -531,7 +531,7 @@ mod pagecache_tests {
         let image = crate::util::env::var("BENCH_IMAGE").unwrap();
         let addr = u64::from_str_radix(crate::util::env::var("INODE").unwrap().trim_start_matches("0x"), 16).unwrap();
         let out = crate::util::env::var("TEST_OUT").unwrap();
-        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/rs-vol/testdata/symbols".into()], ..Default::default() };
+        let opts = GlobalOptions { file: Some(image), symbol_dirs: vec!["/home/user/fvol/testdata/symbols".into()], ..Default::default() };
         let ctx = Context::new(opts).unwrap();
         let k = ctx.linux_kernel().unwrap();
         let inode = k.object_abs("inode", addr).unwrap();

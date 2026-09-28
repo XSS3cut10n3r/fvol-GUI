@@ -8,7 +8,7 @@ variants (file names and contents), string / regex / YARA options, invalid value
 bad regexes, missing files), every renderer, and the global options (--filters, --hide-columns,
 -o name collisions, --single-location, --save-config / -c round trips).
 
-Run with /home/user/rs-vol/bench/venv/bin/python (yara-python builds the compiled-rules input):
+Run with /home/user/fvol/bench/venv/bin/python (yara-python builds the compiled-rules input):
 
     sweep.py gen    [-i IMG ...]                        write the case lists
     sweep.py py     [-i IMG ...] [-m RE] [-j 2] [--max-est 600] [--force]
@@ -23,7 +23,7 @@ runs once and is cached; `py` never runs more than -j (at most 2) python process
 limit.sh with an 8G cap and a 10 min timeout. Cases whose estimated python time (the plugin's
 no-argument time on that image) exceeds --max-est are skipped.
 
-Layout under /home/user/rs-vol/testdata/scratch/sweep/:
+Layout under /home/user/fvol/testdata/scratch/sweep/:
     inputs/            YARA rules, strings files and other inputs shared by both sides
     harvest/IMG.json   the real values (PIDs, offsets, bases, ...) the cases were built from
     cases/IMG.jsonl    one case per line: id, argv, mode, est
@@ -52,7 +52,7 @@ import sys
 import threading
 import time
 
-ROOT = "/home/user/rs-vol"
+ROOT = "/home/user/fvol"
 HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCR = ROOT + "/testdata/scratch/sweep"
 PY = ROOT + "/bench/venv/bin/python"

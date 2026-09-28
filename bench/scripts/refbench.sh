@@ -27,9 +27,9 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$(dirname "$HERE")")
-LIMIT=${LIMIT:-/home/user/rs-vol/bench/scripts/limit.sh}
+LIMIT=${LIMIT:-/home/user/fvol/bench/scripts/limit.sh}
 [ -x "$LIMIT" ] || LIMIT=$ROOT/bench/scripts/limit.sh
-PY=${PY:-/home/user/rs-vol/bench/venv/bin/python}
+PY=${PY:-/home/user/fvol/bench/venv/bin/python}
 IMG=/home/user/cbc2/task2/memory-dirty.raw
 OFF=1G; LEN=1G; PYLEN=; REPS=5; YREPS=3; PYREPS=3
 PROFILE=release; DO_REGEX=1; DO_YARA=1; DO_PY=1; ONLY=; ROUNDS=1; CPU=

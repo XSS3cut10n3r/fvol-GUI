@@ -43,7 +43,7 @@ import sys
 import tarfile
 import time
 
-ROOT = "/home/user/rs-vol"
+ROOT = "/home/user/fvol"
 SCR = ROOT + "/testdata/scratch/dumpgate"
 PY = ROOT + "/bench/venv/bin/python"
 VOLPY = ROOT + "/volatility3/vol.py"

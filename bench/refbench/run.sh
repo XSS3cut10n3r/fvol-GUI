@@ -13,7 +13,7 @@ RAW="${1:-/home/user/cbc2/task2/memory-dirty.raw}"
 N="${2:-2048}"
 REPS="${3:-7}"
 export FASTVOL_BENCH_CPU="${FASTVOL_BENCH_CPU:-${RSVOL_BENCH_CPU:-2}}"   # pin both sides to one P-core
-WORK="${WORK:-/home/user/rs-vol/testdata/scratch/refbench}"   # on disk, not tmpfs
+WORK="${WORK:-/home/user/fvol/testdata/scratch/refbench}"   # on disk, not tmpfs
 mkdir -p "$WORK"
 cd "$WORK"
 
@@ -33,5 +33,5 @@ gcc -O3 -march=native -o refbench "$HERE/refbench.c" lzxpress.c \
 [ -f snappy.vec ] || ./refbench mkvec "$RAW" "$WORK" "$N"
 ./refbench bench "$WORK" "$REPS"
 cd "$ROOT"
-FASTVOL_CODEC_BENCH="$WORK" FASTVOL_BENCH_REPS="$REPS" /home/user/rs-vol/bench/scripts/cargo.sh test --release codec_bench -- --ignored --nocapture 2>/dev/null \
+FASTVOL_CODEC_BENCH="$WORK" FASTVOL_BENCH_REPS="$REPS" /home/user/fvol/bench/scripts/cargo.sh test --release codec_bench -- --ignored --nocapture 2>/dev/null \
     | grep -E "fastvol"

@@ -861,7 +861,7 @@ mod tests {
     fn verinfo_matches_python_reference() {
         use crate::context::GlobalOptions;
         let img = crate::util::env::var("BENCH_IMG").unwrap_or_else(|_| "/home/user/cbc2/task2/memory-dirty.raw".into());
-        let reference = std::fs::read_to_string("/home/user/rs-vol/bench/ref/py/windows.verinfo.VerInfo.txt").unwrap();
+        let reference = std::fs::read_to_string("/home/user/fvol/bench/ref/py/windows.verinfo.VerInfo.txt").unwrap();
         let mut want = std::collections::HashMap::new();
         for line in reference.lines() {
             let f: Vec<&str> = line.split('\t').collect();

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pillow oracle corpus for src/codecs/png.rs (png_rgba_pillow).
 
-    /home/user/rs-vol/bench/venv/bin/python bench/refbench/png_pillow_oracle.py OUTDIR [--quick]
+    /home/user/fvol/bench/venv/bin/python bench/refbench/png_pillow_oracle.py OUTDIR [--quick]
     PNG_CORPUS=OUTDIR cargo test --profile fast png_pillow_corpus -- --ignored --nocapture
 
 For every synthetic RGBA image writes OUTDIR/NAME_WxH.rgba (raw pixels) and OUTDIR/NAME_WxH.png,

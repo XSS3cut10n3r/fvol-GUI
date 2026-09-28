@@ -2,7 +2,7 @@
 """Golden PNGs for src/codecs/png.rs, written by Pillow exactly like linux.graphics.fbdev does
 (Image.new("RGBA") + putpixel for every pixel + save(BytesIO, "PNG")). Pillow 12.3.0, zlib 1.3.2.
 
-    /home/user/rs-vol/bench/venv/bin/python tests/fixtures/codecs/gen_png.py
+    /home/user/fvol/bench/venv/bin/python tests/fixtures/codecs/gen_png.py
 """
 import io
 import os

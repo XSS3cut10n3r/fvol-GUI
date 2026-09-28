@@ -9,7 +9,7 @@ set -euo pipefail
 OUT="$(mkdir -p "$1" && cd "$1" && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 IMAGE="${IMAGE:-rsvol-qemu}"
-PY="${PY:-/home/user/rs-vol/bench/venv/bin/python}"
+PY="${PY:-/home/user/fvol/bench/venv/bin/python}"
 
 run_vm() { # name machine mem
     local name="$1" machine="$2" mem="$3"

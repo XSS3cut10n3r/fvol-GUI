@@ -15,7 +15,7 @@
 # rows of sub-plugins that failed. References therefore run with their own --cache-path (downloads still
 # land in the first -s dir; ~/.cache/volatility3/symbols stays on python's symbol path).
 # Retry pass: rc!=0 runs whose .err shows such a symbol/cache failure are re-run (RETRIES times, default 2).
-ROOT=/home/user/rs-vol
+ROOT=/home/user/fvol
 MANIFEST=${MANIFEST:-$ROOT/bench/images.tsv}
 LISTOVR=
 if [ "$1" = "-l" ]; then LISTOVR=$2; shift 2; fi

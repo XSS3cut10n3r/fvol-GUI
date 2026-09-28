@@ -13,33 +13,33 @@
 #               plugin of the default list that has a reference file, so they need no list column.
 # Provenance + details of each image: testdata/README.md
 # name	os	image_path	symbol_args	ref_dir	[plugin_list]
-win10-17763-imagery	windows	/home/user/rs-vol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw	-	/home/user/rs-vol/bench/ref/win1809
-winxp-sp2-x86	windows	/home/user/rs-vol/testdata/images/windows/vol3-winxp-sp2-x86-laptop-2005-06-25.img	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/winxp-sp2-x86
-winxp-sp3-x86-crash	windows	/home/user/rs-vol/testdata/images/windows/m57-pat-xp-sp3-x86-2009-12-11.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/winxp-sp3-x86-crash
-win2003-x86	windows	/home/user/rs-vol/testdata/images/windows/nist-boomer-win2003-x86-2006-03-17.img	-s /home/user/rs-vol/testdata/symbols;/home/user/rs-vol/testdata/symbols-extra	/home/user/rs-vol/bench/ref/windows/win2003-x86
-vista-sp2-x86-crash	windows	/home/user/rs-vol/testdata/images/windows/m57-terry-vista-sp2-x86-2009-12-11.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/vista-sp2-x86-crash
-win7sp1-x86-pae	windows	/home/user/rs-vol/testdata/images/windows/memlabs-lab0-win7sp1-x86.raw	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win7sp1-x86-pae
-win7sp1-x64	windows	/home/user/rs-vol/testdata/images/windows/memlabs-lab1-win7sp1-x64.raw	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win7sp1-x64
-win2012r2-x64	windows	/home/user/rs-vol/testdata/images/windows/dfirmadness-citadeldc01-win2012r2-x64.mem	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win2012r2-x64
-win10-19041-x64-crash	windows	/home/user/rs-vol/testdata/images/windows/vol3-win10-19041-x64-2025_03.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win10-19041-x64-crash
-win2008-sp1-x86-pae	windows	/home/user/rs-vol/testdata/images/windows/samsclass-win2008-sp1-x86-memdump.mem	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win2008-sp1-x86-pae
-win11-24h2-26100-x64-crash	windows	/home/user/rs-vol/testdata/images/windows/13cubed-challenge-win11-24h2-26100-x64.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win11-24h2-26100-x64-crash
-win7sp1-x64-fullcrash	windows	/home/user/rs-vol/testdata/images/windows/synth-memlabs-lab1-win7sp1-x64-full.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win7sp1-x64-fullcrash	win_fmt_noarg.txt
-win7sp1-x86-pae-bitmapcrash	windows	/home/user/rs-vol/testdata/images/windows/synth-memlabs-lab0-win7sp1-x86-bitmap.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/windows/win7sp1-x86-pae-bitmapcrash	win_fmt_noarg.txt
-noble-6.8-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/rsvol-noble-6.8.0-139-elf
-noble-6.8-lime	linux	/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.8.0-139.lime	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/rsvol-noble-6.8.0-139-lime
-jammy-5.15-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-jammy-5.15.0-191.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/rsvol-jammy-5.15.0-191-elf
-jammy-5.15-lime	linux	/home/user/rs-vol/testdata/images/linux/rsvol-jammy-5.15.0-191.lime	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/rsvol-jammy-5.15.0-191-lime
-debian7-3.2-x64	linux	/home/user/rs-vol/testdata/images/linux/vol3-linux-sample-1-debian7-3.2.0-4-amd64.bin	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/debian7-3.2-x64
-bionic64-4.15-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-bionic64-4.15.0-212.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/bionic64-4.15-elf
-bionic64-4.15-vmem	linux	/home/user/rs-vol/testdata/images/linux/rsvol-bionic64-4.15.0-212.vmem	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/bionic64-4.15-vmem	linux_fmt_noarg.txt
-bionic64-4.15-avml	linux	/home/user/rs-vol/testdata/images/linux/rsvol-bionic64-4.15.0-212.avml	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/bionic64-4.15-avml	linux_fmt_noarg.txt
-bionic32-4.15-pae-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-bionic32-4.15.0-212-i386.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/bionic32-4.15-pae-elf
-bionic32-4.15-pae-lime	linux	/home/user/rs-vol/testdata/images/linux/rsvol-bionic32-4.15.0-212-i386.lime	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/bionic32-4.15-pae-lime	linux_fmt_noarg.txt
-deb12-6.1-686-raw	linux	/home/user/rs-vol/testdata/images/linux/rsvol-deb12-6.1.0-50-686.raw	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/deb12-6.1-686-raw
-deb12-6.1-686-lime	linux	/home/user/rs-vol/testdata/images/linux/rsvol-deb12-6.1.0-50-686.lime	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/deb12-6.1-686-lime	linux_fmt_noarg.txt
-noble-6.17-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.17.0-42.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/noble-6.17-elf
-noble-6.17-qemu	linux	/home/user/rs-vol/testdata/images/linux/rsvol-noble-6.17.0-42.qemu	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/noble-6.17-qemu	linux_fmt_noarg.txt
-resolute-7.0-elf	linux	/home/user/rs-vol/testdata/images/linux/rsvol-resolute-7.0.0-31.elf	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/linux/resolute-7.0-elf
-mac-10.9.2	mac	/home/user/rs-vol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/mac/rsvol-mac-mavericks-10.9.2
-mac-10.12.6	mac	/home/user/rs-vol/testdata/images/mac/securinets2019-contact_me-macos-10.12.6.raw	-s /home/user/rs-vol/testdata/symbols	/home/user/rs-vol/bench/ref/mac/mac-10.12.6
+win10-17763-imagery	windows	/home/user/fvol/testdata/images/windows/rsvol-win10-x64-17763-imagery.raw	-	/home/user/fvol/bench/ref/win1809
+winxp-sp2-x86	windows	/home/user/fvol/testdata/images/windows/vol3-winxp-sp2-x86-laptop-2005-06-25.img	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/winxp-sp2-x86
+winxp-sp3-x86-crash	windows	/home/user/fvol/testdata/images/windows/m57-pat-xp-sp3-x86-2009-12-11.dmp	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/winxp-sp3-x86-crash
+win2003-x86	windows	/home/user/fvol/testdata/images/windows/nist-boomer-win2003-x86-2006-03-17.img	-s /home/user/fvol/testdata/symbols;/home/user/fvol/testdata/symbols-extra	/home/user/fvol/bench/ref/windows/win2003-x86
+vista-sp2-x86-crash	windows	/home/user/fvol/testdata/images/windows/m57-terry-vista-sp2-x86-2009-12-11.dmp	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/vista-sp2-x86-crash
+win7sp1-x86-pae	windows	/home/user/fvol/testdata/images/windows/memlabs-lab0-win7sp1-x86.raw	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win7sp1-x86-pae
+win7sp1-x64	windows	/home/user/fvol/testdata/images/windows/memlabs-lab1-win7sp1-x64.raw	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win7sp1-x64
+win2012r2-x64	windows	/home/user/fvol/testdata/images/windows/dfirmadness-citadeldc01-win2012r2-x64.mem	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win2012r2-x64
+win10-19041-x64-crash	windows	/home/user/fvol/testdata/images/windows/vol3-win10-19041-x64-2025_03.dmp	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win10-19041-x64-crash
+win2008-sp1-x86-pae	windows	/home/user/fvol/testdata/images/windows/samsclass-win2008-sp1-x86-memdump.mem	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win2008-sp1-x86-pae
+win11-24h2-26100-x64-crash	windows	/home/user/fvol/testdata/images/windows/13cubed-challenge-win11-24h2-26100-x64.dmp	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win11-24h2-26100-x64-crash
+win7sp1-x64-fullcrash	windows	/home/user/fvol/testdata/images/windows/synth-memlabs-lab1-win7sp1-x64-full.dmp	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win7sp1-x64-fullcrash	win_fmt_noarg.txt
+win7sp1-x86-pae-bitmapcrash	windows	/home/user/fvol/testdata/images/windows/synth-memlabs-lab0-win7sp1-x86-bitmap.dmp	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/windows/win7sp1-x86-pae-bitmapcrash	win_fmt_noarg.txt
+noble-6.8-elf	linux	/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.elf	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/rsvol-noble-6.8.0-139-elf
+noble-6.8-lime	linux	/home/user/fvol/testdata/images/linux/rsvol-noble-6.8.0-139.lime	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/rsvol-noble-6.8.0-139-lime
+jammy-5.15-elf	linux	/home/user/fvol/testdata/images/linux/rsvol-jammy-5.15.0-191.elf	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/rsvol-jammy-5.15.0-191-elf
+jammy-5.15-lime	linux	/home/user/fvol/testdata/images/linux/rsvol-jammy-5.15.0-191.lime	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/rsvol-jammy-5.15.0-191-lime
+debian7-3.2-x64	linux	/home/user/fvol/testdata/images/linux/vol3-linux-sample-1-debian7-3.2.0-4-amd64.bin	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/debian7-3.2-x64
+bionic64-4.15-elf	linux	/home/user/fvol/testdata/images/linux/rsvol-bionic64-4.15.0-212.elf	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/bionic64-4.15-elf
+bionic64-4.15-vmem	linux	/home/user/fvol/testdata/images/linux/rsvol-bionic64-4.15.0-212.vmem	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/bionic64-4.15-vmem	linux_fmt_noarg.txt
+bionic64-4.15-avml	linux	/home/user/fvol/testdata/images/linux/rsvol-bionic64-4.15.0-212.avml	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/bionic64-4.15-avml	linux_fmt_noarg.txt
+bionic32-4.15-pae-elf	linux	/home/user/fvol/testdata/images/linux/rsvol-bionic32-4.15.0-212-i386.elf	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/bionic32-4.15-pae-elf
+bionic32-4.15-pae-lime	linux	/home/user/fvol/testdata/images/linux/rsvol-bionic32-4.15.0-212-i386.lime	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/bionic32-4.15-pae-lime	linux_fmt_noarg.txt
+deb12-6.1-686-raw	linux	/home/user/fvol/testdata/images/linux/rsvol-deb12-6.1.0-50-686.raw	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/deb12-6.1-686-raw
+deb12-6.1-686-lime	linux	/home/user/fvol/testdata/images/linux/rsvol-deb12-6.1.0-50-686.lime	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/deb12-6.1-686-lime	linux_fmt_noarg.txt
+noble-6.17-elf	linux	/home/user/fvol/testdata/images/linux/rsvol-noble-6.17.0-42.elf	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/noble-6.17-elf
+noble-6.17-qemu	linux	/home/user/fvol/testdata/images/linux/rsvol-noble-6.17.0-42.qemu	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/noble-6.17-qemu	linux_fmt_noarg.txt
+resolute-7.0-elf	linux	/home/user/fvol/testdata/images/linux/rsvol-resolute-7.0.0-31.elf	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/linux/resolute-7.0-elf
+mac-10.9.2	mac	/home/user/fvol/testdata/images/mac/rsvol-mac-mavericks-10.9.2-13C64.dmp	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/mac/rsvol-mac-mavericks-10.9.2
+mac-10.12.6	mac	/home/user/fvol/testdata/images/mac/securinets2019-contact_me-macos-10.12.6.raw	-s /home/user/fvol/testdata/symbols	/home/user/fvol/bench/ref/mac/mac-10.12.6

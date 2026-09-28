@@ -9,9 +9,9 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 ARCH=$1
 shift
-WORK=${1:-/home/user/rs-vol/testdata/scratch/disasm/arm}
+WORK=${1:-/home/user/fvol/testdata/scratch/disasm/arm}
 shift || true
-PY=/home/user/rs-vol/bench/venv/bin/python
+PY=/home/user/fvol/bench/venv/bin/python
 case $ARCH in
   arm64) GEN=$HERE/gen_arm64_spec.py; SPEC=$WORK/s64.json; OUT=$REPO/src/disasm/arm64/spec_data.rs;;
   arm)   GEN=$HERE/gen_arm32_spec.py; SPEC=$WORK/s32.json; OUT=$REPO/src/disasm/arm/spec_data.rs;;

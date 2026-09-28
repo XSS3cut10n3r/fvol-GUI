@@ -16,7 +16,7 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, "/home/user/rs-vol/volatility3")
+sys.path.insert(0, "/home/user/fvol/volatility3")
 sys.dont_write_bytecode = True
 PAGE = 0x1000
 MB = 1 << 20
