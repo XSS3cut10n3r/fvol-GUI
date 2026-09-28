@@ -18,61 +18,61 @@ text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Hel
 </style>
 <rect x=".5" y=".5" width="839" height="583" rx="12" fill="#ffffff" stroke="#d1d9e0"/>
 <text x="28" y="42" class="title">Time for a triage session</text>
-<text x="28" y="64" class="sub">The common plugins run one after another, each as its own process. Log scale: each gridline is 10x. Shorter is faster.</text>
+<text x="28" y="64" class="sub">The common plugins run one after another, each as its own process. Linear scale: shorter is faster.</text>
 <text x="28" y="84" class="sub">Measured on a desktop: Intel Core i7-12700KF (12 cores, 20 threads), 64 GB RAM, NVMe SSD, Linux 7.1.8.</text>
 <text x="28" y="122" class="h">Windows 11 x64, 5 GiB raw image · 12 plugins in a row</text>
 <path d="M256.0 132V262" class="grid"/>
-<path d="M352.0 132V262" class="grid"/>
-<path d="M448.0 132V262" class="grid"/>
-<path d="M544.0 132V262" class="grid"/>
-<path d="M640.0 132V262" class="grid"/>
+<path d="M370.9 132V262" class="grid"/>
+<path d="M485.8 132V262" class="grid"/>
+<path d="M600.7 132V262" class="grid"/>
+<path d="M715.6 132V262" class="grid"/>
 <text x="28" y="149.5" class="tool">python volatility3</text>
 <text x="164" y="149.5" class="run">every session</text>
-<path fill="#8c959f" d="M256 139.0H614.4A4 4 0 0 1 618.4 143.0V147.0A4 4 0 0 1 614.4 151.0H256Z"/>
-<text x="625.4" y="149.5" class="val">59.5 s</text>
+<path fill="#8c959f" d="M256 139.0H593.9A4 4 0 0 1 597.9 143.0V147.0A4 4 0 0 1 593.9 151.0H256Z"/>
+<text x="604.9" y="149.5" class="val">59.5 s</text>
 <text x="28" y="190.5" class="tool">vol-rs</text>
 <text x="164" y="179.5" class="run">first session</text>
-<path fill="#c5ccd4" d="M256 169.0H498.7A4 4 0 0 1 502.7 173.0V177.0A4 4 0 0 1 498.7 181.0H256Z"/>
-<text x="509.7" y="179.5" class="val">3.71 s</text>
+<path fill="#c5ccd4" d="M256 169.0H273.3A4 4 0 0 1 277.3 173.0V177.0A4 4 0 0 1 273.3 181.0H256Z"/>
+<text x="284.3" y="179.5" class="val">3.71 s</text>
 <text x="164" y="201.5" class="run">repeat session</text>
-<path fill="#8c959f" d="M256 191.0H495.5A4 4 0 0 1 499.5 195.0V199.0A4 4 0 0 1 495.5 203.0H256Z"/>
-<text x="506.5" y="201.5" class="val">3.44 s</text>
+<path fill="#8c959f" d="M256 191.0H271.8A4 4 0 0 1 275.8 195.0V199.0A4 4 0 0 1 271.8 203.0H256Z"/>
+<text x="282.8" y="201.5" class="val">3.44 s</text>
 <text x="28" y="242.5" class="tool b">fastvol</text>
 <text x="164" y="231.5" class="run">first session</text>
-<path fill="#8fd9a8" d="M256 221.0H357.6A4 4 0 0 1 361.6 225.0V229.0A4 4 0 0 1 357.6 233.0H256Z"/>
-<text x="368.6" y="231.5" class="val b">126 ms<tspan class="note" dx="8">473x faster than python</tspan></text>
+<path fill="#8fd9a8" d="M256 221.0H257.5A1.5 1.5 0 0 1 259.0 222.5V231.5A1.5 1.5 0 0 1 257.5 233.0H256Z"/>
+<text x="266.0" y="231.5" class="val b">126 ms<tspan class="note" dx="8">473x faster than python</tspan></text>
 <text x="164" y="253.5" class="run">repeat session</text>
-<path fill="#1f9e57" d="M256 243.0H304.3A4 4 0 0 1 308.3 247.0V251.0A4 4 0 0 1 304.3 255.0H256Z"/>
-<text x="315.3" y="253.5" class="val b">35.1 ms<tspan class="note" dx="8">1,701x faster than python</tspan></text>
+<path fill="#1f9e57" d="M256 243.0H257.5A1.5 1.5 0 0 1 259.0 244.5V253.5A1.5 1.5 0 0 1 257.5 255.0H256Z"/>
+<text x="266.0" y="253.5" class="val b">35.1 ms<tspan class="note" dx="8">1,701x faster than python</tspan></text>
 <text x="28" y="300" class="h">Ubuntu 24.04, Linux 6.8, 3 GiB ELF core · 10 plugins in a row</text>
 <path d="M256.0 310V440" class="grid"/>
-<path d="M352.0 310V440" class="grid"/>
-<path d="M448.0 310V440" class="grid"/>
-<path d="M544.0 310V440" class="grid"/>
-<path d="M640.0 310V440" class="grid"/>
+<path d="M370.9 310V440" class="grid"/>
+<path d="M485.8 310V440" class="grid"/>
+<path d="M600.7 310V440" class="grid"/>
+<path d="M715.6 310V440" class="grid"/>
 <text x="28" y="327.5" class="tool">python volatility3</text>
 <text x="164" y="327.5" class="run">every session</text>
-<path fill="#8c959f" d="M256 317.0H627.1A4 4 0 0 1 631.1 321.0V325.0A4 4 0 0 1 627.1 329.0H256Z"/>
-<text x="638.1" y="327.5" class="val">80.8 s</text>
+<path fill="#8c959f" d="M256 317.0H716.0A4 4 0 0 1 720.0 321.0V325.0A4 4 0 0 1 716.0 329.0H256Z"/>
+<text x="727.0" y="327.5" class="val">80.8 s</text>
 <text x="28" y="368.5" class="tool">vol-rs</text>
 <text x="164" y="357.5" class="run">first session</text>
-<path fill="#c5ccd4" d="M256 347.0H486.3A4 4 0 0 1 490.3 351.0V355.0A4 4 0 0 1 486.3 359.0H256Z"/>
-<text x="497.3" y="357.5" class="val">2.76 s</text>
+<path fill="#c5ccd4" d="M256 347.0H267.8A4 4 0 0 1 271.8 351.0V355.0A4 4 0 0 1 267.8 359.0H256Z"/>
+<text x="278.8" y="357.5" class="val">2.76 s</text>
 <text x="164" y="379.5" class="run">repeat session</text>
-<path fill="#8c959f" d="M256 369.0H455.7A4 4 0 0 1 459.7 373.0V377.0A4 4 0 0 1 455.7 381.0H256Z"/>
-<text x="466.7" y="379.5" class="val">1.32 s</text>
+<path fill="#8c959f" d="M256 369.0H259.8A3.8011503782909983 3.8011503782909983 0 0 1 263.6 372.8V377.2A3.8011503782909983 3.8011503782909983 0 0 1 259.8 381.0H256Z"/>
+<text x="270.6" y="379.5" class="val">1.32 s</text>
 <text x="28" y="420.5" class="tool b">fastvol</text>
 <text x="164" y="409.5" class="run">first session</text>
-<path fill="#8fd9a8" d="M256 399.0H382.2A4 4 0 0 1 386.2 403.0V407.0A4 4 0 0 1 382.2 411.0H256Z"/>
-<text x="393.2" y="409.5" class="val b">227 ms<tspan class="note" dx="8">356x faster than python</tspan></text>
+<path fill="#8fd9a8" d="M256 399.0H257.5A1.5 1.5 0 0 1 259.0 400.5V409.5A1.5 1.5 0 0 1 257.5 411.0H256Z"/>
+<text x="266.0" y="409.5" class="val b">227 ms<tspan class="note" dx="8">356x faster than python</tspan></text>
 <text x="164" y="431.5" class="run">repeat session</text>
-<path fill="#1f9e57" d="M256 421.0H302.0A4 4 0 0 1 306.0 425.0V429.0A4 4 0 0 1 302.0 433.0H256Z"/>
-<text x="313.0" y="431.5" class="val b">33.2 ms<tspan class="note" dx="8">2,489x faster than python</tspan></text>
-<text x="256.0" y="460" class="tick" text-anchor="middle">10 ms</text>
-<text x="352.0" y="460" class="tick" text-anchor="middle">100 ms</text>
-<text x="448.0" y="460" class="tick" text-anchor="middle">1 s</text>
-<text x="544.0" y="460" class="tick" text-anchor="middle">10 s</text>
-<text x="640.0" y="460" class="tick" text-anchor="middle">100 s</text>
+<path fill="#1f9e57" d="M256 421.0H257.5A1.5 1.5 0 0 1 259.0 422.5V431.5A1.5 1.5 0 0 1 257.5 433.0H256Z"/>
+<text x="266.0" y="431.5" class="val b">33.2 ms<tspan class="note" dx="8">2,489x faster than python</tspan></text>
+<text x="256.0" y="460" class="tick" text-anchor="middle">0</text>
+<text x="370.9" y="460" class="tick" text-anchor="middle">20 s</text>
+<text x="485.8" y="460" class="tick" text-anchor="middle">40 s</text>
+<text x="600.7" y="460" class="tick" text-anchor="middle">60 s</text>
+<text x="715.6" y="460" class="tick" text-anchor="middle">80 s</text>
 <text x="28" y="494" class="foot">Medians of repeated runs, image in the page cache. First session: the tool's cache empty at the start, as on a new image.</text>
 <text x="28" y="511" class="foot">Repeat: the same session again. python's symbol caches are warm in both.</text>
 <text x="28" y="528" class="foot">Every plugin once, per-plugin geometric-mean speedup over python (every scan really done):</text>

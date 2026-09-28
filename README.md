@@ -31,7 +31,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-dark.svg">
-    <img alt="Bar chart on a log scale of the time for a triage session (the common plugins run one after another), measured on an Intel Core i7-12700KF desktop. Windows 11, 12 plugins: python volatility3 59.5 s; vol-rs 3.71 s on a first session and 3.44 s on a repeat; fastvol 126 ms and 35.1 ms. Linux 6.8, 10 plugins: python 80.8 s; vol-rs 2.76 s and 1.32 s; fastvol 227 ms and 33.2 ms." src="docs/assets/benchmark.svg" width="840">
+    <img alt="Bar chart, linear time scale, of a triage session (the common plugins run one after another), measured on an Intel Core i7-12700KF desktop. Windows 11, 12 plugins: python volatility3 59.5 s; vol-rs 3.71 s on a first session and 3.44 s on a repeat; fastvol 126 ms and 35.1 ms. Linux 6.8, 10 plugins: python 80.8 s; vol-rs 2.76 s and 1.32 s; fastvol 227 ms and 33.2 ms." src="docs/assets/benchmark.svg" width="840">
   </picture>
 </p>
 

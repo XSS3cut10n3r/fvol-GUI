@@ -218,7 +218,9 @@ def machine_line(m):
 def build_chart():
     S = load_summary()
     W = 840
-    X_TOOL, X_RUN, X0, DECADE = 28, 164, 256, 96.0   # bars start at X0, 10x per DECADE px
+    X_TOOL, X_RUN, X0 = 28, 164, 256   # bars start at X0
+    BAR_W = W - X0 - 120               # linear scale: the axis maximum is BAR_W px
+    MIN_BAR = 3                        # the shortest bars stay visible
     ROW, BAR, GROUP_GAP = 22, 12, 8
     panels, values = [], []
     for os_name, image in PANELS:
@@ -240,15 +242,16 @@ def build_chart():
         values += [py, f["vr"]["total"], s2["vr"]["total"], f["fv"]["total"], s2["fv"]["total"]]
     if not panels:
         sys.exit(f"build.py: no triage results in {SUMMARY}")
-    lo = math.floor(math.log10(min(values)))
-    hi = math.ceil(math.log10(max(values)))
-    grid_ticks = [10.0 ** k for k in range(lo, hi + 1)]
+    # the longest bar spans the axis; ticks every 1, 2 or 5 x 10^k (at most 5 steps)
+    top_v = max(values)
+    step = next(m * 10 ** k for k in range(-3, 6) for m in (1, 2, 5) if top_v / (m * 10 ** k) <= 5)
+    grid_ticks = [i * step for i in range(int(top_v // step) + 1)]
 
     def x_of(v):
-        return X0 + (math.log10(v) - lo) * DECADE
+        return X0 + v / top_v * BAR_W
 
     def tick_label(v):
-        return f"{v:,.0f} s" if v >= 1 else f"{v * 1e3:,.0f} ms"
+        return "0" if v == 0 else f"{v:,.0f} s" if v >= 1 else f"{v * 1e3:,.0f} ms"
 
     rounds = S.get("rounds", {})
     gm = [f"{o.capitalize()} ({rounds[o]['plugins']} plugins) {fmt_factor(rounds[o]['speedup']['fv_cold/py']['geomean'])} "
@@ -273,8 +276,8 @@ def build_chart():
                         rows_svg.append(f'<text x="{X_TOOL}" y="{ty + 4.5:.1f}" class="{cls}">{tool}</text>')
                     rows_svg.append(f'<text x="{X_RUN}" y="{cy + 4.5:.1f}" class="run">{run}</text>')
                     fill = t[kind + ("_soft" if run == "first session" else "")]
-                    x1 = max(x_of(v), X0 + 6)
-                    r = 4
+                    x1 = max(x_of(v), X0 + MIN_BAR)
+                    r = min(4, (x1 - X0) / 2)
                     yb = cy - BAR / 2
                     rows_svg.append(
                         f'<path fill="{fill}" d="M{X0} {yb:.1f}H{x1 - r:.1f}A{r} {r} 0 0 1 {x1:.1f} {yb + r:.1f}'
@@ -311,7 +314,7 @@ def build_chart():
         head = [
             f'<rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="12" fill="{t["bg"]}" stroke="{t["border"]}"/>',
             f'<text x="{X_TOOL}" y="42" class="title">{title}</text>',
-            f'<text x="{X_TOOL}" y="64" class="sub">The common plugins run one after another, each as its own process. Log scale: each gridline is 10x. Shorter is faster.</text>',
+            f'<text x="{X_TOOL}" y="64" class="sub">The common plugins run one after another, each as its own process. Linear scale: shorter is faster.</text>',
             f'<text x="{X_TOOL}" y="84" class="sub">{esc(machine_line(S["machine"]))}</text>',
         ]
         style = f"""<style>
