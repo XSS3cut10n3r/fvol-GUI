@@ -122,11 +122,13 @@ jobs:
             echo
             echo "Static Linux binaries: \`x86_64-linux\` runs on any x86-64 CPU, \`x86_64-v3-linux\` needs AVX2 (Haswell / Zen or newer), \`aarch64-linux\` runs on any 64-bit ARM CPU."
             echo
-            echo "## Changes"
-            echo
-            if [ -n "$prev" ]; then range="$prev..$GITHUB_REF_NAME"; else range="$GITHUB_REF_NAME"; fi
-            git log --no-merges --pretty='- %s (%h)' "$range"
-            echo
+            # the first release has no previous tag: no change list (it would be the whole history)
+            if [ -n "$prev" ]; then
+              echo "## Changes"
+              echo
+              git log --no-merges --pretty='- %s (%h)' "$prev..$GITHUB_REF_NAME"
+              echo
+            fi
             echo "## SHA-256"
             echo
             echo '```'
