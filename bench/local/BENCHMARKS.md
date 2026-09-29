@@ -9,7 +9,7 @@ Measured 2026-09-27 20:11–21:18 CDT on this machine (a desktop, not a dedicate
 | Storage | btrfs on LUKS (dm-crypt) on a Micron 2200S NVMe 1024GB |
 | OS | Omarchy, Linux 7.1.8-arch1-3 |
 | Load | load average 3.1 at the start, 2.2 at the end (our own runs included) |
-| fastvol | commit 8870abe, binary sha256 `0cca274f0ff0cf95…`, rustc 1.100.0-nightly (1303417c4 2026-09-21), `target-cpu=native` (the repo's default build) |
+| fastvol | commit 8daf454, binary sha256 `0cca274f0ff0cf95…`, rustc 1.100.0-nightly (1303417c4 2026-09-21), `target-cpu=native` (the repo's default build) |
 | vol-rs | vol-rs 1.0.0 (Volatility 3 framework 2.28.0), binary sha256 `ac1e4ed6b64a6f07…` (the build benchmarked on the VM) |
 | python | Python 3.14.7 / volatility3 v2.28.2-10-g3fcb731e with capstone, yara-python, pycryptodome |
 | Images | Windows 11 x64 raw, 5.0 GiB; Ubuntu 24.04 Linux 6.8 ELF core, 3.0 GiB |

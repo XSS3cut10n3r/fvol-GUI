@@ -10,7 +10,7 @@
  "os": "Omarchy",
  "storage": "btrfs on crypt, disk  Micron 2200S NVMe 1024GB, part",
  "load1_start": 3.119140625,
- "fastvol": "8870abe 0cca274f0ff0cf95",
+ "fastvol": "8daf454 0cca274f0ff0cf95",
  "fastvol_rustc": "rustc 1.100.0-nightly (1303417c4 2026-09-21)",
  "volrs": "vol-rs 1.0.0 (Volatility 3 framework 2.28.0) ac1e4ed6b64a6f07",
  "python": "Python 3.14.7 / volatility3 v2.28.2-10-g3fcb731e",
