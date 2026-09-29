@@ -249,4 +249,4 @@ Output identical to python in every timed run: fastvol cold 59/59, steady 59/59,
 | `linux.pscallstack.PsCallStack` | 333 s | 1.18 s | 282 ms | 60.1 ms | 4.9 ms | 4.9 ms | 67,714x |
 | `timeliner.Timeliner` | 129 s | 1.48 s | 644 ms | 165 ms | 115 ms | 48.7 ms | 1,116x |
 
-Raw data: [raw/raw.jsonl](raw/raw.jsonl) (every run), [raw/machine.json](raw/machine.json), [results.tsv](results.tsv). Harness: `bench/scripts/bench_local.py`; this report: `bench/scripts/bench_local_report.py`. Earlier runs on a dedicated VM: [../vm/BENCHMARKS.md](../vm/BENCHMARKS.md).
+Raw data: [raw/raw.jsonl](raw/raw.jsonl) (every run), [raw/machine.json](raw/machine.json), [results.tsv](results.tsv). Harness: `bench/scripts/bench_local.py`; this report: `bench/scripts/bench_local_report.py`.

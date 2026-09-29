@@ -83,7 +83,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Regenerate from the sources (mark.txt, favicon.txt, bench/vm/BENCHMARKS.md)
+      - name: Regenerate from the sources (mark.txt, favicon.txt, bench/local/summary.json, Cargo.toml)
         run: python3 docs/assets/build.py
       - name: No changes
         run: |

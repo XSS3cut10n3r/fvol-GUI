@@ -93,8 +93,7 @@ every ISF on the test machine. A document the full builder would not accept, or 
 specially (repeated names, for python's dictionary semantics), is not taken lazily. For the
 64 MB Ubuntu 24.04 kernel ISF, the lazy index takes about 13 ms instead of the full build's
 47 ms on a 20-thread desktop CPU; on the 32-vCPU benchmark VM a first `linux.pslist` went from
-0.51 s to 0.11 s, faster than vol-rs with a warm cache (see
-[bench/vm/BENCHMARKS-run2.md](../bench/vm/BENCHMARKS-run2.md#first-runs-with-lazy-symbol-tables-rsvol-cold-rerun)).
+0.51 s to 0.11 s, faster than vol-rs with a warm cache.
 
 The full binary table of a lazy table is built after the plugin's output is complete: `main`
 flushes the output and then hands each such ISF to a helper process, this executable started in
@@ -251,15 +250,14 @@ The design rule is to know the hardware and do the minimum work. The techniques,
 | Caching                       | Symbol tables, the identifier index, automagic results and raw scan hits. |
 | Speculation                   | Likely kernel symbol tables are built while the scans that confirm them run. |
 | Laziness                      | A first run resolves only the types and symbols it uses; the full symbol table is built by a detached helper after the output. |
-| Fixed per-run cost            | A static-pie binary without dynamic loading, hot code laid out together and mapped with huge pages where the kernel allows, a C `main` that skips most of the Rust runtime setup, a lazy `Context`, cache writes on background threads that finish after the output, and the address-space teardown moved to a helper that finishes after the exit ([building.md](building.md#startup)). A warm `windows.pslist.PsList` takes 2.5 ms on the benchmark VM ([bench/vm/BENCHMARKS.md](../bench/vm/BENCHMARKS.md)). |
+| Fixed per-run cost            | A static-pie binary without dynamic loading, hot code laid out together and mapped with huge pages where the kernel allows, a C `main` that skips most of the Rust runtime setup, a lazy `Context`, cache writes on background threads that finish after the output, and the address-space teardown moved to a helper that finishes after the exit ([building.md](building.md#startup)). A warm `windows.pslist.PsList` takes 1.3 ms ([bench/local/BENCHMARKS.md](../bench/local/BENCHMARKS.md#startup-windowspslistpslist)). |
 | Allocation-free inner loops   | Precomputed member offsets, compact 8-byte rows in the timeliner merge, table-driven cell formatting. |
 
 Each from-scratch library is benchmarked against its reference implementation on the same input
 and machine, with the harnesses in `bench/refbench/`: liblzma, zlib, libbz2, libsnappy, OpenSSL,
 capstone, libyara, PCRE2 and RE2, and python's own PDB converter and JSON parser. The target is to
-beat the reference. [bench/PACKAGES.md](../bench/PACKAGES.md) records the results, for example
-AES at about twice OpenSSL's speed and the regex and YARA engines at 1.3 to 20 times the best of
-PCRE2-JIT and RE2.
+beat the reference: for example AES runs at about twice OpenSSL's speed, and the regex and YARA
+engines at 1.3 to 20 times the best of PCRE2-JIT and RE2.
 
 ## Caches and correctness
 

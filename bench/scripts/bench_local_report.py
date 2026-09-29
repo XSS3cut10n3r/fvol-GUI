@@ -281,7 +281,7 @@ for rnd, (medians, eq) in tables.items():
     for p, m in medians.items():
         L.append(f"| `{p}` | " + " | ".join(t(m[x_]) for x_ in STATES) + f" | {x(m['py'] / m['fv_steady'])} |")
     L.append("")
-L += ["Raw data: [raw/raw.jsonl](raw/raw.jsonl) (every run), [raw/machine.json](raw/machine.json), [results.tsv](results.tsv). Harness: `bench/scripts/bench_local.py`; this report: `bench/scripts/bench_local_report.py`. Earlier runs on a dedicated VM: [../vm/BENCHMARKS.md](../vm/BENCHMARKS.md).", ""]
+L += ["Raw data: [raw/raw.jsonl](raw/raw.jsonl) (every run), [raw/machine.json](raw/machine.json), [results.tsv](results.tsv). Harness: `bench/scripts/bench_local.py`; this report: `bench/scripts/bench_local_report.py`.", ""]
 with open(f"{DEST}/BENCHMARKS.md", "w") as f:
     f.write("\n".join(L))
 print(f"wrote {DEST}/BENCHMARKS.md, summary.json, results.tsv")

@@ -23,7 +23,7 @@ to provision symbol files once):
   fv_warm       fastvol, every cache warm, scan results replayed from the per-image scan cache
 
 Rounds:
-  win / linux   every plugin of the pass-3 lists (bench/vm/raw3/*.tsv), image in the page cache
+  win / linux   every plugin of bench/{win,linux}_bench.txt, image in the page cache
   triage        a realistic session: ~12 common plugins in a row, the tool's cache wiped only at
                 the start of the first session (persists within it, like a real first look at an
                 image), then a second session; each with the image in the page cache and evicted
@@ -332,7 +332,7 @@ def startup_round(raw):
 
 
 def plugin_list(os_name):
-    rows = [l.split("\t")[0] for l in open(f"{ROOT}/bench/vm/raw3/{os_name}.tsv")][1:]
+    rows = [l.strip() for l in open(f"{ROOT}/bench/{os_name}_bench.txt") if l.strip()]
     return rows[:NPLUG] if NPLUG else rows
 
 

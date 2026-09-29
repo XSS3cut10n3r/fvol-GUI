@@ -12,7 +12,6 @@ Applies to fastvol 0.1.0 and volatility3 2.28.2.
 | ------------------------------------------------------------------ | -------------------------------------------------------- |
 | [DESIGN.md](../DESIGN.md)                                          | Hard rules, module ownership, resource safety            |
 | [src/objects/README-API.md](../src/objects/README-API.md)          | python to Rust cheat-sheet for layers, objects, symbols, scanning and plugin helpers |
-| [bench/PLUGIN_AGENT_TEMPLATE.md](../bench/PLUGIN_AGENT_TEMPLATE.md) | The brief given to plugin porters, with the full checklist |
 | `src/plugins/mod.rs`                                               | The `Plugin` trait, `Requirement`, `Config`, the registry |
 | `src/renderers/mod.rs`                                             | `Column`, `ColType`, `Value`, `RowSink`                  |
 | `src/plugins/windows/pslist.rs`, `kpcrs.rs`                        | Small, complete plugins to copy from                     |
@@ -352,12 +351,15 @@ cache already covers the `-s` directories (milliseconds) or not (every ISF is re
 own update): compare binaries interleaved in one `coldbench.py` invocation and pin the cache with
 `--py-cache` (its docstring has the details).
 
-The published numbers come from a separate quiet machine. [bench/vm/method.md](../bench/vm/method.md)
-describes the procedure and `bench/vm/scripts/` holds the scripts. After a new run, regenerate
-the report and then copy the summary figures into the README:
+The README's numbers and chart come from `bench/scripts/bench_local.py`, which times fastvol,
+vol-rs and python on one machine (its docstring describes the method). After a new run, write the
+report to `bench/local/`, redraw the chart from its `summary.json`, and then copy the figures into
+the README's Performance section:
 
 ```bash
-cd bench/vm && python3 scripts/report.py raw .
+python3 bench/scripts/bench_local.py <RUN_DIR>
+python3 bench/scripts/bench_local_report.py <RUN_DIR>
+python3 docs/assets/build.py --png
 ```
 
 ## Commit and merge

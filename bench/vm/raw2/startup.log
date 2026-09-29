@@ -1,6 +1,0 @@
-rsvol cold min=0.0647s
-rsvol warm min=0.0033s
-vol-rs cold min=0.5631s
-vol-rs warm min=0.0806s
-python cold min=1.8747s
-python warm min=1.2035s
