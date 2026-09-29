@@ -6,7 +6,8 @@
 #   1. checks: clean tracked tree, on main, vX.Y.Z is new and greater than the current version
 #   2. runs the unit tests (unless --no-test); the parity gates are yours to run first:
 #        bench/scripts/check_all.sh, check_win_images.sh, check_nix.sh all, check_dumps.sh
-#   3. sets the version in Cargo.toml, Cargo.lock and the docs' "Applies to fastvol X" lines
+#   3. sets the version in Cargo.toml, Cargo.lock, the docs' "Applies to fastvol X" lines and the
+#      README's release badge (docs/assets/build.py)
 #   4. commits "release: vX.Y.Z" and makes the annotated tag vX.Y.Z
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -45,8 +46,9 @@ awk -v old="$old" -v new="$new" '
 sed -i "s/^Applies to fastvol $old\b/Applies to fastvol $new/" docs/*.md
 sed -i "s/^fastvol $old\$/fastvol $new/" docs/usage.md
 cargo metadata --locked --offline --format-version 1 > /dev/null || die "Cargo.lock does not match Cargo.toml"
+python3 docs/assets/build.py > /dev/null
 
-git add Cargo.toml Cargo.lock docs/*.md
+git add Cargo.toml Cargo.lock docs/*.md docs/assets
 git commit -q -m "release: v$new"
 git tag -a "v$new" -m "fastvol $new"
 git --no-pager log --oneline -1
