@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// a value above this is corruption (a smeared / garbage `kallsyms_num_syms`). python has no
 /// such bound -- `get_core_symbols` does `for sym_idx in range(self._kallsyms_num_syms)`, so a
 /// corrupted count of, say, 1.8 billion makes python loop billions of times and hang forever.
-/// fastvol gives up on the affected enumeration instead (DESIGN "never hang on malformed memory";
+/// fastvol gives up on the affected enumeration instead (never hang on malformed memory;
 /// where python would hang forever, stop cleanly). Used by every count-driven loop below.
 const MAX_PLAUSIBLE_SYMS: u64 = 16 << 20;
 

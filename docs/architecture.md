@@ -2,8 +2,7 @@
 
 This page explains how fastvol is put together, how it keeps its output identical to python
 volatility3 and where its speed comes from. It is background reading for contributors and for
-anyone who wants to know why the results can be trusted. For the rules contributors must follow,
-see [DESIGN.md](../DESIGN.md); for the API, see
+anyone who wants to know why the results can be trusted. For the API, see
 [src/objects/README-API.md](../src/objects/README-API.md).
 
 Applies to fastvol 0.1.0.

@@ -1,8 +1,9 @@
 # Developing fastvol
 
 How-to guides for contributors: porting a plugin, proving it matches python, measuring it, and
-working without exhausting the machine. The rules behind these steps are in
-[DESIGN.md](../DESIGN.md), which is the contract every change must follow.
+working without exhausting the machine. Every change keeps four rules: no dependencies
+(`[dependencies]` stays empty), stdout byte-identical to python volatility3, no panic, hang or
+unbounded memory on a malformed image, and no code copied from vol-rs.
 
 Applies to fastvol 0.1.0 and volatility3 2.28.2.
 
@@ -10,7 +11,6 @@ Applies to fastvol 0.1.0 and volatility3 2.28.2.
 
 | File                                                               | What it gives you                                        |
 | ------------------------------------------------------------------ | -------------------------------------------------------- |
-| [DESIGN.md](../DESIGN.md)                                          | Hard rules, module ownership, resource safety            |
 | [src/objects/README-API.md](../src/objects/README-API.md)          | python to Rust cheat-sheet for layers, objects, symbols, scanning and plugin helpers |
 | `src/plugins/mod.rs`                                               | The `Plugin` trait, `Requirement`, `Config`, the registry |
 | `src/renderers/mod.rs`                                             | `Column`, `ColType`, `Value`, `RowSink`                  |
@@ -254,7 +254,7 @@ To make new references, use `bench/scripts/py_refs.sh` for the Windows image,
 
 ## Fuzz the plugins for robustness
 
-DESIGN.md rule 4 is that no plugin may panic, hang, exhaust memory or run away on a malformed
+No plugin may panic, hang, exhaust memory or run away on a malformed
 image; it must degrade the way python does (skip the bad object, render `UnreadableValue`, or, where
 python itself raises an uncaught exception, mirror python's exit code and partial output). The fuzz
 driver `bench/scripts/fuzz_images.py` (standard-library python, helper modules `fuzz_geom.py`,

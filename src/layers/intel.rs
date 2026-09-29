@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// forever (confirmed: `windows.memmap`/`windows.driverscan` on such a mutant run past a 120 s
 /// timeout emitting nothing); a consumer that collects the runs (memmap, the scanner) instead
 /// runs out of memory. The walk stops here, turning an OOM into a bounded, partial result
-/// (DESIGN "never OOM on malformed memory"). ~16M is ~48x any real layer, so no valid mapping is
+/// (never OOM on malformed memory). ~16M is ~48x any real layer, so no valid mapping is
 /// ever truncated.
 const MAX_MAPPING_RUNS: u64 = 16 << 20;
 

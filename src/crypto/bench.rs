@@ -9,7 +9,7 @@
 //!   (or run the built test binary directly under `taskset -c 4 ... crypto::bench
 //!   --ignored --nocapture`)
 //!
-//! No bench-harness crate is available (zero dependencies, see `DESIGN.md`), so this
+//! No bench-harness crate is available (zero dependencies), so this
 //! is a plain wall-clock loop. Every measured result is passed through
 //! `std::hint::black_box` -- without it, a result bound to `_` is exactly the kind of
 //! provably-unobserved pure computation LLVM is entitled to delete outright, which

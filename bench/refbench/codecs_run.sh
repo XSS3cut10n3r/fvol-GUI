@@ -23,7 +23,7 @@ RUNS=${2:-10}
 FILTER=${3:-}
 CPU=${CPU:-8}
 ROUNDS=${ROUNDS:-3}
-# Memory-capped scopes (see DESIGN.md "Resource safety").
+# Memory-capped scopes (bench/scripts/limit.sh).
 LIMIT=${LIMIT:-$ROOT/bench/scripts/limit.sh}
 
 mkdir -p "$ROOT/target"

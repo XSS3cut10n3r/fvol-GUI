@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Robustness fuzzer for fastvol: corrupt memory images, run every plugin, classify the outcome.
 
-fastvol must never panic, hang, exhaust memory or run away on a damaged image (DESIGN.md rule 4:
-"Never panic on malformed memory"). This driver builds corrupted copies ("mutants") of the test
+fastvol must never panic, hang, exhaust memory or run away on a damaged image. This driver builds corrupted copies ("mutants") of the test
 images *without copying them* -- a btrfs reflink (`cp --reflink=auto`) shares every extent with
 the original, then targeted in-place writes, hole punches and truncation cost only the changed
 blocks -- runs the plugins of the image's OS on each mutant through `bench/scripts/limit.sh`

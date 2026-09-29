@@ -46,7 +46,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// lazily, so python instead scans forever -- confirmed: python `windows.driverscan` on such a
 /// mutant runs past a 120 s timeout emitting nothing), that list would exhaust memory. fastvol
 /// stops enumerating at this bound and scans what it has, turning an OOM into a bounded, partial
-/// result (DESIGN "never OOM on malformed memory"; where python would hang forever, stop). At
+/// result (never OOM on malformed memory; where python would hang forever, stop). At
 /// ~24 bytes per chunk the cap is ~380 MiB, ~48x above any real image, so no reference scan is
 /// ever truncated.
 const MAX_SCAN_CHUNKS: usize = 16_000_000;

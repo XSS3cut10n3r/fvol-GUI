@@ -1094,7 +1094,7 @@ def main():
 
     syn = synthetic(random.Random(args.seed ^ 0x5eed))
     mems, zeros = ([], []) if args.no_memory or not os.path.exists(args.img) else memory_slices(random.Random(args.seed), args.img, args.slices)
-    # /tmp is RAM-backed tmpfs: work files go to the on-disk scratch area (DESIGN.md)
+    # /tmp is RAM-backed tmpfs: work files go to the on-disk scratch area
     scratch = SCRATCH if os.path.isdir(os.path.dirname(SCRATCH)) else None
     if scratch:
         os.makedirs(scratch, exist_ok=True)
