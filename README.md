@@ -11,11 +11,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/volatilityfoundation/volatility3"><img alt="volatility3: 2.28.2" src="docs/assets/badges/volatility3.svg"></a>
-  <a href="#highlights"><img alt="plugins: 197" src="docs/assets/badges/plugins.svg"></a>
-  <a href="#verification"><img alt="parity: 1975/1975" src="docs/assets/badges/parity.svg"></a>
-  <a href="#highlights"><img alt="dependencies: 0" src="docs/assets/badges/dependencies.svg"></a>
-  <a href="#supported-images"><img alt="images: windows, linux, macos" src="docs/assets/badges/images.svg"></a>
+  <a href="docs/building.md"><img alt="rust: 1.95+" src="docs/assets/badges/rust.svg"></a>
+  <a href="https://github.com/code-zm/fvol/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/code-zm/fvol/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/code-zm/fvol/releases/latest"><img alt="latest release" src="docs/assets/badges/release.svg"></a>
   <a href="#license"><img alt="license: VSL 1.0" src="docs/assets/badges/license.svg"></a>
 </p>
 
@@ -38,11 +36,11 @@
 ## Highlights
 
 - **All 197 plugins** of volatility3 2.28.2, with the same options, `--help`, errors and exit codes.
-- **Byte-identical output** to python volatility3 on 31 images, Windows XP to 11, Linux 3.2 to 7.0, macOS.
 - **356-473x faster than python** and 12-29x faster than vol-rs on a first triage session ([how measured](#performance)).
 - **Zero dependencies**: one static binary, Rust standard library only.
 - **Every common format**: raw, LiME, ELF core, crash dump, VMware, QEMU, AVML, Xen, gzip/bzip2/xz.
 - **Built-in web UI**: `fvol serve`.
+- Tab autocomplete commands
 
 ## Install
 
@@ -59,12 +57,12 @@ cargo build --release    # -> target/release/fvol
 ## Quick start
 
 ```bash
+eval "$(fvol completion bash)"                           # TAB-complete plugins and options
 fvol -f memory.raw windows.pslist.PsList                 # run a plugin
 fvol -h                                                  # list plugins
 fvol -s ./symbols -f linux.lime linux.pslist.PsList      # Linux/macOS: symbol dir
 fvol -f memory.raw -o out/ windows.dlllist.DllList --dump # dump files
 fvol -f memory.raw -r json windows.pslist.PsList         # quick, pretty, csv, json, jsonl
-eval "$(fvol completion bash)"                           # TAB-complete plugins and options
 fvol --version                                           # version banner
 ```
 
