@@ -801,6 +801,8 @@ impl Runs {
     fn log(&self, line: &str) {
         let Some(path) = self.log.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
         use std::io::Write;
+        // one line per event: option values cannot start another line
+        let line: String = line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             let _ = writeln!(f, "fastvol.web INFO     {line}");
         }

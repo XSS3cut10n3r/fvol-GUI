@@ -116,10 +116,17 @@ impl Options {
         {
             return Err(format!("--cache-path: {d} is not a directory"));
         }
-        if let Some(l) = &self.log
-            && !Path::new(l).parent().is_some_and(|p| p.is_dir())
-        {
-            return Err(format!("--log: the folder of {l} does not exist"));
+        if let Some(l) = &self.log {
+            // the server appends to it: only a log file, never a link or another kind of file
+            if !l.to_ascii_lowercase().ends_with(".log") {
+                return Err("--log: the file name must end in .log".into());
+            }
+            if !Path::new(l).parent().is_some_and(|p| p.is_dir()) {
+                return Err(format!("--log: the folder of {l} does not exist"));
+            }
+            if std::fs::symlink_metadata(l).is_ok_and(|m| !m.is_file()) {
+                return Err(format!("--log: {l} is not a regular file"));
+            }
         }
         if let Some(s) = &self.save_config
             && (s.contains('/') || s.starts_with('.'))
@@ -302,6 +309,7 @@ mod tests {
         assert!(bad(r#"{"renderer": "xml"}"#).contains("choose from"));
         assert!(bad(r#"{"extend": ["noequals"]}"#).contains("conf.path=value"));
         assert!(bad(r#"{"extend": ["a.b=not json"]}"#).contains("not JSON"));
+        assert!(bad(r#"{"log": "/tmp/profile"}"#).contains(".log"));
         let o = Options::from_json(&json::parse(r#"{"offline": true, "symbol_dirs": "a;b", "verbosity": 2, "renderer": "csv", "parallelism": "off", "hide_columns": ["Offset"]}"#).unwrap(), &cwd).unwrap();
         assert_eq!(o.symbol_dirs.len(), 2);
         assert_eq!(o.parallel(3), 1);

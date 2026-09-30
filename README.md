@@ -168,8 +168,7 @@ originals. [docs/architecture.md](docs/architecture.md#performance-techniques)
 
 ## License
 
-Volatility Software License 1.0, as a port of Volatility 3 ([LICENSE.txt](LICENSE.txt)). The web UI
-embeds JetBrains Mono (SIL OFL 1.1).
+Volatility Software License 1.0, as a port of Volatility 3 ([LICENSE.txt](LICENSE.txt)).
 
 fastvol is built on the work of the Volatility Foundation and the volatility3 contributors. It is
 an independent project, not affiliated with or endorsed by the Volatility Foundation.

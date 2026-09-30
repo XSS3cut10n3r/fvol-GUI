@@ -98,7 +98,8 @@ Under **Select**, tick the plugins you want and press **Save Preset**. Name it; 
 Stop the server with `Ctrl+C`. Everything you did is already saved: the runs, their results and
 filters, the options and the rules. Start `fvol serve` again, choose **Previous** in the Quick
 Start and pick the dump. The fastvol caches make the image open immediately, and the results
-come back without running any plugin again.
+come back without running any plugin again. To delete an analysis, press **Delete** next to it
+in **Previous**.
 
 ## Reference
 
@@ -138,7 +139,7 @@ saved with the analysis.
 | `--clear-cache`                                                                 | Once, when the image reopens. It empties `~/.cache/fastvol` only, never `~/.fvol`. |
 | `-c`, `-e`                                                                      | To each plugin started afterwards: values for options the plugin leaves unset. `-e automagic.*` keys act when the image is opened. |
 | `--write-config`, `--save-config NAME`                                          | Each run writes its configuration, as `fvol` writes it, into its output folder (`config.json`, or `NAME`). |
-| `-l FILE`                                                                       | A line per run started, finished or failed.                                       |
+| `-l FILE`                                                                       | A line per run started, finished or failed. `FILE` must end in `.log`.            |
 | `--parallelism off`                                                             | One plugin at a time instead of `--parallel N`.                                  |
 | `-r`, `--filters`, `--hide-columns`                                             | The **fvol output** export.                                                       |
 | `-q`, `-p`                                                                      | No effect: the web UI has no console progress, and fastvol does not load python plugins. |
@@ -155,7 +156,8 @@ saved with the analysis.
 `dump_id` is the key fastvol's cache (`~/.cache/fastvol`) uses for an image: a hash of its
 canonical path, size and modification time. A moved or changed dump is therefore a new
 analysis; **Previous** marks the old one *missing* or *changed*. The dump itself is never
-copied. Results that did not fit the memory budget (`--max-memory`) are not saved; their run
+copied. **Delete** next to an analysis in **Previous** removes its metadata and result rows (for
+the dump that is open, its runs too). Results that did not fit the memory budget (`--max-memory`) are not saved; their run
 lists them, and running the plugin again gets them back.
 
 A preset file:
@@ -227,7 +229,7 @@ The API exists for the UI and for scripts. Every call under `/api/` needs the to
 | Method and path                      | Purpose                                                            |
 | ------------------------------------ | ------------------------------------------------------------------ |
 | `GET /api/session`                   | Current image, analysis state, OS, and the facts of the overview   |
-| `POST /api/session`                  | Open another image: `{"file": "<PATH>"}`; its saved analysis comes back |
+| `POST /api/session`                  | Open another image: `{"file": "<PATH>", "symbol_dirs": ["<DIR>"]}` (`symbol_dirs` optional, set like `-s` in Options); its saved analysis comes back |
 | `GET /api/plugins`                   | Every plugin with its options                                      |
 | `GET /api/batches`                   | The runs (each a set of plugins started together)                  |
 | `POST /api/batches`                  | Start a run: `{"name": "<NAME>", "entries": [{"plugin": "<NAME>", "args": {"<option>": <value>}}]}`; every entry is checked first |
@@ -251,6 +253,7 @@ The API exists for the UI and for scripts. Every call under `/api/` needs the to
 | `GET /api/options`, `POST /api/options` | The global options ([Options](#options)); the answer says whether the image was reopened |
 | `GET /api/rules`, `POST /api/rules`, `DELETE /api/rules` | The triage rules file: `{"file": "<NAME>", "text": "<JSON>"}` |
 | `GET /api/analyses`                  | The saved analyses, newest first, with whether each dump is still there |
+| `DELETE /api/analyses/<DUMP_ID>`     | Delete a saved analysis (its metadata and result rows; never the dump). For the open dump, its runs go too |
 | `GET /api/presets`, `POST /api/presets`, `DELETE /api/presets/<ID>` | Your presets in `~/.fvol/presets` |
 | `GET /api/pick-file`, `POST /api/pick-file` | Whether the desktop file dialog is available; show it: `{"dir": "<START>"}` |
 | `GET /api/mem`                       | Read memory: `layer` = `phys`, `kernel` or `pid:<PID>`, `addr`, `len` up to 256 KiB |
@@ -324,6 +327,8 @@ only by the person who started it.
 What the token grants: whoever holds it can read the open image and can open any other file that
 the server's user can read, list directories and read that file's bytes through the memory API.
 It can also read and change the saved analyses, presets and rules in `~/.fvol`, and set the
-options, which name files the server reads (`-c`) or writes (`-l`, `--save-config`).
+options, which name files the server reads (`-c`) or writes: `--save-config` only into a run's
+output directory, and `-l` only to a regular file whose name ends in `.log`, one line per run
+with control characters replaced.
 Treat the URL like a password, and run `fvol serve` as a user that can read only what you intend
 to analyse.

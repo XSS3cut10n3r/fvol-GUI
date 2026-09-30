@@ -2,7 +2,7 @@
 // image, to continue with the image the server already has, to work without one ("go"), or to
 // reopen a saved analysis. The workspace stays behind it and appears when a choice is made.
 
-import { store, api, el, clear, prefs, fmtBytes, fmtAgo, debounce } from './core.js';
+import { store, api, on, el, clear, prefs, fmtBytes, fmtAgo, debounce } from './core.js';
 
 // icons: small inline SVG (not markup from the network, so no CSP concern)
 const ICONS = {
@@ -36,7 +36,9 @@ export function showQuickStart() {
     const hasImage = !!(s && s.image);
     const root = el('div.qs', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'fastvol quick start' });
 
-    const done = () => { root.remove(); removeEventListener('keydown', onKey, true); resolve(); };
+    const done = () => { root.remove(); removeEventListener('keydown', onKey, true); offSession(); resolve(); };
+    // another client (a script, the MCP server) opened an image: show its workspace
+    const offSession = on('session', ({ prev, cur }) => { if (prev && cur && prev.id !== cur.id) done(); });
 
     // ---- left: logo, choices
     const logo = document.querySelector('.brand-logo').cloneNode(true);
@@ -223,16 +225,29 @@ export function showQuickStart() {
         for (const a of items) {
           const ok = a.state === 'ok';
           const why = a.state === 'missing' ? 'the dump is no longer at this path' : a.state === 'changed' ? 'the dump changed since (a different size or date)' : '';
-          const row = el('button.qs-file.qs-prev', { type: 'button', role: 'option', disabled: !ok, title: ok ? a.image : `${a.image}: ${why}` },
-            el('span.fi', {}, icon('chip')),
-            el('span.fn', {}, el('span.qs-pn', { text: a.name }), el('span.qs-pp', { text: a.image })),
-            ok ? el('span.qs-pm', { text: `${a.runs} run${a.runs === 1 ? '' : 's'} · ${a.plugins} plugin${a.plugins === 1 ? '' : 's'}` }) : el('span.qs-tag.warn', { text: a.state }),
-            el('span.fs', { text: `${fmtBytes(a.size)} · ${fmtAgo(a.updated)}` }));
-          if (ok) row.addEventListener('click', async () => {
+          const open = async () => {
             errBox.textContent = '';
             try { await api('session', { method: 'POST', body: { file: a.image } }); done(); }
             catch (e) { errBox.textContent = e.message; }
-          });
+          };
+          const del = el('button.qs-del', { type: 'button', text: 'Delete', title: 'Delete this saved analysis from ~/.fvol', on: { click: async e => {
+            e.stopPropagation();
+            const current = store.session && store.session.image === a.image;
+            if (!confirm(`Delete the saved analysis of ${a.name}?\n\nIts runs, results, filters and options are removed from ~/.fvol. The dump itself is not touched.` + (current ? '\n\nThis dump is open: its runs are removed and it starts over.' : ''))) return;
+            try { await api('analyses/' + encodeURIComponent(a.dump_id), { method: 'DELETE' }); row.remove(); if (!list.querySelector('.qs-prev')) list.append(el('div.qs-empty', { text: 'No saved analyses left.' })); }
+            catch (x) { errBox.textContent = x.message; }
+          } } });
+          // a row, not a button: it holds the Delete button
+          const row = el('div.qs-file.qs-prev', { role: 'option', tabindex: ok ? 0 : -1, 'aria-disabled': String(!ok), class: 'qs-file qs-prev' + (ok ? '' : ' off'), title: ok ? a.image : `${a.image}: ${why}` },
+            el('span.fi', {}, icon('chip')),
+            el('span.fn', {}, el('span.qs-pn', { text: a.name }), el('span.qs-pp', { text: a.image })),
+            ok ? el('span.qs-pm', { text: `${a.runs} run${a.runs === 1 ? '' : 's'} · ${a.plugins} plugin${a.plugins === 1 ? '' : 's'}` }) : el('span.qs-tag.warn', { text: a.state }),
+            el('span.fs', { text: `${fmtBytes(a.size)} · ${fmtAgo(a.updated)}` }),
+            del);
+          if (ok) {
+            row.addEventListener('click', open);
+            row.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); open(); } if (e.key === 'Delete') del.click(); });
+          }
           list.append(row);
         }
       }).catch(e => { clear(list); list.append(el('div.qs-empty', { text: 'Could not read the saved analyses: ' + e.message })); });

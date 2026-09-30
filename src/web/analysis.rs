@@ -338,6 +338,19 @@ fn read_error(j: &Json) -> ErrInfo {
     ErrInfo { kind, title: s("title"), message: s("message"), hints: j.get("hints").map(|h| h.as_arr().iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(), detail: s("detail") }
 }
 
+/// Delete a saved analysis from `root` (`~/.fvol`): its metadata and its result rows. The dump
+/// itself is never touched.
+pub fn delete_in(root: &Path, id: &str) -> Result<(), String> {
+    if !valid_id(id) {
+        return Err("no such analysis".into());
+    }
+    std::fs::remove_file(root.join(format!("{id}-metadata.json"))).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "no such analysis".to_string() } else { e.to_string() })?;
+    match std::fs::remove_dir_all(root.join(id)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
 /// Every saved analysis, newest first: for the Quick Start's "Previous" list.
 pub fn list(w: &mut W) {
     let mut items: Vec<(u64, Json)> = Vec::new();
@@ -413,6 +426,22 @@ mod tests {
         std::fs::write(&p, "{}\n[0,\"9\",1]\n").unwrap();
         assert!(matches!(read_rows(&p, 1), Err(e) if e.contains("damaged")));
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn delete_removes_metadata_and_rows_only() {
+        let root = std::env::temp_dir().join(format!("fastvol-analyses-{}", std::process::id()));
+        let id = "0123456789abcdef";
+        std::fs::create_dir_all(root.join(id).join("1")).unwrap();
+        std::fs::write(root.join(format!("{id}-metadata.json")), "{}").unwrap();
+        std::fs::write(root.join(id).join("1").join("0.jsonl"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("presets")).unwrap();
+        assert!(delete_in(&root, id).is_ok());
+        assert!(!root.join(format!("{id}-metadata.json")).exists() && !root.join(id).exists());
+        assert!(root.join("presets").is_dir());
+        assert!(delete_in(&root, id).unwrap_err().contains("no such"));
+        assert!(delete_in(&root, "../presets").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

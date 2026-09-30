@@ -350,6 +350,10 @@ fn api(app: &Arc<App>, req: &Request, rest: &str) -> Response {
             app.hub.bump();
             err(200, "removed")
         }
+        (["analyses", id], _, Method::Delete) => match app.delete_analysis(id) {
+            Ok(()) => err(200, "removed"),
+            Err(e) => err(404, &e),
+        },
         (["analyses"], true, _) => {
             let mut w = W::new();
             super::analysis::list(&mut w);
@@ -388,7 +392,19 @@ fn open_session(app: &Arc<App>, req: &Request) -> Response {
     if let Err(e) = std::fs::File::open(&path) {
         return err(422, &format!("{} can't be read: {e}", path.display()));
     }
-    match app.open(path) {
+    let opened = app.open(path).and_then(|s| {
+        // `symbol_dirs` in the request (kept for scripts) is set like the Options dialog's -s
+        match j.get("symbol_dirs") {
+            Some(Json::Arr(dirs)) => {
+                let mut o = app.options.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                o.symbol_dirs = dirs.iter().filter_map(|d| d.as_str()).map(|d| cwd.join(d).to_string_lossy().into_owned()).collect();
+                app.set_options(o)?;
+                Ok(app.session())
+            }
+            _ => Ok(s),
+        }
+    });
+    match opened {
         Ok(s) => {
             let mut w = W::new();
             s.json(&mut w);

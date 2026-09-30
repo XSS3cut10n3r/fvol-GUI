@@ -114,6 +114,9 @@ impl App {
         let mut meta = None;
         let mut fresh = None;
         if !same_session {
+            // the background saver runs about once a second: save the dump being left now, so a
+            // change made just before switching is not lost
+            analysis::save(self);
             fresh = image.as_deref().and_then(analysis::Analysis::new);
             meta = fresh.as_ref().and_then(|a| analysis::load(&a.id));
             if let Some(m) = &meta {
@@ -150,6 +153,23 @@ impl App {
     /// Switch to another image (explicit user action).
     pub fn open(self: &Arc<Self>, image: PathBuf) -> Result<Arc<Session>, String> {
         self.open_image(Some(image), false)
+    }
+
+    /// Delete a saved analysis. For the dump that is open, its runs and results go too and it
+    /// starts over (its options stay in use, so its analysis is saved again, empty).
+    pub fn delete_analysis(&self, id: &str) -> Result<(), String> {
+        // the saver waits on this lock: nothing is written back halfway
+        let mut guard = self.analysis.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(a) = guard.as_mut().filter(|a| a.id == id) {
+            let session = self.session().id;
+            for b in self.runs.batches().into_iter().filter(|b| b.session == session) {
+                self.runs.remove_batch(b.id);
+            }
+            a.saved_rows.clear();
+            a.last.clear();
+            a.created_ms = runs::now_ms();
+        }
+        analysis::delete_in(&presets::fvol_dir(), id)
     }
 
     /// Options from the Options dialog. Returns whether the image was reopened (an option that
