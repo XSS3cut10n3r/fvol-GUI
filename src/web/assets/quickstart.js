@@ -2,7 +2,7 @@
 // image, to continue with the image the server already has, to work without one ("go"), or to
 // reopen a saved analysis. The workspace stays behind it and appears when a choice is made.
 
-import { store, api, el, clear, prefs, fmtBytes, fmtAgo, debounce } from './core.js';
+import { store, api, on, el, clear, prefs, fmtBytes, fmtAgo, debounce } from './core.js';
 
 // icons: small inline SVG (not markup from the network, so no CSP concern)
 const ICONS = {
@@ -36,7 +36,9 @@ export function showQuickStart() {
     const hasImage = !!(s && s.image);
     const root = el('div.qs', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'fastvol quick start' });
 
-    const done = () => { root.remove(); removeEventListener('keydown', onKey, true); resolve(); };
+    const done = () => { root.remove(); removeEventListener('keydown', onKey, true); offSession(); resolve(); };
+    // another client (a script, the MCP server) opened an image: show its workspace
+    const offSession = on('session', ({ prev, cur }) => { if (prev && cur && prev.id !== cur.id) done(); });
 
     // ---- left: logo, choices
     const logo = document.querySelector('.brand-logo').cloneNode(true);
